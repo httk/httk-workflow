@@ -9,6 +9,7 @@ documentation of *httk₂* as a whole, see [docs.httk.org](https://docs.httk.org
 :class: tip
 
 - **API reference**: {doc}`reference/index`
+- **Workflow filesystem API**: {doc}`workflow_filesystem_api`
 - **Examples notebook**: {doc}`notebooks/examples`
 ````
 
@@ -34,5 +35,6 @@ hello_world()
 :caption: Documentation
 
 reference/index
+workflow_filesystem_api
 notebooks/examples
 ```
