@@ -371,6 +371,7 @@ class TaskManager:
             "workspace_reused": workspace_reused,
             "unsafe_persistent_takeover": bool(previous_state.get("unsafe_persistent_takeover", False)),
             "data_generation": claimed_state.get("data_generation"),
+            "resources": dict(job.resources),
             "join": claimed_state.get("join_summary"),
         }
         context_path = control / "context.json"
@@ -387,6 +388,9 @@ class TaskManager:
                 "HTTK_WORKFLOW_UNCLEAN_RESTART": "1" if context["is_unclean_restart"] else "0",
                 "HTTK_WORKFLOW_ATTEMPT_REASON": str(context["attempt_reason"]),
                 "HTTK_WORKFLOW_STEP": str(context["step"]),
+                "HTTK_WORKFLOW_PYTHON": sys.executable,
+                "HTTK_WORKFLOW_BASH_API": str(Path(__file__).with_name("shell") / "httk-workflow.sh"),
+                "HTTK_WORKFLOW_VASP_BASH_API": str(Path(__file__).with_name("shell") / "httk-vasp.sh"),
             }
         )
         if job.data_mode == "transactional":
