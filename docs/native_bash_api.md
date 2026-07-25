@@ -25,7 +25,7 @@ case "$HTTK_WORKFLOW_STEP" in
         httk_vasp_remedy_apply remedy.json
         httk_workflow_retry "reviewed VASP remedy applied"
       fi
-      httk_workflow_fail vasp.failed "VASP stopped (classification $status)"
+      httk_workflow_fail vasp.failed "VASP stopped (status $status)"
     fi
     ;;
   collect)
@@ -115,4 +115,5 @@ also enforces the conservative 240-byte VASP workspace-path limit.
 Trivial path matching and field splitting use normal quoted Bash constructs.
 Native code does not source or expose the legacy `HT_TASK_*` or `VASP_*`
 function names. Unchanged v1 workflows continue to use
-{doc}`v1_compatibility`.
+{doc}`v1_compatibility`. For a step-by-step conversion, see
+{doc}`httk_v1_migration_guide`.
