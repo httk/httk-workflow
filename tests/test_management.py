@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest  # pyright: ignore[reportMissingImports]
 from httk.core import CLIContext
 
-from httk.workflow import WorkflowStore
+from httk.workflow import WorkflowWorkspace
 from httk.workflow.adapters import add_computer, import_v1_computer, run_adapter
 from httk.workflow.configuration import identity_key_paths
 from httk.workflow.manifests import create_manifest, verify_manifest
@@ -31,7 +31,7 @@ def _payload(root: Path) -> tuple[Path, str]:
                 "name": "test",
                 "workflow": "tests",
                 "runner": {"path": "files/runner", "arguments": []},
-                "workspace": {"mode": "persistent", "path": "run"},
+                "workdir": {"mode": "persistent", "path": "run"},
                 "data": {"mode": "none"},
                 "initial_step": "start",
                 "priority": 500,
@@ -47,7 +47,7 @@ def _payload(root: Path) -> tuple[Path, str]:
 
 def test_all_command_groups_have_help(tmp_path: Path, capsys) -> None:
     context = CLIContext("httk", tmp_path)
-    for group in ("store", "job", "manager", "config", "project", "computer", "tasks"):
+    for group in ("workspace", "job", "manager", "config", "project", "computer", "tasks"):
         assert command([group, "--help"], context) == 0
     assert command(["v1", "prepare", "--help"], context) == 0
     assert "usage:" in capsys.readouterr().out
@@ -94,20 +94,20 @@ def test_manifest_determinism_special_names_exclusions_and_tampering(tmp_path: P
     assert b"space and\\nnewline" in body
 
 
-def test_manifest_refuses_active_store(tmp_path: Path) -> None:
+def test_manifest_refuses_active_workspace(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="active")
-    store = WorkflowStore(project)
+    workspace = WorkflowWorkspace(project)
     payload, job_id = _payload(tmp_path)
-    submitted = store.submit(payload, "jobs")
+    submitted = workspace.submit(payload, "jobs")
     # Construct the active state through the public transition protocol.
     from httk.workflow.journal import JournalWriter
 
-    with JournalWriter(store.control) as writer:
-        store.transition(writer, submitted, "running", {"reason": "test"})
+    with JournalWriter(workspace.control) as writer:
+        workspace.transition(writer, submitted, "running", {"reason": "test"})
     with pytest.raises(ValueError, match="quiescent"):
         create_manifest(project)
-    assert store.find_marker_by_id(job_id) is not None
+    assert workspace.find_marker_by_id(job_id) is not None
 
 
 def test_adapter_json_contract_and_no_shell_interpolation(tmp_path: Path) -> None:
@@ -166,16 +166,16 @@ def test_safe_v1_computer_import_uses_maintained_adapter(tmp_path: Path) -> None
     assert not (imported / "command").exists()
 
 
-def test_store_upgrade_and_transfer_round_trip_are_idempotent(tmp_path: Path) -> None:
-    source = WorkflowStore.initialize(tmp_path / "source")
+def test_workspace_upgrade_and_transfer_round_trip_are_idempotent(tmp_path: Path) -> None:
+    source = WorkflowWorkspace.initialize(tmp_path / "source")
     assert source.upgrade(["detached-transfer-v1"]) == frozenset({"detached-transfer-v1"})
-    destination = WorkflowStore.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+    destination = WorkflowWorkspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
     payload, job_id = _payload(tmp_path)
     source.submit(payload, "jobs")
     transfer_id = str(uuid.uuid4())
     bundle = source.detach(
         job_id,
-        destination_store_id=destination.store_id,
+        destination_workspace_id=destination.workspace_id,
         transfer_id=transfer_id,
     )
     assert source.recover_transfers()[0]["transfer_id"] == transfer_id
@@ -194,20 +194,20 @@ def test_tasks_send_uses_adapter_status_push_import_and_ack(tmp_path: Path) -> N
     initialize_project(destination_root, name="destination")
     computer = add_computer("local", template="local", project=source_root)
     metadata = json.loads((computer / "computer.json").read_text(encoding="utf-8"))
-    metadata["queues"]["default"]["store"] = str(destination_root)
+    metadata["queues"]["default"]["workspace"] = str(destination_root)
     (computer / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
     payload, job_id = _payload(tmp_path)
-    WorkflowStore(source_root).submit(payload, "jobs")
+    WorkflowWorkspace(source_root).submit(payload, "jobs")
     assert (
         command(
-            ["tasks", "send", "local", job_id, "--store", str(source_root)],
+            ["tasks", "send", "local", job_id, "--workspace", str(source_root)],
             CLIContext("httk", source_root),
         )
         == 0
     )
-    imported = WorkflowStore(destination_root).find_marker_by_id(job_id)
+    imported = WorkflowWorkspace(destination_root).find_marker_by_id(job_id)
     assert imported is not None and imported.kind == "submitted"
-    assert WorkflowStore(source_root).find_marker_by_id(job_id) is None
+    assert WorkflowWorkspace(source_root).find_marker_by_id(job_id) is None
 
 
 def test_tasks_send_resumes_after_copy_before_import(tmp_path: Path, monkeypatch) -> None:
@@ -217,10 +217,10 @@ def test_tasks_send_resumes_after_copy_before_import(tmp_path: Path, monkeypatch
     initialize_project(destination_root, name="destination")
     computer = add_computer("local", template="local", project=source_root)
     metadata = json.loads((computer / "computer.json").read_text(encoding="utf-8"))
-    metadata["queues"]["default"]["store"] = str(destination_root)
+    metadata["queues"]["default"]["workspace"] = str(destination_root)
     (computer / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
     payload, job_id = _payload(tmp_path)
-    WorkflowStore(source_root).submit(payload, "jobs")
+    WorkflowWorkspace(source_root).submit(payload, "jobs")
 
     from httk.workflow import workflow_cli
 
@@ -235,9 +235,9 @@ def test_tasks_send_resumes_after_copy_before_import(tmp_path: Path, monkeypatch
         return real_run_adapter(bundle, operation, request, timeout=timeout)
 
     monkeypatch.setattr(workflow_cli, "run_adapter", interrupt_import)
-    arguments = ["tasks", "send", "local", job_id, "--store", str(source_root)]
+    arguments = ["tasks", "send", "local", job_id, "--workspace", str(source_root)]
     assert command(arguments, CLIContext("httk", source_root)) == 2
-    assert WorkflowStore(source_root).find_marker_by_id(job_id) is None
+    assert WorkflowWorkspace(source_root).find_marker_by_id(job_id) is None
     monkeypatch.setattr(workflow_cli, "run_adapter", real_run_adapter)
     assert command(arguments, CLIContext("httk", source_root)) == 0
-    assert WorkflowStore(destination_root).find_marker_by_id(job_id) is not None
+    assert WorkflowWorkspace(destination_root).find_marker_by_id(job_id) is not None

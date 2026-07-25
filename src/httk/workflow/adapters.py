@@ -248,9 +248,9 @@ def import_v1_computer(
             root = Path(settings["LOCAL_HTTK_DIR"]).expanduser()
             if not root.is_absolute():
                 root = (legacy / root).resolve()
-            row["store"] = str(root / "Runs" / queue)
+            row["workspace"] = str(root / "Runs" / queue)
         elif template == "ssh-slurm" and "REMOTE_HTTK_DIR" in settings:
-            row["store"] = f"{settings['REMOTE_HTTK_DIR'].rstrip('/')}/Runs/{queue}"
+            row["workspace"] = f"{settings['REMOTE_HTTK_DIR'].rstrip('/')}/Runs/{queue}"
             row["host"] = settings.get("REMOTE_HOST", "")
             row["username"] = settings.get("USERNAME", "")
         queues[queue] = row

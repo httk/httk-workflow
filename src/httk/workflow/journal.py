@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from ._util import fsync_directory, json_bytes, retry_delay
-from .errors import FormatError, StoreCorruptionError, StoreUnavailableError
+from .errors import FormatError, WorkspaceCorruptionError, WorkspaceUnavailableError
 from .models import to_base36
 
 SEGMENT_HEADER = b"HTTK-HWJ-V1\n"
@@ -51,7 +51,7 @@ class JournalWriter:
 
     def _open_segment(self, number: int) -> BinaryIO:
         if number > (1 << 32) - 1:
-            raise StoreCorruptionError("journal segment number exhausted")
+            raise WorkspaceCorruptionError("journal segment number exhausted")
         path = self._segment_path(number)
         handle = path.open("x+b")
         handle.write(SEGMENT_HEADER)
@@ -128,31 +128,31 @@ def read_record(control_dir: Path, record_ref: str, *, attempts: int = 7) -> dic
                 if len(header) != len(SEGMENT_HEADER):
                     raise EOFError("short journal segment header")
                 if header != SEGMENT_HEADER:
-                    raise StoreCorruptionError(f"invalid journal segment header: {path}")
+                    raise WorkspaceCorruptionError(f"invalid journal segment header: {path}")
                 handle.seek(offset)
                 length_bytes = handle.read(_LENGTH.size)
                 if len(length_bytes) != _LENGTH.size:
                     raise EOFError("short frame length")
                 (length,) = _LENGTH.unpack(length_bytes)
                 if length != expected_length:
-                    raise StoreCorruptionError("record reference length disagrees with journal frame")
+                    raise WorkspaceCorruptionError("record reference length disagrees with journal frame")
                 payload = handle.read(length)
                 checksum = handle.read(32)
                 trailer = handle.read(_LENGTH.size)
                 if len(payload) != length or len(checksum) != 32 or len(trailer) != _LENGTH.size:
                     raise EOFError("short journal frame")
                 if trailer != length_bytes:
-                    raise StoreCorruptionError("journal frame trailer disagrees with header")
+                    raise WorkspaceCorruptionError("journal frame trailer disagrees with header")
                 actual_checksum = hashlib.sha256(length_bytes + payload).digest()
                 if actual_checksum != checksum:
-                    raise StoreCorruptionError("journal frame checksum mismatch")
+                    raise WorkspaceCorruptionError("journal frame checksum mismatch")
                 if checksum[:16].hex() != expected_prefix:
-                    raise StoreCorruptionError("record reference checksum mismatch")
+                    raise WorkspaceCorruptionError("record reference checksum mismatch")
                 value = json.loads(payload)
                 if not isinstance(value, dict):
-                    raise StoreCorruptionError("journal record is not a JSON object")
+                    raise WorkspaceCorruptionError("journal record is not a JSON object")
                 return value
         except (FileNotFoundError, EOFError, json.JSONDecodeError, UnicodeError) as exc:
             last_error = exc
             time.sleep(retry_delay(attempt))
-    raise StoreUnavailableError(f"journal record is not coherently visible: {record_ref}") from last_error
+    raise WorkspaceUnavailableError(f"journal record is not coherently visible: {record_ref}") from last_error

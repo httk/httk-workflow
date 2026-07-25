@@ -6,7 +6,7 @@ This document specifies the filesystem protocol around which the
 *httk-workflow* engine is built. It is the normative on-disk protocol rather
 than Python API documentation. The current `httk.workflow` implementation
 supports `core-v1`, `transactional-data-v1`, and `priority-bands-v1`;
-relocation and cross-store transfer remain reserved optional extensions and
+relocation and cross-workspace transfer remain reserved optional extensions and
 are rejected rather than partially executed.
 
 The protocol is language independent. A workflow step may be a shell script, a
@@ -20,7 +20,7 @@ is ever required to run cleanup code. Either may disappear between any two
 instructions. A later task manager must be able to identify the last commit
 point and continue from it.
 
-The design is intended for stores containing many millions of jobs. Metadata
+The design is intended for workspaces containing many millions of jobs. Metadata
 inode count, directory fan-out, scheduler scan cost, and manual filesystem
 inspection are therefore correctness-level design concerns, not later
 optimizations.
@@ -62,7 +62,7 @@ The core representation is deliberately small:
    segments. There is no state-record file, event directory, failure file, or
    revision directory per job.
 5. An active attempt temporarily adds one small control directory. Application
-   execution may use either one persistent `run/` workspace or an isolated
+   execution may use either one persistent `run/` workdir or an isolated
    `run.<attempt-id>/`.
 6. `data/` and replayable transactions are optional. Jobs that opt in receive
    all-or-none publication at attempt boundaries; jobs such as large VASP runs
@@ -78,7 +78,7 @@ data is:
 | Authoritative state marker | 1 file | Job lifetime |
 | Shared journal records | 0 files | Packed into writer segments |
 | Attempt control directory | 0 or 1 directory | Attempt/retention lifetime |
-| Persistent/isolated workspace | 0 or 1 directory | Application policy |
+| Persistent/isolated workdir | 0 or 1 directory | Application policy |
 | Per-state/per-event/per-failure files | 0 | Not used |
 
 Shard and journal directories are shared by many jobs. Application inputs,
@@ -90,12 +90,12 @@ even though it is not a permanent per-job protocol object.
 
 ## Concepts
 
-A **workflow store** is one self-contained filesystem tree with an immutable
-store UUID, its jobs, authoritative state markers, and journals.
+A **workflow workspace** is one self-contained filesystem tree with an immutable
+workspace UUID, its jobs, authoritative state markers, and journals.
 
 A **watch root** is an ordinary directory below which a manager discovers
-workflow stores. A manager may also receive explicit store paths and may
-supervise several stores at once.
+workflow workspaces. A manager may also receive explicit workspace paths and may
+supervise several workspaces at once.
 
 A **job** is the durable unit of scheduling, history, and final success or
 failure.
@@ -104,7 +104,7 @@ A **job key** is the filesystem component
 `[<tag>--]<job-uuid>`. The UUID is authoritative; the optional tag is for human
 navigation.
 
-A **placement** is an arbitrary relative parent path below a store, for example
+A **placement** is an arbitrary relative parent path below a workspace, for example
 `project-17/0/03a`. A payload at that placement has the path
 `<placement>/<job-key>`.
 
@@ -130,7 +130,7 @@ Children may themselves create children.
 
 ## Required filesystem semantics
 
-All correctness-critical paths within one workflow store MUST reside on one
+All correctness-critical paths within one workflow workspace MUST reside on one
 filesystem on which:
 
 1. renaming a file within that filesystem is atomic;
@@ -165,9 +165,9 @@ provide fencing. Correctness comes from moving the one current state marker.
 The protocol is deliberately phased. A conforming **core-v1** implementation
 supports:
 
-- one workflow store per job and all references within that store;
+- one workflow workspace per job and all references within that workspace;
 - submission, validation, claiming, leases, execution, and outcomes;
-- persistent and isolated workspaces;
+- persistent and isolated workdirs;
 - retries, joins, failures, cancellation, and operator requests;
 - packed journals, verified marker renames, startup recovery, and garbage
   collection.
@@ -177,27 +177,27 @@ The following are optional extensions:
 | Extension | Additional behavior |
 | --- | --- |
 | `transactional-data-v1` | Replayable contributions to `data/`. |
-| `relocation-v1` | Moving payloads between placements in one store. |
-| `multistore-v1` | Cross-store children, joins, and coordinated transfer. |
+| `relocation-v1` | Moving payloads between placements in one workspace. |
+| `multiworkspace-v1` | Cross-workspace children, joins, and coordinated transfer. |
 | `detached-transfer-v1` | Sealed standalone transfer bundles. |
 | `priority-bands-v1` | Coarse authoritative ready-state priority directories. |
 
-A store declares its core profile and enabled extensions in `format.json`.
-A manager MUST refuse to mutate a store whose core profile or enabled
-extensions it does not support. It MAY attach such a store read-only for
+A workspace declares its core profile and enabled extensions in `format.json`.
+A manager MUST refuse to mutate a workspace whose core profile or enabled
+extensions it does not support. It MAY attach such a workspace read-only for
 inspection. Unknown state kinds are never treated as failed or orphaned jobs.
 
 This split is about implementation scope, not separate data models. Extensions
 retain the same job definition, marker, journal, and verified-rename rules.
 
-## Store layout and arbitrary placement
+## Workspace layout and arbitrary placement
 
-A store is an ordinary directory. Its protocol control data are below
-`STORE/.httk-workflow/`; job payload directories may be placed at any valid
+A workspace is an ordinary directory. Its protocol control data are below
+`WORKSPACE/.httk-workflow/`; job payload directories may be placed at any valid
 relative path outside that reserved directory:
 
 ```text
-STORE/
+WORKSPACE/
 ├── .httk-workflow/
 │   ├── format.json
 │   ├── tmp/
@@ -246,18 +246,18 @@ parallel path such as:
 
 The protocol assigns no meaning to the placement components. They may represent
 projects, user names, dates, hash shards of any depth, or a mixture. Different
-jobs in one store may use completely different placement schemes.
+jobs in one workspace may use completely different placement schemes.
 
-The layout shows all defined extensions. A core-only store need not create
+The layout shows all defined extensions. A core-only workspace need not create
 `relocating/` or `transferring/`, and no empty state-kind or placement
 directories are required.
 
-`files/`, `data/`, a workspace, and attempt control are created only when
+`files/`, `data/`, a workdir, and attempt control are created only when
 required. Empty placeholder directories SHOULD NOT be created. Empty placement
 directories have no protocol meaning and may be pruned, subject to the
 rename/prune rules below.
 
-`format.json` identifies the self-contained store:
+`format.json` identifies the self-contained workspace:
 
 ```json
 {
@@ -266,7 +266,7 @@ rename/prune rules below.
   "core_profile": "core-v1",
   "extensions": [],
   "record_ref_encoding": "hwref-v1",
-  "store_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
+  "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
   "created_at": "2026-07-24T12:00:00Z"
 }
 ```
@@ -295,95 +295,95 @@ correctness MUST NOT depend on cleanup.
 
 Placement components MUST be normalized relative path components. Empty
 components, `.`, `..`, NUL bytes, and `.httk-workflow` are forbidden. Each
-component must fit the underlying filesystem's filename limit. A store MAY set
+component must fit the underlying filesystem's filename limit. A workspace MAY set
 policy limits on depth and total relative path length, but these are operational
 limits rather than a protocol sharding scheme.
 
-## Managing and combining stores
+## Managing and combining workspaces
 
-A core manager may attach several independent stores for operational
-convenience, but jobs and joins remain within their own stores. Cross-store
-references and coordinated movement require `multistore-v1`.
+A core manager may attach several independent workspaces for operational
+convenience, but jobs and joins remain within their own workspaces. Cross-workspace
+references and coordinated movement require `multiworkspace-v1`.
 
 A task manager accepts any combination of:
 
-- explicit store paths;
+- explicit workspace paths;
 - watch roots below which it discovers directories containing
   `.httk-workflow/format.json`.
 
-The manager identifies a store by `store_id`, not its current absolute path.
-The same underlying store discovered through two path aliases is attached
-once. Journal references are store-relative and include the store ID when used
-from another store.
+The manager identifies a workspace by `workspace_id`, not its current absolute path.
+The same underlying workspace discovered through two path aliases is attached
+once. Journal references are workspace-relative and include the workspace ID when used
+from another workspace.
 
-If two discovered roots declare the same `store_id`, a manager MUST prove that
+If two discovered roots declare the same `workspace_id`, a manager MUST prove that
 they identify the same underlying directory before treating them as aliases.
 Suitable evidence is an equal filesystem object identity obtained from open
 directory handles, device/inode identity where reliable, or an equivalent
 backend facility. Equal `format.json` bytes, UUIDs, or path canonicalization
 alone are insufficient because a copied backup has all three. If equivalence
 cannot be proved, the manager MUST refuse both roots for mutation and report a
-loud duplicate-store-ID error; it MUST NOT attach an arbitrary winner.
+loud duplicate-workspace-ID error; it MUST NOT attach an arbitrary winner.
 
 This permits both common arrangements:
 
 ```text
-# One store with projects as placement prefixes
-STORE/project-a/00/17/<job-key>
-STORE/project-b/hash/x9/<job-key>
+# One workspace with projects as placement prefixes
+WORKSPACE/project-a/00/17/<job-key>
+WORKSPACE/project-b/hash/x9/<job-key>
 
-# A watch root containing self-contained project stores
+# A watch root containing self-contained project workspaces
 WATCH/project-a/.httk-workflow/format.json
 WATCH/project-a/00/17/<job-key>
 WATCH/project-b/.httk-workflow/format.json
 WATCH/project-b/hash/x9/<job-key>
 ```
 
-A manager may schedule from all attached stores in one resource pool. Job and
-child references are `(store_id, job_id)` pairs; the job UUID alone is accepted
-only when unambiguous among attached stores.
+A manager may schedule from all attached workspaces in one resource pool. Job and
+child references are `(workspace_id, job_id)` pairs; the job UUID alone is accepted
+only when unambiguous among attached workspaces.
 
-Discovery stops at a store boundary. Attached stores MUST NOT overlap unless an
+Discovery stops at a workspace boundary. Attached workspaces MUST NOT overlap unless an
 explicit advanced profile defines ownership of every placement prefix; the
-default manager rejects nested/overlapping store roots.
+default manager rejects nested/overlapping workspace roots.
 
 ### Dynamic attachment
 
-A complete store can be built elsewhere on the same filesystem and atomically
+A complete workspace can be built elsewhere on the same filesystem and atomically
 renamed below a watch root. Its `format.json`, state tree, journals, and
-payloads arrive together. The manager discovers the immutable store ID and
+payloads arrive together. The manager discovers the immutable workspace ID and
 begins scheduling it without restarting.
 
 Filesystem notifications are hints. Managers periodically rescan watch roots so
-a lost notification cannot hide an attached store.
+a lost notification cannot hide an attached workspace.
 
-Renaming an attached store within watched paths does not create a new store.
+Renaming an attached workspace within watched paths does not create a new workspace.
 Managers SHOULD hold an open directory handle and update the path associated
-with the same store ID. Copying a live store is forbidden: it duplicates
+with the same workspace ID. Copying a live workspace is forbidden: it duplicates
 authoritative markers and journal identity. Discovery of such a copy is handled
 by the duplicate-ID refusal above, including when an operator restores a backup
-beside the live store.
+beside the live workspace.
 
 ### Dynamic detachment
 
-Detaching one store does not stop a manager from serving its other stores. A
+Detaching one workspace does not stop a manager from serving its other workspaces. A
 detach coordinator obtains acknowledgement from every manager with a live
-heartbeat in that store. Each manager:
+heartbeat in that workspace. Each manager:
 
-1. stops new claims from that store;
+1. stops new claims from that workspace;
 2. completes or releases manager-owned claimed jobs;
 3. completes committing replays;
 4. waits for, pauses, or explicitly hands off running attempts;
-5. closes the store journal writer;
-6. acknowledges that the store is quiescent for it.
+5. closes the workspace journal writer;
+6. acknowledges that the workspace is quiescent for it.
 
 Once all live managers acknowledge and no marker is claimed, running, or
-committing, the store directory may be atomically moved out of the watch root.
-A manager MUST NOT interpret disappearance of a store as failure of every job
-in it. It marks that store unavailable until the same store ID is reattached.
+committing, the workspace directory may be atomically moved out of the watch root.
+A manager MUST NOT interpret disappearance of a workspace as failure of every job
+in it. It marks that workspace unavailable until the same workspace ID is reattached.
 
-A raw move of a store containing active attempts is supported only when the
-same supervising managers follow the atomic rename by store ID and retain valid
+A raw move of a workspace containing active attempts is supported only when the
+same supervising managers follow the atomic rename by workspace ID and retain valid
 directory handles. The portable and recommended operation is controlled
 detach, move, then attach.
 
@@ -410,12 +410,12 @@ The tag:
 
 Without a tag, the job key is just the UUID. Parsers identify the final UUID
 rather than trusting the tag. A lookup by tag may return several jobs; UUID
-lookup returns at most one job within a store.
+lookup returns at most one job within a workspace.
 
 The current payload path is:
 
 ```text
-<store>/<placement>/<job-key>/
+<workspace>/<placement>/<job-key>/
 ```
 
 The authoritative state marker uses the same placement and job key.
@@ -515,11 +515,11 @@ MAY use it unconditionally:
 4. Otherwise, the actor locates and validates the job's current marker. A
    different valid marker proves that another transition won.
 5. If source, expected destination, and another valid current marker all remain
-   absent after bounded reopen/backoff retries, the store is unavailable or
+   absent after bounded reopen/backoff retries, the workspace is unavailable or
    corrupt. The actor MUST stop mutation and report that condition; it MUST NOT
    silently classify the result as a lost race.
 
-Record references are globally unique within a store, so the expected
+Record references are globally unique within a workspace, so the expected
 destination MUST initially be absent. An implementation SHOULD use no-replace
 rename where available. An already present expected destination is success
 only when it names the actor's prepared record; any conflicting entry is
@@ -541,7 +541,7 @@ A pruner MUST make at most one removal attempt per candidate directory in one
 scan and MUST NOT immediately retry a failed removal. It backs off until a
 later scan. Transition parent-creation/rename retries are also bounded; if
 repeated confirmed prune collisions would exhaust that budget, the manager
-suppresses pruning for the affected subtree or store and retries the transition
+suppresses pruning for the affected subtree or workspace and retries the transition
 before reporting storage failure. Pruning is optional and MUST yield to state
 mutation. Implementations MAY simply disable placement-directory pruning while
 managers are attached.
@@ -600,7 +600,7 @@ zeroes except for zero itself.
 `checksum128` is the first 128 bits of the SHA-256 checksum over the encoded
 frame length and payload, rendered as 32 lowercase hexadecimal digits. The
 complete checksum remains in the frame. No alternate encoding is permitted in
-a `core-v1` store, so independent implementations resolve marker names
+a `core-v1` workspace, so independent implementations resolve marker names
 identically.
 
 The worst-case noninitial marker basename is 213 ASCII bytes:
@@ -613,7 +613,7 @@ The worst-case noninitial marker basename is 213 ASCII bytes:
 The 86-byte job key is a 48-byte tag, `--`, and a 36-byte UUID. The reference
 budget is `33` for `w` and the writer UUID, `9` for `-s` and a seven-digit
 base-36 segment number, `15` each for `-o`/offset and `-l`/length, and `34` for
-`-h` plus the checksum: `33 + 9 + 15 + 15 + 34 = 106`. A conforming store MUST
+`-h` plus the checksum: `33 + 9 + 15 + 15 + 34 = 106`. A conforming workspace MUST
 support at least 213 bytes per filename component and MUST validate this at
 initialization. These field limits and the tag limit MUST NOT be enlarged
 within format version 1.
@@ -627,7 +627,7 @@ On a network filesystem, visibility of a marker and visibility of the newly
 extended journal segment may reach different clients at different times. A
 reader that sees a referenced frame as absent, short, or checksum-incomplete
 MUST close and reopen or otherwise refresh the segment and retry with bounded
-backoff. It declares corruption only after the store's configured visibility
+backoff. It declares corruption only after the workspace's configured visibility
 deadline, and it MUST NOT mutate the marker while the referenced frame is
 temporarily unreadable.
 
@@ -637,7 +637,7 @@ Every state frame includes:
 {
   "format": "httk-workflow-state",
   "format_version": 1,
-  "store_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
+  "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
   "job_id": "01234567-89ab-cdef-0123-456789abcdef",
   "job_key": "silicon-relax--01234567-89ab-cdef-0123-456789abcdef",
   "placement": "project-17/0/03a",
@@ -687,7 +687,7 @@ A minimal `job.json` is:
     "path": "files/runner",
     "arguments": []
   },
-  "workspace": {
+  "workdir": {
     "mode": "persistent",
     "path": "run"
   },
@@ -718,7 +718,7 @@ directly in it instead of one file per parameter.
 `runner.backend` selects an installed execution adapter and defaults to
 `path` when omitted. The core task manager implements `path`; managers MUST
 leave jobs using an unavailable or disallowed backend unclaimed. This permits
-specialized managers to share a store without either one accidentally running
+specialized managers to share a workspace without either one accidentally running
 the other's job profile. Backend-specific immutable fields belong in
 `job.json`, and their submission validation is owned by that backend.
 
@@ -732,9 +732,9 @@ path-containment rules.
 objects that require separate files. Small inputs SHOULD be embedded in
 `job.json`.
 
-`workspace.mode` is `persistent` or `isolated`:
+`workdir.mode` is `persistent` or `isolated`:
 
-- `persistent` reuses the declared workspace directory across step activations
+- `persistent` reuses the declared workdir directory across step activations
   and attempts. The workflow program owns recovery and cleanup of partial
   application files.
 - `isolated` creates a new `run.<attempt-id>/` for every attempt. It may be
@@ -743,10 +743,10 @@ objects that require separate files. Small inputs SHOULD be embedded in
 The mode MUST be explicit in `job.json`; the protocol has no implicit default.
 
 `data.mode` is `none` or `transactional` and is also explicit. With `none`, the
-job may keep all mutable and final application data in its persistent workspace.
+job may keep all mutable and final application data in its persistent workdir.
 It never needs to create `data/`, publish a transaction, or increment a data
 generation. With `transactional`, `data/` and the transaction protocol below
-are available when the store enables `transactional-data-v1`.
+are available when the workspace enables `transactional-data-v1`.
 
 `claim` and its `pool` are required; `required_capabilities` may be empty.
 `claim.pool` is the scheduling pool or queue from which the job may be claimed.
@@ -782,7 +782,7 @@ To submit:
 1. Create a complete job below `.httk-workflow/tmp/`, including `job.json` and
    any initial `files/` or `data/`.
 2. Choose any placement and atomically rename it to
-   `<store>/<placement>/<job-key>/`.
+   `<workspace>/<placement>/<job-key>/`.
 3. Create a temporary zero-length marker named
    `<job-key>.p<priority>.g0.init`.
 4. Atomically rename that marker to
@@ -806,11 +806,11 @@ records bounded validation details. The payload is retained for diagnosis.
 Implementations MUST NOT leave invalid jobs indefinitely in `submitted`.
 
 An entry whose marker name or placement is itself not parseable cannot enter
-the normal job state machine. A store repair tool moves it to a shared
+the normal job state machine. A workspace repair tool moves it to a shared
 `.httk-workflow/quarantine/` area outside `state/`; managers report it loudly
 and never schedule it. Names in quarantine MUST preserve or record the original
 relative path without permitting collisions or traversal. Quarantine is
-exceptional store corruption, not another job state.
+exceptional workspace corruption, not another job state.
 
 Retrying submission with an existing job UUID succeeds only when the existing
 immutable job digest is identical and its marker already exists. A different
@@ -891,7 +891,7 @@ The claimed frame names:
 - preceding record reference.
 
 The manager creates `.httk-attempt.<attempt-id>/`, prepares the selected
-persistent or isolated workspace, appends a running frame, and renames the
+persistent or isolated workdir, appends a running frame, and renames the
 claimed marker to running immediately before launching the application. A
 local executor MAY first create a process blocked on a launch gate, durably
 record that process identity, commit the running marker, and only then release
@@ -915,22 +915,22 @@ state. A manager merely releasing work transitions back to ready. Both retain
 the activation ID for a retry.
 
 Filesystem fencing cannot prevent a partitioned old process from producing
-external side effects or modifying a persistent workspace. For an isolated
-workspace, managers SHOULD terminate its process group or cancel its batch
-allocation before recovery when possible. For a persistent workspace, the
+external side effects or modifying a persistent workdir. For an isolated
+workdir, managers SHOULD terminate its process group or cancel its batch
+allocation before recovery when possible. For a persistent workdir, the
 default safe policy MUST establish that the previous writer can no longer
-modify the workspace—for example, by scheduler-confirmed allocation expiry or
+modify the workdir—for example, by scheduler-confirmed allocation expiry or
 cancellation and process-group termination—before launching a replacement.
 Lease expiry alone is not sufficient. A site MAY enable lease-only persistent
 takeover as an explicit unsafe policy; that choice and every use of it MUST be
 recorded in the new attempt frame.
 
-## Attempt control, workspaces, and runner contract
+## Attempt control, workdirs, and runner contract
 
-Attempt control is separate from application workspace:
+Attempt control is separate from application workdir:
 
 ```text
-<store>/<placement>/<job-key>/
+<workspace>/<placement>/<job-key>/
 ├── .httk-attempt.<attempt-id>/
 │   ├── context.json
 │   ├── outcome.tmp.<nonce>/
@@ -940,15 +940,15 @@ Attempt control is separate from application workspace:
 
 In isolated mode the application directory is
 `run.<attempt-id>/` instead of `run/`. The runner's current working directory is
-the selected application workspace, not the attempt control directory.
+the selected application workdir, not the attempt control directory.
 
 Separating them matters in persistent mode: a late process from an old attempt
 can only publish beneath its own attempt-control name. Its outcome cannot
 replace or impersonate the new attempt's outcome.
 
-### Persistent workspace
+### Persistent workdir
 
-The same declared workspace is used across normal step advances and retries.
+The same declared workdir is used across normal step advances and retries.
 The manager does not clean, copy, snapshot, or transactionally inspect its
 application files.
 
@@ -968,22 +968,22 @@ context. The workflow code examines the reason and the existing files and may:
 A planned advance to another step also reuses the directory, but is not a
 restart: the new activation has attempt ordinal 1 and `is_restart: false`.
 
-Persistent mode deliberately gives up workspace isolation. If an old process
+Persistent mode deliberately gives up workdir isolation. If an old process
 cannot be established incapable of further writes, it may still modify `run/`
 after being fenced from publishing an outcome. The safe default is therefore
 to wait, force scheduler cancellation, or pause for manual action. Only an
 explicitly configured unsafe takeover policy may accept concurrent-writer risk,
 as specified under fencing above.
 
-### Isolated workspace
+### Isolated workdir
 
 Every attempt receives a new `run.<attempt-id>/`. The manager may populate it
 from submitted files or transactional `data/` by copying, reflinking, or a
-filesystem snapshot. Writes through an isolated workspace MUST NOT mutate
+filesystem snapshot. Writes through an isolated workdir MUST NOT mutate
 committed `data/` before a transaction.
 
-Old isolated workspaces may be retained for diagnosis or collected later. A
-manual continuation can import selected files into a new isolated workspace,
+Old isolated workdirs may be retained for diagnosis or collected later. A
+manual continuation can import selected files into a new isolated workdir,
 with the choice recorded in history.
 
 ### Context and restart detection
@@ -993,9 +993,9 @@ The manager MUST set:
 ```text
 HTTK_WORKFLOW_CONTEXT=<absolute path to attempt context.json>
 HTTK_WORKFLOW_CONTROL_DIR=<absolute attempt-control path>
-HTTK_WORKFLOW_STORE_DIR=<absolute store path>
+HTTK_WORKFLOW_WORKSPACE_DIR=<absolute workspace path>
 HTTK_WORKFLOW_JOB_DIR=<absolute current payload path>
-HTTK_WORKFLOW_RUN_DIR=<absolute selected workspace path>
+HTTK_WORKFLOW_WORKDIR=<absolute selected workdir path>
 HTTK_WORKFLOW_IS_RESTART=0|1
 HTTK_WORKFLOW_UNCLEAN_RESTART=0|1
 HTTK_WORKFLOW_ATTEMPT_REASON=<reason>
@@ -1015,7 +1015,7 @@ An unclean persistent retry context is:
 {
   "format": "httk-workflow-attempt-context",
   "format_version": 1,
-  "store_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
+  "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
   "job_id": "01234567-89ab-cdef-0123-456789abcdef",
   "placement": "project-17/0/03a",
   "step": "relax",
@@ -1027,8 +1027,8 @@ An unclean persistent retry context is:
   "attempt_reason": "lease_lost",
   "previous_attempt_id": "31fa431e-e01c-49aa-8fa8-e8af23b73c52",
   "activation_reason": "advance",
-  "workspace_mode": "persistent",
-  "workspace_reused": true,
+  "workdir_mode": "persistent",
+  "workdir_reused": true,
   "data_generation": null,
   "resources": {},
   "join": null
@@ -1045,9 +1045,9 @@ Thus a shell or Python step does not infer restart from leftover filenames. It
 reads `HTTK_WORKFLOW_CONTEXT` (or the scalar variables), then uses the existing
 files according to application policy.
 
-Attempt-control directories are transient metadata. Persistent workspaces are
+Attempt-control directories are transient metadata. Persistent workdirs are
 application data and MUST NOT be garbage-collected merely because an attempt
-ended. Isolated workspaces may be collected under their retention policy. No
+ended. Isolated workdirs may be collected under their retention policy. No
 state transition depends on cleanup.
 
 ## Publishing an outcome
@@ -1131,7 +1131,7 @@ This section applies only when `job.json` declares
 `data/` directly. It publishes a replayable transaction in its outcome.
 
 A job with `data.mode` equal to `none` omits `data/` and the transaction bundle.
-In particular, a persistent-workspace job may freely update application files
+In particular, a persistent-workdir job may freely update application files
 such as `WAVECAR` in `run/`; those files are not workflow-protocol metadata.
 
 The required guarantee is:
@@ -1206,7 +1206,7 @@ Required operation types are:
 
 Put operations declare a content digest. Replacement and removal operations
 MAY declare an expected old digest or require absence. Preconditions prevent a
-replayed or stale transaction from overwriting an unexpected workspace.
+replayed or stale transaction from overwriting an unexpected workdir.
 Symlinks, devices, sockets, and FIFOs are forbidden by default.
 
 Every removal uses the deterministic destination
@@ -1249,7 +1249,7 @@ After all operations validate as applied, the manager:
 2. renames the exact committing marker to ready, waiting, succeeded, failed, or
    paused;
 3. only then permits transaction trash and, in isolated mode, an old isolated
-   workspace to be collected.
+   workdir to be collected.
 
 If interrupted after the data changes but before the final marker rename, a new
 manager sees `committing`, reads the outcome named by the committing frame, and
@@ -1260,7 +1260,7 @@ permanent revision and manifest hierarchy per step.
 
 ## Relocating and transferring jobs
 
-This section requires `relocation-v1`, `multistore-v1`, or
+This section requires `relocation-v1`, `multiworkspace-v1`, or
 `detached-transfer-v1` as indicated. A `core-v1` implementation does not create
 `relocating` or `transferring` states.
 
@@ -1269,7 +1269,7 @@ Arbitrary placement is dynamic. A job may move after submission, but a raw
 still name the old placement. Relocation is therefore a short replayable
 protocol.
 
-### Relocation within one store
+### Relocation within one workspace
 
 Only a quiescent job may relocate. `ready`, `waiting`, `paused`, `failed`,
 `succeeded`, and `cancelled` are quiescent. A claimed or running job must first
@@ -1306,7 +1306,7 @@ it rename the common payload prefix. It then returns each marker to its mirrored
 destination placement. Recovery uses the batch record; no per-job coordinator
 files are required.
 
-### Moving new jobs into a running store
+### Moving new jobs into a running workspace
 
 Files may be copied or generated under `.httk-workflow/tmp/` while managers
 continue working. The complete payload is renamed to any chosen placement and
@@ -1320,19 +1320,19 @@ time; a batch requiring an all-at-once scheduling barrier should initially
 publish its members paused and release them through an explicit batch request.
 
 If the source is on another filesystem, the copy must finish and be validated
-inside the destination store before marker publication. Atomic rename is relied
+inside the destination workspace before marker publication. Atomic rename is relied
 on only for the final same-filesystem publication.
 
-### Moving jobs between stores
+### Moving jobs between workspaces
 
-An individual job can transfer atomically between two stores only when both
+An individual job can transfer atomically between two workspaces only when both
 control trees and the payload source/destination are on the same filesystem. A
-coordinator attached to both stores:
+coordinator attached to both workspaces:
 
 1. moves the quiescent source marker to `transferring`, recording source and
-   destination store IDs, placements, transfer ID, and prior logical state;
-2. renames the payload into the destination store;
-3. appends the import frame to a destination-store journal;
+   destination workspace IDs, placements, transfer ID, and prior logical state;
+2. renames the payload into the destination workspace;
+3. appends the import frame to a destination-workspace journal;
 4. renames the same marker inode from the source `transferring` tree to the
    mirrored destination state tree.
 
@@ -1347,23 +1347,23 @@ and transfer-token validation; the source is retired only after explicit
 acknowledgement. A backend implementing this profile must document its
 duplicate-suppression and failure policy.
 
-If the job may be named by an unresolved cross-store join, the source store
-MUST retain a packed forwarding record keyed by source store ID, job ID, job
-key, and old placement, naming the destination store and placement. It is
+If the job may be named by an unresolved cross-workspace join, the source workspace
+MUST retain a packed forwarding record keyed by source workspace ID, job ID, job
+key, and old placement, naming the destination workspace and placement. It is
 retained for at least the maximum join-history period. A transfer implementation
 without such lookup support MUST reject transfer of a job participating in an
 unresolved join.
 
-To detach one job without an immediately attached destination store, the
+To detach one job without an immediately attached destination workspace, the
 manager moves it to `transferring`, writes one compact
 `.httk-transfer/manifest.json` inside the payload, and renames the authoritative
 marker into `.httk-transfer/` inside that payload. The directory is then a
 sealed, nonschedulable bundle that can be moved out. Import places and validates
 the complete bundle first, appends an import frame, then renames the embedded
-marker into the target store's state tree. The extra transfer metadata exists
+marker into the target workspace's state tree. The extra transfer metadata exists
 only while the job is detached or retained for transfer provenance.
 
-For moving whole projects, a self-contained store is preferable: controlled
+For moving whole projects, a self-contained workspace is preferable: controlled
 detach and attach carry its state tree, journals, and all arbitrary placements
 together.
 
@@ -1387,17 +1387,17 @@ A step places complete child bundles in its outcome:
             └── ...
 ```
 
-Each child `job.json` names parent store, parent job, parent activation, and
-spawn ID. `spawn.json` chooses the target store and arbitrary placement for
+Each child `job.json` names parent workspace, parent job, parent activation, and
+spawn ID. `spawn.json` chooses the target workspace and arbitrary placement for
 each child. Child UUIDs and tags are chosen before outcome publication. In
-`core-v1`, the target store MUST be the parent's store; cross-store children
-require `multistore-v1`.
+`core-v1`, the target workspace MUST be the parent's workspace; cross-workspace children
+require `multiworkspace-v1`.
 
 While the parent is `committing`, the manager:
 
 1. moves each complete child bundle to its chosen
-   `<store>/<placement>/<job-key>` path;
-2. creates its one `g0.init` marker at the mirrored target-store path below
+   `<workspace>/<placement>/<job-key>` path;
+2. creates its one `g0.init` marker at the mirrored target-workspace path below
    `state/submitted`;
 3. treats an identical existing child plus marker as already registered;
 4. fails on the same UUID with different immutable content.
@@ -1407,8 +1407,8 @@ only some children, but replay registers the deterministic missing set.
 Registration is not rolled back. Published children may start before the parent
 has completed its transition; that is safe.
 
-When a target store is on another filesystem, the child is first copied into
-that store's temporary area and validated there. Its placement rename and
+When a target workspace is on another filesystem, the child is first copied into
+that workspace's temporary area and validated there. Its placement rename and
 submitted-marker publication then occur within the target filesystem while the
 parent remains committing.
 
@@ -1426,13 +1426,13 @@ A wait outcome explicitly names its child set:
   "join": {
     "children": [
       {
-        "store_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
+        "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
         "job_id": "411d9e6e-c050-451d-a851-e20f2570d7c5",
         "job_key": "branch-a--411d9e6e-c050-451d-a851-e20f2570d7c5",
         "placement_hint": "project-17/0/041"
       },
       {
-        "store_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
+        "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
         "job_id": "7ead0705-e1bb-4290-9ebd-fc1b24df9005",
         "job_key": "branch-b--7ead0705-e1bb-4290-9ebd-fc1b24df9005",
         "placement_hint": "project-17/0/042"
@@ -1462,10 +1462,10 @@ parent directory. New unrelated descendants cannot affect the join.
 A manager first checks every applicable state kind—and every ready priority
 band when enabled—at the child's `placement_hint`; ordinary state transitions
 do not change placement. It then uses its in-memory job-key map. If the hint is
-stale under `relocation-v1` or `multistore-v1`, it follows any packed
+stale under `relocation-v1` or `multiworkspace-v1`, it follows any packed
 relocation/transfer forwarding record and finally falls back to a complete
-marker scan of the named store. A cache is never the only recovery path.
-Failure to find the child after bounded store visibility retries is an
+marker scan of the named workspace. A cache is never the only recovery path.
+Failure to find the child after bounded workspace visibility retries is an
 unavailable/corrupt dependency, not evidence that a join condition is
 impossible.
 
@@ -1479,7 +1479,7 @@ generation, terminal data generation, and failure information. Child committed
 data may be exposed through read-only paths named in the context. A
 transactional parent imports selected child data through its own transaction.
 A non-transactional workflow may instead let application code inspect or copy
-child data into its persistent workspace according to its own conventions.
+child data into its persistent workdir according to its own conventions.
 
 Join evaluation records an observation vector containing every child's exact
 marker generation, state-frame reference, and state kind. The vector need not
@@ -1570,7 +1570,7 @@ rename. A request names:
 - requested action;
 - operator identity and reason;
 - any selected retained files for manual import;
-- for relocation or transfer, the exact destination store and placement plus a
+- for relocation or transfer, the exact destination workspace and placement plus a
   unique operation ID.
 
 Actions include:
@@ -1581,7 +1581,7 @@ Actions include:
 - `set_priority`;
 - `pause`;
 - `relocate`, when `relocation-v1` is enabled;
-- `transfer`, when `multistore-v1` or `detached-transfer-v1` is enabled.
+- `transfer`, when `multiworkspace-v1` or `detached-transfer-v1` is enabled.
 
 Action validity is deliberately narrow:
 
@@ -1615,10 +1615,10 @@ The result is written to the shared journal. The transient request file may be
 removed after retention policy permits; there is no per-job request directory.
 
 Manual continuation preserves failure history. In persistent mode it reuses the
-declared workspace in place; the new attempt context records
+declared workdir in place; the new attempt context records
 `is_restart: true`, its cleanliness, and `attempt_reason: "manual_continue"`.
 No file import or transaction is required. In isolated mode, selected retained
-files may instead be imported into the new workspace; if they also become
+files may instead be imported into the new workdir; if they also become
 committed `data/`, that contribution uses a transaction.
 
 ## Required outcome-processing order
@@ -1658,19 +1658,19 @@ decision must not be mistaken for an abandoned attempt.
 
 A manager:
 
-1. discovers explicit and watched stores and validates each `format.json`;
-2. rejects duplicate store IDs and unsupported enabled extensions before
+1. discovers explicit and watched workspaces and validates each `format.json`;
+2. rejects duplicate workspace IDs and unsupported enabled extensions before
    mutation;
 3. creates a manager record, fresh writer-incarnation journal, and heartbeat in
-   each attached store;
+   each attached workspace;
 4. resumes markers in `committing` and, when enabled, `relocating` and
    `transferring`;
 5. examines possibly abandoned claimed and running markers;
-6. evaluates waiting joins, including cross-store references when enabled;
+6. evaluates waiting joins, including cross-workspace references when enabled;
 7. handles submitted jobs and operator requests;
 8. claims eligible ready work in pool, capability, priority, and resource
    order;
-9. continues watching for stores being attached, renamed, or detached.
+9. continues watching for workspaces being attached, renamed, or detached.
 
 It does not need to reconcile a separate state index. Listing `state/` is
 listing the authoritative scheduler state.
@@ -1681,9 +1681,9 @@ A high-scale implementation SHOULD:
   projects or job set;
 - keep an in-memory job-key-to-marker map while running;
 - process arbitrary placement subtrees incrementally rather than repeatedly
-  scanning every attached store;
+  scanning every attached workspace;
 - use filesystem notifications only as hints, since notifications may be lost;
-- store task-manager query caches outside per-job directories.
+- workspace task-manager query caches outside per-job directories.
 
 Without `priority-bands-v1`, discovering the globally highest-priority ready
 job requires enumerating the ready tree. Incremental scans MAY therefore cause
@@ -1696,13 +1696,13 @@ Neither mode changes claim correctness.
 
 The following may be collected under explicit retention policy:
 
-- unpublished store temporary entries;
+- unpublished workspace temporary entries;
 - placed payload directories that never reached submitted state, except sealed
   transfer bundles;
 - journal frames not referenced by any marker or history chain;
 - incomplete outcome directories;
 - obsolete attempt-control directories;
-- abandoned and completed isolated workspaces;
+- abandoned and completed isolated workdirs;
 - transaction trash after the destination marker transition;
 - retained diagnostic application files.
 
@@ -1714,12 +1714,12 @@ Terminal `job.json`, committed application data, the one state marker, and
 required journal history are retained according to site policy. Age alone is
 not permission to delete a non-terminal job.
 
-A persistent workspace is application data, not attempt scratch. It is retained
+A persistent workdir is application data, not attempt scratch. It is retained
 until an explicit job or site retention rule permits its removal, including
 after failure or manual continuation.
 
 A payload containing `.httk-transfer/manifest.json` and its sealed marker is
-not an orphan even though it has no marker in a store state tree. Generic
+not an orphan even though it has no marker in a workspace state tree. Generic
 temporary/orphan GC MUST NOT collect, alter, or unseal it. Only an explicit
 transfer import, abort, or transfer-specific retention action may do so.
 
@@ -1747,7 +1747,7 @@ The layout is intentionally legible without a database:
 - `state/waiting/` is the join backlog;
 - `state/failed/` is the current broken-job collection;
 - `state/succeeded/` is the finalized-success collection;
-- `.httk-workflow/quarantine/` contains malformed entries requiring store
+- `.httk-workflow/quarantine/` contains malformed entries requiring workspace
   repair rather than workflow scheduling;
 - every marker begins with the optional human tag plus UUID job key;
 - the matching payload is at the same relative placement outside
@@ -1762,7 +1762,7 @@ the matching journal record and validate the expected old generation.
 An inspection tool should accept any of:
 
 - UUID;
-- store UUID;
+- workspace UUID;
 - exact job key;
 - marker path;
 - current payload path;
@@ -1788,7 +1788,7 @@ or batch-scheduler boundary. Managers additionally MUST:
 - prevent a runner from writing immutable job metadata, the state tree, or the
   journal directly;
 - for transactional jobs, additionally prevent direct writes to committed
-  `data/`. Writes to the declared application workspace are allowed.
+  `data/`. Writes to the declared application workdir are allowed.
 
 ## Persistent VASP restart example
 
@@ -1796,7 +1796,7 @@ A VASP workflow that wants traditional in-place execution can declare:
 
 ```json
 {
-  "workspace": {"mode": "persistent", "path": "run"},
+  "workdir": {"mode": "persistent", "path": "run"},
   "data": {"mode": "none"}
 }
 ```
@@ -1809,14 +1809,14 @@ The behavior is then:
    directly in `run/`. The manager does not copy, rename, or interpret them.
 3. If execution disappears without publishing an outcome, the manager fences
    that attempt. After establishing that the old writer cannot still modify the
-   workspace, it starts a new attempt in the same `run/`.
+   workdir, it starts a new attempt in the same `run/`.
 4. The replacement context says `is_restart: true`,
    `is_unclean_restart: true`, and, for example,
    `attempt_reason: "lease_lost"`. The step may validate or remove partial
    files, adjust `INCAR`, and resume from `WAVECAR` using domain-specific logic.
 5. If the step publishes `advance`, the next workflow step may also use the
    same `run/`, but it receives `is_restart: false`: this is its first attempt,
-   not a restart merely because the workspace already contains files.
+   not a restart merely because the workdir already contains files.
 6. A later operator `continue` again reuses `run/` and is explicitly identified
    as a restart. No transactional `data/` output is involved.
 
@@ -1834,7 +1834,7 @@ variables are convenient projections for simple runners.
 
 ## Worked example
 
-This example deliberately uses isolated workspaces in a store with
+This example deliberately uses isolated workdirs in a workspace with
 `transactional-data-v1` enabled. Job `silicon-relax--J` starts at `prepare`,
 creates two calculations, joins them, and finalizes:
 
@@ -1859,7 +1859,7 @@ creates two calculations, joins them, and finalizes:
     and queues `finalize`.
 11. `finalize` publishes succeed. The same marker that existed at submission is
     renamed to `state/succeeded/...`.
-12. Completed isolated workspaces are later collected. The payload retains one
+12. Completed isolated workdirs are later collected. The payload retains one
     job file and application data; its one external state marker mirrors its
     arbitrary placement, and history is packed with many other jobs in journal
     segments.
@@ -1886,7 +1886,7 @@ implement the following mapping for instantiated *httk* v1 task templates:
 | `ht.tmp.task.*` to `ht.task.*` | Child bundle to placed payload plus one marker |
 | `ht.tmp.atomic.*` / `ht.atomic.*` | Idempotent adapter preflight replay before an *httk₂* outcome |
 | Restart count in pathname | Activation ID and attempt ordinal in state frame |
-| `ht.run.resume` | Audited manual continuation, reusing a persistent workspace or explicitly importing into an isolated one |
+| `ht.run.resume` | Audited manual continuation, reusing a persistent workdir or explicitly importing into an isolated one |
 
 The adapter preserves the *httk* v1 ordering rule that a published
 `ht_finished`/broken decision or pending atomic transaction is completed without
@@ -1921,12 +1921,12 @@ The principal improvements are:
 - transition, failure, and event metadata packed into shared journal segments;
 - optional human-readable path tags without weakening UUID identity;
 - arbitrary project/shard placement and crash-safe relocation;
-- dynamic multi-store attachment for combining projects;
+- dynamic multi-workspace attachment for combining projects;
 - explicit attempt fencing and restart detection;
 - explicit child sets and join policies;
 - transactional replay with no permanent revision-metadata tree per step;
 - structured, durable manual and failure history.
 
 The filesystem remains the interoperability layer, but its steady-state inode
-cost is small enough for multi-million-job stores and its state remains directly
+cost is small enough for multi-million-job workspaces and its state remains directly
 understandable to a human with ordinary filesystem tools.

@@ -5,8 +5,8 @@ import sys
 from collections.abc import Sequence
 
 from .errors import WorkflowError
-from .store import WorkflowStore
 from .v1 import V1TaskManager, prepare_v1_payload, submit_v1_task
+from .workspace import WorkflowWorkspace
 
 
 def _job_options(parser: argparse.ArgumentParser) -> None:
@@ -33,13 +33,13 @@ def _parser(program: str = "httk-v1-taskmanager") -> argparse.ArgumentParser:
     _job_options(prepare)
 
     submit = subparsers.add_parser("submit", help="prepare and submit an instantiated v1 task")
-    submit.add_argument("store")
+    submit.add_argument("workspace")
     submit.add_argument("source")
     submit.add_argument("--placement", required=True)
     _job_options(submit)
 
-    run = subparsers.add_parser("run", help="run only httk-v1 jobs in a v2 store")
-    run.add_argument("store")
+    run = subparsers.add_parser("run", help="run only httk-v1 jobs in a v2 workspace")
+    run.add_argument("workspace")
     run.add_argument("--set", "-s", dest="taskset", default="any")
     run.add_argument("--wrap", "-w")
     run.add_argument("--task-timeout", "-t", type=float, default=21600.0)
@@ -78,10 +78,10 @@ def main(argv: Sequence[str] | None = None, *, program: str = "httk-v1-taskmanag
             )
             print(job.job_key)
             return 0
-        store = WorkflowStore(arguments.store, durable=arguments.durable)
+        workspace = WorkflowWorkspace(arguments.workspace, durable=arguments.durable)
         if arguments.command == "submit":
             marker = submit_v1_task(
-                store,
+                workspace,
                 arguments.source,
                 arguments.placement,
                 job_id=arguments.job_id,
@@ -97,7 +97,7 @@ def main(argv: Sequence[str] | None = None, *, program: str = "httk-v1-taskmanag
         if arguments.command == "run":
             compression = "zstd" if arguments.zstdlog else "none" if arguments.no_bzip2log else "bzip2"
             with V1TaskManager(
-                store,
+                workspace,
                 taskset=arguments.taskset,
                 maximum_workers=arguments.workers,
                 lease_seconds=arguments.lease_seconds,

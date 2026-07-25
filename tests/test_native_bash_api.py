@@ -10,10 +10,10 @@ from httk.workflow import (
     Diagnostic,
     JobSpec,
     ProcessSupervisor,
-    ReplayableWorkspaceBatch,
+    ReplayableWorkdirBatch,
     TaskManager,
     VaspRemedyDecision,
-    WorkflowStore,
+    WorkflowWorkspace,
     apply_vasp_remedy,
     clean_vasp_outputs,
     diagnose_vasp_files,
@@ -32,7 +32,7 @@ def _runtime(tmp_path: Path, *, data_generation: int | None = None) -> AttemptRu
             {
                 "format": "httk-workflow-attempt-context",
                 "format_version": 1,
-                "store_id": str(uuid.uuid4()),
+                "workspace_id": str(uuid.uuid4()),
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"job--{uuid.uuid4()}",
                 "placement": "project/a",
@@ -45,8 +45,8 @@ def _runtime(tmp_path: Path, *, data_generation: int | None = None) -> AttemptRu
                 "is_restart": True,
                 "is_unclean_restart": False,
                 "attempt_reason": "requested_retry",
-                "workspace_mode": "persistent",
-                "workspace_reused": True,
+                "workdir_mode": "persistent",
+                "workdir_reused": True,
                 "data_generation": data_generation,
                 "join": None,
             }
@@ -57,8 +57,8 @@ def _runtime(tmp_path: Path, *, data_generation: int | None = None) -> AttemptRu
         "HTTK_WORKFLOW_CONTEXT": str(context),
         "HTTK_WORKFLOW_CONTROL_DIR": str(control),
         "HTTK_WORKFLOW_JOB_DIR": str(tmp_path / "job"),
-        "HTTK_WORKFLOW_RUN_DIR": str(tmp_path / "run"),
-        "HTTK_WORKFLOW_STORE_DIR": str(tmp_path / "store"),
+        "HTTK_WORKFLOW_WORKDIR": str(tmp_path / "run"),
+        "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
     }
     (tmp_path / "run").mkdir()
     return AttemptRuntime.from_environment(environment)
@@ -114,18 +114,18 @@ def test_outcome_rejects_stale_explicit_generation(tmp_path: Path) -> None:
         raise AssertionError("stale explicit generation was accepted")
 
 
-def test_workspace_batch_replays_after_seal(tmp_path: Path) -> None:
-    workspace = tmp_path / "run"
-    workspace.mkdir()
+def test_workdir_batch_replays_after_seal(tmp_path: Path) -> None:
+    workdir = tmp_path / "run"
+    workdir.mkdir()
     source = tmp_path / "new"
     source.write_text("new\n", encoding="utf-8")
-    batch = ReplayableWorkspaceBatch.create(workspace)
+    batch = ReplayableWorkdirBatch.create(workdir)
     batch.transaction.put_file("value", source, "results/value.txt")
     batch.seal()
-    recovered = ReplayableWorkspaceBatch.recover(workspace)
+    recovered = ReplayableWorkdirBatch.recover(workdir)
     assert len(recovered) == 1
-    assert (workspace / "results" / "value.txt").read_text(encoding="utf-8") == "new\n"
-    assert ReplayableWorkspaceBatch.recover(workspace) == ()
+    assert (workdir / "results" / "value.txt").read_text(encoding="utf-8") == "new\n"
+    assert ReplayableWorkdirBatch.recover(workdir) == ()
 
 
 def test_supervisor_external_checker_and_literal_argv(tmp_path: Path) -> None:
@@ -253,7 +253,7 @@ Path("OSZICAR").write_text("")
 
 
 def test_installed_style_bash_runner_uses_manager_paths(tmp_path: Path) -> None:
-    store = WorkflowStore.initialize(tmp_path / "store", extensions=["transactional-data-v1"])
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
     payload = tmp_path / "payload"
     files = payload / "files"
     files.mkdir(parents=True)
@@ -293,14 +293,14 @@ esac
             data_mode="transactional",
         ),
     )
-    store.submit(payload, "bash/jobs")
-    with TaskManager(store, heartbeat_interval=0.01) as manager:
+    workspace.submit(payload, "bash/jobs")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle()
-    marker = store.find_marker_by_id(job.id)
+    marker = workspace.find_marker_by_id(job.id)
     assert marker is not None and marker.kind == "succeeded"
-    state = store.payload_path(marker.placement, marker.job_key) / "run" / ".httk-runner" / "state.json"
+    state = workspace.payload_path(marker.placement, marker.job_key) / "run" / ".httk-runner" / "state.json"
     assert json.loads(state.read_text(encoding="utf-8")) == {"answer": 42}
-    data = store.payload_path(marker.placement, marker.job_key) / "data" / "result.txt"
+    data = workspace.payload_path(marker.placement, marker.job_key) / "data" / "result.txt"
     assert data.read_text(encoding="utf-8") == "result\n"
 
 
@@ -330,8 +330,8 @@ def test_bash_composes_transaction_without_jq_or_eval(tmp_path: Path) -> None:
             "HTTK_WORKFLOW_CONTEXT": str(runtime.control / "context.json"),
             "HTTK_WORKFLOW_CONTROL_DIR": str(runtime.control),
             "HTTK_WORKFLOW_JOB_DIR": str(runtime.job),
-            "HTTK_WORKFLOW_RUN_DIR": str(runtime.workspace),
-            "HTTK_WORKFLOW_STORE_DIR": str(runtime.store),
+            "HTTK_WORKFLOW_WORKDIR": str(runtime.workdir),
+            "HTTK_WORKFLOW_WORKSPACE_DIR": str(runtime.workspace),
             "HTTK_WORKFLOW_PYTHON": sys.executable,
             "HTTK_WORKFLOW_BASH_API": str(shell),
             "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
@@ -350,14 +350,14 @@ httk_workflow_transaction_put_file result "$PWD/result.txt" "results/result.txt"
 httk_workflow_advance collect
 """,
         ],
-        cwd=runtime.workspace,
+        cwd=runtime.workdir,
         env=environment,
         text=True,
         capture_output=True,
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    assert not (runtime.workspace / "unsafe").exists()
+    assert not (runtime.workdir / "unsafe").exists()
     ready = runtime.control / "outcome.ready"
     body = json.loads((ready / "outcome.json").read_text(encoding="utf-8"))
     assert body["action"] == "advance"

@@ -21,7 +21,7 @@ from .projects import (
     read_project,
     require_project,
 )
-from .store import WorkflowStore
+from .workspace import WorkflowWorkspace
 
 _DOMAIN = b"httk-project-manifest-v2\0"
 
@@ -78,18 +78,18 @@ def _seed(project: Path) -> bytes:
 
 
 @contextmanager
-def store_maintenance_guard(store: WorkflowStore) -> Iterator[None]:
+def workspace_maintenance_guard(workspace: WorkflowWorkspace) -> Iterator[None]:
     """Fence manager launches while a project snapshot is inspected."""
 
-    path = store.control / "maintenance.lock"
+    path = workspace.control / "maintenance.lock"
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(descriptor, "w", encoding="ascii") as stream:
             stream.write(f"{os.getpid()}\n")
-        unresolved = list(store.scan_markers(("claimed", "running", "committing", "transferring")))
+        unresolved = list(workspace.scan_markers(("claimed", "running", "committing", "transferring")))
         if unresolved:
             states = ", ".join(f"{item.job_key}:{item.kind}" for item in unresolved)
-            raise ValueError(f"manifest requires a quiescent store; unresolved work: {states}")
+            raise ValueError(f"manifest requires a quiescent workspace; unresolved work: {states}")
         yield
     finally:
         path.unlink(missing_ok=True)
@@ -110,8 +110,8 @@ def create_manifest(
     exclusions = project_exclusions(metadata)
     if destination.is_relative_to(root):
         exclusions = (*exclusions, destination.relative_to(root).as_posix())
-    store = WorkflowStore(root)
-    with store_maintenance_guard(store):
+    workspace = WorkflowWorkspace(root)
+    with workspace_maintenance_guard(workspace):
         seed = _seed(root)
         header = {
             "format": "httk-project-manifest",

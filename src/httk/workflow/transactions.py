@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 from ._util import read_json, retry_delay, sha256_file, tree_digest
-from .errors import FormatError, StoreUnavailableError, TransactionError
+from .errors import FormatError, TransactionError, WorkspaceUnavailableError
 from .models import validate_label
 
 
@@ -43,7 +43,7 @@ def _rename_verified(source: Path, destination: Path, *, replace: bool = False, 
             continue
         time.sleep(retry_delay(attempt))
     detail = f": {last_error}" if last_error else ""
-    raise StoreUnavailableError(f"cannot resolve transaction rename {source} -> {destination}{detail}")
+    raise WorkspaceUnavailableError(f"cannot resolve transaction rename {source} -> {destination}{detail}")
 
 
 def _digest_matches(path: Path, expected: str) -> bool:

@@ -29,7 +29,7 @@ def _context(path: Path) -> None:
             {
                 "format": "httk-workflow-attempt-context",
                 "format_version": 1,
-                "store_id": "store",
+                "workspace_id": "workspace",
                 "job_id": "job",
                 "job_key": "job-key",
                 "placement": "jobs",
@@ -54,8 +54,8 @@ def test_native_runtime_reads_context_and_publishes_outcome(tmp_path: Path) -> N
         "HTTK_WORKFLOW_CONTEXT": str(context),
         "HTTK_WORKFLOW_CONTROL_DIR": str(control),
         "HTTK_WORKFLOW_JOB_DIR": str(tmp_path / "job"),
-        "HTTK_WORKFLOW_RUN_DIR": str(tmp_path / "run"),
-        "HTTK_WORKFLOW_STORE_DIR": str(tmp_path / "store"),
+        "HTTK_WORKFLOW_WORKDIR": str(tmp_path / "run"),
+        "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
     }
     runtime = AttemptRuntime.from_environment(environment)
     assert runtime.context.step == "relax"

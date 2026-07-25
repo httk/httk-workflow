@@ -9,7 +9,7 @@ from .errors import FormatError
 from .models import JobDefinition, Marker
 
 if TYPE_CHECKING:
-    from .store import WorkflowStore
+    from .workspace import WorkflowWorkspace
 
 
 @dataclass(frozen=True)
@@ -19,7 +19,7 @@ class AttemptLaunch:
     job: JobDefinition
     marker: Marker
     payload: Path
-    workspace: Path
+    workdir: Path
     control: Path
     context_path: Path
     context: Mapping[str, Any]
@@ -51,10 +51,10 @@ class RunnerBackend(Protocol):
     def commit_outcome(self, commit: OutcomeCommit) -> None:
         """Complete backend-specific idempotent work before the marker advances."""
 
-    def reconcile(self, store: "WorkflowStore") -> None:
+    def reconcile(self, workspace: "WorkflowWorkspace") -> None:
         """Repair backend-specific derived views; never alter authoritative state."""
 
-    def marker_changed(self, store: "WorkflowStore", marker: Marker) -> None:
+    def marker_changed(self, workspace: "WorkflowWorkspace", marker: Marker) -> None:
         """Refresh derived views after an authoritative marker transition."""
 
 
@@ -77,8 +77,8 @@ class PathRunnerBackend:
     def commit_outcome(self, commit: OutcomeCommit) -> None:
         return
 
-    def reconcile(self, store: "WorkflowStore") -> None:
+    def reconcile(self, workspace: "WorkflowWorkspace") -> None:
         return
 
-    def marker_changed(self, store: "WorkflowStore", marker: Marker) -> None:
+    def marker_changed(self, workspace: "WorkflowWorkspace", marker: Marker) -> None:
         return
