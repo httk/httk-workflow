@@ -3,8 +3,11 @@
 ## Status and scope
 
 This document specifies the filesystem protocol around which the
-*httk-workflow* engine is to be built. It is a design specification, not
-documentation of an existing Python API.
+*httk-workflow* engine is built. It is the normative on-disk protocol rather
+than Python API documentation. The current `httk.workflow` implementation
+supports `core-v1`, `transactional-data-v1`, and `priority-bands-v1`;
+relocation and cross-store transfer remain reserved optional extensions and
+are rejected rather than partially executed.
 
 The protocol is language independent. A workflow step may be a shell script, a
 Python program, a compiled executable, or any other program that can read and
@@ -879,7 +882,13 @@ The claimed frame names:
 
 The manager creates `.httk-attempt.<attempt-id>/`, prepares the selected
 persistent or isolated workspace, appends a running frame, and renames the
-claimed marker to running immediately before launching the process.
+claimed marker to running immediately before launching the application. A
+local executor MAY first create a process blocked on a launch gate, durably
+record that process identity, commit the running marker, and only then release
+the gate to execute the application. If its manager disappears before release,
+the gate MUST cause that process to exit without executing the application.
+This closes the otherwise ambiguous crash window between a running transition
+and recording the new process identity.
 
 Managers update `managers/<manager-id>/heartbeat.json` by atomic replacement.
 A recoverer uses the state frame, heartbeat, batch scheduler when available,

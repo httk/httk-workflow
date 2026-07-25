@@ -3,9 +3,9 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "httk-placeholder"
+name = "httk-workflow"
 version = "0.1.0"
-description = "httk₂ module providing placeholder functionality."
+description = "Filesystem-native workflow execution for httk₂."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
@@ -33,9 +33,12 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://httk.org"
-Documentation = "https://docs.httk.org/httk-placeholder/"
-Repository = "https://github.com/httk/httk-placeholder"
-Issues = "https://github.com/httk/httk-placeholder/issues"
+Documentation = "https://docs.httk.org/httk-workflow/"
+Repository = "https://github.com/httk/httk-workflow"
+Issues = "https://github.com/httk/httk-workflow/issues"
+
+[project.scripts]
+httk-taskmanager = "httk.workflow.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -65,9 +68,10 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+namespaces = true
 
 [tool.setuptools.package-data]
-"httk.placeholder" = ["py.typed"]
+"httk.workflow" = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -77,7 +81,7 @@ profile = "black"
 
 [tool.ruff]
 target-version = "py312"
-src = ["src", "examples"]
+src = ["src", "examples", "tests"]
 
 [tool.black]
 target-version = ["py312"]
@@ -86,13 +90,13 @@ skip-string-normalization = true
 
 [tool.pyright]
 pythonVersion = "3.12"
-include = ["src", "examples"]
+include = ["src", "examples", "tests"]
 extraPaths = ["src"]  
 reportMissingImports = true
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src", "examples"]
+files = ["src", "examples", "tests"]
 mypy_path = ["src"]
 namespace_packages = true
 explicit_package_bases = true

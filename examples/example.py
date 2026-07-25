@@ -1,5 +1,8 @@
-"""Minimal usage example for httk-placeholder."""
+"""Initialize an httk workflow store."""
 
-from httk.placeholder import hello_world
+from pathlib import Path
 
-hello_world()
+from httk.workflow import WorkflowStore
+
+store = WorkflowStore.initialize(Path("example-workflow-store"))
+print(f"initialized workflow store {store.store_id} at {store.root}")
