@@ -13,8 +13,8 @@ from .models import STATE_KINDS
 from .store import WorkflowStore
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="httk-taskmanager", description="Manage httk filesystem workflows")
+def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=program, description="Manage httk filesystem workflows")
     parser.add_argument("--durable", action="store_true", help="fsync protocol publications")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -24,7 +24,7 @@ def _parser() -> argparse.ArgumentParser:
         "--extension",
         action="append",
         default=[],
-        choices=("transactional-data-v1", "priority-bands-v1"),
+        choices=("transactional-data-v1", "priority-bands-v1", "detached-transfer-v1"),
     )
 
     submit = subparsers.add_parser("submit", help="submit a complete payload directory")
@@ -79,7 +79,21 @@ def _status(store: WorkflowStore, *, as_json: bool) -> None:
             }
         )
     if as_json:
-        print(json.dumps({"store_id": store.store_id, "counts": counts, "jobs": rows}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "format": "httk-workflow-status",
+                    "format_version": 1,
+                    "store_id": store.store_id,
+                    "store_format_version": store.format["format_version"],
+                    "core_profile": store.format["core_profile"],
+                    "extensions": sorted(store.extensions),
+                    "counts": counts,
+                    "jobs": rows,
+                },
+                indent=2,
+            )
+        )
         return
     print(f"store {store.store_id}")
     for kind in sorted(counts):
@@ -111,10 +125,10 @@ def _publish_request(store: WorkflowStore, arguments: argparse.Namespace) -> Non
     print(path)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, program: str = "httk-taskmanager") -> int:
     """Run the command-line interface."""
 
-    parser = _parser()
+    parser = _parser(program)
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "init":
@@ -157,7 +171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     manager.serve(poll_interval=arguments.poll_interval)
             return 0
     except (WorkflowError, OSError, ValueError) as exc:
-        print(f"httk-taskmanager: {exc}", file=sys.stderr)
+        print(f"{program}: {exc}", file=sys.stderr)
         return 2
     parser.error(f"unknown command: {arguments.command}")
     return 2

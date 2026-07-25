@@ -10,7 +10,7 @@ from ._util import json_bytes, require_int, require_mapping, require_string
 from .errors import FormatError
 
 CORE_PROFILE = "core-v1"
-SUPPORTED_EXTENSIONS = frozenset({"transactional-data-v1", "priority-bands-v1"})
+SUPPORTED_EXTENSIONS = frozenset({"transactional-data-v1", "priority-bands-v1", "detached-transfer-v1"})
 STATE_KINDS = (
     "submitted",
     "ready",

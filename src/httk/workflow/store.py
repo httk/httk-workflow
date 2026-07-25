@@ -98,6 +98,9 @@ class WorkflowStore:
             "state/submitted",
         ):
             (control / relative).mkdir(parents=True, exist_ok=True)
+        if "detached-transfer-v1" in extension_set:
+            for relative in ("transfers/acks", "transfers/imported", "transfers/incoming", "transfers/retired"):
+                (control / relative).mkdir(parents=True, exist_ok=True)
         write_json_atomic(
             control / "format.json",
             {
@@ -112,6 +115,71 @@ class WorkflowStore:
             durable=durable,
         )
         return cls(root_path, durable=durable)
+
+    def upgrade(self, extensions: Iterable[str]) -> frozenset[str]:
+        """Enable extensions that have an implemented in-place migration."""
+
+        requested = frozenset(extensions)
+        unknown = requested - SUPPORTED_EXTENSIONS
+        if unknown:
+            raise UnsupportedExtensionError(f"no implemented migration for extensions: {', '.join(sorted(unknown))}")
+        additions = requested - self.extensions
+        unsupported_migrations = additions - {"detached-transfer-v1"}
+        if unsupported_migrations:
+            raise UnsupportedExtensionError(
+                "existing stores can only enable detached-transfer-v1; "
+                f"no implemented migration for: {', '.join(sorted(unsupported_migrations))}"
+            )
+        if "detached-transfer-v1" in additions:
+            for relative in ("transfers/acks", "transfers/imported", "transfers/incoming", "transfers/retired"):
+                (self.control / relative).mkdir(parents=True, exist_ok=True)
+            updated = dict(self.format)
+            updated["extensions"] = sorted(self.extensions | additions)
+            write_json_atomic(self.control / "format.json", updated, durable=self.durable)
+            self.format = updated
+            self.extensions = frozenset(updated["extensions"])
+        return self.extensions
+
+    def detach(
+        self,
+        job_id: str,
+        *,
+        destination_store_id: str,
+        destination_placement: str | PurePosixPath | None = None,
+        transfer_id: str | None = None,
+    ) -> Path:
+        """Seal one quiescent job as a detached transfer bundle."""
+
+        from .transfers import detach_job
+
+        return detach_job(
+            self,
+            job_id,
+            destination_store_id=destination_store_id,
+            destination_placement=destination_placement,
+            transfer_id=transfer_id,
+        )
+
+    def import_bundle(self, bundle: str | os.PathLike[str]) -> dict[str, object]:
+        """Import a validated detached transfer bundle."""
+
+        from .transfers import import_bundle
+
+        return import_bundle(self, bundle)
+
+    def acknowledge_transfer(self, acknowledgement: Mapping[str, object]) -> Path:
+        """Retire a source bundle after destination acknowledgement."""
+
+        from .transfers import acknowledge_transfer
+
+        return acknowledge_transfer(self, acknowledgement)
+
+    def recover_transfers(self) -> list[dict[str, object]]:
+        """Recover or report interrupted detached-transfer publications."""
+
+        from .transfers import recover_transfers
+
+        return recover_transfers(self)
 
     def state_directory(self, kind: str, placement: PurePosixPath, *, priority: int) -> Path:
         if kind not in STATE_KINDS:
