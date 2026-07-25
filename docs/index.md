@@ -6,13 +6,14 @@ This site documents the *httk-workflow* module. For the full documentation of
 The module implements a recoverable, language-neutral workflow protocol whose
 source of truth is a single atomically renamed state marker per job. Python
 applications use `httk.workflow`; installations also provide the
-`httk-taskmanager` command.
+`httk-taskmanager` and `httk-v1-taskmanager` commands.
 
 ```{admonition} Quick links
 :class: tip
 
 - **API reference**: {doc}`reference/index`
 - **Task-manager usage**: {doc}`taskmanager`
+- **httk v1 compatibility**: {doc}`v1_compatibility`
 - **Workflow filesystem API**: {doc}`workflow_filesystem_api`
 - **Examples notebook**: {doc}`notebooks/examples`
 ````
@@ -49,6 +50,7 @@ httk-taskmanager run workflow-store
 
 reference/index
 taskmanager
+v1_compatibility
 workflow_filesystem_api
 notebooks/examples
 ```
