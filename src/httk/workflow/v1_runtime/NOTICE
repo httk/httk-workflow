@@ -8,7 +8,7 @@ The compatibility implementations in ``compat/ht_tasks_api_v1.sh`` and
 * ``Execution/tasks/vasp/vasptools.sh``
 
 The repository history attributes their design and implementation primarily
-to Rickard Armiento, with later contributions by Henrik Levämäki (``hpleva``),
+to Rickard Armiento, with later contributions by Henrik Levämäki (``hpleava``),
 Joel Davidsson (including the ``j-euler`` identity), Christopher Tholander,
 Gabriel Persson, and other httk contributors. Relevant recorded changes
 include:
@@ -29,6 +29,11 @@ Those Python modules are not copied into httk-workflow. The v2 workflow code
 uses its own filesystem protocol and v1 process adapter; the historical Python
 interfaces are acknowledged here to keep authorship explicit when comparing
 the two designs.
+
+The independently structured native-v2 runtime, VASP diagnostics, and reviewed
+remedy policy also acknowledge this prior work. Their public contracts and
+storage formats are new, but the functional coverage audit and diagnostic
+vocabulary were informed by the attributed v1 shell and Python interfaces.
 
 The compatibility shell implementation remains available under the
 GNU Affero General Public License, version 3 or later. See ``LICENSE``.

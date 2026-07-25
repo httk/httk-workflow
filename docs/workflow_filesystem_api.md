@@ -999,6 +999,10 @@ HTTK_WORKFLOW_RUN_DIR=<absolute selected workspace path>
 HTTK_WORKFLOW_IS_RESTART=0|1
 HTTK_WORKFLOW_UNCLEAN_RESTART=0|1
 HTTK_WORKFLOW_ATTEMPT_REASON=<reason>
+HTTK_WORKFLOW_STEP=<current step>
+HTTK_WORKFLOW_PYTHON=<manager Python interpreter>
+HTTK_WORKFLOW_BASH_API=<absolute native workflow Bash library>
+HTTK_WORKFLOW_VASP_BASH_API=<absolute native VASP Bash library>
 ```
 
 `HTTK_WORKFLOW_DATA_DIR` is additionally set only for transactional-data jobs.
@@ -1026,6 +1030,7 @@ An unclean persistent retry context is:
   "workspace_mode": "persistent",
   "workspace_reused": true,
   "data_generation": null,
+  "resources": {},
   "join": null
 }
 ```
