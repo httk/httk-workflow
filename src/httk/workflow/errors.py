@@ -6,14 +6,14 @@ class WorkflowError(Exception):
 
 
 class FormatError(WorkflowError, ValueError):
-    """A store, job, journal frame, outcome, or request is malformed."""
+    """A workspace, job, journal frame, outcome, or request is malformed."""
 
 
-class StoreUnavailableError(WorkflowError):
-    """The store cannot currently provide a coherent protocol view."""
+class WorkspaceUnavailableError(WorkflowError):
+    """The workspace cannot currently provide a coherent protocol view."""
 
 
-class StoreCorruptionError(WorkflowError):
+class WorkspaceCorruptionError(WorkflowError):
     """The authoritative filesystem state is internally inconsistent."""
 
 
@@ -22,7 +22,7 @@ class TransitionLostError(WorkflowError):
 
 
 class UnsupportedExtensionError(WorkflowError):
-    """A store requires an extension this implementation does not support."""
+    """A workspace requires an extension this implementation does not support."""
 
 
 class TransactionError(WorkflowError):

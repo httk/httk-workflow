@@ -10,7 +10,7 @@ httk workflow --help
 The complete tree is:
 
 ```text
-httk workflow store init|status|upgrade
+httk workflow workspace init|status|upgrade
 httk workflow job submit|request
 httk workflow manager run
 httk workflow v1 prepare|submit|run
@@ -40,7 +40,7 @@ httk workflow project init . --name example --default-queue default
 ```
 
 A project has `.httk-project/project.json`, a standard 32-byte Ed25519 seed
-stored with mode `0600`, and a workflow store with
+stored with mode `0600`, and a workflow workspace with
 `detached-transfer-v1` enabled. Commands discover the nearest project in the
 working directory's parent chain.
 
@@ -75,10 +75,10 @@ run.
 
 ## Detached transfers
 
-Stores can enable the implemented migration explicitly:
+Workspaces can enable the implemented migration explicitly:
 
 ```console
-httk workflow store upgrade STORE --extension detached-transfer-v1
+httk workflow workspace upgrade WORKSPACE --extension detached-transfer-v1
 ```
 
 A transfer fences an explicit quiescent marker, seals it in the payload,

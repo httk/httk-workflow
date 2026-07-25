@@ -16,10 +16,10 @@ examples, see
 
 ## Prepare and submit
 
-Initialize the store once with the normal command:
+Initialize the workspace once with the normal command:
 
 ```console
-httk-taskmanager init STORE
+httk-taskmanager init WORKSPACE
 ```
 
 An already instantiated task template can then be prepared separately:
@@ -27,13 +27,13 @@ An already instantiated task template can then be prepared separately:
 ```console
 httk-v1-taskmanager prepare TEMPLATE PREPARED \
   --tag silicon-relax --set vasp --priority 4 --attempts 10
-httk-taskmanager submit STORE PREPARED --placement project-a/00/17
+httk-taskmanager submit WORKSPACE PREPARED --placement project-a/00/17
 ```
 
 Or it can be prepared and submitted in one operation:
 
 ```console
-httk-v1-taskmanager submit STORE TEMPLATE \
+httk-v1-taskmanager submit WORKSPACE TEMPLATE \
   --placement project-a/00/17 \
   --tag silicon-relax --set vasp --priority 4 --attempts 10
 ```
@@ -48,16 +48,16 @@ sealed:
 ```python
 from pathlib import Path
 
-from httk.workflow import WorkflowStore, submit_v1_task
+from httk.workflow import WorkflowWorkspace, submit_v1_task
 
 
 def materialize(payload: Path) -> None:
     (payload / "input.dat").write_text("calculation input\n")
 
 
-store = WorkflowStore("STORE")
+workspace = WorkflowWorkspace("WORKSPACE")
 marker = submit_v1_task(
-    store,
+    workspace,
     "TEMPLATE",
     "project-a/00/17",
     materializer=materialize,
@@ -76,7 +76,7 @@ applications should prefer a materializer callback.
 Run only compatibility jobs:
 
 ```console
-httk-v1-taskmanager run STORE --set any --workers 8
+httk-v1-taskmanager run WORKSPACE --set any --workers 8
 ```
 
 `--set NAME` restricts claiming to that *httk* v1 task set; `any` accepts every pool.
@@ -103,17 +103,17 @@ independent *httk₂* designs rather than renamed `HT_TASK_*` or `VASP_*` method
 
 The ordinary `httk-taskmanager` executes only native `path` jobs, and the *httk* v1
 manager executes only `httk-v1` jobs. They may therefore be attached to the
-same store. Both can still use the common status and request interface:
+same workspace. Both can still use the common status and request interface:
 
 ```console
-httk-taskmanager status STORE
-httk-taskmanager request STORE JOB_UUID continue \
+httk-taskmanager status WORKSPACE
+httk-taskmanager request WORKSPACE JOB_UUID continue \
   --operator "$USER" --reason "manual repair complete"
 ```
 
 ## Shell behavior
 
-For `ht_steps`, the persistent application workspace is
+For `ht_steps`, the persistent application workdir is
 `ht.run.current/`. It is reused across clean step advances and managed retries,
 so a VASP workflow may continue updating a large `WAVECAR` in place. No
 transactional `data/` output is required. `ht_run` executes at the payload
@@ -135,7 +135,7 @@ fi
 ```
 
 The full structured record is the JSON file named by
-`HTTK_WORKFLOW_CONTEXT`. Workspace reuse alone does not imply a restart: a
+`HTTK_WORKFLOW_CONTEXT`. Workdir reuse alone does not imply a restart: a
 normal next step receives `HTTK_WORKFLOW_IS_RESTART=0`.
 
 The legacy decisions map as follows:

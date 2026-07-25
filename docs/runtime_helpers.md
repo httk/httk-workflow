@@ -26,7 +26,7 @@ Other convenience outcomes are `succeed()` and `pause(reason)`. The API uses
 argv arrays and structured *httk₂* outcomes; it deliberately does not reproduce
 the *httk* v1 exit-code and `ht.nextstep` interface.
 
-`initialize()` also completes any sealed `ReplayableWorkspaceBatch` left by an
+`initialize()` also completes any sealed `ReplayableWorkdirBatch` left by an
 interrupted attempt. `runtime.state` is atomic JSON application state, not an
 executable shell fragment.
 
@@ -79,7 +79,7 @@ assemble_potcar("/data/vasp/potpaw_PBE", poscar="POSCAR", output="POTCAR")
 The API also provides `read_poscar_header`, `suggested_magnetic_moments`,
 `read_incar`, `calculate_nbands`, `prepare_vasp_inputs`, `run_vasp`,
 `plan_vasp_remedy`, `apply_vasp_remedy`, output extraction/cleaning, and
-`contcar_to_poscar`. `validate_vasp_workspace` checks VASP's conservative path
+`contcar_to_poscar`. `validate_vasp_workdir` checks VASP's conservative path
 limit and `clean_vasp_outputs` performs explicit pre-run cleanup while
 preserving requested files. Diagnosis never changes inputs. The bounded
 `reviewed-v1` policy must be planned and applied explicitly, and records every

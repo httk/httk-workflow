@@ -36,8 +36,8 @@ from .models import (
     normalize_placement,
     validate_step,
 )
-from .store import WorkflowStore
 from .transactions import replay_transaction
+from .workspace import WorkflowWorkspace
 
 
 @dataclass
@@ -54,11 +54,11 @@ class RunningAttempt:
 
 
 class TaskManager:
-    """Execute and recover jobs in one workflow store."""
+    """Execute and recover jobs in one workflow workspace."""
 
     def __init__(
         self,
-        store: WorkflowStore,
+        workspace: WorkflowWorkspace,
         *,
         pools: Sequence[str] = ("default",),
         capabilities: Sequence[str] = (),
@@ -72,7 +72,7 @@ class TaskManager:
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
-        self.store = store
+        self.workspace = workspace
         self.pools = frozenset(pools)
         self.capabilities = frozenset(capabilities)
         self.maximum_workers = maximum_workers
@@ -92,8 +92,8 @@ class TaskManager:
         self.accept_any_pool = accept_any_pool
         self.manager_id = str(uuid.uuid4())
         self.hostname = socket.gethostname()
-        self.writer = JournalWriter(store.control, durable=store.durable)
-        self._manager_dir = store.control / "managers" / self.manager_id
+        self.writer = JournalWriter(workspace.control, durable=workspace.durable)
+        self._manager_dir = workspace.control / "managers" / self.manager_id
         self._manager_dir.mkdir(parents=True, exist_ok=False)
         self._running: dict[str, RunningAttempt] = {}
         self._last_heartbeat = 0.0
@@ -112,12 +112,12 @@ class TaskManager:
                 "accept_any_pool": self.accept_any_pool,
                 "started_at": utc_now(),
             },
-            durable=store.durable,
+            durable=workspace.durable,
         )
         self.heartbeat(force=True)
         for name in self.allowed_backends:
             try:
-                self.runner_backends[name].reconcile(self.store)
+                self.runner_backends[name].reconcile(self.workspace)
             except (WorkflowError, OSError):
                 # Backend views are derived and must never prevent the manager
                 # from attaching to authoritative marker state.
@@ -142,7 +142,7 @@ class TaskManager:
         write_json_atomic(
             self._manager_dir / "heartbeat.json",
             {"manager_id": self.manager_id, "updated_at": utc_now()},
-            durable=self.store.durable,
+            durable=self.workspace.durable,
         )
         self._last_heartbeat = now
 
@@ -157,7 +157,7 @@ class TaskManager:
         changed |= self._evaluate_joins()
         changed |= self._poll_running()
         changed |= self._recover_abandoned_claims()
-        if (self.store.control / "maintenance.lock").exists():
+        if (self.workspace.control / "maintenance.lock").exists():
             return changed
         for marker in self._eligible_ready():
             if len(self._running) >= self.maximum_workers:
@@ -182,12 +182,12 @@ class TaskManager:
         *,
         priority: int | None = None,
     ) -> Marker:
-        moved = self.store.transition(self.writer, marker, kind, updates, priority=priority)
+        moved = self.workspace.transition(self.writer, marker, kind, updates, priority=priority)
         try:
-            job = self.store.load_job(moved)
+            job = self.workspace.load_job(moved)
             backend = self._backend_for(job)
             if backend is not None:
-                backend.marker_changed(self.store, moved)
+                backend.marker_changed(self.workspace, moved)
         except (WorkflowError, OSError):
             # Backend views are recoverable derivatives. The committed marker
             # transition must remain successful even if refreshing one fails.
@@ -222,9 +222,9 @@ class TaskManager:
         raise TimeoutError("workflow manager did not become idle")
 
     def _has_actionable_work(self) -> bool:
-        for marker in self.store.scan_markers(("submitted", "ready", "committing")):
+        for marker in self.workspace.scan_markers(("submitted", "ready", "committing")):
             try:
-                job = self.store.load_job(marker)
+                job = self.workspace.load_job(marker)
             except WorkflowError:
                 # An invalid submission is actionable because registration will
                 # turn it into a protocol failure.
@@ -237,13 +237,13 @@ class TaskManager:
 
     def _register_submissions(self) -> bool:
         changed = False
-        for marker in list(self.store.scan_markers(("submitted",))):
+        for marker in list(self.workspace.scan_markers(("submitted",))):
             try:
-                job = self.store.validate_job_payload(marker)
+                job = self.workspace.validate_job_payload(marker)
                 backend = self._backend_for(job)
                 if backend is None:
                     continue
-                backend.validate(job, self.store.payload_path(marker.placement, marker.job_key))
+                backend.validate(job, self.workspace.payload_path(marker.placement, marker.job_key))
                 ready = {
                     "step": job.initial_step,
                     "activation_id": str(uuid.uuid4()),
@@ -277,9 +277,9 @@ class TaskManager:
         """Return one priority-ordered snapshot of locally eligible work."""
 
         eligible: list[Marker] = []
-        for marker in self.store.scan_markers(("ready",)):
+        for marker in self.workspace.scan_markers(("ready",)):
             try:
-                job = self.store.load_job(marker)
+                job = self.workspace.load_job(marker)
             except WorkflowError:
                 continue
             if self._backend_for(job) is None:
@@ -293,8 +293,8 @@ class TaskManager:
         return eligible
 
     def _claim_and_launch(self, marker: Marker) -> None:
-        job = self.store.load_job(marker)
-        state = self.store.read_state(marker)
+        job = self.workspace.load_job(marker)
+        state = self.workspace.read_state(marker)
         attempt_ordinal = self._state_int(state, "attempt_ordinal", default=0) + 1
         total_attempts = self._state_int(state, "total_attempts", default=0) + 1
         budget_failure = self._attempt_budget_failure(job, attempt_ordinal, total_attempts)
@@ -331,28 +331,28 @@ class TaskManager:
         self._launch_claimed(claimed, job, state)
 
     def _launch_claimed(self, marker: Marker, job: JobDefinition, previous_state: Mapping[str, Any]) -> None:
-        if (self.store.control / "maintenance.lock").exists():
+        if (self.workspace.control / "maintenance.lock").exists():
             return
-        claimed_state = self.store.read_state(marker)
+        claimed_state = self.workspace.read_state(marker)
         backend = self._backend_for(job)
         if backend is None:
             raise FormatError(f"runner backend is unavailable: {job.runner_backend}")
         attempt_id = str(claimed_state["attempt_id"])
-        payload = self.store.payload_path(marker.placement, marker.job_key)
+        payload = self.workspace.payload_path(marker.placement, marker.job_key)
         control = payload / str(claimed_state["attempt_control"])
         control.mkdir(exist_ok=False)
-        if job.workspace_mode == "persistent":
-            workspace = payload.joinpath(*job.workspace_path.parts)
-            workspace_reused = workspace.exists()
+        if job.workdir_mode == "persistent":
+            workdir = payload.joinpath(*job.workdir_path.parts)
+            workdir_reused = workdir.exists()
         else:
-            base = payload.joinpath(*job.workspace_path.parts)
-            workspace = base.parent / f"{base.name}.{attempt_id}"
-            workspace_reused = False
-        workspace.mkdir(parents=True, exist_ok=True)
+            base = payload.joinpath(*job.workdir_path.parts)
+            workdir = base.parent / f"{base.name}.{attempt_id}"
+            workdir_reused = False
+        workdir.mkdir(parents=True, exist_ok=True)
         context = {
             "format": "httk-workflow-attempt-context",
             "format_version": 1,
-            "store_id": self.store.store_id,
+            "workspace_id": self.workspace.workspace_id,
             "job_id": job.id,
             "job_key": job.job_key,
             "placement": marker.placement.as_posix(),
@@ -367,23 +367,23 @@ class TaskManager:
             "attempt_reason": claimed_state.get("reason", "claim"),
             "previous_attempt_id": previous_state.get("attempt_id"),
             "activation_reason": previous_state.get("reason"),
-            "workspace_mode": job.workspace_mode,
-            "workspace_reused": workspace_reused,
+            "workdir_mode": job.workdir_mode,
+            "workdir_reused": workdir_reused,
             "unsafe_persistent_takeover": bool(previous_state.get("unsafe_persistent_takeover", False)),
             "data_generation": claimed_state.get("data_generation"),
             "resources": dict(job.resources),
             "join": claimed_state.get("join_summary"),
         }
         context_path = control / "context.json"
-        write_json_atomic(context_path, context, durable=self.store.durable)
+        write_json_atomic(context_path, context, durable=self.workspace.durable)
         environment = os.environ.copy()
         environment.update(
             {
                 "HTTK_WORKFLOW_CONTEXT": str(context_path),
                 "HTTK_WORKFLOW_CONTROL_DIR": str(control),
-                "HTTK_WORKFLOW_STORE_DIR": str(self.store.root),
+                "HTTK_WORKFLOW_WORKSPACE_DIR": str(self.workspace.root),
                 "HTTK_WORKFLOW_JOB_DIR": str(payload),
-                "HTTK_WORKFLOW_RUN_DIR": str(workspace),
+                "HTTK_WORKFLOW_WORKDIR": str(workdir),
                 "HTTK_WORKFLOW_IS_RESTART": "1" if context["is_restart"] else "0",
                 "HTTK_WORKFLOW_UNCLEAN_RESTART": "1" if context["is_unclean_restart"] else "0",
                 "HTTK_WORKFLOW_ATTEMPT_REASON": str(context["attempt_reason"]),
@@ -403,7 +403,7 @@ class TaskManager:
                     job=job,
                     marker=marker,
                     payload=payload,
-                    workspace=workspace,
+                    workdir=workdir,
                     control=control,
                     context_path=context_path,
                     context=context,
@@ -424,7 +424,7 @@ class TaskManager:
                     "--",
                     *runner_command,
                 ],
-                cwd=workspace,
+                cwd=workdir,
                 env=environment,
                 stdout=stdout,
                 stderr=stderr,
@@ -442,7 +442,7 @@ class TaskManager:
                     "launched_at": utc_now(),
                     "launch_gated": True,
                 },
-                durable=self.store.durable,
+                durable=self.workspace.durable,
             )
             running = self._transition(
                 marker,
@@ -454,7 +454,7 @@ class TaskManager:
                     "attempt_id": attempt_id,
                     "lease_seconds": self.lease_seconds,
                     "started_at": utc_now(),
-                    "workspace": str(workspace.relative_to(payload)),
+                    "workdir": str(workdir.relative_to(payload)),
                     "attempt_control": control.name,
                     "reason": "launched",
                 },
@@ -478,11 +478,11 @@ class TaskManager:
     def _poll_running(self) -> bool:
         changed = False
         current_by_attempt: dict[str, Marker] = {}
-        for marker in list(self.store.scan_markers(("running",))):
-            job = self.store.load_job(marker)
+        for marker in list(self.workspace.scan_markers(("running",))):
+            job = self.workspace.load_job(marker)
             if self._backend_for(job) is None:
                 continue
-            state = self.store.read_state(marker)
+            state = self.workspace.read_state(marker)
             attempt_id = str(state.get("attempt_id", ""))
             current_by_attempt[attempt_id] = marker
             outcome_path = self._outcome_path(marker, state)
@@ -522,7 +522,7 @@ class TaskManager:
             ):
                 continue
             unsafe_takeover = False
-            if job.workspace_mode == "persistent" and not self._persistent_writer_dead(marker, state):
+            if job.workdir_mode == "persistent" and not self._persistent_writer_dead(marker, state):
                 if not self.unsafe_persistent_takeover:
                     continue
                 unsafe_takeover = True
@@ -544,7 +544,7 @@ class TaskManager:
         return changed
 
     def _outcome_path(self, marker: Marker, state: Mapping[str, Any]) -> Path:
-        payload = self.store.payload_path(marker.placement, marker.job_key)
+        payload = self.workspace.payload_path(marker.placement, marker.job_key)
         control_name = str(state.get("attempt_control", f".httk-attempt.{state.get('attempt_id', '')}"))
         return payload / control_name / "outcome.ready"
 
@@ -568,8 +568,8 @@ class TaskManager:
 
     def _resume_committing(self) -> bool:
         changed = False
-        for marker in list(self.store.scan_markers(("committing",))):
-            job = self.store.load_job(marker)
+        for marker in list(self.workspace.scan_markers(("committing",))):
+            job = self.workspace.load_job(marker)
             if self._backend_for(job) is None:
                 continue
             try:
@@ -578,7 +578,7 @@ class TaskManager:
                 pass
             except (FormatError, TransactionError) as exc:
                 try:
-                    state = self.store.read_state(marker)
+                    state = self.workspace.read_state(marker)
                     self._transition(
                         marker,
                         "failed",
@@ -594,8 +594,8 @@ class TaskManager:
         return changed
 
     def _process_committing(self, marker: Marker) -> None:
-        state = self.store.read_state(marker)
-        job = self.store.load_job(marker)
+        state = self.workspace.read_state(marker)
+        job = self.workspace.load_job(marker)
         outcome_path = self._outcome_path(marker, state)
         outcome = self._read_outcome(outcome_path / "outcome.json", marker, state)
         data_generation_raw = state.get("data_generation")
@@ -608,7 +608,7 @@ class TaskManager:
                 raise TransactionError("outcome expected_data_generation is stale")
             changed_data = replay_transaction(
                 transaction_path,
-                self.store.payload_path(marker.placement, marker.job_key) / "data",
+                self.workspace.payload_path(marker.placement, marker.job_key) / "data",
                 expected_generation=data_generation,
             )
             if changed_data:
@@ -621,7 +621,7 @@ class TaskManager:
             OutcomeCommit(
                 job=job,
                 marker=marker,
-                payload=self.store.payload_path(marker.placement, marker.job_key),
+                payload=self.workspace.payload_path(marker.placement, marker.job_key),
                 outcome_path=outcome_path,
                 outcome=outcome,
             )
@@ -720,11 +720,11 @@ class TaskManager:
                 raise FormatError("spawn child must be an object")
             job_key = str(raw.get("job_key", ""))
             placement = normalize_placement(str(raw.get("placement", "")))
-            if raw.get("store_id", self.store.store_id) != self.store.store_id:
-                raise UnsupportedExtensionError("cross-store child requires multistore-v1")
+            if raw.get("workspace_id", self.workspace.workspace_id) != self.workspace.workspace_id:
+                raise UnsupportedExtensionError("cross-workspace child requires multiworkspace-v1")
             source = children_dir / "jobs" / job_key
             expected_digest = str(expected_digests.get(job_key, ""))
-            target = self.store.payload_path(placement, job_key)
+            target = self.workspace.payload_path(placement, job_key)
             if source.is_dir():
                 child = JobDefinition.from_mapping(read_json(source / "job.json"))
                 if child.job_key != job_key:
@@ -732,17 +732,17 @@ class TaskManager:
                 if tree_digest(source) != expected_digest:
                     raise FormatError("spawn child changed after outcome publication")
                 target.parent.mkdir(parents=True, exist_ok=True)
-                self.store._publish_path(source, target)
+                self.workspace._publish_path(source, target)
             if not target.is_dir() or tree_digest(target) != expected_digest:
                 raise FormatError(f"registered child bundle does not match: {job_key}")
             child = JobDefinition.from_mapping(read_json(target / "job.json"))
-            existing = self.store.find_markers(job_key)
+            existing = self.workspace.find_markers(job_key)
             if existing:
                 continue
-            temporary = self.store.control / "tmp" / f"child-marker.{uuid.uuid4()}"
+            temporary = self.workspace.control / "tmp" / f"child-marker.{uuid.uuid4()}"
             temporary.touch(exist_ok=False)
-            destination = self.store.marker_path("submitted", placement, job_key, child.priority, 0, "init")
-            self.store._publish_path(temporary, destination)
+            destination = self.workspace.marker_path("submitted", placement, job_key, child.priority, 0, "init")
+            self.workspace._publish_path(temporary, destination)
 
     def _advance(
         self,
@@ -834,7 +834,7 @@ class TaskManager:
         unclean: bool = True,
         unsafe_takeover: bool = False,
     ) -> None:
-        state = self.store.read_state(marker)
+        state = self.workspace.read_state(marker)
         progress = self._state_progress(state)
         if failure_class in job.retry_policy.retry_on:
             self._retry(
@@ -859,11 +859,11 @@ class TaskManager:
 
     def _recover_abandoned_claims(self) -> bool:
         changed = False
-        for marker in list(self.store.scan_markers(("claimed",))):
-            job = self.store.load_job(marker)
+        for marker in list(self.workspace.scan_markers(("claimed",))):
+            job = self.workspace.load_job(marker)
             if self._backend_for(job) is None:
                 continue
-            state = self.store.read_state(marker)
+            state = self.workspace.read_state(marker)
             if self._manager_alive(
                 str(state.get("manager_id", "")),
                 lease_seconds=float(state.get("lease_seconds", self.lease_seconds)),
@@ -889,14 +889,14 @@ class TaskManager:
         if not manager_id:
             return False
         try:
-            heartbeat = read_json(self.store.control / "managers" / manager_id / "heartbeat.json")
+            heartbeat = read_json(self.workspace.control / "managers" / manager_id / "heartbeat.json")
             updated = timestamp_seconds(str(heartbeat["updated_at"]))
         except (WorkflowError, KeyError, ValueError):
             return False
         return time.time() - updated <= lease_seconds
 
     def _persistent_writer_dead(self, marker: Marker, state: Mapping[str, Any]) -> bool:
-        payload = self.store.payload_path(marker.placement, marker.job_key)
+        payload = self.workspace.payload_path(marker.placement, marker.job_key)
         process_path = payload / str(state.get("attempt_control", "")) / "process.json"
         try:
             process = read_json(process_path)
@@ -915,11 +915,11 @@ class TaskManager:
 
     def _evaluate_joins(self) -> bool:
         changed = False
-        for marker in list(self.store.scan_markers(("waiting",))):
-            parent_job = self.store.load_job(marker)
+        for marker in list(self.workspace.scan_markers(("waiting",))):
+            parent_job = self.workspace.load_job(marker)
             if self._backend_for(parent_job) is None:
                 continue
-            state = self.store.read_state(marker)
+            state = self.workspace.read_state(marker)
             join = state.get("join")
             if not isinstance(join, Mapping):
                 continue
@@ -937,17 +937,17 @@ class TaskManager:
                 placement_hint = child_ref.get("placement_hint")
                 job_key = child_ref.get("job_key")
                 if isinstance(placement_hint, str) and isinstance(job_key, str):
-                    child_marker = self.store.find_marker_at(job_key, normalize_placement(placement_hint))
+                    child_marker = self.workspace.find_marker_at(job_key, normalize_placement(placement_hint))
                     if child_marker is not None and child_marker.job_id != child_id:
                         raise FormatError("join child identity disagrees with placement hint")
                 if child_marker is None:
-                    child_marker = self.store.find_marker_by_id(child_id)
+                    child_marker = self.workspace.find_marker_by_id(child_id)
                 if child_marker is None:
                     missing = True
                     break
                 observations.append(
                     {
-                        "store_id": self.store.store_id,
+                        "workspace_id": self.workspace.workspace_id,
                         "job_id": child_id,
                         "job_key": child_marker.job_key,
                         "placement": child_marker.placement.as_posix(),
@@ -1029,22 +1029,22 @@ class TaskManager:
         raise FormatError(f"unknown join condition: {condition!r}")
 
     def _handle_requests(self) -> bool:
-        ready_dir = self.store.control / "requests" / "ready"
+        ready_dir = self.workspace.control / "requests" / "ready"
         changed = False
         for request_path in sorted(ready_dir.iterdir()) if ready_dir.exists() else ():
             if not request_path.is_file():
                 continue
             try:
                 request = read_json(request_path)
-                marker = self.store.find_marker_by_id(str(request.get("job_id", "")))
+                marker = self.workspace.find_marker_by_id(str(request.get("job_id", "")))
                 if marker is not None:
-                    job = self.store.load_job(marker)
+                    job = self.workspace.load_job(marker)
                     if self._backend_for(job) is None:
                         continue
             except WorkflowError:
                 # Claim malformed requests so one manager can quarantine them.
                 pass
-            claimed_dir = self.store.control / "requests" / "claimed" / self.manager_id
+            claimed_dir = self.workspace.control / "requests" / "claimed" / self.manager_id
             claimed_dir.mkdir(parents=True, exist_ok=True)
             claimed_path = claimed_dir / request_path.name
             try:
@@ -1056,7 +1056,7 @@ class TaskManager:
             except TransitionLostError:
                 claimed_path.unlink(missing_ok=True)
             except (WorkflowError, OSError, ValueError) as exc:
-                self.store.quarantine(claimed_path, reason=f"invalid request: {exc}")
+                self.workspace.quarantine(claimed_path, reason=f"invalid request: {exc}")
             else:
                 claimed_path.unlink(missing_ok=True)
             changed = True
@@ -1065,7 +1065,7 @@ class TaskManager:
     def _apply_request(self, request: Mapping[str, Any]) -> None:
         if request.get("format") != "httk-workflow-request" or request.get("format_version") != 1:
             raise FormatError("request must use httk-workflow-request version 1")
-        marker = self.store.find_marker_by_id(str(request.get("job_id", "")))
+        marker = self.workspace.find_marker_by_id(str(request.get("job_id", "")))
         if marker is None:
             raise FormatError("request job does not exist")
         if marker.generation != int(request.get("expected_generation", -1)):
@@ -1073,8 +1073,8 @@ class TaskManager:
         if marker.record_ref != request.get("expected_record_ref"):
             return
         action = request.get("action")
-        state = self.store.read_state(marker)
-        job = self.store.load_job(marker)
+        state = self.workspace.read_state(marker)
+        job = self.workspace.load_job(marker)
         progress = self._state_progress(state)
         audit = {
             "operator": request.get("operator"),
@@ -1130,7 +1130,7 @@ class TaskManager:
             self._terminate_process(local.process.pid)
             local.close_logs()
             return
-        payload = self.store.payload_path(marker.placement, marker.job_key)
+        payload = self.workspace.payload_path(marker.placement, marker.job_key)
         try:
             process = read_json(payload / str(state.get("attempt_control", "")) / "process.json")
             if process.get("hostname") == self.hostname:

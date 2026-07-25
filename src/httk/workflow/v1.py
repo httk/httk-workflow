@@ -15,7 +15,7 @@ from .backends import AttemptLaunch, OutcomeCommit
 from .errors import FormatError, WorkflowError
 from .manager import TaskManager
 from .models import JobDefinition, Marker, normalize_placement, validate_label
-from .store import WorkflowStore
+from .workspace import WorkflowWorkspace
 
 V1_BACKEND = "httk-v1"
 V1_CAPABILITY = "httk-v1"
@@ -114,7 +114,7 @@ def _job_mapping(
             "path": runner_path,
             "arguments": [],
         },
-        "workspace": {"mode": "persistent", "path": "ht.run.current"},
+        "workdir": {"mode": "persistent", "path": "ht.run.current"},
         "data": {"mode": "none"},
         "initial_step": initial_step,
         "priority": legacy_priority(priority),
@@ -224,7 +224,7 @@ def prepare_v1_payload(
 
 
 def submit_v1_task(
-    store: WorkflowStore,
+    workspace: WorkflowWorkspace,
     source: str | os.PathLike[str],
     placement: str | PurePosixPath,
     *,
@@ -238,10 +238,10 @@ def submit_v1_task(
     priority: int = 3,
     attempts: int = 10,
 ) -> Marker:
-    """Prepare and atomically submit one legacy task through a v2 store."""
+    """Prepare and atomically submit one legacy task through a v2 workspace."""
 
     normalized = normalize_placement(placement)
-    temporary = store.control / "tmp" / f"v1-submit.{uuid.uuid4()}"
+    temporary = workspace.control / "tmp" / f"v1-submit.{uuid.uuid4()}"
     prepare_v1_payload(
         source,
         temporary,
@@ -256,7 +256,7 @@ def submit_v1_task(
         attempts=attempts,
         root_placement=normalized.as_posix(),
     )
-    return store.submit(temporary, normalized, move=True)
+    return workspace.submit(temporary, normalized, move=True)
 
 
 def parse_v1_task_name(value: str) -> dict[str, str] | None:
@@ -361,23 +361,23 @@ class V1RunnerBackend:
             target = commit.payload.parents[len(commit.marker.placement.parts)].joinpath(*placement.parts, job_key)
             _replace_with_relative_symlink(commit.payload / legacy_path, target)
 
-    def reconcile(self, store: WorkflowStore) -> None:
-        for marker in store.scan_markers():
+    def reconcile(self, workspace: WorkflowWorkspace) -> None:
+        for marker in workspace.scan_markers():
             try:
-                job = store.load_job(marker)
+                job = workspace.load_job(marker)
                 compatibility = _compatibility(job)
                 link = compatibility.get("legacy_link")
                 if isinstance(link, Mapping):
-                    _reconcile_legacy_link(store, marker, link)
+                    _reconcile_legacy_link(workspace, marker, link)
             except (WorkflowError, OSError):
                 continue
 
-    def marker_changed(self, store: WorkflowStore, marker: Marker) -> None:
-        job = store.load_job(marker)
+    def marker_changed(self, workspace: WorkflowWorkspace, marker: Marker) -> None:
+        job = workspace.load_job(marker)
         compatibility = _compatibility(job)
         link = compatibility.get("legacy_link")
         if isinstance(link, Mapping):
-            _reconcile_legacy_link(store, marker, link)
+            _reconcile_legacy_link(workspace, marker, link)
 
 
 class V1TaskManager(TaskManager):
@@ -385,7 +385,7 @@ class V1TaskManager(TaskManager):
 
     def __init__(
         self,
-        store: WorkflowStore,
+        workspace: WorkflowWorkspace,
         *,
         taskset: str = "any",
         maximum_workers: int = 1,
@@ -407,7 +407,7 @@ class V1TaskManager(TaskManager):
             attempts=attempts,
         )
         super().__init__(
-            store,
+            workspace,
             pools=pools,
             capabilities=(V1_CAPABILITY,),
             maximum_workers=maximum_workers,
@@ -478,7 +478,7 @@ def _legacy_status(marker: Marker, state: Mapping[str, object]) -> str:
     return "stopped"
 
 
-def _reconcile_legacy_link(store: WorkflowStore, marker: Marker, link: Mapping[str, object]) -> None:
+def _reconcile_legacy_link(workspace: WorkflowWorkspace, marker: Marker, link: Mapping[str, object]) -> None:
     parent_key = str(link.get("parent_job_key", ""))
     parent_placement = normalize_placement(str(link.get("parent_placement", "")))
     link_directory = _relative_legacy_path(link.get("directory"))
@@ -496,7 +496,7 @@ def _reconcile_legacy_link(store: WorkflowStore, marker: Marker, link: Mapping[s
     )
     if parse_v1_task_name(original_name) != field_values:
         raise FormatError("legacy_link.fields do not form a valid v1 task name")
-    state = store.read_state(marker)
+    state = workspace.read_state(marker)
     step = str(
         state.get("next_step")
         if marker.kind == "waiting" and state.get("next_step") is not None
@@ -513,11 +513,11 @@ def _reconcile_legacy_link(store: WorkflowStore, marker: Marker, link: Mapping[s
         else "unclaimed"
     )
     priority = V2_TO_V1_PRIORITY.get(marker.priority, int(field_values["priority"]))
-    parent_payload = store.payload_path(parent_placement, parent_key)
+    parent_payload = workspace.payload_path(parent_placement, parent_key)
     directory = parent_payload / link_directory
     prefix = f"ht.task.{field_values['taskset']}.{field_values['task_id']}.{step}." f"{restarts}.{owner}.{priority}."
     desired = directory / f"{prefix}{_legacy_status(marker, state)}"
-    target = store.payload_path(marker.placement, marker.job_key)
+    target = workspace.payload_path(marker.placement, marker.job_key)
     candidates = []
     if directory.is_dir():
         for candidate in directory.iterdir():

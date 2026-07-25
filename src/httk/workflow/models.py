@@ -127,8 +127,8 @@ class JobDefinition:
     runner_backend: str
     runner_path: PurePosixPath
     runner_arguments: tuple[str, ...]
-    workspace_mode: str
-    workspace_path: PurePosixPath
+    workdir_mode: str
+    workdir_path: PurePosixPath
     data_mode: str
     initial_step: str
     priority: int
@@ -165,13 +165,13 @@ class JobDefinition:
         runner_path = PurePosixPath(require_string(runner.get("path"), "runner.path"))
         if runner_path.is_absolute() or ".." in runner_path.parts:
             raise FormatError("runner.path must remain below the job directory")
-        workspace = require_mapping(value.get("workspace"), "workspace")
-        workspace_mode = require_string(workspace.get("mode"), "workspace.mode")
-        if workspace_mode not in {"persistent", "isolated"}:
-            raise FormatError("workspace.mode must be persistent or isolated")
-        workspace_path = PurePosixPath(require_string(workspace.get("path", "run"), "workspace.path"))
-        if workspace_path.is_absolute() or ".." in workspace_path.parts or not workspace_path.parts:
-            raise FormatError("workspace.path must remain below the job directory")
+        workdir = require_mapping(value.get("workdir"), "workdir")
+        workdir_mode = require_string(workdir.get("mode"), "workdir.mode")
+        if workdir_mode not in {"persistent", "isolated"}:
+            raise FormatError("workdir.mode must be persistent or isolated")
+        workdir_path = PurePosixPath(require_string(workdir.get("path", "run"), "workdir.path"))
+        if workdir_path.is_absolute() or ".." in workdir_path.parts or not workdir_path.parts:
+            raise FormatError("workdir.path must remain below the job directory")
         data = require_mapping(value.get("data"), "data")
         data_mode = require_string(data.get("mode"), "data.mode")
         if data_mode not in {"none", "transactional"}:
@@ -192,8 +192,8 @@ class JobDefinition:
             runner_backend=runner_backend,
             runner_path=runner_path,
             runner_arguments=arguments,
-            workspace_mode=workspace_mode,
-            workspace_path=workspace_path,
+            workdir_mode=workdir_mode,
+            workdir_path=workdir_path,
             data_mode=data_mode,
             initial_step=validate_step(value.get("initial_step"), "initial_step"),
             priority=require_int(value.get("priority"), "priority", maximum=999),

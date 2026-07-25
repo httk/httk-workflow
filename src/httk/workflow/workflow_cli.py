@@ -29,14 +29,14 @@ from .configuration import (
 from .errors import WorkflowError
 from .manifests import create_manifest, verify_manifest
 from .projects import import_v1_project, initialize_project, require_project
-from .store import WorkflowStore
+from .workspace import WorkflowWorkspace
 
 _HELP = """usage: {program} GROUP COMMAND [ARG ...]
 
 Filesystem-native workflow execution and project management.
 
 command groups:
-  store       init, status, upgrade
+  workspace   init, status, upgrade
   job         submit, request
   manager     run
   v1          prepare, submit, run
@@ -84,15 +84,15 @@ def _required(
     return result
 
 
-def _store_upgrade(argv: Sequence[str], program: str) -> int:
-    parser = _parser(program, "Enable an implemented workflow-store extension")
-    parser.add_argument("store")
+def _workspace_upgrade(argv: Sequence[str], program: str) -> int:
+    parser = _parser(program, "Enable an implemented workflow workspace extension")
+    parser.add_argument("workspace")
     parser.add_argument("--extension", action="append", required=True)
     parsed = _parse(parser, argv)
     if isinstance(parsed, int):
         return parsed
-    store = WorkflowStore(parsed.store)
-    print("\n".join(sorted(store.upgrade(parsed.extension))))
+    workspace = WorkflowWorkspace(parsed.workspace)
+    print("\n".join(sorted(workspace.upgrade(parsed.extension))))
     return 0
 
 
@@ -328,37 +328,37 @@ def _destination_from_adapter(target: Any, supplied: str | None) -> str:
     queues = metadata.get("queues", {})
     if isinstance(queues, Mapping):
         queue = queues.get(target.queue)
-        if isinstance(queue, Mapping) and isinstance(queue.get("store"), str):
-            return str(queue["store"])
-    raise ValueError("destination store is missing; use --destination-store or configure queue store=PATH")
+        if isinstance(queue, Mapping) and isinstance(queue.get("workspace"), str):
+            return str(queue["workspace"])
+    raise ValueError("destination workspace is missing; use --destination-workspace or configure queue workspace=PATH")
 
 
 def _tasks_send(argv: Sequence[str], program: str, context: CLIContext) -> int:
     parser = _parser(program, "Detach and send explicit workflow jobs")
     parser.add_argument("computer")
     parser.add_argument("jobs", nargs="+")
-    parser.add_argument("--store")
-    parser.add_argument("--destination-store")
+    parser.add_argument("--workspace")
+    parser.add_argument("--destination-workspace")
     parser.add_argument("--destination-placement")
     parser.add_argument("--timeout", type=float)
     parsed = _parse(parser, argv)
     if isinstance(parsed, int):
         return parsed
-    source_root = Path(parsed.store).resolve() if parsed.store else require_project(context.cwd)
-    source = WorkflowStore(source_root)
+    source_root = Path(parsed.workspace).resolve() if parsed.workspace else require_project(context.cwd)
+    source = WorkflowWorkspace(source_root)
     target = resolve_computer(parsed.computer, project=context.cwd)
-    destination_root = _destination_from_adapter(target, parsed.destination_store)
+    destination_root = _destination_from_adapter(target, parsed.destination_workspace)
     status = run_adapter(
         target.bundle,
         "status",
         {
             "queue": target.queue,
-            "argv": ["httk", "workflow", "store", "status", destination_root, "--json"],
+            "argv": ["httk", "workflow", "workspace", "status", destination_root, "--json"],
         },
         timeout=parsed.timeout,
     )
     if status.get("returncode") != 0:
-        raise RuntimeError(f"destination store compatibility check failed: {status.get('stderr', '')}")
+        raise RuntimeError(f"destination workspace compatibility check failed: {status.get('stderr', '')}")
     try:
         status_data = json.loads(str(status.get("stdout", "")))
         if (
@@ -368,10 +368,10 @@ def _tasks_send(argv: Sequence[str], program: str, context: CLIContext) -> int:
             or "detached-transfer-v1" not in status_data.get("extensions", [])
         ):
             raise ValueError
-        destination_store_id = str(status_data["store_id"])
-        uuid.UUID(destination_store_id)
+        destination_workspace_id = str(status_data["workspace_id"])
+        uuid.UUID(destination_workspace_id)
     except (AttributeError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
-        raise ValueError("destination did not return a compatible workflow store status") from exc
+        raise ValueError("destination did not return a compatible workflow workspace status") from exc
     acknowledgements: list[dict[str, object]] = []
     for job_id in parsed.jobs:
         source.recover_transfers()
@@ -380,7 +380,7 @@ def _tasks_send(argv: Sequence[str], program: str, context: CLIContext) -> int:
             ledger = read_json(ledger_path)
             if (
                 ledger.get("job_id") == job_id
-                and ledger.get("destination_store_id") == destination_store_id
+                and ledger.get("destination_workspace_id") == destination_workspace_id
                 and ledger.get("status") == "sealed"
             ):
                 candidates.append(ledger)
@@ -393,7 +393,7 @@ def _tasks_send(argv: Sequence[str], program: str, context: CLIContext) -> int:
                 raise ValueError("resumed transfer destination placement disagrees with the request")
         bundle = source.detach(
             job_id,
-            destination_store_id=destination_store_id,
+            destination_workspace_id=destination_workspace_id,
             destination_placement=parsed.destination_placement,
             transfer_id=transfer_id,
         )
@@ -415,7 +415,7 @@ def _tasks_send(argv: Sequence[str], program: str, context: CLIContext) -> int:
                     "workflow",
                     "tasks",
                     "receive",
-                    "--store",
+                    "--workspace",
                     destination_root,
                     "--bundle",
                     remote_bundle,
@@ -439,12 +439,12 @@ def _tasks_send(argv: Sequence[str], program: str, context: CLIContext) -> int:
 
 def _tasks_receive(argv: Sequence[str], program: str) -> int:
     parser = _parser(program, "Import one sealed detached transfer bundle")
-    parser.add_argument("--store", required=True)
+    parser.add_argument("--workspace", required=True)
     parser.add_argument("--bundle", required=True)
     parsed = _parse(parser, argv)
     if isinstance(parsed, int):
         return parsed
-    acknowledgement = WorkflowStore(parsed.store).import_bundle(parsed.bundle)
+    acknowledgement = WorkflowWorkspace(parsed.workspace).import_bundle(parsed.bundle)
     print(json.dumps(acknowledgement, sort_keys=True, separators=(",", ":")))
     return 0
 
@@ -452,14 +452,14 @@ def _tasks_receive(argv: Sequence[str], program: str) -> int:
 def _tasks_remote(argv: Sequence[str], program: str, context: CLIContext, operation: str) -> int:
     parser = _parser(program, f"Remote workflow {operation}")
     parser.add_argument("computer")
-    parser.add_argument("--store")
+    parser.add_argument("--workspace")
     parser.add_argument("--timeout", type=float)
     parser.add_argument("--workers", type=int, default=1)
     parsed = _parse(parser, argv)
     if isinstance(parsed, int):
         return parsed
     target = resolve_computer(parsed.computer, project=context.cwd)
-    store = _destination_from_adapter(target, parsed.store)
+    workspace = _destination_from_adapter(target, parsed.workspace)
     if operation == "start-manager":
         request = {
             "queue": target.queue,
@@ -468,7 +468,7 @@ def _tasks_remote(argv: Sequence[str], program: str, context: CLIContext, operat
                 "workflow",
                 "manager",
                 "run",
-                store,
+                workspace,
                 "--workers",
                 str(parsed.workers),
             ],
@@ -476,7 +476,7 @@ def _tasks_remote(argv: Sequence[str], program: str, context: CLIContext, operat
     else:
         request = {
             "queue": target.queue,
-            "argv": ["httk", "workflow", "store", "status", store, "--json"],
+            "argv": ["httk", "workflow", "workspace", "status", workspace, "--json"],
         }
     print(json.dumps(run_adapter(target.bundle, operation, request, timeout=parsed.timeout), indent=2))
     return 0
@@ -508,15 +508,15 @@ def command(argv: Sequence[str], context: CLIContext) -> int:
         return 0
     group, rest = arguments[0], arguments[1:]
     try:
-        if group == "store":
+        if group == "workspace":
             if not rest or rest[0] in {"-h", "--help"}:
-                print(f"usage: {program} store init|status|upgrade [ARG ...]")
+                print(f"usage: {program} workspace init|status|upgrade [ARG ...]")
                 return 0
             action, tail = rest[0], rest[1:]
             if action in {"init", "status"}:
-                return _delegate(native_cli.main, [action, *tail], f"{program} store")
+                return _delegate(native_cli.main, [action, *tail], f"{program} workspace")
             if action == "upgrade":
-                return _store_upgrade(tail, f"{program} store upgrade")
+                return _workspace_upgrade(tail, f"{program} workspace upgrade")
         elif group == "job":
             if not rest or rest[0] in {"-h", "--help"}:
                 print(f"usage: {program} job submit|request [ARG ...]")

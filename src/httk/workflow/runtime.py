@@ -17,9 +17,9 @@ from ._util import read_json
 from .runtime_builders import (
     JoinSpec,
     OutcomeBuilder,
-    ReplayableWorkspaceBatch,
+    ReplayableWorkdirBatch,
     RunLog,
-    WorkspaceState,
+    WorkdirState,
 )
 
 _OUTCOME_ACTIONS = frozenset({"advance", "retry", "wait", "succeed", "fail", "pause"})
@@ -29,7 +29,7 @@ _OUTCOME_ACTIONS = frozenset({"advance", "retry", "wait", "succeed", "fail", "pa
 class AttemptContext:
     """The immutable identity and restart evidence for one running attempt."""
 
-    store_id: str
+    workspace_id: str
     job_id: str
     job_key: str
     placement: str
@@ -44,8 +44,8 @@ class AttemptContext:
     attempt_reason: str | None
     previous_attempt_id: str | None
     activation_reason: str | None
-    workspace_mode: str | None
-    workspace_reused: bool
+    workdir_mode: str | None
+    workdir_reused: bool
     unsafe_persistent_takeover: bool
     data_generation: int | None
     resources: Mapping[str, object]
@@ -59,7 +59,7 @@ class AttemptContext:
         value = read_json(Path(path))
         if value.get("format") != "httk-workflow-attempt-context" or value.get("format_version") != 1:
             raise ValueError("attempt context must use httk-workflow-attempt-context version 1")
-        required = ("store_id", "job_id", "job_key", "placement", "step", "activation_id", "attempt_id")
+        required = ("workspace_id", "job_id", "job_key", "placement", "step", "activation_id", "attempt_id")
         if any(not isinstance(value.get(name), str) or not value[name] for name in required):
             raise ValueError("attempt context is missing a required string identity")
         generation = value.get("data_generation")
@@ -86,7 +86,7 @@ class AttemptContext:
             return raw
 
         return cls(
-            store_id=value["store_id"],
+            workspace_id=value["workspace_id"],
             job_id=value["job_id"],
             job_key=value["job_key"],
             placement=value["placement"],
@@ -101,8 +101,8 @@ class AttemptContext:
             attempt_reason=optional_string("attempt_reason"),
             previous_attempt_id=optional_string("previous_attempt_id"),
             activation_reason=optional_string("activation_reason"),
-            workspace_mode=optional_string("workspace_mode"),
-            workspace_reused=bool(value.get("workspace_reused", False)),
+            workdir_mode=optional_string("workdir_mode"),
+            workdir_reused=bool(value.get("workdir_reused", False)),
             unsafe_persistent_takeover=bool(value.get("unsafe_persistent_takeover", False)),
             data_generation=generation,
             resources=dict(resources_raw),
@@ -174,8 +174,8 @@ class AttemptRuntime:
     context: AttemptContext
     control: Path
     job: Path
+    workdir: Path
     workspace: Path
-    store: Path
     data: Path | None = None
 
     @classmethod
@@ -196,40 +196,40 @@ class AttemptRuntime:
             context=context,
             control=Path(required("HTTK_WORKFLOW_CONTROL_DIR")).resolve(),
             job=Path(required("HTTK_WORKFLOW_JOB_DIR")).resolve(),
-            workspace=Path(required("HTTK_WORKFLOW_RUN_DIR")).resolve(),
-            store=Path(required("HTTK_WORKFLOW_STORE_DIR")).resolve(),
+            workdir=Path(required("HTTK_WORKFLOW_WORKDIR")).resolve(),
+            workspace=Path(required("HTTK_WORKFLOW_WORKSPACE_DIR")).resolve(),
             data=None if not data_value else Path(data_value).resolve(),
         )
 
     @classmethod
     def initialize(cls, environment: Mapping[str, str] | None = None) -> Self:
-        """Construct the runtime and replay every sealed workspace batch."""
+        """Construct the runtime and replay every sealed workdir batch."""
 
         result = cls.from_environment(environment)
-        ReplayableWorkspaceBatch.recover(result.workspace)
+        ReplayableWorkdirBatch.recover(result.workdir)
         return result
 
     @property
-    def state(self) -> WorkspaceState:
-        """Return the application state associated with this workspace."""
+    def state(self) -> WorkdirState:
+        """Return the application state associated with this workdir."""
 
-        return WorkspaceState(self.workspace)
+        return WorkdirState(self.workdir)
 
     @property
     def runlog(self) -> RunLog:
         """Return the structured application run log."""
 
-        return RunLog(self.workspace)
+        return RunLog(self.workdir)
 
     def outcome(self) -> OutcomeBuilder:
         """Start a composable unpublished outcome."""
 
         return OutcomeBuilder(self)
 
-    def workspace_batch(self) -> ReplayableWorkspaceBatch:
-        """Start a replayable group of workspace changes."""
+    def workdir_batch(self) -> ReplayableWorkdirBatch:
+        """Start a replayable group of workdir changes."""
 
-        return ReplayableWorkspaceBatch.create(self.workspace)
+        return ReplayableWorkdirBatch.create(self.workdir)
 
     def publish(
         self,
