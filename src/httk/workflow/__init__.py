@@ -13,6 +13,13 @@ from .errors import (
 from .manager import TaskManager
 from .models import JobDefinition, Marker, RetryPolicy
 from .store import WorkflowStore
+from .transfers import (
+    acknowledge_transfer,
+    detach_job,
+    import_bundle,
+    recover_transfers,
+    validate_bundle,
+)
 from .v1 import (
     V1Materializer,
     V1RunnerBackend,
@@ -42,6 +49,11 @@ __all__ = [
     "V1TaskManager",
     "WorkflowError",
     "WorkflowStore",
+    "detach_job",
+    "validate_bundle",
+    "import_bundle",
+    "acknowledge_transfer",
+    "recover_transfers",
     "bundled_v1_root",
     "prepare_v1_payload",
     "submit_v1_task",

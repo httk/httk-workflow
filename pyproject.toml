@@ -78,6 +78,14 @@ namespaces = true
   "v1_runtime/Execution/tasks/vasp/*.sh",
   "v1_runtime/LICENSE",
   "v1_runtime/README.md",
+  "adapter_templates/*/computer.json",
+  "adapter_templates/*/configure",
+  "adapter_templates/*/install",
+  "adapter_templates/*/invoke",
+  "adapter_templates/*/push",
+  "adapter_templates/*/pull",
+  "adapter_templates/*/start-manager",
+  "adapter_templates/*/status",
 ]
 
 [tool.pytest.ini_options]
@@ -98,7 +106,7 @@ skip-string-normalization = true
 [tool.pyright]
 pythonVersion = "3.12"
 include = ["src", "examples", "tests"]
-extraPaths = ["src"]  
+extraPaths = ["src", "../httk-core/src"]
 reportMissingImports = true
 
 [tool.mypy]
