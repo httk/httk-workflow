@@ -16,6 +16,7 @@ applications use `httk.workflow`; installations also provide the
 - **Native runner helpers**: {doc}`runtime_helpers`
 - **Native Bash API**: {doc}`native_bash_api`
 - **Project and workflow CLI**: {doc}`workflow_cli`
+- **httk v1 migration guide**: {doc}`httk_v1_migration_guide`
 - **httk v1 compatibility**: {doc}`v1_compatibility`
 - **Workflow filesystem API**: {doc}`workflow_filesystem_api`
 - **Examples notebook**: {doc}`notebooks/examples`
@@ -56,6 +57,7 @@ taskmanager
 runtime_helpers
 native_bash_api
 workflow_cli
+httk_v1_migration_guide
 v1_compatibility
 workflow_filesystem_api
 notebooks/examples

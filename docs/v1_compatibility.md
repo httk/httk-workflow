@@ -10,6 +10,9 @@ continue an existing v1 task-manager queue. A task first becomes an ordinary
 v2 payload with an immutable `job.json`; from submission onward, its v2 marker
 and journal history are authoritative.
 
+For a staged conversion of workflow code, including native Bash and Python
+examples, see {doc}`httk_v1_migration_guide`.
+
 ## Prepare and submit
 
 Initialize the store once with the normal command:
