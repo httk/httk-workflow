@@ -5,8 +5,8 @@ from datetime import date
 from sphinx.deprecation import RemovedInSphinx10Warning
 warnings.filterwarnings("ignore", category=RemovedInSphinx10Warning)
 
-project = "httk-placeholder"
-author = "The httk-placeholder AUTHORS"
+project = "httk-workflow"
+author = "The httk-workflow AUTHORS"
 copyright = f"{date.today().year}, {author}"
 
 extensions = [

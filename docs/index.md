@@ -1,33 +1,46 @@
-# *httk-[placeholder]*
+# *httk-workflow*
 
-This site documents specifically the *httk-[placeholder]* module. For the full
-documentation of *httk₂* as a whole, see [docs.httk.org](https://docs.httk.org).
+This site documents the *httk-workflow* module. For the full documentation of
+*httk₂*, see [docs.httk.org](https://docs.httk.org).
 
-*httk-[placeholder]* is a *httk₂* module providing [placeholder functionality].
+The module implements a recoverable, language-neutral workflow protocol whose
+source of truth is a single atomically renamed state marker per job. Python
+applications use `httk.workflow`; installations also provide the
+`httk-taskmanager` command.
 
 ```{admonition} Quick links
 :class: tip
 
 - **API reference**: {doc}`reference/index`
+- **Task-manager usage**: {doc}`taskmanager`
 - **Workflow filesystem API**: {doc}`workflow_filesystem_api`
 - **Examples notebook**: {doc}`notebooks/examples`
 ````
 
 ## Install
 
-Preferably work in a Python virtual environment, then do:
+Preferably work in a Python virtual environment:
+
 ```bash
-git clone https://github.com/httk/httk-[placeholder]
-cd httk-[placeholder]
+git clone https://github.com/httk/httk-workflow
+cd httk-workflow
 python -m pip install -e .
 ```
 
-## Usage example
+## Minimal setup
 
 ```python
-from httk.[placeholder] import hello_world
+from httk.workflow import WorkflowStore
 
-hello_world()
+store = WorkflowStore.initialize("workflow-store")
+print(store.store_id)
+```
+
+Then submit a complete job payload and run the installed manager:
+
+```console
+httk-taskmanager submit workflow-store prepared-job --placement project/00
+httk-taskmanager run workflow-store
 ```
 
 ```{toctree}
@@ -35,6 +48,7 @@ hello_world()
 :caption: Documentation
 
 reference/index
+taskmanager
 workflow_filesystem_api
 notebooks/examples
 ```

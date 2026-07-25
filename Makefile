@@ -22,7 +22,7 @@ docs-inventories:
 	curl -fsSL https://docs.python.org/3/objects.inv -o docs/_inventories/python.inv
 
 dist-clean:
-	rm -rf build $(DIST_DIR) src/httk_placeholder.egg-info
+	rm -rf build $(DIST_DIR) src/httk_workflow.egg-info
 
 clean: docs-clean dist-clean
 	find . -name "*.pyc" -print0 | xargs -0 rm -f
@@ -30,16 +30,16 @@ clean: docs-clean dist-clean
 	find . -name "__pycache__" -print0 | xargs -0 rm -rf
 
 format:
-	$(PYTHON) -m ruff check src examples --select F401 --fix
-	$(PYTHON) -m isort src examples
-	$(PYTHON) -m black src examples
+	$(PYTHON) -m ruff check src examples tests --select F401 --fix
+	$(PYTHON) -m isort src examples tests
+	$(PYTHON) -m black --workers 1 src/httk/workflow/*.py examples/*.py tests/*.py
 
 format-check: lint
-	$(PYTHON) -m isort --check-only src examples
-	$(PYTHON) -m black --check src examples
+	$(PYTHON) -m isort --check-only src examples tests
+	$(PYTHON) -m black --workers 1 --check src/httk/workflow/*.py examples/*.py tests/*.py
 
 lint:
-	$(PYTHON) -m ruff check src examples
+	$(PYTHON) -m ruff check src examples tests
 
 typecheck_pyright:
 	$(PYTHON) -m pyright
@@ -48,10 +48,10 @@ typecheck:
 	$(PYTHON) -m mypy
 
 test:
-	$(PYTHON) -m pytest
+	PYTHONPATH=src $(PYTHON) -m pytest
 
 test_fastfail:
-	$(PYTHON) -m pytest -q -x
+	PYTHONPATH=src $(PYTHON) -m pytest -q -x
 
 check: format-check typecheck typecheck_pyright test
 
