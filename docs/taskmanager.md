@@ -81,4 +81,4 @@ process observes end-of-file and exits without executing the runner.
 
 `httk-taskmanager` executes only the normal `path` runner backend. Legacy
 `ht_steps` jobs use a distinct backend and are intentionally left untouched;
-run those with {doc}`v1_compatibility`.
+run those with [*httk* v1 task compatibility](v1_compatibility.md).

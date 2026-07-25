@@ -21,7 +21,7 @@ httk workflow tasks send|receive|start-manager|status
 ```
 
 `httk-taskmanager` and `httk-v1-taskmanager` remain supported and dispatch the
-same native and v1 command functions.
+same native and *httk* v1 command functions.
 
 ## Configuration and projects
 
@@ -51,7 +51,7 @@ httk workflow project manifest create
 httk workflow project manifest verify
 ```
 
-The v2 manifest is deterministic canonical JSON-lines compressed with bzip2.
+The *httk₂* manifest is deterministic canonical JSON-lines compressed with bzip2.
 It records sorted POSIX paths, regular-file sizes and SHA-256 hashes, empty
 directories, and symlink targets. Special files are rejected. A
 domain-separated body digest is signed with Ed25519. Creation fences manager

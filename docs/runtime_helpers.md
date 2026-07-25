@@ -1,6 +1,6 @@
 # Native runner helpers
 
-Native v2 runners receive their attempt identity and filesystem paths through
+Native *httk₂* runners receive their attempt identity and filesystem paths through
 manager-provided environment variables. `AttemptRuntime` validates that
 context and publishes outcomes with the required temporary-directory plus
 atomic-rename protocol:
@@ -23,8 +23,8 @@ else:
 ```
 
 Other convenience outcomes are `succeed()` and `pause(reason)`. The API uses
-argv arrays and structured v2 outcomes; it deliberately does not reproduce
-the v1 exit-code and `ht.nextstep` interface.
+argv arrays and structured *httk₂* outcomes; it deliberately does not reproduce
+the *httk* v1 exit-code and `ht.nextstep` interface.
 
 `initialize()` also completes any sealed `ReplayableWorkspaceBatch` left by an
 interrupted attempt. `runtime.state` is atomic JSON application state, not an
@@ -85,7 +85,7 @@ preserving requested files. Diagnosis never changes inputs. The bounded
 `reviewed-v1` policy must be planned and applied explicitly, and records every
 change in structured history.
 
-These functions are independent v2 interfaces. They do not import the Python v1
+These functions are independent *httk₂* interfaces. They do not import the Python *httk* v1
 `httk.task.ht_tasks_api` or `httk.task.vasptools` implementations.
 The native runtime, supervision, utility, and VASP modules were audited to use
 only the Python standard library and other `httk.workflow` modules. No numeric
@@ -95,7 +95,7 @@ argv invocation of `gzip` or `uncompress` when either executable is available.
 
 Native Bash runners use the same implementation through {doc}`native_bash_api`.
 
-For unchanged v1 `ht_steps`, continue sourcing the exact historic filenames
+For unchanged *httk* v1 `ht_steps`, continue sourcing the exact historic filenames
 under `$HTTK_DIR/Execution/tasks/`. Those are thin redirects to the attributed
-compatibility implementation described in [httk v1 task
+compatibility implementation described in [*httk* v1 task
 compatibility](v1_compatibility.md).

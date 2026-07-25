@@ -1,6 +1,6 @@
 # Native Bash runner API
 
-The normal v2 manager exports absolute paths to two packaged, sourced
+The normal *httk₂* manager exports absolute paths to two packaged, sourced
 libraries. A runner does not need to locate Python package data itself:
 
 ```bash
@@ -57,7 +57,7 @@ evaluate a command string.
 - `httk_workflow_run` supervises an argv command. `--checker SPEC.json` adds a
   required versioned executable checker.
 - `httk_calc`, `httk_template_render`, `httk_compress`, and `httk_decompress`
-  are safe replacements for commonly used v1 conveniences. Templates use
+  are safe replacements for commonly used *httk* v1 conveniences. Templates use
   `string.Template` and an explicit JSON values object, never `eval`.
 
 Transaction and workspace specs use the protocol operation names
@@ -94,9 +94,9 @@ has no safe remaining action. Applying a decision uses a replayable workspace
 batch and records before/after input digests and policy history. Preparation
 also enforces the conservative 240-byte VASP workspace-path limit.
 
-## Mapping from v1
+## Mapping from *httk* v1
 
-| v1 capability | Native v2 replacement |
+| *httk* v1 capability | Native *httk₂* replacement |
 | --- | --- |
 | `HT_TASK_INIT`, next/finished/broken | Context initialization and structured outcome functions |
 | `HT_TASK_SUBTASKS`, `HT_TASK_CREATE` | Prepared child payloads plus explicit `JoinSpec` |
@@ -114,6 +114,7 @@ also enforces the conservative 240-byte VASP workspace-path limit.
 
 Trivial path matching and field splitting use normal quoted Bash constructs.
 Native code does not source or expose the legacy `HT_TASK_*` or `VASP_*`
-function names. Unchanged v1 workflows continue to use
-{doc}`v1_compatibility`. For a step-by-step conversion, see
-{doc}`httk_v1_migration_guide`.
+function names. Unchanged *httk* v1 workflows continue to use
+[*httk* v1 task compatibility](v1_compatibility.md). For a step-by-step
+conversion, see
+[*httk* v1 migration guide](httk_v1_migration_guide.md).
