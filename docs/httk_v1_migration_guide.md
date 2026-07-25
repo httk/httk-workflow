@@ -1,17 +1,17 @@
-# Migrating an httk v1 workflow to v2
+# Migrating an *httk* v1 workflow to *httk₂*
 
-This guide takes an existing `ht_steps` or `ht_run` workflow from httk v1 to
+This guide takes an existing `ht_steps` or `ht_run` workflow from *httk* v1 to
 *httk-workflow*. You can keep the workflow unchanged behind the compatibility
 runner, migrate one job type at a time, or replace the legacy API completely
-with the native v2 Bash or Python API.
+with the native *httk₂* Bash or Python API.
 
 The central rule is:
 
 > Migrate task definitions and newly instantiated task directories, not a live
-> v1 task-manager queue.
+> *httk* v1 task-manager queue.
 
-The v2 manager never claims or rewrites an existing v1 queue tree. Once a task
-has been prepared and submitted to a v2 store, its `job.json`, marker, and
+The *httk₂* manager never claims or rewrites an existing *httk* v1 queue tree. Once a task
+has been prepared and submitted to an *httk₂* store, its `job.json`, marker, and
 journal are authoritative.
 
 ## 1. Choose a migration route
@@ -20,7 +20,7 @@ You do not need to migrate every workflow at once.
 
 | Route | Workflow changes | Manager | Best use |
 | --- | --- | --- | --- |
-| Compatibility | None, normally | `httk-v1-taskmanager` | Establish a v2 operational baseline quickly |
+| Compatibility | None, normally | `httk-v1-taskmanager` | Establish an *httk₂* operational baseline quickly |
 | Mixed | Per job type | Both managers on one store | Incremental migration with a direct fallback |
 | Native Bash | Replace `HT_TASK_*` and `VASP_*` calls | `httk-taskmanager` | Preserve a shell-oriented workflow |
 | Native Python | Replace the runner with Python calls | `httk-taskmanager` | New development and more structured logic |
@@ -29,7 +29,7 @@ Start with compatibility unless you already have tests that describe the
 workflow's inputs, outputs, restart behavior, and child-task behavior. A
 compatibility run gives you a useful reference result before semantics change.
 
-## 2. Inventory the v1 workflow
+## 2. Inventory the *httk* v1 workflow
 
 Make a copy of an instantiated task directory and record:
 
@@ -51,9 +51,9 @@ Make a copy of an instantiated task directory and record:
 Do not infer completion from a legacy task-directory suffix alone. Capture the
 actual input files, logs, expected results, and exit behavior.
 
-## 3. Run the workflow unchanged in a v2 store
+## 3. Run the workflow unchanged in an *httk₂* store
 
-Initialize a v2 store:
+Initialize an *httk₂* store:
 
 ```console
 httk workflow store init workflow-store
@@ -65,7 +65,7 @@ The standalone alias is equivalent:
 httk-taskmanager init workflow-store
 ```
 
-Prepare an already instantiated v1 task without consuming the source:
+Prepare an already instantiated *httk* v1 task without consuming the source:
 
 ```console
 httk workflow v1 prepare legacy-task prepared-v1 \
@@ -93,7 +93,7 @@ httk workflow v1 submit workflow-store legacy-task \
   --attempts 10
 ```
 
-Run only v1 compatibility jobs:
+Run only *httk* v1 compatibility jobs:
 
 ```console
 httk workflow v1 run workflow-store \
@@ -110,16 +110,17 @@ source "$HTTK_DIR/Execution/tasks/ht_tasks_api.sh"
 source "$HTTK_DIR/Execution/tasks/vasp/vasptools.sh"
 ```
 
-Inspect the result through the v2 source of truth:
+Inspect the result through the *httk₂* source of truth:
 
 ```console
 httk workflow store status workflow-store --json
 ```
 
 The compatibility runner preserves the persistent `ht.run.current/`
-workspace, translates v1 decisions and dynamic subtasks, and completes
-published v1 atomic sections after interruption. See {doc}`v1_compatibility`
-for the precise compatibility boundary.
+workspace, translates *httk* v1 decisions and dynamic subtasks, and completes
+published *httk* v1 atomic sections after interruption. See
+[*httk* v1 task compatibility](v1_compatibility.md) for the precise
+compatibility boundary.
 
 ## 4. Migrate project, configuration, and computers separately
 
@@ -131,19 +132,19 @@ Import safe user configuration explicitly:
 httk workflow config import-v1
 ```
 
-Create v2 project metadata from a local `ht.project` without modifying it:
+Create *httk₂* project metadata from a local `ht.project` without modifying it:
 
 ```console
 httk workflow project import-v1 . --source ./ht.project
 ```
 
 This imports safe metadata and public identities. It does not import private
-keys or the v1 queue. Imported project metadata records
+keys or the *httk* v1 queue. Imported project metadata records
 `legacy_queue_imported: false`. The project store is initialized for detached
 transfer, not transactional data. Use persistent `data.mode: "none"` jobs
 there, or initialize a separate transactional store before submission.
 
-Recognized v1 computer definitions can be mapped explicitly:
+Recognized *httk* v1 computer definitions can be mapped explicitly:
 
 ```console
 httk workflow computer import-v1 ~/.httk/computers/cluster-a \
@@ -157,8 +158,8 @@ and credentials are not copied or executed by the importer.
 
 ## 5. Run compatibility and native jobs side by side
 
-The v1 and native managers select different runner backends, so they can share
-one v2 store:
+The *httk* v1 and native managers select different runner backends, so they can share
+one *httk₂* store:
 
 ```console
 # Terminal or service 1: compatibility jobs
@@ -180,9 +181,9 @@ change its runner backend.
 Migrate one representative task first. Compare it with the compatibility
 reference before moving a larger batch.
 
-## 6. Replace the v1 control flow with native Bash
+## 6. Replace the *httk* v1 control flow with native Bash
 
-A typical v1 runner looks like:
+A typical *httk* v1 runner looks like:
 
 ```bash
 #!/usr/bin/env bash
@@ -327,9 +328,9 @@ workspace in an explicit preparation step when necessary.
 
 ## 7. Translate the commonly used task helpers
 
-The native API is intentionally not a spelling change of the v1 API.
+The native API is intentionally not a spelling change of the *httk* v1 API.
 
-| v1 operation | Native Bash | Native Python |
+| *httk* v1 operation | Native Bash | Native Python |
 | --- | --- | --- |
 | `HT_TASK_INIT` | `httk_workflow_init` | `AttemptRuntime.initialize()` |
 | `HT_TASK_NEXT step` | `httk_workflow_advance step` | `runtime.advance("step")` |
@@ -452,7 +453,7 @@ httk_workflow_run \
   -- simulation --input input.dat
 ```
 
-Checker diagnostics belong on stderr. Do not reproduce the v1 signal,
+Checker diagnostics belong on stderr. Do not reproduce the *httk* v1 signal,
 temporary-message-file, or process-discovery convention.
 
 ## 9. Replace VASP helpers
@@ -499,13 +500,13 @@ Important behavioral differences are:
 - commands are argv arrays and never interpolated shell strings.
 
 The old Python modules `httk.task.ht_tasks_api` and
-`httk.task.vasptools` are not available in v2. Use the public functions in
-`httk.workflow` instead. Their independent design and the prior v1
+`httk.task.vasptools` are not available in *httk₂*. Use the public functions in
+`httk.workflow` instead. Their independent design and the prior *httk* v1
 contributor work are described in the packaged compatibility `NOTICE`.
 
 ## 10. Migrate dynamic subtasks
 
-Do not recreate the v1 `ht.task.<set>...waitstart` filename protocol in a
+Do not recreate the *httk* v1 `ht.task.<set>...waitstart` filename protocol in a
 native workflow. Prepare explicit child payloads and publish their identities
 with the parent outcome.
 
@@ -691,7 +692,7 @@ native result has passed these checks.
 
 ## 13. Cut over and retire compatibility deliberately
 
-Stop instantiating new compatibility jobs first. Let submitted v1 jobs reach a
+Stop instantiating new compatibility jobs first. Let submitted *httk* v1 jobs reach a
 terminal state or cancel them through recorded operator requests:
 
 ```console
@@ -709,9 +710,9 @@ read-only according to the project's provenance and retention policy.
 
 ## Migration checklist
 
-- [ ] An instantiated v1 task runs successfully through compatibility.
+- [ ] An instantiated *httk* v1 task runs successfully through compatibility.
 - [ ] Project/configuration/computer imports were reviewed separately.
-- [ ] No live v1 queue is being treated as a v2 store.
+- [ ] No live *httk* v1 queue is being treated as an *httk₂* store.
 - [ ] Persistent scratch and committed result files are distinguished.
 - [ ] The store's extensions match the native job's data model.
 - [ ] Every `HT_TASK_*` and `VASP_*` dependency has an explicit replacement.
