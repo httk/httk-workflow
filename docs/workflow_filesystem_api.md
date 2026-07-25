@@ -683,6 +683,7 @@ A minimal `job.json` is:
   "name": "Silicon relaxation",
   "workflow": "example.vasp-relax",
   "runner": {
+    "backend": "path",
     "path": "files/runner",
     "arguments": []
   },
@@ -714,9 +715,18 @@ A minimal `job.json` is:
 immutable after submission. Small workflow-specific parameters SHOULD be stored
 directly in it instead of one file per parameter.
 
-`runner.path` is resolved relative to the current payload directory. It MUST remain
-beneath that directory unless an administrator has enabled external runners.
-`arguments` is an argument vector, never a shell command string.
+`runner.backend` selects an installed execution adapter and defaults to
+`path` when omitted. The core task manager implements `path`; managers MUST
+leave jobs using an unavailable or disallowed backend unclaimed. This permits
+specialized managers to share a store without either one accidentally running
+the other's job profile. Backend-specific immutable fields belong in
+`job.json`, and their submission validation is owned by that backend.
+
+`runner.path` is resolved relative to the current payload directory. It MUST
+remain beneath that directory unless an administrator has enabled external
+runners. `arguments` is an argument vector, never a shell command string. A
+backend may treat the path as a backend-specific program while retaining these
+path-containment rules.
 
 `files/` is optional and contains submitted code, templates, or immutable input
 objects that require separate files. Small inputs SHOULD be embedded in
@@ -1067,6 +1077,10 @@ A minimal outcome is:
 
 `expected_data_generation` is required only when the outcome contains a
 transaction. It MUST equal the generation supplied in the attempt context.
+An outcome MAY contain `priority`, an integer from 0 through 999. The manager
+uses it for the marker produced by the committed action; omission preserves
+the current priority. This allows a workflow decision and its scheduling
+preference to share one atomic marker transition.
 
 Actions are:
 
@@ -1850,7 +1864,8 @@ rule.
 
 ## Relationship to httk v1
 
-The future compatibility layer can map:
+The `httk-v1` runner backend and `httk-v1-taskmanager` compatibility executor
+implement the following mapping for instantiated v1 task templates:
 
 | httk v1 | This protocol |
 | --- | --- |
@@ -1864,11 +1879,11 @@ The future compatibility layer can map:
 | Exit code 4 / broken | `fail` outcome and failed journal frame |
 | `ht.reason` | Structured failure in packed history plus retained log |
 | `ht.tmp.task.*` to `ht.task.*` | Child bundle to placed payload plus one marker |
-| `ht.tmp.atomic.*` / `ht.atomic.*` | Published transaction plus committing replay |
+| `ht.tmp.atomic.*` / `ht.atomic.*` | Idempotent adapter preflight replay before a v2 outcome |
 | Restart count in pathname | Activation ID and attempt ordinal in state frame |
 | `ht.run.resume` | Audited manual continuation, reusing a persistent workspace or explicitly importing into an isolated one |
 
-The adapter must preserve the v1 ordering rule that a published
+The adapter preserves the v1 ordering rule that a published
 `ht_finished`/broken decision or pending atomic transaction is completed without
 rerunning `ht_steps`.
 
@@ -1884,6 +1899,14 @@ explicit child set. A child that publishes detached grandchildren may complete
 without those grandchildren, so a migrated workflow that requires subtree
 completion must make the child join its own descendants before succeeding or
 name the additional jobs explicitly in the ancestor's join.
+
+The shipped adapter makes each discovered direct subtask an explicit child.
+Each such child applies the same rule recursively, so ordinary nested v1 task
+trees retain subtree completion. It uses `all_terminal`, rather than
+`all_succeeded`, because v1 resumed a `waitsubtasks` parent once no descendant
+remained in an active state; broken descendants did not keep it waiting.
+Legacy `ht.task.*.<status>` symlinks are derived operator views only. The v2
+marker and journal remain authoritative.
 
 The principal improvements are:
 

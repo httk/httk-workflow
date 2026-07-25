@@ -339,10 +339,6 @@ class WorkflowStore:
         """Perform manager-side immutable submission validation."""
 
         job = self.load_job(marker)
-        payload = self.payload_path(marker.placement, marker.job_key)
-        runner = payload.joinpath(*job.runner_path.parts)
-        if not runner.is_file():
-            raise FormatError(f"runner does not exist or is not a regular file: {job.runner_path}")
         if job.data_mode == "transactional" and "transactional-data-v1" not in self.extensions:
             raise UnsupportedExtensionError("job requires transactional-data-v1")
         return job
