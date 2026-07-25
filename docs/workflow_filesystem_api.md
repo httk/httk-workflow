@@ -198,6 +198,7 @@ STORE/
 ├── .httk-workflow/
 │   ├── format.json
 │   ├── tmp/
+│   ├── quarantine/
 │   ├── state/
 │   │   ├── submitted/<placement>/
 │   │   ├── ready/<placement>/
@@ -453,11 +454,12 @@ The basename has this logical grammar:
 <job-key>.p<priority>.g<generation>.<record-ref>
 ```
 
-`generation` is a monotonically increasing base-36 state generation. It is
-unrelated to the data generation. `record-ref` locates the immutable transition
-record in a packed journal. The initial submitted marker uses `g0.init`,
-because its initial information is in `job.json`. Priority is always a
-zero-padded three-digit integer from `000` through `999`.
+`generation` is a monotonically increasing unsigned 64-bit state generation,
+encoded in lowercase base 36 without leading zeroes. It is unrelated to the
+data generation. `record-ref` locates the immutable transition record in a
+packed journal. The initial submitted marker uses `g0.init`, because its
+initial information is in `job.json`. Priority is always a zero-padded
+three-digit integer from `000` through `999`.
 
 The complete relative marker path is the authoritative current state:
 
@@ -530,8 +532,16 @@ Empty state-placement parents MAY be removed only with operations that fail
 when a directory is nonempty. A pruner racing a transition either observes the
 new marker and fails to remove the directory, or removes the empty directory
 first and causes the transition to recreate it and retry. Broad recursive
-deletion is forbidden. Implementations MAY instead disable placement-directory
-pruning while managers are attached.
+deletion is forbidden.
+
+A pruner MUST make at most one removal attempt per candidate directory in one
+scan and MUST NOT immediately retry a failed removal. It backs off until a
+later scan. Transition parent-creation/rename retries are also bounded; if
+repeated confirmed prune collisions would exhaust that budget, the manager
+suppresses pruning for the affected subtree or store and retries the transition
+before reporting storage failure. Pruning is optional and MUST yield to state
+mutation. Implementations MAY simply disable placement-directory pruning while
+managers are attached.
 
 The marker file is created once at submission and then only renamed. A normal
 job lifetime therefore consumes one state-marker inode regardless of its number
@@ -580,14 +590,30 @@ length, and checksum. Format version 1 mandates the canonical filename-safe
 w<writer-uuid-hex>-s<segment-base36>-o<offset-base36>-l<length-base36>-h<checksum128-hex>
 ```
 
-The writer UUID is 32 lowercase hexadecimal digits without hyphens. Numeric
-fields use lowercase base 36 without leading zeroes except for zero itself.
+The writer UUID is 32 lowercase hexadecimal digits without hyphens. Segment
+numbers are unsigned 32-bit integers; byte offsets and frame lengths are
+unsigned 64-bit integers. Numeric fields use lowercase base 36 without leading
+zeroes except for zero itself.
 `checksum128` is the first 128 bits of the SHA-256 checksum over the encoded
 frame length and payload, rendered as 32 lowercase hexadecimal digits. The
 complete checksum remains in the frame. No alternate encoding is permitted in
 a `core-v1` store, so independent implementations resolve marker names
-identically. The reference and maximum job key must fit in one filesystem
-component.
+identically.
+
+The worst-case noninitial marker basename is 213 ASCII bytes:
+
+```text
+86 job-key + 5 ".p999" + 15 (".g" + 13 generation digits)
++ 1 "." + 106 maximum hwref-v1 = 213
+```
+
+The 86-byte job key is a 48-byte tag, `--`, and a 36-byte UUID. The reference
+budget is `33` for `w` and the writer UUID, `9` for `-s` and a seven-digit
+base-36 segment number, `15` each for `-o`/offset and `-l`/length, and `34` for
+`-h` plus the checksum: `33 + 9 + 15 + 15 + 34 = 106`. A conforming store MUST
+support at least 213 bytes per filename component and MUST validate this at
+initialization. These field limits and the tag limit MUST NOT be enlarged
+within format version 1.
 
 Before a state-marker rename, the writer MUST flush the entire frame and, in
 the storage-durable profile, synchronize the segment. A marker can therefore
@@ -667,7 +693,7 @@ A minimal `job.json` is:
   "initial_step": "prepare",
   "priority": 500,
   "claim": {
-    "pool": "vasp",
+    "pool": "default",
     "required_capabilities": []
   },
   "retry_policy": {
@@ -716,6 +742,11 @@ A manager advertises its pools and capabilities and MUST claim a job only when
 both match. This is claim eligibility, not a workflow name and not a substitute
 for quantitative `resources`.
 
+The literal pool name `default` is reserved for jobs requiring no explicit
+routing. A manager started without pool configuration MUST advertise
+`default`. Thus a trivial deployment uses the value shown above without any
+out-of-band pool agreement; sites opt into other pool names deliberately.
+
 Retry limits are independent optional safeguards:
 
 - `maximum_attempts_per_activation` limits retries of one logical activation;
@@ -763,8 +794,10 @@ Implementations MUST NOT leave invalid jobs indefinitely in `submitted`.
 
 An entry whose marker name or placement is itself not parseable cannot enter
 the normal job state machine. A store repair tool moves it to a shared
-quarantine area outside `state/`; managers report it loudly and never schedule
-it. Quarantine is exceptional store corruption, not another job state.
+`.httk-workflow/quarantine/` area outside `state/`; managers report it loudly
+and never schedule it. Names in quarantine MUST preserve or record the original
+relative path without permitting collisions or traversal. Quarantine is
+exceptional store corruption, not another job state.
 
 Retrying submission with an existing job UUID succeeds only when the existing
 immutable job digest is identical and its marker already exists. A different
@@ -1662,6 +1695,10 @@ not an orphan even though it has no marker in a store state tree. Generic
 temporary/orphan GC MUST NOT collect, alter, or unseal it. Only an explicit
 transfer import, abort, or transfer-specific retention action may do so.
 
+Entries in `.httk-workflow/quarantine/` are likewise outside generic orphan
+GC. They are removed only by an explicit repair decision or a separately
+configured quarantine-retention policy that preserves an audit record.
+
 Empty placement-directory pruning follows the nonrecursive race rules in
 “State-marker rename.” Implementations should account for these directories:
 deep or job-unique placements can temporarily leave one empty hierarchy under
@@ -1682,6 +1719,8 @@ The layout is intentionally legible without a database:
 - `state/waiting/` is the join backlog;
 - `state/failed/` is the current broken-job collection;
 - `state/succeeded/` is the finalized-success collection;
+- `.httk-workflow/quarantine/` contains malformed entries requiring store
+  repair rather than workflow scheduling;
 - every marker begins with the optional human tag plus UUID job key;
 - the matching payload is at the same relative placement outside
   `.httk-workflow`;
