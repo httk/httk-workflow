@@ -1,0 +1,34 @@
+httk v1 task compatibility provenance
+=====================================
+
+The compatibility implementations in ``compat/ht_tasks_api_v1.sh`` and
+``compat/vasptools_v1.sh`` derive from these files in the httk v1 repository:
+
+* ``Execution/tasks/ht_tasks_api.sh``
+* ``Execution/tasks/vasp/vasptools.sh``
+
+The repository history attributes their design and implementation primarily
+to Rickard Armiento, with later contributions by Henrik Levämäki (``hpleva``),
+Joel Davidsson (including the ``j-euler`` identity), Christopher Tholander,
+Gabriel Persson, and other httk contributors. Relevant recorded changes
+include:
+
+* Henrik Levämäki, ``77d0ece`` and ``ca7bcd2`` (shell maintenance);
+* Joel Davidsson, ``e4d6b9f`` and ``7449118``;
+* Gabriel Persson, ``737dcc4``;
+* Christopher Tholander, ``87f6f84`` and ``81436e1``.
+
+The separate Python interfaces formerly at
+``src/httk/task/ht_tasks_api.py`` and ``src/httk/task/vasptools.py`` were
+introduced in commit ``7672f868`` and developed by Henrik Levämäki
+(``hpleava``, ``henrik.levamaki@gmail.com``). Their files identify:
+
+    Copyright (C) 2022 Henrik Levämäki
+
+Those Python modules are not copied into httk-workflow. The v2 workflow code
+uses its own filesystem protocol and v1 process adapter; the historical Python
+interfaces are acknowledged here to keep authorship explicit when comparing
+the two designs.
+
+The compatibility shell implementation remains available under the
+GNU Affero General Public License, version 3 or later. See ``LICENSE``.
