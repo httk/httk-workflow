@@ -87,6 +87,15 @@ Useful legacy-style controls are:
 
 Without `--httk-v1-root`, the distribution's bundled
 `Execution/tasks/ht_tasks_api.sh` and VASP shell helpers are used.
+Those exact historic paths are thin source redirects into an attributed
+compatibility implementation. Existing shell function names and behavior are
+preserved; the old Python modules are not bundled.
+
+Native v2 Python runners should use `httk.workflow.AttemptRuntime` to read
+attempt context and atomically publish outcomes. Common VASP file operations
+are available as data-oriented functions such as `read_poscar_header`,
+`automatic_kpoint_grid`, `update_incar`, and `assemble_potcar`. These APIs are
+independent v2 designs rather than renamed `HT_TASK_*` or `VASP_*` methods.
 
 The ordinary `httk-taskmanager` executes only native `path` jobs, and the v1
 manager executes only `httk-v1` jobs. They may therefore be attached to the
