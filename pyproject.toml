@@ -80,6 +80,7 @@ namespaces = true
   "v1_runtime/NOTICE",
   "v1_runtime/README.md",
   "v1_runtime/compat/*.sh",
+  "shell/*.sh",
   "adapter_templates/*/computer.json",
   "adapter_templates/*/configure",
   "adapter_templates/*/install",

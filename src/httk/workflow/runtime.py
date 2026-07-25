@@ -5,15 +5,22 @@ a Python spelling of the v1 ``HT_TASK_*`` functions.
 """
 
 import os
+import shutil
 import signal
 import subprocess
-import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-from ._util import read_json, write_json_atomic
+from ._util import read_json
+from .runtime_builders import (
+    JoinSpec,
+    OutcomeBuilder,
+    ReplayableWorkspaceBatch,
+    RunLog,
+    WorkspaceState,
+)
 
 _OUTCOME_ACTIONS = frozenset({"advance", "retry", "wait", "succeed", "fail", "pause"})
 
@@ -29,9 +36,20 @@ class AttemptContext:
     step: str
     activation_id: str
     attempt_id: str
+    activation_ordinal: int | None
+    attempt_ordinal: int | None
+    total_attempts: int | None
     is_restart: bool
     is_unclean_restart: bool
+    attempt_reason: str | None
+    previous_attempt_id: str | None
+    activation_reason: str | None
+    workspace_mode: str | None
+    workspace_reused: bool
+    unsafe_persistent_takeover: bool
     data_generation: int | None
+    resources: Mapping[str, object]
+    join: object
     raw: Mapping[str, Any]
 
     @classmethod
@@ -47,6 +65,26 @@ class AttemptContext:
         generation = value.get("data_generation")
         if generation is not None and (not isinstance(generation, int) or isinstance(generation, bool)):
             raise ValueError("attempt data_generation must be an integer or null")
+        resources_raw = value.get("resources", {})
+        if not isinstance(resources_raw, Mapping):
+            raise ValueError("attempt resources must be an object")
+
+        def optional_integer(name: str) -> int | None:
+            raw = value.get(name)
+            if raw is None:
+                return None
+            if not isinstance(raw, int) or isinstance(raw, bool) or raw < 0:
+                raise ValueError(f"attempt {name} must be a nonnegative integer or null")
+            return raw
+
+        def optional_string(name: str) -> str | None:
+            raw = value.get(name)
+            if raw is None:
+                return None
+            if not isinstance(raw, str):
+                raise ValueError(f"attempt {name} must be a string or null")
+            return raw
+
         return cls(
             store_id=value["store_id"],
             job_id=value["job_id"],
@@ -55,9 +93,20 @@ class AttemptContext:
             step=value["step"],
             activation_id=value["activation_id"],
             attempt_id=value["attempt_id"],
+            activation_ordinal=optional_integer("activation_ordinal"),
+            attempt_ordinal=optional_integer("attempt_ordinal"),
+            total_attempts=optional_integer("total_attempts"),
             is_restart=bool(value.get("is_restart", False)),
             is_unclean_restart=bool(value.get("is_unclean_restart", False)),
+            attempt_reason=optional_string("attempt_reason"),
+            previous_attempt_id=optional_string("previous_attempt_id"),
+            activation_reason=optional_string("activation_reason"),
+            workspace_mode=optional_string("workspace_mode"),
+            workspace_reused=bool(value.get("workspace_reused", False)),
+            unsafe_persistent_takeover=bool(value.get("unsafe_persistent_takeover", False)),
             data_generation=generation,
+            resources=dict(resources_raw),
+            join=value.get("join"),
             raw=value,
         )
 
@@ -152,6 +201,36 @@ class AttemptRuntime:
             data=None if not data_value else Path(data_value).resolve(),
         )
 
+    @classmethod
+    def initialize(cls, environment: Mapping[str, str] | None = None) -> Self:
+        """Construct the runtime and replay every sealed workspace batch."""
+
+        result = cls.from_environment(environment)
+        ReplayableWorkspaceBatch.recover(result.workspace)
+        return result
+
+    @property
+    def state(self) -> WorkspaceState:
+        """Return the application state associated with this workspace."""
+
+        return WorkspaceState(self.workspace)
+
+    @property
+    def runlog(self) -> RunLog:
+        """Return the structured application run log."""
+
+        return RunLog(self.workspace)
+
+    def outcome(self) -> OutcomeBuilder:
+        """Start a composable unpublished outcome."""
+
+        return OutcomeBuilder(self)
+
+    def workspace_batch(self) -> ReplayableWorkspaceBatch:
+        """Start a replayable group of workspace changes."""
+
+        return ReplayableWorkspaceBatch.create(self.workspace)
+
     def publish(
         self,
         action: str,
@@ -168,41 +247,22 @@ class AttemptRuntime:
 
         if action not in _OUTCOME_ACTIONS:
             raise ValueError(f"unsupported workflow outcome action: {action!r}")
-        if priority is not None and (isinstance(priority, bool) or not 0 <= priority <= 999):
-            raise ValueError("priority must be an integer from 0 through 999")
-        ready = self.control / "outcome.ready"
-        if ready.exists():
-            raise FileExistsError(f"an outcome is already published: {ready}")
-        temporary = self.control / f"outcome.tmp.{uuid.uuid4()}"
-        temporary.mkdir()
-        body: dict[str, object] = {
-            "format": "httk-workflow-outcome",
-            "format_version": 1,
-            "job_id": self.context.job_id,
-            "activation_id": self.context.activation_id,
-            "attempt_id": self.context.attempt_id,
-            "action": action,
-        }
-        optional = {
-            "next_step": next_step,
-            "priority": priority,
-            "failure": None if failure is None else dict(failure),
-            "retry": None if retry is None else dict(retry),
-            "join": None if join is None else dict(join),
-            "pause": None if pause is None else dict(pause),
-            "expected_data_generation": expected_data_generation,
-        }
-        body.update({name: value for name, value in optional.items() if value is not None})
+        builder = self.outcome()
         try:
-            write_json_atomic(temporary / "outcome.json", body)
-            os.rename(temporary, ready)
+            return builder.publish(
+                action,  # type: ignore[arg-type]
+                next_step=next_step,
+                priority=priority,
+                failure=failure,
+                retry=retry,
+                join=join,
+                pause=pause,
+                expected_data_generation=expected_data_generation,
+            )
         except Exception:
-            if temporary.exists():
-                for child in temporary.iterdir():
-                    child.unlink()
-                temporary.rmdir()
+            if builder.root.exists():
+                shutil.rmtree(builder.root)
             raise
-        return ready
 
     def advance(self, next_step: str, *, priority: int | None = None) -> Path:
         """Request a new activation at *next_step*."""
@@ -237,3 +297,14 @@ class AttemptRuntime:
         """Pause the job for operator action."""
 
         return self.publish("pause", pause={"reason": reason})
+
+    def wait(
+        self,
+        next_step: str,
+        join: JoinSpec,
+        *,
+        priority: int | None = None,
+    ) -> Path:
+        """Wait for an explicit child set before starting *next_step*."""
+
+        return self.outcome().publish("wait", next_step=next_step, join=join, priority=priority)
