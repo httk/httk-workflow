@@ -157,6 +157,8 @@ class TaskManager:
         changed |= self._evaluate_joins()
         changed |= self._poll_running()
         changed |= self._recover_abandoned_claims()
+        if (self.store.control / "maintenance.lock").exists():
+            return changed
         for marker in self._eligible_ready():
             if len(self._running) >= self.maximum_workers:
                 break
@@ -329,6 +331,8 @@ class TaskManager:
         self._launch_claimed(claimed, job, state)
 
     def _launch_claimed(self, marker: Marker, job: JobDefinition, previous_state: Mapping[str, Any]) -> None:
+        if (self.store.control / "maintenance.lock").exists():
+            return
         claimed_state = self.store.read_state(marker)
         backend = self._backend_for(job)
         if backend is None:

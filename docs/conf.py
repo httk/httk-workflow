@@ -83,6 +83,7 @@ _docs_base_url = os.environ.get("HTTK_DOCS_BASE_URL", "https://docs.httk.org")
 
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3", "_inventories/python.inv"),
+    "httk-core": (f"{_docs_base_url}/httk-core/", "_inventories/httk-core.inv"),
 }
 
 autoapi_options = [
@@ -114,7 +115,7 @@ nitpick_ignore = [
 copybutton_prompt_text = r">>> |\.\.\. |\$ "
 copybutton_prompt_is_regexp = True
 
-suppress_warnings = ["myst.xref_missing"]
+suppress_warnings = ["myst.xref_missing", "autoapi.python_import_resolution"]
 
 def skip_member(app, what, name, obj, skip, options):
     # Skip private members (those starting with _)

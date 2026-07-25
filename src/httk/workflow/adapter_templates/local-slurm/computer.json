@@ -1,0 +1,1 @@
+{"adapter_version":1,"format":"httk-computer-adapter","format_version":1,"kind":"local-slurm","operations":{"configure":"configure","install":"install","invoke":"invoke","pull":"pull","push":"push","start-manager":"start-manager","status":"status"},"queues":{"default":{}},"required_binaries":["sbatch","squeue"],"timeout_seconds":60}

@@ -19,9 +19,9 @@ def _job_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--attempts", "-a", type=int, default=10)
 
 
-def _parser() -> argparse.ArgumentParser:
+def _parser(program: str = "httk-v1-taskmanager") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="httk-v1-taskmanager",
+        prog=program,
         description="Prepare and execute httk v1 task templates through the v2 workflow engine",
     )
     parser.add_argument("--durable", action="store_true", help="fsync protocol publications")
@@ -58,10 +58,10 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, program: str = "httk-v1-taskmanager") -> int:
     """Run the httk v1 compatibility command."""
 
-    parser = _parser()
+    parser = _parser(program)
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "prepare":
@@ -118,7 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     manager.serve(poll_interval=arguments.poll_interval)
             return 0
     except (WorkflowError, OSError, ValueError) as exc:
-        print(f"httk-v1-taskmanager: {exc}", file=sys.stderr)
+        print(f"{program}: {exc}", file=sys.stderr)
         return 2
     parser.error(f"unknown command: {arguments.command}")
     return 2

@@ -13,6 +13,7 @@ applications use `httk.workflow`; installations also provide the
 
 - **API reference**: {doc}`reference/index`
 - **Task-manager usage**: {doc}`taskmanager`
+- **Project and workflow CLI**: {doc}`workflow_cli`
 - **httk v1 compatibility**: {doc}`v1_compatibility`
 - **Workflow filesystem API**: {doc}`workflow_filesystem_api`
 - **Examples notebook**: {doc}`notebooks/examples`
@@ -50,6 +51,7 @@ httk-taskmanager run workflow-store
 
 reference/index
 taskmanager
+workflow_cli
 v1_compatibility
 workflow_filesystem_api
 notebooks/examples
