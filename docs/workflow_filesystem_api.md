@@ -14,7 +14,7 @@ Python program, a compiled executable, or any other program that can read and
 write files and atomically rename a file or directory.
 
 The design descends from the `ht.task.*` directories, `ht_steps`,
-`ht.nextstep`, subtasks, and `ht.atomic.*` replay mechanism in httk v1. It keeps
+`ht.nextstep`, subtasks, and `ht.atomic.*` replay mechanism in *httk* v1. It keeps
 the central property of that design: neither a workflow step nor a task manager
 is ever required to run cleanup code. Either may disappear between any two
 instructions. A later task manager must be able to identify the last commit
@@ -1255,7 +1255,7 @@ If interrupted after the data changes but before the final marker rename, a new
 manager sees `committing`, reads the outcome named by the committing frame, and
 idempotently completes replay. It does not rerun the step.
 
-This retains the useful httk v1 `ht.atomic.*` principle while avoiding one
+This retains the useful *httk* v1 `ht.atomic.*` principle while avoiding one
 permanent revision and manifest hierarchy per step.
 
 ## Relocating and transferring jobs
@@ -1867,12 +1867,12 @@ creates two calculations, joins them, and finalizes:
 At every interruption point, the marker location selects exactly one recovery
 rule.
 
-## Relationship to httk v1
+## Relationship to *httk* v1
 
 The `httk-v1` runner backend and `httk-v1-taskmanager` compatibility executor
-implement the following mapping for instantiated v1 task templates:
+implement the following mapping for instantiated *httk* v1 task templates:
 
-| httk v1 | This protocol |
+| *httk* v1 | This protocol |
 | --- | --- |
 | `ht.task.<set>.<id>.<step>...<status>` | One global state marker plus a packed state frame |
 | Task-manager `-s <set>` eligibility | `claim.pool` and manager pool membership |
@@ -1884,33 +1884,33 @@ implement the following mapping for instantiated v1 task templates:
 | Exit code 4 / broken | `fail` outcome and failed journal frame |
 | `ht.reason` | Structured failure in packed history plus retained log |
 | `ht.tmp.task.*` to `ht.task.*` | Child bundle to placed payload plus one marker |
-| `ht.tmp.atomic.*` / `ht.atomic.*` | Idempotent adapter preflight replay before a v2 outcome |
+| `ht.tmp.atomic.*` / `ht.atomic.*` | Idempotent adapter preflight replay before an *httk₂* outcome |
 | Restart count in pathname | Activation ID and attempt ordinal in state frame |
 | `ht.run.resume` | Audited manual continuation, reusing a persistent workspace or explicitly importing into an isolated one |
 
-The adapter preserves the v1 ordering rule that a published
+The adapter preserves the *httk* v1 ordering rule that a published
 `ht_finished`/broken decision or pending atomic transaction is completed without
 rerunning `ht_steps`.
 
-v1's restart counter was carried across steps but incremented only when a stale
+*httk* v1's restart counter was carried across steps but incremented only when a stale
 `running` task was adopted; it did not bound an indefinitely advancing clean
-workflow. v2 keeps the per-activation retry limit and adds optional total
+workflow. *httk₂* keeps the per-activation retry limit and adds optional total
 attempt and activation budgets for that separate concern.
 
-Join migration is intentionally not a pathname-for-pathname emulation. v1
+Join migration is intentionally not a pathname-for-pathname emulation. *httk* v1
 `waitsubtasks` searched the whole nested task subtree and could notice
-descendants that appeared later. A v2 join waits only for its immutable,
+descendants that appeared later. An *httk₂* join waits only for its immutable,
 explicit child set. A child that publishes detached grandchildren may complete
 without those grandchildren, so a migrated workflow that requires subtree
 completion must make the child join its own descendants before succeeding or
 name the additional jobs explicitly in the ancestor's join.
 
 The shipped adapter makes each discovered direct subtask an explicit child.
-Each such child applies the same rule recursively, so ordinary nested v1 task
+Each such child applies the same rule recursively, so ordinary nested *httk* v1 task
 trees retain subtree completion. It uses `all_terminal`, rather than
-`all_succeeded`, because v1 resumed a `waitsubtasks` parent once no descendant
+`all_succeeded`, because *httk* v1 resumed a `waitsubtasks` parent once no descendant
 remained in an active state; broken descendants did not keep it waiting.
-Legacy `ht.task.*.<status>` symlinks are derived operator views only. The v2
+Legacy `ht.task.*.<status>` symlinks are derived operator views only. The *httk₂*
 marker and journal remain authoritative.
 
 The principal improvements are:
