@@ -4,7 +4,7 @@ import time
 import uuid
 from pathlib import Path
 
-from httk.workflow import TaskManager, WorkflowStore
+from httk.workflow import TaskManager, WorkflowWorkspace
 from httk.workflow.errors import TransitionLostError
 from httk.workflow.journal import JournalWriter, read_record
 
@@ -31,7 +31,7 @@ def _payload(
         "name": "Test job",
         "workflow": "tests.example",
         "runner": {"path": "files/runner", "arguments": []},
-        "workspace": {"mode": "persistent", "path": "run"},
+        "workdir": {"mode": "persistent", "path": "run"},
         "data": {"mode": data_mode},
         "initial_step": "prepare",
         "priority": 500,
@@ -56,7 +56,7 @@ from pathlib import Path
 
 context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
-run = Path(os.environ["HTTK_WORKFLOW_RUN_DIR"])
+run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 (run / "steps.txt").open("a").write(context["step"] + "\\n")
 if context["step"] == "prepare":
     body = {"action": "advance", "next_step": "collect"}
@@ -87,9 +87,9 @@ def test_journal_round_trip(tmp_path: Path) -> None:
 
 
 def test_transition_verifies_destination_after_ambiguous_rename(tmp_path: Path, monkeypatch) -> None:
-    store = WorkflowStore.initialize(tmp_path / "store")
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
     payload, _ = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
-    marker = store.submit(payload, "project/rename")
+    marker = workspace.submit(payload, "project/rename")
     real_rename = os.rename
     injected = False
 
@@ -101,8 +101,8 @@ def test_transition_verifies_destination_after_ambiguous_rename(tmp_path: Path, 
             raise OSError("simulated lost NFS reply")
 
     monkeypatch.setattr(os, "rename", ambiguous_rename)
-    with JournalWriter(store.control) as writer:
-        moved = store.transition(
+    with JournalWriter(workspace.control) as writer:
+        moved = workspace.transition(
             writer,
             marker,
             "ready",
@@ -121,44 +121,44 @@ def test_transition_verifies_destination_after_ambiguous_rename(tmp_path: Path, 
 
 
 def test_submit_and_run_multistep_persistent_job(tmp_path: Path) -> None:
-    store = WorkflowStore.initialize(tmp_path / "store")
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
-    store.submit(payload, "project/a")
-    with TaskManager(store, heartbeat_interval=0.01) as manager:
+    workspace.submit(payload, "project/a")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle()
-    marker = store.find_marker_by_id(job_id)
+    marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
     assert marker.kind == "succeeded"
-    run = store.payload_path(marker.placement, marker.job_key) / "run"
+    run = workspace.payload_path(marker.placement, marker.job_key) / "run"
     assert (run / "steps.txt").read_text(encoding="utf-8").splitlines() == ["prepare", "collect"]
 
 
 def test_new_manager_replays_published_outcome(tmp_path: Path) -> None:
-    store = WorkflowStore.initialize(tmp_path / "store")
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(
         tmp_path / "source",
         _TWO_STEP_RUNNER.replace('"action": "advance", "next_step": "collect"', '"action": "succeed"'),
     )
-    store.submit(payload, "project/recovery")
-    first = TaskManager(store, heartbeat_interval=0.01)
+    workspace.submit(payload, "project/recovery")
+    first = TaskManager(workspace, heartbeat_interval=0.01)
     try:
         first.tick()
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            running = store.find_marker_by_id(job_id)
+            running = workspace.find_marker_by_id(job_id)
             assert running is not None
-            state = store.read_state(running)
+            state = workspace.read_state(running)
             if running.kind == "running" and first._outcome_path(running, state).exists():
                 first.tick()
                 break
             time.sleep(0.01)
-        committing = store.find_marker_by_id(job_id)
+        committing = workspace.find_marker_by_id(job_id)
         assert committing is not None and committing.kind == "committing"
     finally:
         first.close()
-    with TaskManager(store) as replacement:
+    with TaskManager(workspace) as replacement:
         replacement.run_until_idle()
-    finished = store.find_marker_by_id(job_id)
+    finished = workspace.find_marker_by_id(job_id)
     assert finished is not None and finished.kind == "succeeded"
 
 
@@ -167,24 +167,24 @@ def test_lost_running_transition_does_not_execute_runner(tmp_path: Path, monkeyp
 from pathlib import Path
 Path("runner-executed").write_text("unsafe")
 """
-    store = WorkflowStore.initialize(tmp_path / "store")
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", runner)
-    store.submit(payload, "project/gated")
-    real_transition = store.transition
+    workspace.submit(payload, "project/gated")
+    real_transition = workspace.transition
 
     def lose_running_transition(writer, marker, kind, updates, *, priority=None):
         if kind == "running":
             raise TransitionLostError("simulated competing transition")
         return real_transition(writer, marker, kind, updates, priority=priority)
 
-    monkeypatch.setattr(store, "transition", lose_running_transition)
-    with TaskManager(store, heartbeat_interval=0.01) as manager:
+    monkeypatch.setattr(workspace, "transition", lose_running_transition)
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.tick()
         time.sleep(0.05)
-    marker = store.find_marker_by_id(job_id)
+    marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "claimed"
-    workspace = store.payload_path(marker.placement, marker.job_key) / "run"
-    assert not (workspace / "runner-executed").exists()
+    workdir = workspace.payload_path(marker.placement, marker.job_key) / "run"
+    assert not (workdir / "runner-executed").exists()
 
 
 def test_unclean_process_failure_sets_restart_context(tmp_path: Path) -> None:
@@ -195,7 +195,7 @@ import sys
 from pathlib import Path
 
 context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
-run = Path(os.environ["HTTK_WORKFLOW_RUN_DIR"])
+run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 count_path = run / "count"
 count = int(count_path.read_text()) + 1 if count_path.exists() else 1
 count_path.write_text(str(count))
@@ -216,15 +216,15 @@ temporary.mkdir()
 }))
 os.rename(temporary, control / "outcome.ready")
 """
-    store = WorkflowStore.initialize(tmp_path / "store")
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", runner, retry_on=["process_failure"])
-    store.submit(payload, "project/restart")
-    with TaskManager(store, heartbeat_interval=0.01) as manager:
+    workspace.submit(payload, "project/restart")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle()
-    marker = store.find_marker_by_id(job_id)
+    marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
     assert marker.kind == "succeeded"
-    assert (store.payload_path(marker.placement, marker.job_key) / "run" / "count").read_text() == "2"
+    assert (workspace.payload_path(marker.placement, marker.job_key) / "run" / "count").read_text() == "2"
 
 
 def test_transactional_output(tmp_path: Path) -> None:
@@ -265,15 +265,15 @@ content = b"complete\\n"
 }))
 os.rename(temporary, control / "outcome.ready")
 """
-    store = WorkflowStore.initialize(tmp_path / "store", extensions=["transactional-data-v1"])
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
     payload, job_id = _payload(tmp_path / "source", runner, data_mode="transactional")
-    store.submit(payload, "project/transaction")
-    with TaskManager(store, heartbeat_interval=0.01) as manager:
+    workspace.submit(payload, "project/transaction")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle()
-    marker = store.find_marker_by_id(job_id)
+    marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
     assert marker.kind == "succeeded"
-    data = store.payload_path(marker.placement, marker.job_key) / "data"
+    data = workspace.payload_path(marker.placement, marker.job_key) / "data"
     assert (data / "result.txt").read_text(encoding="utf-8") == "complete\n"
 
 
@@ -330,7 +330,7 @@ os.rename(temporary, control / "outcome.ready")
         "name": "Child",
         "workflow": "tests.child",
         "runner": {"path": "files/runner", "arguments": []},
-        "workspace": {"mode": "persistent", "path": "run"},
+        "workdir": {"mode": "persistent", "path": "run"},
         "data": {"mode": "none"},
         "initial_step": "run",
         "priority": 500,
@@ -338,14 +338,14 @@ os.rename(temporary, control / "outcome.ready")
         "retry_policy": {"retry_on": []},
         "resources": {},
         "parent": {
-            "store_id": context["store_id"],
+            "workspace_id": context["workspace_id"],
             "job_id": context["job_id"],
             "activation_id": context["activation_id"],
         },
     }))
     (temporary / "children" / "spawn.json").write_text(json.dumps({
         "children": [{
-            "store_id": context["store_id"],
+            "workspace_id": context["workspace_id"],
             "job_id": child_id,
             "job_key": child_key,
             "placement": "project/children",
@@ -357,7 +357,7 @@ os.rename(temporary, control / "outcome.ready")
         "next_step": "aggregate",
         "join": {
             "children": [{
-                "store_id": context["store_id"],
+                "workspace_id": context["workspace_id"],
                 "job_id": child_id,
                 "job_key": child_key,
                 "placement_hint": "project/children",
@@ -368,39 +368,39 @@ os.rename(temporary, control / "outcome.ready")
 (temporary / "outcome.json").write_text(json.dumps(outcome))
 os.rename(temporary, control / "outcome.ready")
 """
-    store = WorkflowStore.initialize(tmp_path / "store")
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", runner)
-    store.submit(payload, "project/parent")
-    with TaskManager(store, heartbeat_interval=0.01) as manager:
+    workspace.submit(payload, "project/parent")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle()
-    parent = store.find_marker_by_id(job_id)
+    parent = workspace.find_marker_by_id(job_id)
     assert parent is not None and parent.kind == "succeeded"
-    markers = list(store.scan_markers(("succeeded",)))
+    markers = list(workspace.scan_markers(("succeeded",)))
     assert len(markers) == 2
 
 
 def test_invalid_submission_moves_to_failed(tmp_path: Path) -> None:
-    store = WorkflowStore.initialize(tmp_path / "store")
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
     (payload / "files" / "runner").unlink()
-    store.submit(payload, "project/invalid")
-    with TaskManager(store) as manager:
+    workspace.submit(payload, "project/invalid")
+    with TaskManager(workspace) as manager:
         manager.tick()
-    marker = store.find_marker_by_id(job_id)
+    marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
     assert marker.kind == "failed"
 
 
 def test_priority_request_renames_authoritative_marker(tmp_path: Path) -> None:
-    store = WorkflowStore.initialize(tmp_path / "store", extensions=["priority-bands-v1"])
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", extensions=["priority-bands-v1"])
     payload, job_id = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
-    submitted = store.submit(payload, "project/request")
-    with TaskManager(store, pools=("other",)) as manager:
+    submitted = workspace.submit(payload, "project/request")
+    with TaskManager(workspace, pools=("other",)) as manager:
         manager.tick()
-        ready = store.find_marker_by_id(job_id)
+        ready = workspace.find_marker_by_id(job_id)
         assert ready is not None and ready.kind == "ready"
         assert "p5xx" in ready.path.parts
-        store.publish_request(
+        workspace.publish_request(
             {
                 "format": "httk-workflow-request",
                 "format_version": 1,
@@ -415,7 +415,7 @@ def test_priority_request_renames_authoritative_marker(tmp_path: Path) -> None:
             }
         )
         manager.tick()
-    changed = store.find_marker_by_id(job_id)
+    changed = workspace.find_marker_by_id(job_id)
     assert changed is not None
     assert changed.priority == 25
     assert "p0xx" in changed.path.parts

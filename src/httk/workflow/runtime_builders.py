@@ -53,14 +53,14 @@ def _copy_tree(source: Path, destination: Path) -> None:
 class ChildReference:
     """The stable identity used in a native join."""
 
-    store_id: str
+    workspace_id: str
     job_id: str
     job_key: str
     placement_hint: str
 
     def as_mapping(self) -> dict[str, str]:
         return {
-            "store_id": self.store_id,
+            "workspace_id": self.workspace_id,
             "job_id": self.job_id,
             "job_key": self.job_key,
             "placement_hint": self.placement_hint,
@@ -109,8 +109,8 @@ class JobSpec:
     tag: str | None = None
     job_id: str | None = None
     runner_arguments: tuple[str, ...] = ()
-    workspace_mode: Literal["persistent", "isolated"] = "persistent"
-    workspace_path: str = "run"
+    workdir_mode: Literal["persistent", "isolated"] = "persistent"
+    workdir_path: str = "run"
     data_mode: Literal["none", "transactional"] = "none"
     priority: int = 500
     claim_pool: str = "default"
@@ -141,7 +141,7 @@ class JobSpec:
                 "path": self.runner_path,
                 "arguments": list(self.runner_arguments),
             },
-            "workspace": {"mode": self.workspace_mode, "path": self.workspace_path},
+            "workdir": {"mode": self.workdir_mode, "path": self.workdir_path},
             "data": {"mode": self.data_mode},
             "initial_step": self.initial_step,
             "priority": self.priority,
@@ -284,7 +284,7 @@ class OutcomeBuilder:
             for raw in spawn.get("children", []):
                 if isinstance(raw, Mapping):
                     reference = ChildReference(
-                        str(raw["store_id"]),
+                        str(raw["workspace_id"]),
                         str(raw["job_id"]),
                         str(raw["job_key"]),
                         str(raw["placement"]),
@@ -312,7 +312,7 @@ class OutcomeBuilder:
         child_mapping = read_json(source / "job.json")
         spawn_id = str(uuid.uuid4())
         child_mapping["parent"] = {
-            "store_id": self.runtime.context.store_id,
+            "workspace_id": self.runtime.context.workspace_id,
             "job_id": self.runtime.context.job_id,
             "job_key": self.runtime.context.job_key,
             "activation_id": self.runtime.context.activation_id,
@@ -326,13 +326,13 @@ class OutcomeBuilder:
         _copy_tree(source, destination)
         write_json_atomic(destination / "job.json", child_mapping)
         reference = ChildReference(
-            self.runtime.context.store_id,
+            self.runtime.context.workspace_id,
             child.id,
             child.job_key,
             normalized.as_posix(),
         )
         entry: dict[str, object] = {
-            "store_id": reference.store_id,
+            "workspace_id": reference.workspace_id,
             "job_id": reference.job_id,
             "job_key": reference.job_key,
             "placement": reference.placement_hint,
@@ -426,24 +426,24 @@ class OutcomeBuilder:
         return ready
 
 
-class ReplayableWorkspaceBatch:
-    """A sealed, idempotently replayable set of workspace changes."""
+class ReplayableWorkdirBatch:
+    """A sealed, idempotently replayable set of workdir changes."""
 
-    def __init__(self, workspace: Path, root: Path) -> None:
-        self.workspace = workspace
+    def __init__(self, workdir: Path, root: Path) -> None:
+        self.workdir = workdir
         self.root = root
         self.transaction = TransactionBuilder(root, expected_generation=0)
 
     @classmethod
-    def create(cls, workspace: str | os.PathLike[str]) -> "ReplayableWorkspaceBatch":
-        target = Path(workspace).resolve()
-        draft = target / ".httk-runner" / "workspace-drafts" / str(uuid.uuid4())
+    def create(cls, workdir: str | os.PathLike[str]) -> "ReplayableWorkdirBatch":
+        target = Path(workdir).resolve()
+        draft = target / ".httk-runner" / "workdir-drafts" / str(uuid.uuid4())
         draft.mkdir(parents=True)
         return cls(target, draft)
 
     def seal(self) -> Path:
         self.transaction.seal()
-        ready_root = self.workspace / ".httk-runner" / "workspace-ready"
+        ready_root = self.workdir / ".httk-runner" / "workdir-ready"
         ready_root.mkdir(parents=True, exist_ok=True)
         ready = ready_root / self.root.name
         os.rename(self.root, ready)
@@ -451,10 +451,10 @@ class ReplayableWorkspaceBatch:
         return ready
 
     def commit(self) -> Path:
-        if self.root.parent.name != "workspace-ready":
+        if self.root.parent.name != "workdir-ready":
             self.seal()
-        replay_transaction(self.root, self.workspace, expected_generation=0)
-        applied_root = self.workspace / ".httk-runner" / "workspace-applied"
+        replay_transaction(self.root, self.workdir, expected_generation=0)
+        applied_root = self.workdir / ".httk-runner" / "workdir-applied"
         applied_root.mkdir(parents=True, exist_ok=True)
         applied = applied_root / self.root.name
         os.rename(self.root, applied)
@@ -462,9 +462,9 @@ class ReplayableWorkspaceBatch:
         return applied
 
     @staticmethod
-    def recover(workspace: str | os.PathLike[str]) -> tuple[Path, ...]:
-        target = Path(workspace).resolve()
-        ready_root = target / ".httk-runner" / "workspace-ready"
+    def recover(workdir: str | os.PathLike[str]) -> tuple[Path, ...]:
+        target = Path(workdir).resolve()
+        ready_root = target / ".httk-runner" / "workdir-ready"
         if not ready_root.is_dir():
             return ()
         recovered: list[Path] = []
@@ -472,7 +472,7 @@ class ReplayableWorkspaceBatch:
             if not batch.is_dir():
                 continue
             replay_transaction(batch, target, expected_generation=0)
-            applied_root = target / ".httk-runner" / "workspace-applied"
+            applied_root = target / ".httk-runner" / "workdir-applied"
             applied_root.mkdir(parents=True, exist_ok=True)
             applied = applied_root / batch.name
             os.rename(batch, applied)
@@ -480,11 +480,11 @@ class ReplayableWorkspaceBatch:
         return tuple(recovered)
 
 
-class WorkspaceState:
-    """Atomic JSON application state stored below the current workspace."""
+class WorkdirState:
+    """Atomic JSON application state stored below the current workdir."""
 
-    def __init__(self, workspace: str | os.PathLike[str]) -> None:
-        self.path = Path(workspace).resolve() / ".httk-runner" / "state.json"
+    def __init__(self, workdir: str | os.PathLike[str]) -> None:
+        self.path = Path(workdir).resolve() / ".httk-runner" / "state.json"
 
     def read(self) -> dict[str, object]:
         return {} if not self.path.exists() else read_json(self.path)
@@ -509,10 +509,10 @@ class WorkspaceState:
 
 
 class RunLog:
-    """Append-only structured application evidence in a workspace."""
+    """Append-only structured application evidence in a workdir."""
 
-    def __init__(self, workspace: str | os.PathLike[str]) -> None:
-        self.path = Path(workspace).resolve() / ".httk-runner" / "runlog.jsonl"
+    def __init__(self, workdir: str | os.PathLike[str]) -> None:
+        self.path = Path(workdir).resolve() / ".httk-runner" / "runlog.jsonl"
 
     def append(self, kind: str, message: str, *, files: Sequence[str | os.PathLike[str]] = ()) -> None:
         if not kind or "\x00" in kind:

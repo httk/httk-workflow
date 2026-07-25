@@ -11,7 +11,7 @@ The central rule is:
 > *httk* v1 task-manager queue.
 
 The *httk₂* manager never claims or rewrites an existing *httk* v1 queue tree. Once a task
-has been prepared and submitted to an *httk₂* store, its `job.json`, marker, and
+has been prepared and submitted to an *httk₂* workspace, its `job.json`, marker, and
 journal are authoritative.
 
 ## 1. Choose a migration route
@@ -21,7 +21,7 @@ You do not need to migrate every workflow at once.
 | Route | Workflow changes | Manager | Best use |
 | --- | --- | --- | --- |
 | Compatibility | None, normally | `httk-v1-taskmanager` | Establish an *httk₂* operational baseline quickly |
-| Mixed | Per job type | Both managers on one store | Incremental migration with a direct fallback |
+| Mixed | Per job type | Both managers on one workspace | Incremental migration with a direct fallback |
 | Native Bash | Replace `HT_TASK_*` and `VASP_*` calls | `httk-taskmanager` | Preserve a shell-oriented workflow |
 | Native Python | Replace the runner with Python calls | `httk-taskmanager` | New development and more structured logic |
 
@@ -51,18 +51,18 @@ Make a copy of an instantiated task directory and record:
 Do not infer completion from a legacy task-directory suffix alone. Capture the
 actual input files, logs, expected results, and exit behavior.
 
-## 3. Run the workflow unchanged in an *httk₂* store
+## 3. Run the workflow unchanged in an *httk₂* workspace
 
-Initialize an *httk₂* store:
+Initialize an *httk₂* workspace:
 
 ```console
-httk workflow store init workflow-store
+httk workflow workspace init workflow-workspace
 ```
 
 The standalone alias is equivalent:
 
 ```console
-httk-taskmanager init workflow-store
+httk-taskmanager init workflow-workspace
 ```
 
 Prepare an already instantiated *httk* v1 task without consuming the source:
@@ -78,14 +78,14 @@ httk workflow v1 prepare legacy-task prepared-v1 \
 Submit the prepared payload:
 
 ```console
-httk workflow job submit workflow-store prepared-v1 \
+httk workflow job submit workflow-workspace prepared-v1 \
   --placement migration/reference/silicon-relax
 ```
 
 Preparation and submission can also be combined:
 
 ```console
-httk workflow v1 submit workflow-store legacy-task \
+httk workflow v1 submit workflow-workspace legacy-task \
   --placement migration/reference/silicon-relax \
   --tag silicon-relax \
   --set vasp \
@@ -96,7 +96,7 @@ httk workflow v1 submit workflow-store legacy-task \
 Run only *httk* v1 compatibility jobs:
 
 ```console
-httk workflow v1 run workflow-store \
+httk workflow v1 run workflow-workspace \
   --set any \
   --workers 4 \
   --until-idle
@@ -113,11 +113,11 @@ source "$HTTK_DIR/Execution/tasks/vasp/vasptools.sh"
 Inspect the result through the *httk₂* source of truth:
 
 ```console
-httk workflow store status workflow-store --json
+httk workflow workspace status workflow-workspace --json
 ```
 
 The compatibility runner preserves the persistent `ht.run.current/`
-workspace, translates *httk* v1 decisions and dynamic subtasks, and completes
+workdir, translates *httk* v1 decisions and dynamic subtasks, and completes
 published *httk* v1 atomic sections after interruption. See
 [*httk* v1 task compatibility](v1_compatibility.md) for the precise
 compatibility boundary.
@@ -140,9 +140,9 @@ httk workflow project import-v1 . --source ./ht.project
 
 This imports safe metadata and public identities. It does not import private
 keys or the *httk* v1 queue. Imported project metadata records
-`legacy_queue_imported: false`. The project store is initialized for detached
+`legacy_queue_imported: false`. The project workspace is initialized for detached
 transfer, not transactional data. Use persistent `data.mode: "none"` jobs
-there, or initialize a separate transactional store before submission.
+there, or initialize a separate transactional workspace before submission.
 
 Recognized *httk* v1 computer definitions can be mapped explicitly:
 
@@ -150,7 +150,7 @@ Recognized *httk* v1 computer definitions can be mapped explicitly:
 httk workflow computer import-v1 ~/.httk/computers/cluster-a \
   --name cluster-a
 httk workflow computer configure cluster-a:default \
-  --set store=/remote/path/to/workflow-store
+  --set workspace=/remote/path/to/workflow-workspace
 ```
 
 Review every generated adapter before installation. Legacy shell executables
@@ -159,20 +159,20 @@ and credentials are not copied or executed by the importer.
 ## 5. Run compatibility and native jobs side by side
 
 The *httk* v1 and native managers select different runner backends, so they can share
-one *httk₂* store:
+one *httk₂* workspace:
 
 ```console
 # Terminal or service 1: compatibility jobs
-httk-v1-taskmanager run workflow-store --set any --workers 2
+httk-v1-taskmanager run workflow-workspace --set any --workers 2
 
 # Terminal or service 2: native jobs
-httk-taskmanager run workflow-store --pool vasp-native --workers 2
+httk-taskmanager run workflow-workspace --pool vasp-native --workers 2
 ```
 
 If the future native jobs will use transactional data, create this shared
-store with `--extension transactional-data-v1` before submitting the
+workspace with `--extension transactional-data-v1` before submitting the
 compatibility baseline. That extension cannot currently be added to an
-existing store in place.
+existing workspace in place.
 
 Give the first native version a new job UUID and preferably a distinct tag and
 placement. Do not edit the immutable `job.json` of an already submitted job to
@@ -266,18 +266,18 @@ The outcome functions publish exactly one decision and then exit the Bash
 runner. Do not additionally return a legacy decision code or write
 `ht.nextstep`.
 
-The `collect` example uses transactional data. Its store must have been
+The `collect` example uses transactional data. Its workspace must have been
 created with that extension:
 
 ```console
-httk-taskmanager init native-store \
+httk-taskmanager init native-workspace \
   --extension transactional-data-v1
 ```
 
-`transactional-data-v1` cannot currently be added to an existing store by an
-in-place upgrade, so decide this when creating the native store. If the job
+`transactional-data-v1` cannot currently be added to an existing workspace by an
+in-place upgrade, so decide this when creating the native workspace. If the job
 uses `data.mode: "none"`, omit the transaction and keep restartable working
-files in its persistent workspace instead.
+files in its persistent workdir instead.
 
 ### Prepare the native payload
 
@@ -302,7 +302,7 @@ prepare_job_payload(
         runner_path="files/run.sh",
         initial_step="prepare",
         tag="silicon-relax",
-        workspace_mode="persistent",
+        workdir_mode="persistent",
         data_mode="transactional",
         priority=700,
         claim_pool="vasp-native",
@@ -315,16 +315,16 @@ prepare_job_payload(
 Submit and run it:
 
 ```console
-httk-taskmanager submit native-store native-job \
+httk-taskmanager submit native-workspace native-job \
   --placement migration/native/silicon-relax
-httk-taskmanager run native-store \
+httk-taskmanager run native-workspace \
   --pool vasp-native \
   --until-idle
 ```
 
 Static payload files are available below `HTTK_WORKFLOW_JOB_DIR`; the selected
-workspace is `HTTK_WORKFLOW_RUN_DIR`. Copy or link static inputs into the
-workspace in an explicit preparation step when necessary.
+workdir is `HTTK_WORKFLOW_WORKDIR`. Copy or link static inputs into the
+workdir in an explicit preparation step when necessary.
 
 ## 7. Translate the commonly used task helpers
 
@@ -337,7 +337,7 @@ The native API is intentionally not a spelling change of the *httk* v1 API.
 | `HT_TASK_FINISHED` | `httk_workflow_succeed` | `runtime.succeed()` |
 | `HT_TASK_BROKEN` | `httk_workflow_fail CODE MESSAGE` | `runtime.fail(code, message)` |
 | `HT_TASK_SUBTASKS` | explicit children plus `httk_workflow_wait` | `OutcomeBuilder` plus `JoinSpec` |
-| `HT_TASK_ATOMIC_*` | outcome transaction or workspace spec | `TransactionBuilder` or `ReplayableWorkspaceBatch` |
+| `HT_TASK_ATOMIC_*` | outcome transaction or workdir spec | `TransactionBuilder` or `ReplayableWorkdirBatch` |
 | `HT_TASK_STORE_VAR` | `httk_workflow_state_set` | `runtime.state.set()` |
 | `HT_TASK_RUN_CONTROLLED` | `httk_workflow_run` | `ProcessSupervisor` |
 | `HT_TASK_SET_PRIORITY` | `--priority` on an outcome | `priority=` on publication |
@@ -414,7 +414,7 @@ For application-specific monitoring, write a checker spec:
 ```
 
 This example assumes the executable checker and its specification were copied
-from the immutable job payload into the workspace during preparation.
+from the immutable job payload into the workdir during preparation.
 
 The executable reads `httk-workflow-checker-event` JSON lines from stdin and
 emits versioned results on stdout:
@@ -523,7 +523,7 @@ from httk.workflow import AttemptRuntime, JobSpec, JoinSpec, prepare_job_payload
 runtime = AttemptRuntime.initialize()
 outcome = runtime.outcome()
 
-with tempfile.TemporaryDirectory(dir=runtime.workspace) as draft_root:
+with tempfile.TemporaryDirectory(dir=runtime.workdir) as draft_root:
     for index, parameter in enumerate(("0.95", "1.00", "1.05")):
         child = Path(draft_root) / f"child-{index}"
         shutil.copytree(runtime.job / "files" / "child-template", child)
@@ -595,7 +595,7 @@ def main() -> int:
 
     if runtime.context.step == "prepare":
         for name in ("POSCAR", "INCAR"):
-            destination = runtime.workspace / name
+            destination = runtime.workdir / name
             if not destination.exists():
                 shutil.copy2(runtime.job / "files" / name, destination)
         prepare_vasp_inputs(
@@ -606,7 +606,7 @@ def main() -> int:
                 parallel_tag="NPAR",
                 parallel_value=4,
             ),
-            directory=runtime.workspace,
+            directory=runtime.workdir,
         )
         runtime.advance("run")
         return 0
@@ -614,7 +614,7 @@ def main() -> int:
     if runtime.context.step == "run":
         report = run_vasp(
             ["vasp_std"],
-            directory=runtime.workspace,
+            directory=runtime.workdir,
             timeout=86400,
         )
         if report.classification == "completed":
@@ -629,7 +629,7 @@ def main() -> int:
         if not decision.give_up:
             apply_vasp_remedy(
                 decision,
-                directory=runtime.workspace,
+                directory=runtime.workdir,
                 history_path=history,
             )
             runtime.retry("reviewed VASP remedy applied")
@@ -647,12 +647,12 @@ def main() -> int:
         transaction = outcome.transaction()
         transaction.put_file(
             "outcar",
-            runtime.workspace / "OUTCAR",
+            runtime.workdir / "OUTCAR",
             "results/OUTCAR",
         )
         transaction.put_file(
             "oszicar",
-            runtime.workspace / "OSZICAR",
+            runtime.workdir / "OSZICAR",
             "results/OSZICAR",
         )
         outcome.publish("succeed")
@@ -667,7 +667,7 @@ if __name__ == "__main__":
 ```
 
 As in the Bash example, the transaction requires a transactional-data job and
-a store initialized with `transactional-data-v1`.
+a workspace initialized with `transactional-data-v1`.
 
 ## 12. Validate before switching production work
 
@@ -696,7 +696,7 @@ Stop instantiating new compatibility jobs first. Let submitted *httk* v1 jobs re
 terminal state or cancel them through recorded operator requests:
 
 ```console
-httk-taskmanager request workflow-store JOB_UUID cancel \
+httk-taskmanager request workflow-workspace JOB_UUID cancel \
   --operator "$USER" \
   --reason "replaced by validated native workflow"
 ```
@@ -712,9 +712,9 @@ read-only according to the project's provenance and retention policy.
 
 - [ ] An instantiated *httk* v1 task runs successfully through compatibility.
 - [ ] Project/configuration/computer imports were reviewed separately.
-- [ ] No live *httk* v1 queue is being treated as an *httk₂* store.
+- [ ] No live *httk* v1 queue is being treated as an *httk₂* workspace.
 - [ ] Persistent scratch and committed result files are distinguished.
-- [ ] The store's extensions match the native job's data model.
+- [ ] The workspace's extensions match the native job's data model.
 - [ ] Every `HT_TASK_*` and `VASP_*` dependency has an explicit replacement.
 - [ ] Automatic remedies became explicit plan-and-apply decisions.
 - [ ] Child jobs use stable identities and an explicit join condition.

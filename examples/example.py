@@ -1,8 +1,8 @@
-"""Initialize an httk workflow store."""
+"""Initialize an httk workflow workspace."""
 
 from pathlib import Path
 
-from httk.workflow import WorkflowStore
+from httk.workflow import WorkflowWorkspace
 
-store = WorkflowStore.initialize(Path("example-workflow-store"))
-print(f"initialized workflow store {store.store_id} at {store.root}")
+workspace = WorkflowWorkspace.initialize(Path("example-workflow-workspace"))
+print(f"initialized workflow workspace {workspace.workspace_id} at {workspace.root}")

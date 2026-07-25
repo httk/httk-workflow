@@ -52,15 +52,15 @@ evaluate a command string.
   operations. `child_add` adds prepared child payloads. The final outcome
   function publishes the complete bundle.
 - `httk_workflow_job_prepare DEST SPEC.json` creates a native payload.
-  `httk_workflow_workspace_apply SPEC.json` applies a replayable set of
-  persistent-workspace changes.
+  `httk_workflow_workdir_apply SPEC.json` applies a replayable set of
+  persistent-workdir changes.
 - `httk_workflow_run` supervises an argv command. `--checker SPEC.json` adds a
   required versioned executable checker.
 - `httk_calc`, `httk_template_render`, `httk_compress`, and `httk_decompress`
   are safe replacements for commonly used *httk* v1 conveniences. Templates use
   `string.Template` and an explicit JSON values object, never `eval`.
 
-Transaction and workspace specs use the protocol operation names
+Transaction and workdir specs use the protocol operation names
 `make-dir`, `put-file`, `put-tree`, `replace-tree`, and `remove`. Sources are
 copied into a sealed bundle before publication. Symlinks and special files are
 rejected.
@@ -90,9 +90,9 @@ for completed nonconvergence, 22 for process failure, and 124 for timeout. The
 versioned JSON report is authoritative.
 
 Remedies are never automatic. `remedy_plan` returns 3 when the reviewed policy
-has no safe remaining action. Applying a decision uses a replayable workspace
+has no safe remaining action. Applying a decision uses a replayable workdir
 batch and records before/after input digests and policy history. Preparation
-also enforces the conservative 240-byte VASP workspace-path limit.
+also enforces the conservative 240-byte VASP workdir-path limit.
 
 ## Mapping from *httk* v1
 
@@ -100,8 +100,8 @@ also enforces the conservative 240-byte VASP workspace-path limit.
 | --- | --- |
 | `HT_TASK_INIT`, next/finished/broken | Context initialization and structured outcome functions |
 | `HT_TASK_SUBTASKS`, `HT_TASK_CREATE` | Prepared child payloads plus explicit `JoinSpec` |
-| `HT_TASK_ATOMIC_*` | Protocol transactions or `ReplayableWorkspaceBatch` |
-| `HT_TASK_STORE_VAR` | `WorkspaceState` / Bash state functions |
+| `HT_TASK_ATOMIC_*` | Protocol transactions or `ReplayableWorkdirBatch` |
+| `HT_TASK_STORE_VAR` | `WorkdirState` / Bash state functions |
 | `HT_TASK_RUN_CONTROLLED`, follow-file checkers | `ProcessSupervisor` and checker JSON-lines protocol |
 | priority file | `priority` on the published outcome |
 | run log helpers | structured `RunLog` |

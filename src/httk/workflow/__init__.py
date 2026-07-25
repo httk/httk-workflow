@@ -3,12 +3,12 @@
 from .backends import AttemptLaunch, OutcomeCommit, PathRunnerBackend, RunnerBackend
 from .errors import (
     FormatError,
-    StoreCorruptionError,
-    StoreUnavailableError,
     TransactionError,
     TransitionLostError,
     UnsupportedExtensionError,
     WorkflowError,
+    WorkspaceCorruptionError,
+    WorkspaceUnavailableError,
 )
 from .manager import TaskManager
 from .models import JobDefinition, Marker, RetryPolicy
@@ -18,10 +18,10 @@ from .runtime_builders import (
     JobSpec,
     JoinSpec,
     OutcomeBuilder,
-    ReplayableWorkspaceBatch,
+    ReplayableWorkdirBatch,
     RunLog,
     TransactionBuilder,
-    WorkspaceState,
+    WorkdirState,
     prepare_job_payload,
 )
 from .runtime_utils import (
@@ -30,7 +30,6 @@ from .runtime_utils import (
     evaluate_expression,
     render_template,
 )
-from .store import WorkflowStore
 from .supervision import (
     CheckerSpec,
     Diagnostic,
@@ -82,9 +81,10 @@ from .vasp import (
     scale_poscar_lattice,
     suggested_magnetic_moments,
     update_incar,
-    validate_vasp_workspace,
+    validate_vasp_workdir,
     write_automatic_kpoints,
 )
+from .workspace import WorkflowWorkspace
 
 __all__ = [
     "AttemptContext",
@@ -107,12 +107,12 @@ __all__ = [
     "ProcessSupervisor",
     "FollowSource",
     "SourceEvent",
-    "ReplayableWorkspaceBatch",
+    "ReplayableWorkdirBatch",
     "RunLog",
     "RetryPolicy",
     "RunnerBackend",
-    "StoreCorruptionError",
-    "StoreUnavailableError",
+    "WorkspaceCorruptionError",
+    "WorkspaceUnavailableError",
     "TaskManager",
     "TransactionError",
     "TransitionLostError",
@@ -121,9 +121,9 @@ __all__ = [
     "V1RunnerBackend",
     "V1TaskManager",
     "WorkflowError",
-    "WorkflowStore",
+    "WorkflowWorkspace",
     "TransactionBuilder",
-    "WorkspaceState",
+    "WorkdirState",
     "VaspPreparationOptions",
     "VaspRemedyDecision",
     "VaspRunReport",
@@ -162,7 +162,7 @@ __all__ = [
     "run_vasp",
     "plan_vasp_remedy",
     "apply_vasp_remedy",
-    "validate_vasp_workspace",
+    "validate_vasp_workdir",
     "bundled_v1_root",
     "prepare_v1_payload",
     "submit_v1_task",

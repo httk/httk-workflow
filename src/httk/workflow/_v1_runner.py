@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 # This file is executed by absolute path. Make source-tree execution work even
-# when a relative PYTHONPATH no longer resolves from the job workspace.
+# when a relative PYTHONPATH no longer resolves from the job workdir.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from httk.workflow._util import read_json, write_json_atomic
@@ -68,12 +68,12 @@ def _remove(path: Path) -> None:
         shutil.rmtree(path)
 
 
-def replay_v1_atomic(workspace: Path) -> None:
+def replay_v1_atomic(workdir: Path) -> None:
     """Idempotently finish legacy ``ht.atomic.*`` directories."""
 
-    for temporary in workspace.glob("ht.tmp.atomic.*"):
+    for temporary in workdir.glob("ht.tmp.atomic.*"):
         _remove(temporary)
-    for atomic in sorted(workspace.glob("ht.atomic.*")):
+    for atomic in sorted(workdir.glob("ht.atomic.*")):
         if not atomic.is_dir():
             continue
         for instruction in sorted(atomic.glob("ht.atommv.*")):
@@ -81,8 +81,8 @@ def replay_v1_atomic(workspace: Path) -> None:
             destination_text = instruction.read_text(encoding="utf-8").strip()
             if not source_name or not destination_text:
                 raise RuntimeError(f"invalid legacy atomic move instruction: {instruction}")
-            source = workspace / source_name
-            destination = workspace / destination_text
+            source = workdir / source_name
+            destination = workdir / destination_text
             if source.exists() or source.is_symlink():
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if destination.exists() or destination.is_symlink():
@@ -92,25 +92,25 @@ def replay_v1_atomic(workspace: Path) -> None:
                 raise RuntimeError(f"legacy atomic move lost both source and destination: {source_name}")
             instruction.unlink(missing_ok=True)
         for entry in sorted(atomic.iterdir()):
-            destination = workspace / entry.name
+            destination = workdir / entry.name
             if destination.exists() or destination.is_symlink():
                 _remove(destination)
             os.rename(entry, destination)
         atomic.rmdir()
-    for temporary in workspace.glob("ht.tmp.atomic.*"):
+    for temporary in workdir.glob("ht.tmp.atomic.*"):
         _remove(temporary)
 
 
-def _next_step(workspace: Path) -> str | None:
-    path = workspace / "ht.nextstep"
+def _next_step(workdir: Path) -> str | None:
+    path = workdir / "ht.nextstep"
     if not path.is_file():
         return None
     value = path.read_text(encoding="utf-8").strip()
     return value or None
 
 
-def _legacy_priority(workspace: Path) -> int | None:
-    path = workspace / "ht.priority"
+def _legacy_priority(workdir: Path) -> int | None:
+    path = workdir / "ht.priority"
     if not path.is_file():
         return None
     try:
@@ -189,7 +189,7 @@ def _legacy_environment(
             "HT_TASK_STEP": str(context["step"]),
             "HT_TASKMGR_TIMEOUT": str(int(arguments.timeout)),
             "HT_TASKMGR_SET": job.claim_pool,
-            "HT_TASKMGR_ROOTDIR": str(Path(os.environ["HTTK_WORKFLOW_STORE_DIR"])),
+            "HT_TASKMGR_ROOTDIR": str(Path(os.environ["HTTK_WORKFLOW_WORKSPACE_DIR"])),
             "HT_TASKMGR_ATTEMPTS": str(arguments.attempts),
             "HT_NBR_NODES": environment.get("HT_NBR_NODES", "1"),
             "TASKMGRPID": str(os.getpid()),
@@ -261,7 +261,7 @@ def _prepare_children(
             "fields": fields,
         }
         parent = {
-            "store_id": context["store_id"],
+            "workspace_id": context["workspace_id"],
             "job_id": job.id,
             "job_key": job.job_key,
         }
@@ -284,7 +284,7 @@ def _prepare_children(
         placement = _child_placement(root, job.id, child_id)
         entries.append(
             {
-                "store_id": context["store_id"],
+                "workspace_id": context["workspace_id"],
                 "job_id": child_id,
                 "job_key": child_job.job_key,
                 "placement": placement.as_posix(),
@@ -346,7 +346,7 @@ def _publish_outcome(
             "condition": "all_terminal",
             "children": [
                 {
-                    "store_id": entry["store_id"],
+                    "workspace_id": entry["workspace_id"],
                     "job_id": entry["job_id"],
                     "job_key": entry["job_key"],
                     "placement_hint": entry["placement"],
@@ -359,11 +359,11 @@ def _publish_outcome(
     os.rename(temporary, control / "outcome.ready")
 
 
-def _archive_log(payload: Path, workspace: Path, compression: str) -> None:
+def _archive_log(payload: Path, workdir: Path, compression: str) -> None:
     source = payload / "ht.taskmgr.stdout"
     if not source.is_file():
         return
-    destination = workspace / "ht.taskmgr.stdout"
+    destination = workdir / "ht.taskmgr.stdout"
     if source.resolve() != destination.resolve():
         shutil.copyfile(source, destination)
     if compression == "bzip2":
@@ -384,7 +384,7 @@ def main() -> int:
     context_path = Path(os.environ["HTTK_WORKFLOW_CONTEXT"])
     control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
     payload = Path(os.environ["HTTK_WORKFLOW_JOB_DIR"])
-    workspace = Path(os.environ["HTTK_WORKFLOW_RUN_DIR"])
+    workdir = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
     context = read_json(context_path)
     job = JobDefinition.from_mapping(read_json(payload / "job.json"))
     compatibility = job.raw.get("compatibility")
@@ -394,10 +394,10 @@ def main() -> int:
     program_path = payload / program_name
     if program_name == "ht_steps":
         resume = payload / "ht.run.resume"
-        if resume.is_dir() and not any(workspace.iterdir()):
-            workspace.rmdir()
-            os.rename(resume, workspace)
-        current = workspace
+        if resume.is_dir() and not any(workdir.iterdir()):
+            workdir.rmdir()
+            os.rename(resume, workdir)
+        current = workdir
     else:
         current = payload
     environment = _legacy_environment(

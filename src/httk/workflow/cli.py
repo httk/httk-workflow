@@ -10,7 +10,7 @@ from ._util import utc_now
 from .errors import WorkflowError
 from .manager import TaskManager
 from .models import STATE_KINDS
-from .store import WorkflowStore
+from .workspace import WorkflowWorkspace
 
 
 def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
@@ -18,8 +18,8 @@ def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
     parser.add_argument("--durable", action="store_true", help="fsync protocol publications")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    initialize = subparsers.add_parser("init", help="initialize a workflow store")
-    initialize.add_argument("store")
+    initialize = subparsers.add_parser("init", help="initialize a workflow workspace")
+    initialize.add_argument("workspace")
     initialize.add_argument(
         "--extension",
         action="append",
@@ -28,13 +28,13 @@ def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
     )
 
     submit = subparsers.add_parser("submit", help="submit a complete payload directory")
-    submit.add_argument("store")
+    submit.add_argument("workspace")
     submit.add_argument("source")
     submit.add_argument("--placement", required=True)
     submit.add_argument("--move", action="store_true", help="rename rather than copy the source")
 
     run = subparsers.add_parser("run", help="run the task manager")
-    run.add_argument("store")
+    run.add_argument("workspace")
     run.add_argument("--pool", action="append", default=[])
     run.add_argument("--capability", action="append", default=[])
     run.add_argument("--workers", type=int, default=1)
@@ -46,11 +46,11 @@ def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
     run.add_argument("--unsafe-persistent-takeover", action="store_true")
 
     status = subparsers.add_parser("status", help="summarize authoritative markers")
-    status.add_argument("store")
+    status.add_argument("workspace")
     status.add_argument("--json", action="store_true")
 
     request = subparsers.add_parser("request", help="publish an operator request")
-    request.add_argument("store")
+    request.add_argument("workspace")
     request.add_argument("job_id")
     request.add_argument(
         "action",
@@ -63,10 +63,10 @@ def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
     return parser
 
 
-def _status(store: WorkflowStore, *, as_json: bool) -> None:
+def _status(workspace: WorkflowWorkspace, *, as_json: bool) -> None:
     counts: dict[str, int] = {}
     rows: list[dict[str, object]] = []
-    for marker in store.scan_markers(STATE_KINDS):
+    for marker in workspace.scan_markers(STATE_KINDS):
         counts[marker.kind] = counts.get(marker.kind, 0) + 1
         rows.append(
             {
@@ -84,10 +84,10 @@ def _status(store: WorkflowStore, *, as_json: bool) -> None:
                 {
                     "format": "httk-workflow-status",
                     "format_version": 1,
-                    "store_id": store.store_id,
-                    "store_format_version": store.format["format_version"],
-                    "core_profile": store.format["core_profile"],
-                    "extensions": sorted(store.extensions),
+                    "workspace_id": workspace.workspace_id,
+                    "workspace_format_version": workspace.format["format_version"],
+                    "core_profile": workspace.format["core_profile"],
+                    "extensions": sorted(workspace.extensions),
                     "counts": counts,
                     "jobs": rows,
                 },
@@ -95,13 +95,13 @@ def _status(store: WorkflowStore, *, as_json: bool) -> None:
             )
         )
         return
-    print(f"store {store.store_id}")
+    print(f"workspace {workspace.workspace_id}")
     for kind in sorted(counts):
         print(f"{kind:12s} {counts[kind]}")
 
 
-def _publish_request(store: WorkflowStore, arguments: argparse.Namespace) -> None:
-    marker = store.find_marker_by_id(arguments.job_id)
+def _publish_request(workspace: WorkflowWorkspace, arguments: argparse.Namespace) -> None:
+    marker = workspace.find_marker_by_id(arguments.job_id)
     if marker is None:
         raise ValueError(f"job does not exist: {arguments.job_id}")
     request: dict[str, object] = {
@@ -121,7 +121,7 @@ def _publish_request(store: WorkflowStore, arguments: argparse.Namespace) -> Non
         request["priority"] = arguments.priority
     if arguments.step is not None:
         request["step"] = arguments.step
-    path = store.publish_request(request)
+    path = workspace.publish_request(request)
     print(path)
 
 
@@ -132,32 +132,32 @@ def main(argv: Sequence[str] | None = None, *, program: str = "httk-taskmanager"
     arguments = parser.parse_args(argv)
     try:
         if arguments.command == "init":
-            store = WorkflowStore.initialize(
-                arguments.store,
+            workspace = WorkflowWorkspace.initialize(
+                arguments.workspace,
                 extensions=arguments.extension,
                 durable=arguments.durable,
             )
-            print(store.root)
+            print(workspace.root)
             return 0
-        store = WorkflowStore(
-            arguments.store,
+        workspace = WorkflowWorkspace(
+            arguments.workspace,
             mutable=arguments.command != "status",
             durable=arguments.durable,
         )
         if arguments.command == "submit":
-            marker = store.submit(arguments.source, arguments.placement, move=arguments.move)
+            marker = workspace.submit(arguments.source, arguments.placement, move=arguments.move)
             print(marker.path)
             return 0
         if arguments.command == "status":
-            _status(store, as_json=arguments.json)
+            _status(workspace, as_json=arguments.json)
             return 0
         if arguments.command == "request":
-            _publish_request(store, arguments)
+            _publish_request(workspace, arguments)
             return 0
         if arguments.command == "run":
             pools = arguments.pool or ["default"]
             with TaskManager(
-                store,
+                workspace,
                 pools=pools,
                 capabilities=arguments.capability,
                 maximum_workers=arguments.workers,

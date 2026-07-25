@@ -105,8 +105,8 @@ httk_workflow_job_prepare() {
     _httk_workflow_bridge job-prepare "$1" "$2"
 }
 
-httk_workflow_workspace_apply() {
-    _httk_workflow_bridge workspace-apply "$1"
+httk_workflow_workdir_apply() {
+    _httk_workflow_bridge workdir-apply "$1"
 }
 
 httk_workflow_advance() {

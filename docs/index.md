@@ -35,17 +35,17 @@ python -m pip install -e .
 ## Minimal setup
 
 ```python
-from httk.workflow import WorkflowStore
+from httk.workflow import WorkflowWorkspace
 
-store = WorkflowStore.initialize("workflow-store")
-print(store.store_id)
+workspace = WorkflowWorkspace.initialize("workflow-workspace")
+print(workspace.workspace_id)
 ```
 
 Then submit a complete job payload and run the installed manager:
 
 ```console
-httk-taskmanager submit workflow-store prepared-job --placement project/00
-httk-taskmanager run workflow-store
+httk-taskmanager submit workflow-workspace prepared-job --placement project/00
+httk-taskmanager run workflow-workspace
 ```
 
 ```{toctree}

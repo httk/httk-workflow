@@ -11,7 +11,7 @@ from pathlib import Path
 from httk.core import ed25519_generate_seed, ed25519_public_key
 
 from ._util import write_json_atomic
-from .store import WorkflowStore
+from .workspace import WorkflowWorkspace
 
 PROJECT_DIRECTORY = ".httk-project"
 PROJECT_FILE = "project.json"
@@ -81,7 +81,7 @@ def initialize_project(
     default_queue: str | None = None,
     manifest_exclusions: Iterable[str] = (),
 ) -> dict[str, object]:
-    """Initialize project metadata, keys, and a detached-transfer store."""
+    """Initialize project metadata, keys, and a detached-transfer workspace."""
 
     project = Path(root).expanduser().resolve()
     project.mkdir(parents=True, exist_ok=True)
@@ -100,11 +100,11 @@ def initialize_project(
     _write_project_key(control)
     (control / "computers").mkdir()
     try:
-        WorkflowStore.initialize(project, extensions=("detached-transfer-v1",))
+        WorkflowWorkspace.initialize(project, extensions=("detached-transfer-v1",))
     except Exception:
         # Leave a recognizable project rather than guessing whether it is safe
         # to remove a directory that may already contain user files.
-        metadata["store_initialization_failed"] = True
+        metadata["workspace_initialization_failed"] = True
         write_json_atomic(control / PROJECT_FILE, metadata)
         raise
     return metadata

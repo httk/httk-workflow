@@ -1,4 +1,4 @@
-"""Workflow-store creation, submission, marker discovery, and transitions."""
+"""Workflow workspace creation, submission, marker discovery, and transitions."""
 
 import errno
 import os
@@ -19,10 +19,10 @@ from ._util import (
 )
 from .errors import (
     FormatError,
-    StoreCorruptionError,
-    StoreUnavailableError,
     TransitionLostError,
     UnsupportedExtensionError,
+    WorkspaceCorruptionError,
+    WorkspaceUnavailableError,
 )
 from .journal import JournalWriter, read_record
 from .models import (
@@ -37,8 +37,8 @@ from .models import (
 )
 
 
-class WorkflowStore:
-    """One self-contained httk workflow filesystem store."""
+class WorkflowWorkspace:
+    """One self-contained httk workflow filesystem workspace."""
 
     def __init__(self, root: str | os.PathLike[str], *, mutable: bool = True, durable: bool = False) -> None:
         self.root = Path(root).resolve()
@@ -46,24 +46,24 @@ class WorkflowStore:
         self.durable = durable
         self.format = read_json(self.control / "format.json")
         if self.format.get("format") != "httk-workflow-filesystem" or self.format.get("format_version") != 1:
-            raise FormatError("store must use httk-workflow-filesystem format version 1")
+            raise FormatError("workspace must use httk-workflow-filesystem format version 1")
         if self.format.get("core_profile") != CORE_PROFILE:
             raise UnsupportedExtensionError(f"unsupported core profile: {self.format.get('core_profile')!r}")
         extensions_raw = self.format.get("extensions", [])
         if not isinstance(extensions_raw, list) or not all(isinstance(item, str) for item in extensions_raw):
-            raise FormatError("store extensions must be an array of strings")
+            raise FormatError("workspace extensions must be an array of strings")
         self.extensions = frozenset(extensions_raw)
         unsupported = self.extensions - SUPPORTED_EXTENSIONS
         if mutable and unsupported:
             raise UnsupportedExtensionError(f"unsupported enabled extensions: {', '.join(sorted(unsupported))}")
         if self.format.get("record_ref_encoding") != "hwref-v1":
             raise UnsupportedExtensionError("unsupported record reference encoding")
-        self.store_id = str(self.format.get("store_id"))
+        self.workspace_id = str(self.format.get("workspace_id"))
         try:
-            if str(uuid.UUID(self.store_id)) != self.store_id:
+            if str(uuid.UUID(self.workspace_id)) != self.workspace_id:
                 raise ValueError
         except ValueError as exc:
-            raise FormatError("store_id must be a canonical UUID") from exc
+            raise FormatError("workspace_id must be a canonical UUID") from exc
         self.priority_bands = "priority-bands-v1" in self.extensions
 
     @classmethod
@@ -73,8 +73,8 @@ class WorkflowStore:
         *,
         extensions: Iterable[str] = (),
         durable: bool = False,
-    ) -> "WorkflowStore":
-        """Create and return a new store."""
+    ) -> "WorkflowWorkspace":
+        """Create and return a new workspace."""
 
         root_path = Path(root).resolve()
         root_path.mkdir(parents=True, exist_ok=True)
@@ -109,7 +109,7 @@ class WorkflowStore:
                 "core_profile": CORE_PROFILE,
                 "extensions": sorted(extension_set),
                 "record_ref_encoding": "hwref-v1",
-                "store_id": str(uuid.uuid4()),
+                "workspace_id": str(uuid.uuid4()),
                 "created_at": utc_now(),
             },
             durable=durable,
@@ -127,7 +127,7 @@ class WorkflowStore:
         unsupported_migrations = additions - {"detached-transfer-v1"}
         if unsupported_migrations:
             raise UnsupportedExtensionError(
-                "existing stores can only enable detached-transfer-v1; "
+                "existing workspaces can only enable detached-transfer-v1; "
                 f"no implemented migration for: {', '.join(sorted(unsupported_migrations))}"
             )
         if "detached-transfer-v1" in additions:
@@ -144,7 +144,7 @@ class WorkflowStore:
         self,
         job_id: str,
         *,
-        destination_store_id: str,
+        destination_workspace_id: str,
         destination_placement: str | PurePosixPath | None = None,
         transfer_id: str | None = None,
     ) -> Path:
@@ -155,7 +155,7 @@ class WorkflowStore:
         return detach_job(
             self,
             job_id,
-            destination_store_id=destination_store_id,
+            destination_workspace_id=destination_workspace_id,
             destination_placement=destination_placement,
             transfer_id=transfer_id,
         )
@@ -222,7 +222,7 @@ class WorkflowStore:
     def find_marker_by_id(self, job_id: str) -> Marker | None:
         matches = [marker for marker in self.scan_markers() if marker.job_id == job_id]
         if len(matches) > 1:
-            raise StoreCorruptionError(f"job {job_id} has more than one state marker")
+            raise WorkspaceCorruptionError(f"job {job_id} has more than one state marker")
         return matches[0] if matches else None
 
     def find_marker_at(self, job_key: str, placement: PurePosixPath) -> Marker | None:
@@ -244,7 +244,7 @@ class WorkflowStore:
                     if path.is_file():
                         matches.append(Marker.from_path(state_root, path, priority_bands=self.priority_bands))
         if len(matches) > 1:
-            raise StoreCorruptionError(f"job {job_key} has multiple markers at {placement}")
+            raise WorkspaceCorruptionError(f"job {job_key} has multiple markers at {placement}")
         return matches[0] if matches else None
 
     def load_job(self, marker: Marker) -> JobDefinition:
@@ -261,7 +261,7 @@ class WorkflowStore:
             return {
                 "format": "httk-workflow-state",
                 "format_version": 1,
-                "store_id": self.store_id,
+                "workspace_id": self.workspace_id,
                 "job_id": marker.job_id,
                 "job_key": marker.job_key,
                 "placement": marker.placement.as_posix(),
@@ -275,12 +275,12 @@ class WorkflowStore:
         if (
             frame.get("format") != "httk-workflow-state"
             or frame.get("format_version") != 1
-            or frame.get("store_id") != self.store_id
+            or frame.get("workspace_id") != self.workspace_id
             or frame.get("job_key") != marker.job_key
             or frame.get("state_generation") != marker.generation
             or frame.get("kind") != marker.kind
         ):
-            raise StoreCorruptionError(f"state frame disagrees with marker {marker.path}")
+            raise WorkspaceCorruptionError(f"state frame disagrees with marker {marker.path}")
         return frame
 
     def transition(
@@ -297,11 +297,11 @@ class WorkflowStore:
         next_priority = marker.priority if priority is None else priority
         generation = marker.generation + 1
         if generation > (1 << 64) - 1:
-            raise StoreCorruptionError("state generation exhausted")
+            raise WorkspaceCorruptionError("state generation exhausted")
         frame: dict[str, object] = {
             "format": "httk-workflow-state",
             "format_version": 1,
-            "store_id": self.store_id,
+            "workspace_id": self.workspace_id,
             "job_id": marker.job_id,
             "job_key": marker.job_key,
             "placement": marker.placement.as_posix(),
@@ -336,10 +336,10 @@ class WorkflowStore:
             if len(current) == 1:
                 raise TransitionLostError(f"another transition moved {source} to {current[0].path}")
             if len(current) > 1:
-                raise StoreCorruptionError(f"job {marker.job_key} has multiple markers")
+                raise WorkspaceCorruptionError(f"job {marker.job_key} has multiple markers")
             time.sleep(retry_delay(attempt))
         detail = f": {last_error}" if last_error is not None else ""
-        raise StoreUnavailableError(f"cannot resolve marker rename {source} -> {destination}{detail}")
+        raise WorkspaceUnavailableError(f"cannot resolve marker rename {source} -> {destination}{detail}")
 
     def _publish_path(self, source: Path, destination: Path, *, attempts: int = 7) -> None:
         last_error: OSError | None = None
@@ -364,7 +364,7 @@ class WorkflowStore:
                 continue
             time.sleep(retry_delay(attempt))
         detail = f": {last_error}" if last_error else ""
-        raise StoreUnavailableError(f"cannot resolve publication {source} -> {destination}{detail}")
+        raise WorkspaceUnavailableError(f"cannot resolve publication {source} -> {destination}{detail}")
 
     def submit(
         self,
@@ -373,7 +373,7 @@ class WorkflowStore:
         *,
         move: bool = False,
     ) -> Marker:
-        """Copy or move a complete payload into the store and publish it."""
+        """Copy or move a complete payload into the workspace and publish it."""
 
         source_path = Path(source).resolve()
         job = JobDefinition.from_mapping(read_json(source_path / "job.json"))
@@ -389,7 +389,7 @@ class WorkflowStore:
                 os.rename(source_path, staging)
             except OSError as exc:
                 if exc.errno == errno.EXDEV:
-                    raise WorkflowStoreError("move submission must remain on one filesystem") from exc
+                    raise WorkflowWorkspaceError("move submission must remain on one filesystem") from exc
                 raise
         else:
             shutil.copytree(source_path, staging, symlinks=False)
@@ -439,5 +439,5 @@ class WorkflowStore:
         return ready
 
 
-class WorkflowStoreError(StoreUnavailableError):
-    """A store operation could not be completed."""
+class WorkflowWorkspaceError(WorkspaceUnavailableError):
+    """A workspace operation could not be completed."""

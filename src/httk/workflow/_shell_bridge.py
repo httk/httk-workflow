@@ -15,7 +15,7 @@ from .runtime_builders import (
     JobSpec,
     JoinSpec,
     OutcomeBuilder,
-    ReplayableWorkspaceBatch,
+    ReplayableWorkdirBatch,
     prepare_job_payload,
 )
 from .runtime_utils import (
@@ -74,8 +74,8 @@ def _parser() -> argparse.ArgumentParser:
     job_prepare = commands.add_parser("job-prepare")
     job_prepare.add_argument("destination")
     job_prepare.add_argument("spec")
-    workspace_apply = commands.add_parser("workspace-apply")
-    workspace_apply.add_argument("spec")
+    workdir_apply = commands.add_parser("workdir-apply")
+    workdir_apply.add_argument("spec")
 
     for name in ("tx-mkdir", "tx-remove"):
         item = commands.add_parser(name)
@@ -377,15 +377,15 @@ def _command(arguments: argparse.Namespace) -> int:
     elif command == "job-prepare":
         raw = read_json(Path(arguments.spec))
         prepare_job_payload(arguments.destination, JobSpec(**raw))
-    elif command == "workspace-apply":
+    elif command == "workdir-apply":
         raw = read_json(Path(arguments.spec))
         operations = raw.get("operations")
         if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
-            raise ValueError("workspace operation spec requires an operations array")
-        batch = ReplayableWorkspaceBatch.create(_runtime().workspace)
+            raise ValueError("workdir operation spec requires an operations array")
+        batch = ReplayableWorkdirBatch.create(_runtime().workdir)
         for item in operations:
             if not isinstance(item, Mapping):
-                raise ValueError("workspace operation must be an object")
+                raise ValueError("workdir operation must be an object")
             operation = str(item.get("op", ""))
             identifier = str(item.get("id", ""))
             path = str(item.get("path", ""))
@@ -403,7 +403,7 @@ def _command(arguments: argparse.Namespace) -> int:
             elif operation == "remove":
                 batch.transaction.remove(identifier, path, missing_ok=bool(item.get("missing_ok", False)))
             else:
-                raise ValueError(f"unknown workspace operation: {operation}")
+                raise ValueError(f"unknown workdir operation: {operation}")
         print(batch.commit())
     elif command.startswith("tx-"):
         _transaction_add(arguments)

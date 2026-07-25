@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._util import read_json, sha256_file, utc_now, write_json_atomic
-from .runtime_builders import ReplayableWorkspaceBatch
+from .runtime_builders import ReplayableWorkdirBatch
 from .supervision import (
     Diagnostic,
     FollowSource,
@@ -490,7 +490,7 @@ def clean_outcar(
     return destination
 
 
-def validate_vasp_workspace(
+def validate_vasp_workdir(
     path: str | os.PathLike[str] = ".",
     *,
     maximum_length: int = 240,
@@ -501,7 +501,7 @@ def validate_vasp_workspace(
     if maximum_length < 1:
         raise ValueError("maximum path length must be positive")
     if len(os.fspath(resolved).encode()) > maximum_length:
-        raise ValueError(f"VASP workspace path exceeds {maximum_length} bytes: {resolved}")
+        raise ValueError(f"VASP workdir path exceeds {maximum_length} bytes: {resolved}")
     return resolved
 
 
@@ -566,7 +566,7 @@ def prepare_vasp_inputs(
 ) -> dict[str, object]:
     """Prepare POSCAR, POTCAR, KPOINTS, and INCAR with recorded choices."""
 
-    root = validate_vasp_workspace(directory)
+    root = validate_vasp_workdir(directory)
     poscar = root / "POSCAR"
     incar = root / "INCAR"
     if options.normalize_handedness:
@@ -917,7 +917,7 @@ def apply_vasp_remedy(
     directory: str | os.PathLike[str] = ".",
     history_path: str | os.PathLike[str] = ".httk-vasp/remedies.json",
 ) -> Path:
-    """Explicitly apply a proposed remedy through a replayable workspace batch."""
+    """Explicitly apply a proposed remedy through a replayable workdir batch."""
 
     if decision.give_up:
         raise ValueError(f"cannot apply give-up decision: {decision.reason}")
@@ -1001,7 +1001,7 @@ def apply_vasp_remedy(
         history.update({"attempts": attempts, "events": events})
         staged_history = staging / "vasp-remedies.json"
         write_json_atomic(staged_history, history)
-        batch = ReplayableWorkspaceBatch.create(root)
+        batch = ReplayableWorkdirBatch.create(root)
         for index, (name, source) in enumerate(sorted(changed.items())):
             batch.transaction.put_file(f"input-{index}", source, name)
         batch.transaction.put_file("remedy-history", staged_history, Path(history_path).as_posix())
