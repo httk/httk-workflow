@@ -78,3 +78,7 @@ The local executor starts runners behind a one-byte launch gate. It records
 the process identity and commits the `running` marker before releasing that
 gate. If the manager disappears during this narrow launch interval, the gated
 process observes end-of-file and exits without executing the runner.
+
+`httk-taskmanager` executes only the normal `path` runner backend. Legacy
+`ht_steps` jobs use a distinct backend and are intentionally left untouched;
+run those with {doc}`v1_compatibility`.

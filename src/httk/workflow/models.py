@@ -124,6 +124,7 @@ class JobDefinition:
     tag: str | None
     name: str
     workflow: str
+    runner_backend: str
     runner_path: PurePosixPath
     runner_arguments: tuple[str, ...]
     workspace_mode: str
@@ -156,6 +157,7 @@ class JobDefinition:
         tag_raw = value.get("tag")
         tag = None if tag_raw is None else validate_label(tag_raw, "tag")
         runner = require_mapping(value.get("runner"), "runner")
+        runner_backend = validate_label(runner.get("backend", "path"), "runner.backend")
         arguments_raw = runner.get("arguments", [])
         if not isinstance(arguments_raw, Sequence) or isinstance(arguments_raw, (str, bytes)):
             raise FormatError("runner.arguments must be an array")
@@ -187,6 +189,7 @@ class JobDefinition:
             tag=tag,
             name=require_string(value.get("name"), "name"),
             workflow=require_string(value.get("workflow"), "workflow"),
+            runner_backend=runner_backend,
             runner_path=runner_path,
             runner_arguments=arguments,
             workspace_mode=workspace_mode,

@@ -12,7 +12,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Self
 
-from ._util import read_json, timestamp_seconds, tree_digest, utc_now, write_json_atomic
+from ._util import (
+    read_json,
+    require_int,
+    timestamp_seconds,
+    tree_digest,
+    utc_now,
+    write_json_atomic,
+)
+from .backends import AttemptLaunch, OutcomeCommit, PathRunnerBackend, RunnerBackend
 from .errors import (
     FormatError,
     TransactionError,
@@ -58,6 +66,9 @@ class TaskManager:
         lease_seconds: float = 900.0,
         heartbeat_interval: float = 30.0,
         unsafe_persistent_takeover: bool = False,
+        runner_backends: Sequence[RunnerBackend] = (),
+        allowed_backends: Sequence[str] | None = None,
+        accept_any_pool: bool = False,
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
@@ -68,6 +79,17 @@ class TaskManager:
         self.lease_seconds = lease_seconds
         self.heartbeat_interval = heartbeat_interval
         self.unsafe_persistent_takeover = unsafe_persistent_takeover
+        backends = [PathRunnerBackend(), *runner_backends]
+        self.runner_backends = {backend.name: backend for backend in backends}
+        if len(self.runner_backends) != len(backends):
+            raise ValueError("runner backend names must be unique")
+        self.allowed_backends = (
+            frozenset(self.runner_backends) if allowed_backends is None else frozenset(allowed_backends)
+        )
+        unknown_allowed = self.allowed_backends - self.runner_backends.keys()
+        if unknown_allowed:
+            raise ValueError(f"allowed runner backends are not installed: {', '.join(sorted(unknown_allowed))}")
+        self.accept_any_pool = accept_any_pool
         self.manager_id = str(uuid.uuid4())
         self.hostname = socket.gethostname()
         self.writer = JournalWriter(store.control, durable=store.durable)
@@ -86,11 +108,20 @@ class TaskManager:
                 "pid": os.getpid(),
                 "pools": sorted(self.pools),
                 "capabilities": sorted(self.capabilities),
+                "runner_backends": sorted(self.allowed_backends),
+                "accept_any_pool": self.accept_any_pool,
                 "started_at": utc_now(),
             },
             durable=store.durable,
         )
         self.heartbeat(force=True)
+        for name in self.allowed_backends:
+            try:
+                self.runner_backends[name].reconcile(self.store)
+            except (WorkflowError, OSError):
+                # Backend views are derived and must never prevent the manager
+                # from attaching to authoritative marker state.
+                continue
 
     def __enter__(self) -> Self:
         return self
@@ -136,6 +167,31 @@ class TaskManager:
             changed = True
         return changed
 
+    def _backend_for(self, job: JobDefinition) -> RunnerBackend | None:
+        if job.runner_backend not in self.allowed_backends:
+            return None
+        return self.runner_backends.get(job.runner_backend)
+
+    def _transition(
+        self,
+        marker: Marker,
+        kind: str,
+        updates: Mapping[str, object],
+        *,
+        priority: int | None = None,
+    ) -> Marker:
+        moved = self.store.transition(self.writer, marker, kind, updates, priority=priority)
+        try:
+            job = self.store.load_job(moved)
+            backend = self._backend_for(job)
+            if backend is not None:
+                backend.marker_changed(self.store, moved)
+        except (WorkflowError, OSError):
+            # Backend views are recoverable derivatives. The committed marker
+            # transition must remain successful even if refreshing one fails.
+            pass
+        return moved
+
     def serve(self, *, poll_interval: float = 1.0) -> None:
         """Run until interrupted."""
 
@@ -153,7 +209,7 @@ class TaskManager:
         quiet_passes = 0
         while time.monotonic() < deadline:
             changed = self.tick()
-            actionable = any(True for _ in self.store.scan_markers(("submitted", "ready", "committing")))
+            actionable = self._has_actionable_work()
             if not changed and not self._running and not actionable:
                 quiet_passes += 1
                 if quiet_passes >= 2:
@@ -163,11 +219,29 @@ class TaskManager:
             time.sleep(poll_interval)
         raise TimeoutError("workflow manager did not become idle")
 
+    def _has_actionable_work(self) -> bool:
+        for marker in self.store.scan_markers(("submitted", "ready", "committing")):
+            try:
+                job = self.store.load_job(marker)
+            except WorkflowError:
+                # An invalid submission is actionable because registration will
+                # turn it into a protocol failure.
+                if marker.kind == "submitted":
+                    return True
+                continue
+            if self._backend_for(job) is not None:
+                return True
+        return False
+
     def _register_submissions(self) -> bool:
         changed = False
         for marker in list(self.store.scan_markers(("submitted",))):
             try:
                 job = self.store.validate_job_payload(marker)
+                backend = self._backend_for(job)
+                if backend is None:
+                    continue
+                backend.validate(job, self.store.payload_path(marker.placement, marker.job_key))
                 ready = {
                     "step": job.initial_step,
                     "activation_id": str(uuid.uuid4()),
@@ -178,13 +252,12 @@ class TaskManager:
                     "reason": "submitted",
                     "job_digest": job.digest,
                 }
-                self.store.transition(self.writer, marker, "ready", ready)
+                self._transition(marker, "ready", ready)
             except TransitionLostError:
                 pass
             except (FormatError, UnsupportedExtensionError) as exc:
                 try:
-                    self.store.transition(
-                        self.writer,
+                    self._transition(
                         marker,
                         "failed",
                         {
@@ -207,7 +280,9 @@ class TaskManager:
                 job = self.store.load_job(marker)
             except WorkflowError:
                 continue
-            if job.claim_pool not in self.pools:
+            if self._backend_for(job) is None:
+                continue
+            if not self.accept_any_pool and job.claim_pool not in self.pools:
                 continue
             if not job.required_capabilities <= self.capabilities:
                 continue
@@ -222,8 +297,7 @@ class TaskManager:
         total_attempts = self._state_int(state, "total_attempts", default=0) + 1
         budget_failure = self._attempt_budget_failure(job, attempt_ordinal, total_attempts)
         if budget_failure is not None:
-            self.store.transition(
-                self.writer,
+            self._transition(
                 marker,
                 "failed",
                 {
@@ -234,8 +308,7 @@ class TaskManager:
             )
             return
         attempt_id = str(uuid.uuid4())
-        claimed = self.store.transition(
-            self.writer,
+        claimed = self._transition(
             marker,
             "claimed",
             {
@@ -257,6 +330,9 @@ class TaskManager:
 
     def _launch_claimed(self, marker: Marker, job: JobDefinition, previous_state: Mapping[str, Any]) -> None:
         claimed_state = self.store.read_state(marker)
+        backend = self._backend_for(job)
+        if backend is None:
+            raise FormatError(f"runner backend is unavailable: {job.runner_backend}")
         attempt_id = str(claimed_state["attempt_id"])
         payload = self.store.payload_path(marker.placement, marker.job_key)
         control = payload / str(claimed_state["attempt_control"])
@@ -313,7 +389,21 @@ class TaskManager:
             environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
         stdout = (control / "stdout.log").open("ab")
         stderr = (control / "stderr.log").open("ab")
-        runner_command = [str(payload.joinpath(*job.runner_path.parts)), *job.runner_arguments]
+        runner_command = list(
+            backend.command(
+                AttemptLaunch(
+                    job=job,
+                    marker=marker,
+                    payload=payload,
+                    workspace=workspace,
+                    control=control,
+                    context_path=context_path,
+                    context=context,
+                )
+            )
+        )
+        if not runner_command:
+            raise FormatError(f"runner backend {job.runner_backend!r} returned an empty command")
         gate_read, gate_write = os.pipe()
         process: subprocess.Popen[bytes] | None = None
         running: Marker | None = None
@@ -346,8 +436,7 @@ class TaskManager:
                 },
                 durable=self.store.durable,
             )
-            running = self.store.transition(
-                self.writer,
+            running = self._transition(
                 marker,
                 "running",
                 {
@@ -382,6 +471,9 @@ class TaskManager:
         changed = False
         current_by_attempt: dict[str, Marker] = {}
         for marker in list(self.store.scan_markers(("running",))):
+            job = self.store.load_job(marker)
+            if self._backend_for(job) is None:
+                continue
             state = self.store.read_state(marker)
             attempt_id = str(state.get("attempt_id", ""))
             current_by_attempt[attempt_id] = marker
@@ -406,7 +498,6 @@ class TaskManager:
                     except TransitionLostError:
                         pass
                 else:
-                    job = self.store.load_job(marker)
                     failure_class = "protocol_error" if return_code == 0 else "process_failure"
                     self._handle_attempt_failure(
                         marker,
@@ -422,7 +513,6 @@ class TaskManager:
                 lease_seconds=float(state.get("lease_seconds", self.lease_seconds)),
             ):
                 continue
-            job = self.store.load_job(marker)
             unsafe_takeover = False
             if job.workspace_mode == "persistent" and not self._persistent_writer_dead(marker, state):
                 if not self.unsafe_persistent_takeover:
@@ -453,8 +543,7 @@ class TaskManager:
     def _begin_commit(self, marker: Marker, state: Mapping[str, Any], outcome_path: Path) -> None:
         outcome = self._read_outcome(outcome_path / "outcome.json", marker, state)
         child_digests = self._child_digests(outcome_path)
-        self.store.transition(
-            self.writer,
+        self._transition(
             marker,
             "committing",
             {
@@ -472,6 +561,9 @@ class TaskManager:
     def _resume_committing(self) -> bool:
         changed = False
         for marker in list(self.store.scan_markers(("committing",))):
+            job = self.store.load_job(marker)
+            if self._backend_for(job) is None:
+                continue
             try:
                 self._process_committing(marker)
             except TransitionLostError:
@@ -479,8 +571,7 @@ class TaskManager:
             except (FormatError, TransactionError) as exc:
                 try:
                     state = self.store.read_state(marker)
-                    self.store.transition(
-                        self.writer,
+                    self._transition(
                         marker,
                         "failed",
                         {
@@ -515,43 +606,71 @@ class TaskManager:
             if changed_data:
                 data_generation += 1
         self._register_children(marker, state, outcome_path)
+        backend = self._backend_for(job)
+        if backend is None:
+            return
+        backend.commit_outcome(
+            OutcomeCommit(
+                job=job,
+                marker=marker,
+                payload=self.store.payload_path(marker.placement, marker.job_key),
+                outcome_path=outcome_path,
+                outcome=outcome,
+            )
+        )
         action = outcome["action"]
         progress = self._state_progress(state)
         progress["data_generation"] = data_generation
+        priority_raw = outcome.get("priority")
+        next_priority = (
+            marker.priority if priority_raw is None else require_int(priority_raw, "outcome.priority", maximum=999)
+        )
         if action == "advance":
-            self._advance(marker, job, state, validate_step(outcome.get("next_step"), "next_step"), progress)
+            self._advance(
+                marker,
+                job,
+                state,
+                validate_step(outcome.get("next_step"), "next_step"),
+                progress,
+                priority=next_priority,
+            )
         elif action == "retry":
             reason = self._nested_reason(outcome, "retry")
-            self._retry(marker, job, state, progress, reason, unclean=False)
+            self._retry(marker, job, state, progress, reason, unclean=False, priority=next_priority)
         elif action == "wait":
             next_step = validate_step(outcome.get("next_step"), "next_step")
             join = outcome.get("join")
             if not isinstance(join, Mapping):
                 raise FormatError("wait outcome requires a join object")
-            self.store.transition(
-                self.writer,
+            self._transition(
                 marker,
                 "waiting",
                 {**progress, "next_step": next_step, "join": dict(join), "reason": "waiting_for_children"},
+                priority=next_priority,
             )
         elif action == "succeed":
-            self.store.transition(self.writer, marker, "succeeded", {**progress, "reason": "succeeded"})
+            self._transition(
+                marker,
+                "succeeded",
+                {**progress, "reason": "succeeded"},
+                priority=next_priority,
+            )
         elif action == "fail":
             failure = outcome.get("failure")
             if not isinstance(failure, Mapping):
                 raise FormatError("fail outcome requires a failure object")
-            self.store.transition(
-                self.writer,
+            self._transition(
                 marker,
                 "failed",
                 {**progress, "failure": dict(failure), "reason": "declared_failure"},
+                priority=next_priority,
             )
         elif action == "pause":
-            self.store.transition(
-                self.writer,
+            self._transition(
                 marker,
                 "paused",
                 {**progress, "pause": outcome.get("pause"), "reason": "step_paused"},
+                priority=next_priority,
             )
         else:
             raise FormatError(f"unsupported outcome action: {action!r}")
@@ -627,12 +746,12 @@ class TaskManager:
         *,
         reason: str = "advance",
         join_summary: object = None,
+        priority: int | None = None,
     ) -> None:
         activation_ordinal = self._state_int(state, "activation_ordinal", default=1) + 1
         maximum = job.retry_policy.maximum_activations
         if maximum is not None and activation_ordinal > maximum:
-            self.store.transition(
-                self.writer,
+            self._transition(
                 marker,
                 "failed",
                 {
@@ -642,8 +761,7 @@ class TaskManager:
                 },
             )
             return
-        self.store.transition(
-            self.writer,
+        self._transition(
             marker,
             "ready",
             {
@@ -656,6 +774,7 @@ class TaskManager:
                 "join_summary": join_summary,
                 "previous_attempt_id": state.get("attempt_id"),
             },
+            priority=priority,
         )
 
     def _retry(
@@ -668,12 +787,12 @@ class TaskManager:
         *,
         unclean: bool,
         unsafe_takeover: bool = False,
+        priority: int | None = None,
     ) -> None:
         current_attempts = self._state_int(state, "attempt_ordinal", default=1)
         maximum = job.retry_policy.maximum_attempts_per_activation
         if maximum is not None and current_attempts >= maximum:
-            self.store.transition(
-                self.writer,
+            self._transition(
                 marker,
                 "failed",
                 {
@@ -683,8 +802,7 @@ class TaskManager:
                 },
             )
             return
-        self.store.transition(
-            self.writer,
+        self._transition(
             marker,
             "ready",
             {
@@ -694,6 +812,7 @@ class TaskManager:
                 "unsafe_persistent_takeover": unsafe_takeover,
                 "previous_attempt_id": state.get("attempt_id"),
             },
+            priority=priority,
         )
 
     def _handle_attempt_failure(
@@ -720,8 +839,7 @@ class TaskManager:
                 unsafe_takeover=unsafe_takeover,
             )
             return
-        self.store.transition(
-            self.writer,
+        self._transition(
             marker,
             "failed",
             {
@@ -734,6 +852,9 @@ class TaskManager:
     def _recover_abandoned_claims(self) -> bool:
         changed = False
         for marker in list(self.store.scan_markers(("claimed",))):
+            job = self.store.load_job(marker)
+            if self._backend_for(job) is None:
+                continue
             state = self.store.read_state(marker)
             if self._manager_alive(
                 str(state.get("manager_id", "")),
@@ -741,8 +862,7 @@ class TaskManager:
             ):
                 continue
             try:
-                self.store.transition(
-                    self.writer,
+                self._transition(
                     marker,
                     "ready",
                     {
@@ -788,6 +908,9 @@ class TaskManager:
     def _evaluate_joins(self) -> bool:
         changed = False
         for marker in list(self.store.scan_markers(("waiting",))):
+            parent_job = self.store.load_job(marker)
+            if self._backend_for(parent_job) is None:
+                continue
             state = self.store.read_state(marker)
             join = state.get("join")
             if not isinstance(join, Mapping):
@@ -833,11 +956,10 @@ class TaskManager:
             impossible = self._join_impossible(condition, join, kinds)
             if not satisfied and not impossible:
                 continue
-            job = self.store.load_job(marker)
             if satisfied:
                 self._advance(
                     marker,
-                    job,
+                    parent_job,
                     state,
                     validate_step(state.get("next_step"), "next_step"),
                     self._state_progress(state),
@@ -849,7 +971,7 @@ class TaskManager:
                 if isinstance(on_impossible, Mapping) and on_impossible.get("action") == "advance":
                     self._advance(
                         marker,
-                        job,
+                        parent_job,
                         state,
                         validate_step(on_impossible.get("next_step"), "on_impossible.next_step"),
                         self._state_progress(state),
@@ -857,8 +979,7 @@ class TaskManager:
                         join_summary=observations,
                     )
                 else:
-                    self.store.transition(
-                        self.writer,
+                    self._transition(
                         marker,
                         "failed",
                         {
@@ -905,6 +1026,16 @@ class TaskManager:
         for request_path in sorted(ready_dir.iterdir()) if ready_dir.exists() else ():
             if not request_path.is_file():
                 continue
+            try:
+                request = read_json(request_path)
+                marker = self.store.find_marker_by_id(str(request.get("job_id", "")))
+                if marker is not None:
+                    job = self.store.load_job(marker)
+                    if self._backend_for(job) is None:
+                        continue
+            except WorkflowError:
+                # Claim malformed requests so one manager can quarantine them.
+                pass
             claimed_dir = self.store.control / "requests" / "claimed" / self.manager_id
             claimed_dir.mkdir(parents=True, exist_ok=True)
             claimed_path = claimed_dir / request_path.name
@@ -943,8 +1074,7 @@ class TaskManager:
             "request_id": request.get("request_id"),
         }
         if action == "cancel" and marker.kind not in TERMINAL_KINDS:
-            self.store.transition(
-                self.writer,
+            self._transition(
                 marker,
                 "cancelled",
                 {**progress, **audit, "reason": "operator_cancel"},
@@ -954,8 +1084,7 @@ class TaskManager:
             return
         if action == "set_priority" and marker.kind in {"submitted", "ready", "waiting", "paused", "failed"}:
             priority = int(request.get("priority", -1))
-            self.store.transition(
-                self.writer,
+            self._transition(
                 marker,
                 marker.kind,
                 {**progress, **audit, "reason": "operator_priority"},
@@ -963,8 +1092,7 @@ class TaskManager:
             )
             return
         if action == "pause" and marker.kind in {"submitted", "ready", "waiting"}:
-            self.store.transition(
-                self.writer,
+            self._transition(
                 marker,
                 "paused",
                 {**progress, **audit, "reason": "operator_pause"},
