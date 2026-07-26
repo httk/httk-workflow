@@ -31,6 +31,7 @@ from .configuration import (
 )
 from .errors import WorkflowError
 from .manifests import create_manifest, release_maintenance_lock, verify_manifest
+from .models import CORE_PROFILE
 from .projects import import_v1_project, initialize_project, require_project
 from .workspace import WorkflowWorkspace
 
@@ -40,6 +41,7 @@ Filesystem-native workflow execution and project management.
 
 command groups:
   workspace   init, status, upgrade, unlock
+  runner      publish
   job         submit, request
   manager     run
   v1          prepare, submit, run
@@ -107,6 +109,36 @@ def _workspace_unlock(argv: Sequence[str], program: str) -> int:
     if isinstance(parsed, int):
         return parsed
     print(release_maintenance_lock(WorkflowWorkspace(parsed.workspace), force=parsed.force))
+    return 0
+
+
+def _runner(argv: Sequence[str], program: str) -> int:
+    """Manage the shared runners one workspace publishes for its jobs."""
+
+    if not argv or argv[0] in {"-h", "--help"}:
+        print(f"usage: {program} publish [ARG ...]")
+        return 0
+    action, rest = argv[0], argv[1:]
+    if action != "publish":
+        raise ValueError(f"unknown runner command: {action}")
+    parser = _parser(f"{program} publish", "Publish one runner into a workspace runner store")
+    parser.add_argument("file", help="the runner file to publish")
+    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--name", help="store name, including any subdirectory (default: the file name)")
+    parser.add_argument(
+        "--replace",
+        action="store_true",
+        help="overwrite a stored runner of the same name whose content differs",
+    )
+    parsed = _parse(parser, rest)
+    if isinstance(parsed, int):
+        return parsed
+    reference = WorkflowWorkspace(parsed.workspace).publish_runner(
+        parsed.file,
+        name=parsed.name,
+        replace=parsed.replace,
+    )
+    print(json.dumps(reference, indent=2, sort_keys=True))
     return 0
 
 
@@ -386,7 +418,7 @@ def _tasks_send(argv: Sequence[str], program: str, context: CLIContext) -> int:
         if (
             status_data.get("format") != "httk-workflow-status"
             or status_data.get("format_version") != 1
-            or status_data.get("core_profile") != "core-v1"
+            or status_data.get("core_profile") != CORE_PROFILE
             or "detached-transfer-v1" not in status_data.get("extensions", [])
         ):
             raise ValueError
@@ -541,6 +573,8 @@ def command(argv: Sequence[str], context: CLIContext) -> int:
                 return _workspace_upgrade(tail, f"{program} workspace upgrade")
             if action == "unlock":
                 return _workspace_unlock(tail, f"{program} workspace unlock")
+        elif group == "runner":
+            return _runner(rest, f"{program} runner")
         elif group == "job":
             if not rest or rest[0] in {"-h", "--help"}:
                 print(f"usage: {program} job submit|request [ARG ...]")

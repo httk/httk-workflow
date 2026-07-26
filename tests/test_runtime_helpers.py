@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest  # pyright: ignore[reportMissingImports]
 
 from httk.workflow import (
-    AttemptRuntime,
+    Attempt,
     assemble_potcar,
     automatic_kpoint_grid,
     bundled_v1_root,
@@ -45,7 +45,7 @@ def _context(path: Path) -> None:
     )
 
 
-def test_native_runtime_reads_context_and_publishes_outcome(tmp_path: Path) -> None:
+def test_an_attempt_reads_its_context_and_publishes_one_outcome(tmp_path: Path) -> None:
     control = tmp_path / "control"
     control.mkdir()
     context = control / "context.json"
@@ -57,17 +57,20 @@ def test_native_runtime_reads_context_and_publishes_outcome(tmp_path: Path) -> N
         "HTTK_WORKFLOW_WORKDIR": str(tmp_path / "run"),
         "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
     }
-    runtime = AttemptRuntime.from_environment(environment)
-    assert runtime.context.step == "relax"
-    assert runtime.context.is_restart
-    ready = runtime.advance("collect", priority=700)
+    attempt = Attempt.initialize(environment)
+    assert attempt.context.step == "relax"
+    assert attempt.step == "relax"
+    assert attempt.context.is_restart
+    assert attempt.children.all == ()
+    ready = attempt.advance("collect", priority=700)
     outcome = json.loads((ready / "outcome.json").read_text(encoding="utf-8"))
     assert outcome["action"] == "advance"
     assert outcome["next_step"] == "collect"
     assert outcome["priority"] == 700
     assert not list(control.glob("outcome.tmp.*"))
-    with pytest.raises(FileExistsError):
-        runtime.succeed()
+    assert attempt.published
+    with pytest.raises(RuntimeError, match="already published"):
+        attempt.succeed()
 
 
 def test_run_command_uses_argv_and_times_out_process_group(tmp_path: Path) -> None:

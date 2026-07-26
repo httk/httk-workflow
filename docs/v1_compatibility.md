@@ -95,8 +95,9 @@ Those exact historic paths are thin source redirects into an attributed
 compatibility implementation. Existing shell function names and behavior are
 preserved; the old Python modules are not bundled.
 
-Native *httk₂* Python runners should use `httk.workflow.AttemptRuntime` to read
-attempt context and atomically publish outcomes. Common VASP file operations
+Native *httk₂* Python runners should use `httk.workflow.Runner` and the
+`httk.workflow.Attempt` it dispatches to, which read attempt context and
+atomically publish outcomes. Common VASP file operations
 are available as data-oriented functions such as `read_poscar_header`,
 `automatic_kpoint_grid`, `update_incar`, and `assemble_potcar`. These APIs are
 independent *httk₂* designs rather than renamed `HT_TASK_*` or `VASP_*` methods.

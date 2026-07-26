@@ -3,6 +3,7 @@
 import argparse
 import bz2
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -224,6 +225,27 @@ def _child_placement(root: PurePosixPath, parent_id: str, child_id: str) -> Pure
     return root / "v1-children" / parent_id[:2] / parent_id[2:4] / child_id[:2] / child_id[2:4]
 
 
+def _child_label(task_id: str, used: set[str]) -> str:
+    """Derive one unique spawn label from a legacy ``ht.task.*`` task id.
+
+    The legacy task id is the name an operator recognizes, so it is kept
+    verbatim wherever the label syntax allows. Legacy names are not required to
+    be unique across the directories of one task, so a collision appends the
+    ordinal of the child within this spawn set.
+    """
+
+    cleaned = re.sub(r"[^a-z0-9._-]+", "-", task_id.lower()).strip("-.")
+    cleaned = re.sub(r"-{2,}", "-", cleaned)[:48].strip("-.")
+    base = cleaned if cleaned and cleaned[0].isalnum() else f"task-{cleaned}"[:48].rstrip("-.")
+    label = base
+    index = 1
+    while label in used:
+        index += 1
+        label = f"{base[:44]}-{index}"
+    used.add(label)
+    return label
+
+
 def _prepare_children(
     outcome_temporary: Path,
     *,
@@ -244,6 +266,7 @@ def _prepare_children(
     jobs_root = children_root / "jobs"
     jobs_root.mkdir(parents=True)
     entries: list[dict[str, object]] = []
+    labels: set[str] = set()
     for source in sources:
         fields = parse_v1_task_name(source.name)
         if fields is None:
@@ -287,6 +310,7 @@ def _prepare_children(
                 "workspace_id": context["workspace_id"],
                 "job_id": child_id,
                 "job_key": child_job.job_key,
+                "label": _child_label(str(fields["task_id"]), labels),
                 "placement": placement.as_posix(),
                 "compatibility": {"legacy_path": relative.as_posix()},
             }
@@ -349,6 +373,7 @@ def _publish_outcome(
                     "workspace_id": entry["workspace_id"],
                     "job_id": entry["job_id"],
                     "job_key": entry["job_key"],
+                    "label": entry["label"],
                     "placement_hint": entry["placement"],
                 }
                 for entry in children

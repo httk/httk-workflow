@@ -1,21 +1,56 @@
-"""Private command bridge used by the packaged native Bash libraries."""
+"""Private command bridge used by the packaged native Bash libraries.
+
+The bridge is the language-agnostic half of the Bash authoring SDK: every Bash
+function in ``shell/httk-workflow.sh`` is one invocation of one subcommand here,
+and every subcommand does its work through :class:`httk.workflow.Attempt` and
+:class:`httk.workflow.OutcomeDraft`. A Bash runner and a Python runner therefore
+publish the same bytes, because they publish through exactly one implementation.
+
+A Bash runner is many short-lived processes, so the bridge holds no state of its
+own between calls. The one implicit outcome draft of an attempt lives in the
+attempt control directory as ``outcome.tmp.<uuid>``, and every bridge process
+rediscovers and resumes it there: the spawned children, the staged data
+transaction, and therefore the operation counter are all read back from the
+draft itself.
+
+Exit codes are uniform across every subcommand:
+
+``0``
+    the call succeeded.
+``1``
+    the answer is legitimately absent — an unset state key, a missing input
+    without a default, a null child field.
+``2``
+    the call is refused — bad usage, a protocol violation, or a corrupt attempt
+    context.
+
+The supervised-command and VASP subcommands additionally report the classified
+outcome of the program they ran: ``run`` returns ``124`` on timeout, ``125`` when
+a checker or diagnostic stopped it, and ``22`` on any other nonzero exit;
+``vasp-run`` returns ``20``, ``21``, ``22``, or ``124``; ``vasp-diagnose``
+returns ``20`` when it found something; and ``vasp-remedy-plan`` returns ``3``
+when the reviewed policy has no remaining safe action. ``125`` is also what
+``httk.workflow._launcher`` reports for a runner it could not start at all.
+"""
 
 import argparse
+import dataclasses
 import json
-import shutil
+import os
+import shlex
 import sys
-import uuid
 from collections.abc import Mapping, Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+from typing import Literal, cast
 
-from ._util import read_json, sha256_file, tree_digest, write_json_atomic
-from .models import Failure, validate_label
-from .runtime import AttemptRuntime
+from ._util import read_json, write_json_atomic
+from .runtime import _read_environment
 from .runtime_builders import (
     JobSpec,
-    JoinSpec,
-    OutcomeBuilder,
+    JoinCondition,
+    OutcomeDraft,
     ReplayableWorkdirBatch,
+    TransactionBuilder,
     prepare_job_payload,
 )
 from .runtime_utils import (
@@ -24,6 +59,7 @@ from .runtime_utils import (
     evaluate_expression,
     render_template,
 )
+from .sdk import RUNNER_ERROR_FORMAT, Attempt, ChildSpec, Runner, RunnerRef
 from .supervision import CheckerSpec, ProcessSupervisor
 from .vasp import (
     VaspPreparationOptions,
@@ -52,75 +88,130 @@ from .vasp import (
     write_automatic_kpoints,
 )
 
+ABSENT = 1
+REFUSED = 2
+
+RUNNER_WORKFLOW_VARIABLE = "HTTK_WORKFLOW_RUNNER_WORKFLOW"
+RUNNER_STEPS_VARIABLE = "HTTK_WORKFLOW_RUNNER_STEPS"
+
+_CHILD_FIELDS = (
+    "label",
+    "state",
+    "job_id",
+    "job_key",
+    "failure_code",
+    "failure_message",
+    "payload",
+    "workdir",
+    "data",
+    "data_generation",
+)
+_JOIN_CONDITIONS = ("all_succeeded", "all_terminal", "any_succeeded", "at_least")
+
+
+class _Absent(Exception):
+    """A read whose answer is legitimately not there."""
+
+
+class _Refused(Exception):
+    """A call the bridge will not perform: bad usage or a protocol violation."""
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="httk-workflow-shell-bridge")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("init")
+
+    commands.add_parser("begin")
+    commands.add_parser("batch")
     context = commands.add_parser("context")
     context.add_argument("field", nargs="?")
+    job_input = commands.add_parser("input")
+    job_input.add_argument("name")
+    job_input.add_argument("--default")
     state_get = commands.add_parser("state-get")
     state_get.add_argument("name")
     state_set = commands.add_parser("state-set")
     state_set.add_argument("name")
-    state_set.add_argument("json_value")
+    state_set.add_argument("value")
     state_delete = commands.add_parser("state-delete")
     state_delete.add_argument("name")
+    state_merge = commands.add_parser("state-merge")
+    state_merge.add_argument("assignments", nargs="+")
     runlog = commands.add_parser("runlog")
     runlog.add_argument("kind")
     runlog.add_argument("message")
     runlog.add_argument("files", nargs="*")
-    commands.add_parser("outcome-begin")
+
+    put = commands.add_parser("put")
+    put.add_argument("source")
+    put.add_argument("destination")
+    remove = commands.add_parser("remove")
+    remove.add_argument("destination")
+    remove.add_argument("--missing-ok", action="store_true")
+
+    spawn = commands.add_parser("spawn")
+    spawn.add_argument("label")
+    spawn.add_argument("--step")
+    spawn.add_argument("--payload")
+    spawn.add_argument("--input", action="append", default=[], dest="inputs")
+    spawn.add_argument("--runner", default="inherit")
+    spawn.add_argument("--placement")
+    spawn.add_argument("--priority", type=int)
+    spawn.add_argument("--tag")
+    spawn.add_argument("--name")
+    spawn.add_argument("--workflow")
+    spawn.add_argument("--workdir-mode", choices=("persistent", "isolated"), default="persistent")
+    spawn.add_argument("--workdir-path", default="run")
+    spawn.add_argument("--data-mode", choices=("none", "transactional"), default="none")
+    spawn.add_argument("--claim-pool")
+    spawn.add_argument("--capability", action="append", default=[], dest="capabilities")
+    spawn.add_argument("--retry-on", action="append", default=[], dest="retry_on")
+    spawn.add_argument("--resources")
+    spawn.add_argument("--max-attempts-per-activation", type=int)
+    spawn.add_argument("--max-total-attempts", type=int)
+    spawn.add_argument("--max-activations", type=int)
+
+    children = commands.add_parser("children")
+    selection = children.add_mutually_exclusive_group()
+    selection.add_argument("--all", dest="selection", action="store_const", const="all")
+    selection.add_argument("--succeeded", dest="selection", action="store_const", const="succeeded")
+    selection.add_argument("--failed", dest="selection", action="store_const", const="failed")
+    children.set_defaults(selection="all")
+    child = commands.add_parser("child")
+    child.add_argument("label")
+    child.add_argument("field", choices=_CHILD_FIELDS)
+
+    advance = commands.add_parser("advance")
+    advance.add_argument("next_step")
+    advance.add_argument("--state", action="append", default=[], dest="state")
+    advance.add_argument("--priority", type=int)
+    gather = commands.add_parser("gather")
+    gather.add_argument("next_step")
+    gather.add_argument("--when", choices=_JOIN_CONDITIONS, default="all_succeeded")
+    gather.add_argument("--count", type=int)
+    gather.add_argument("--on-impossible")
+    commands.add_parser("succeed")
+    fail = commands.add_parser("fail")
+    fail.add_argument("code")
+    fail.add_argument("message")
+    fail.add_argument("--details")
+    fail.add_argument("--retryable", action="store_true")
+    retry = commands.add_parser("retry")
+    retry.add_argument("reason")
+    pause = commands.add_parser("pause")
+    pause.add_argument("reason")
+    commands.add_parser("fail-unknown-step")
+    commands.add_parser("fail-no-outcome")
+    abort = commands.add_parser("abort")
+    abort.add_argument("--exception", default="ShellError")
+    abort.add_argument("--message", default="")
+    abort.add_argument("--traceback-file")
+
     job_prepare = commands.add_parser("job-prepare")
     job_prepare.add_argument("destination")
     job_prepare.add_argument("spec")
     workdir_apply = commands.add_parser("workdir-apply")
     workdir_apply.add_argument("spec")
-
-    for name in ("tx-mkdir", "tx-remove"):
-        item = commands.add_parser(name)
-        item.add_argument("draft")
-        item.add_argument("operation_id")
-        item.add_argument("path")
-        if name == "tx-remove":
-            item.add_argument("--missing-ok", action="store_true")
-    for name in ("tx-put-file", "tx-put-tree", "tx-replace-tree"):
-        item = commands.add_parser(name)
-        item.add_argument("draft")
-        item.add_argument("operation_id")
-        item.add_argument("source")
-        item.add_argument("path")
-    child = commands.add_parser("child-add")
-    child.add_argument("draft")
-    child.add_argument("payload")
-    child.add_argument("placement")
-
-    for name in ("advance", "wait"):
-        item = commands.add_parser(name)
-        item.add_argument("next_step")
-        item.add_argument("--draft")
-        item.add_argument("--priority", type=int)
-        if name == "wait":
-            item.add_argument(
-                "--condition",
-                choices=("all_succeeded", "all_terminal", "any_succeeded", "at_least"),
-                default="all_succeeded",
-            )
-            item.add_argument("--count", type=int)
-            item.add_argument("--on-impossible")
-    succeed = commands.add_parser("succeed")
-    succeed.add_argument("--draft")
-    fail = commands.add_parser("fail")
-    fail.add_argument("code")
-    fail.add_argument("message")
-    fail.add_argument("--details")
-    fail.add_argument("--draft")
-    retry = commands.add_parser("retry")
-    retry.add_argument("reason")
-    retry.add_argument("--draft")
-    pause = commands.add_parser("pause")
-    pause.add_argument("reason")
-    pause.add_argument("--draft")
 
     run = commands.add_parser("run")
     run.add_argument("--timeout", type=float)
@@ -144,6 +235,11 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--remove-source", action="store_true")
         item.add_argument("paths", nargs="+")
 
+    _add_vasp_commands(commands)
+    return parser
+
+
+def _add_vasp_commands(commands: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     vasp_prepare = commands.add_parser("vasp-prepare")
     vasp_prepare.add_argument("--directory", default=".")
     vasp_prepare.add_argument("--options")
@@ -217,94 +313,350 @@ def _parser() -> argparse.ArgumentParser:
     remedy_apply.add_argument("decision")
     remedy_apply.add_argument("--directory", default=".")
     remedy_apply.add_argument("--history", default=".httk-vasp/remedies.json")
-    return parser
 
 
-def _runtime() -> AttemptRuntime:
-    return AttemptRuntime.from_environment()
+def _declared(attempt: Attempt) -> None:
+    """Stand in for a step whose handler lives in the Bash runner."""
 
 
-def _builder(draft: str | None) -> OutcomeBuilder:
-    runtime = _runtime()
-    return runtime.outcome() if draft is None else OutcomeBuilder.resume(runtime, draft)
+def _runner() -> Runner | None:
+    """Return the step registration the Bash runner exported, if it did."""
+
+    workflow = os.environ.get(RUNNER_WORKFLOW_VARIABLE)
+    if not workflow:
+        return None
+    runner = Runner(workflow)
+    for step in os.environ.get(RUNNER_STEPS_VARIABLE, "").split("\n"):
+        if step:
+            runner.step(name=step)(_declared)
+    return runner
 
 
-def _safe_target(value: str) -> PurePosixPath:
-    if "\0" in value:
-        raise ValueError("transaction target contains a NUL byte")
-    target = PurePosixPath(value)
-    if (
-        target.is_absolute()
-        or not target.parts
-        or any(part in {"", ".", "..", ".httk-workflow", ".httk-runner"} for part in target.parts)
-    ):
-        raise ValueError("transaction target must be a normalized relative path")
-    return target
+def _draft_root(control: Path) -> Path | None:
+    """Return the one unpublished outcome draft of this attempt, if any."""
+
+    roots = sorted(item for item in control.glob("outcome.tmp.*") if item.is_dir())
+    if len(roots) > 1:
+        raise _Refused(f"this attempt has {len(roots)} outcome drafts, which cannot happen for one attempt")
+    return roots[0] if roots else None
 
 
-def _transaction_add(arguments: argparse.Namespace) -> None:
-    runtime = _runtime()
-    draft = Path(arguments.draft).resolve()
-    if draft.parent != runtime.control or not draft.name.startswith("outcome.tmp."):
-        raise ValueError("outcome draft is not owned by this attempt")
-    root = draft / "transaction"
-    payload = root / "payload"
-    payload.mkdir(parents=True, exist_ok=True)
-    manifest_path = root / "manifest.json"
-    if manifest_path.exists():
-        manifest = read_json(manifest_path)
+def _bind() -> Attempt:
+    """Bind this process to its attempt and resume the draft it left behind."""
+
+    bound = _read_environment()
+    attempt = Attempt(
+        bound.context,
+        control=bound.control,
+        payload=bound.payload,
+        workdir=bound.workdir,
+        workspace=bound.workspace,
+        data=bound.data,
+        step=bound.step,
+        runner=_runner(),
+    )
+    published = bound.control / "outcome.ready"
+    if published.is_dir():
+        attempt._published = published
+        attempt._action = str(read_json(published / "outcome.json").get("action", "published"))
+    root = _draft_root(bound.control)
+    if root is None:
+        return attempt
+    draft = OutcomeDraft._resume(bound.context, bound.control, root)
+    attempt._draft = draft
+    if (draft.root / "transaction" / "manifest.json").is_file():
+        generation = attempt.context.data_generation
+        if generation is None:
+            raise _Refused("this draft stages a transaction but the job has data.mode none")
+        # The sealed manifest is the operation counter of a Bash runner, so the
+        # next identifier is the same whichever process of this attempt asks.
+        try:
+            transaction = TransactionBuilder.resume(draft.root / "transaction", expected_generation=generation)
+        except ValueError as exception:
+            raise _Refused(f"the staged transaction manifest of this draft is unusable: {exception}") from exception
+        attempt._transaction = transaction
+        attempt._operations = len(transaction)
+    return attempt
+
+
+_ATTEMPT: Attempt | None = None
+
+
+def _attempt() -> Attempt:
+    """Return this process's attempt, binding it exactly once."""
+
+    global _ATTEMPT
+    if _ATTEMPT is None:
+        _ATTEMPT = _bind()
+    return _ATTEMPT
+
+
+def _publishing() -> Attempt:
+    """Return an attempt whose runner registration is known.
+
+    Composing or publishing an outcome names steps and records the runner's step
+    set, so it needs the registration ``httk_workflow_runner`` exports. Refusing
+    without it is better than publishing an outcome that silently skips the step
+    checks a Python runner always performs.
+    """
+
+    attempt = _attempt()
+    if attempt._runner is None:
+        raise _Refused(
+            "composing an outcome needs the runner registration; "
+            "call httk_workflow_runner WORKFLOW STEP... before any step function"
+        )
+    return attempt
+
+
+def _print(value: object) -> None:
+    """Print one JSON value the way a shell wants to read it."""
+
+    print(value if isinstance(value, str) else json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+def _value(text: str) -> object:
+    """Return the JSON value one command-line argument denotes.
+
+    ``@path`` is the JSON content of a file, which is how a shell passes a value
+    it cannot quote. Anything else is a JSON scalar when it parses as one and the
+    literal string when it does not, so ``k=42`` is a number and ``k=Si`` is a
+    string without the author quoting either.
+    """
+
+    if text.startswith("@"):
+        return json.loads(Path(text[1:]).read_text(encoding="utf-8"))
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def _assignments(values: Sequence[str], name: str) -> dict[str, object]:
+    """Parse ``key=value`` arguments into one JSON object."""
+
+    result: dict[str, object] = {}
+    for item in values:
+        key, separator, text = item.partition("=")
+        if not separator or not key:
+            raise _Refused(f"{name} must be spelled NAME=VALUE, not {item!r}")
+        result[key] = _value(text)
+    return result
+
+
+def _runner_reference(value: str) -> RunnerRef:
+    """Parse the ``inherit``/``ws:PATH@SHA``/``installed:PATH@SHA`` spelling."""
+
+    if value == "inherit":
+        return RunnerRef.inherit()
+    source, separator, rest = value.partition(":")
+    path, marker, digest = rest.rpartition("@")
+    if not separator or not marker or not path:
+        raise _Refused(
+            f"runner reference {value!r} must be inherit, ws:PATH@SHA256, or installed:PATH@SHA256",
+        )
+    if source in {"ws", "workspace"}:
+        return RunnerRef.workspace(path, digest)
+    if source == "installed":
+        return RunnerRef.installed(path, digest)
+    raise _Refused(f"runner source {source!r} must be ws or installed")
+
+
+def _child_spec(arguments: argparse.Namespace) -> ChildSpec:
+    """Build the synthesized child one ``spawn`` call describes."""
+
+    if not arguments.step:
+        raise _Refused("a synthesized child needs --step, or --payload for a prepared payload directory")
+    resources = None if not arguments.resources else read_json(Path(str(arguments.resources).removeprefix("@")))
+    return ChildSpec(
+        step=arguments.step,
+        inputs=_assignments(arguments.inputs, "a child input"),
+        runner=_runner_reference(arguments.runner),
+        name=arguments.name,
+        workflow=arguments.workflow,
+        tag=arguments.tag,
+        workdir_mode=cast(Literal["persistent", "isolated"], arguments.workdir_mode),
+        workdir_path=arguments.workdir_path,
+        data_mode=cast(Literal["none", "transactional"], arguments.data_mode),
+        priority=arguments.priority,
+        claim_pool=arguments.claim_pool,
+        required_capabilities=tuple(arguments.capabilities),
+        resources=resources,
+        maximum_attempts_per_activation=arguments.max_attempts_per_activation,
+        maximum_total_attempts=arguments.max_total_attempts,
+        maximum_activations=arguments.max_activations,
+        retry_on=tuple(arguments.retry_on),
+    )
+
+
+def _spawn(arguments: argparse.Namespace) -> None:
+    attempt = _publishing()
+    if arguments.payload:
+        if arguments.step or arguments.inputs or arguments.runner != "inherit":
+            raise _Refused(
+                "a prepared payload directory carries its own job definition, "
+                "so --step, --input, and --runner apply only to a synthesized child"
+            )
+        reference = attempt.spawn(arguments.payload, label=arguments.label, placement=arguments.placement)
     else:
-        if runtime.context.data_generation is None:
-            raise ValueError("this job does not use transactional data")
-        manifest = {
-            "format": "httk-workflow-transaction",
-            "format_version": 1,
-            "id": str(uuid.uuid4()),
-            "expected_data_generation": runtime.context.data_generation,
-            "operations": [],
-        }
-    operations = manifest["operations"]
-    if not isinstance(operations, list):
-        raise ValueError("transaction manifest operations are invalid")
-    identifier = validate_label(arguments.operation_id, "transaction operation id")
-    if any(isinstance(item, Mapping) and item.get("id") == identifier for item in operations):
-        raise ValueError(f"duplicate transaction operation id: {identifier}")
-    operation_name = arguments.command.removeprefix("tx-")
-    target = _safe_target(arguments.path)
-    if operation_name != "mkdir":
-        for raw in operations:
-            if not isinstance(raw, Mapping) or raw.get("op") == "make-dir":
-                continue
-            existing = _safe_target(str(raw["path"]))
-            if target == existing or target in existing.parents or existing in target.parents:
-                raise ValueError(f"transaction targets overlap: {existing} and {target}")
-    operation = {
-        "id": identifier,
-        "op": {
-            "mkdir": "make-dir",
-            "replace-tree": "replace-tree",
-            "put-tree": "put-tree",
-            "put-file": "put-file",
-            "remove": "remove",
-        }[operation_name],
-        "path": target.as_posix(),
+        reference = attempt.spawn(_child_spec(arguments), label=arguments.label, placement=arguments.placement)
+    print(reference.job_key)
+
+
+def _children(arguments: argparse.Namespace) -> None:
+    """Print one tab-separated row per observed child."""
+
+    view = _attempt().children
+    selected = {"all": view.all, "succeeded": view.succeeded, "failed": view.failed}[arguments.selection]
+    for child in selected:
+        print(
+            "\t".join(
+                (
+                    child.label or "",
+                    child.kind,
+                    child.job_key,
+                    "" if child.workdir is None else str(child.workdir),
+                    "" if child.data is None else str(child.data),
+                )
+            )
+        )
+
+
+def _child(arguments: argparse.Namespace) -> None:
+    view = _attempt().children
+    child = view.get(arguments.label)
+    if child is None:
+        raise _Absent(
+            f"no child was spawned under label {arguments.label!r}; observed labels: {', '.join(view.labels) or 'none'}"
+        )
+    fields: dict[str, object] = {
+        "label": child.label,
+        "state": child.kind,
+        "job_id": child.job_id,
+        "job_key": child.job_key,
+        "failure_code": None if child.failure is None else child.failure.code,
+        "failure_message": None if child.failure is None else child.failure.message,
+        "payload": str(child.payload),
+        "workdir": None if child.workdir is None else str(child.workdir),
+        "data": None if child.data is None else str(child.data),
+        "data_generation": child.data_generation,
     }
-    if operation_name == "remove":
-        operation["missing_ok"] = arguments.missing_ok
-    elif operation_name in {"put-file", "put-tree", "replace-tree"}:
-        source = Path(arguments.source)
-        staged = payload / identifier
-        if operation_name == "put-file":
-            if not source.is_file() or source.is_symlink():
-                raise ValueError("put-file source must be a regular file")
-            shutil.copy2(source, staged)
-            digest = sha256_file(staged)
+    value = fields[arguments.field]
+    if value is None:
+        raise _Absent()
+    _print(value)
+
+
+def _seal(attempt: Attempt) -> None:
+    """Persist the staged transaction so the next bridge process resumes it."""
+
+    if attempt._transaction is not None:
+        attempt._transaction.seal()
+
+
+def _abort(arguments: argparse.Namespace) -> None:
+    """Discard the unpublished draft and record why the step ended abruptly."""
+
+    attempt = _attempt()
+    attempt._discard_draft()
+    trace = ""
+    if arguments.traceback_file:
+        path = Path(arguments.traceback_file)
+        if path.is_file():
+            trace = path.read_text(encoding="utf-8", errors="replace")
+    write_json_atomic(
+        attempt.control / "error.json",
+        {
+            "format": RUNNER_ERROR_FORMAT,
+            "format_version": 1,
+            "step": attempt.step,
+            "exception": arguments.exception,
+            "message": arguments.message,
+            "traceback": trace or f"{arguments.exception}: {arguments.message}\n",
+        },
+    )
+
+
+def _job_prepare(arguments: argparse.Namespace) -> None:
+    """Create ``job.json`` in a prepared payload from a specification file.
+
+    The specification is exactly the member set of :class:`JobSpec`, including
+    ``runner_backend``, ``runner_source``, ``runner_sha256``, and ``inputs``, so
+    a Bash runner can prepare a payload for a shared runner without a Python
+    program in between.
+    """
+
+    raw = read_json(Path(arguments.spec))
+    known = {field.name for field in dataclasses.fields(JobSpec)}
+    unknown = sorted(set(raw) - known)
+    if unknown:
+        raise _Refused(f"unknown job specification members: {', '.join(unknown)}")
+    values = dict(raw)
+    for name in ("runner_arguments", "required_capabilities", "retry_on"):
+        if name in values:
+            values[name] = tuple(values[name])
+    job = prepare_job_payload(arguments.destination, JobSpec(**values))
+    _print(
+        {
+            "id": job.id,
+            "job_key": job.job_key,
+            "runner_backend": job.runner_backend,
+            "runner_source": job.runner_source,
+            "runner_sha256": job.runner_sha256,
+            "inputs": dict(job.inputs),
+        }
+    )
+
+
+def _workdir_apply(arguments: argparse.Namespace) -> None:
+    raw = read_json(Path(arguments.spec))
+    operations = raw.get("operations")
+    if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
+        raise _Refused("a workdir operation spec requires an operations array")
+    batch = ReplayableWorkdirBatch.create(_attempt().workdir)
+    for item in operations:
+        if not isinstance(item, Mapping):
+            raise _Refused("a workdir operation must be an object")
+        operation = str(item.get("op", ""))
+        identifier = str(item.get("id", ""))
+        path = str(item.get("path", ""))
+        if operation == "make-dir":
+            batch.transaction.make_dir(identifier, path)
+        elif operation == "put-file":
+            batch.transaction.put_file(identifier, str(item.get("source", "")), path)
+        elif operation in {"put-tree", "replace-tree"}:
+            batch.transaction.put_tree(
+                identifier,
+                str(item.get("source", "")),
+                path,
+                replace=operation == "replace-tree",
+            )
+        elif operation == "remove":
+            batch.transaction.remove(identifier, path, missing_ok=bool(item.get("missing_ok", False)))
         else:
-            shutil.copytree(source, staged)
-            digest = tree_digest(staged)
-        operation.update({"source": f"payload/{identifier}", "sha256": digest})
-    operations.append(operation)
-    write_json_atomic(manifest_path, manifest)
+            raise _Refused(f"unknown workdir operation: {operation}")
+    print(batch.commit())
+
+
+def _run(arguments: argparse.Namespace) -> int:
+    argv = arguments.argv[1:] if arguments.argv[:1] == ["--"] else arguments.argv
+    checkers = tuple(CheckerSpec.from_mapping(read_json(Path(path))) for path in arguments.checker)
+    report = ProcessSupervisor(
+        checkers=checkers,
+        follow=tuple(source for checker in checkers for source in checker.sources),
+    ).run(
+        argv,
+        timeout=arguments.timeout,
+        termination_grace=arguments.grace,
+        stdout_path=arguments.stdout,
+        stderr_path=arguments.stderr,
+    )
+    report.write(arguments.report)
+    if report.timed_out:
+        return 124
+    if report.termination.startswith("checker") or any(item.stop for item in report.diagnostics):
+        return 125
+    return 0 if report.returncode == 0 else 22
 
 
 def _diagnostics_from_report(path: Path):
@@ -346,119 +698,117 @@ def _decision(path: Path) -> VaspRemedyDecision:
     )
 
 
-def _command(arguments: argparse.Namespace) -> int:
+def _attempt_command(arguments: argparse.Namespace) -> int:
+    """Run one subcommand that reads or composes the current attempt."""
+
     command = arguments.command
-    if command == "init":
-        runtime = AttemptRuntime.initialize()
-        print(runtime.context.step)
+    if command == "begin":
+        attempt = _attempt()
+        ReplayableWorkdirBatch.recover(attempt.workdir)
+        print(attempt.step)
     elif command == "context":
-        raw = _runtime().context.raw
+        raw = _attempt().context.raw
         if arguments.field is None:
-            print(json.dumps(raw, sort_keys=True, separators=(",", ":")))
+            _print(raw)
         elif arguments.field not in raw:
-            return 1
-        elif isinstance(raw[arguments.field], (dict, list)):
-            print(json.dumps(raw[arguments.field], sort_keys=True, separators=(",", ":")))
+            raise _Absent()
         elif raw[arguments.field] is not None:
-            print(raw[arguments.field])
-    elif command == "state-get":
-        value = _runtime().state.get(arguments.name)
-        if value is None:
-            return 1
-        print(json.dumps(value, sort_keys=True, separators=(",", ":")))
-    elif command == "state-set":
-        _runtime().state.set(arguments.name, json.loads(arguments.json_value))
-    elif command == "state-delete":
-        return 0 if _runtime().state.delete(arguments.name) else 1
-    elif command == "runlog":
-        _runtime().runlog.append(arguments.kind, arguments.message, files=arguments.files)
-    elif command == "outcome-begin":
-        print(_runtime().outcome().root)
-    elif command == "job-prepare":
-        raw = read_json(Path(arguments.spec))
-        prepare_job_payload(arguments.destination, JobSpec(**raw))
-    elif command == "workdir-apply":
-        raw = read_json(Path(arguments.spec))
-        operations = raw.get("operations")
-        if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
-            raise ValueError("workdir operation spec requires an operations array")
-        batch = ReplayableWorkdirBatch.create(_runtime().workdir)
-        for item in operations:
-            if not isinstance(item, Mapping):
-                raise ValueError("workdir operation must be an object")
-            operation = str(item.get("op", ""))
-            identifier = str(item.get("id", ""))
-            path = str(item.get("path", ""))
-            if operation == "make-dir":
-                batch.transaction.make_dir(identifier, path)
-            elif operation == "put-file":
-                batch.transaction.put_file(identifier, str(item.get("source", "")), path)
-            elif operation in {"put-tree", "replace-tree"}:
-                batch.transaction.put_tree(
-                    identifier,
-                    str(item.get("source", "")),
-                    path,
-                    replace=operation == "replace-tree",
-                )
-            elif operation == "remove":
-                batch.transaction.remove(identifier, path, missing_ok=bool(item.get("missing_ok", False)))
+            _print(raw[arguments.field])
+    elif command == "input":
+        attempt = _attempt()
+        try:
+            if arguments.default is None:
+                _print(attempt.input(arguments.name))
             else:
-                raise ValueError(f"unknown workdir operation: {operation}")
-        print(batch.commit())
-    elif command.startswith("tx-"):
-        _transaction_add(arguments)
-    elif command == "child-add":
-        reference = OutcomeBuilder.resume(_runtime(), arguments.draft).add_child(arguments.payload, arguments.placement)
-        print(json.dumps(reference.as_mapping(), sort_keys=True, separators=(",", ":")))
+                _print(attempt.input(arguments.name, _value(arguments.default)))
+        except KeyError as exc:
+            raise _Absent(str(exc.args[0])) from exc
+    elif command == "state-get":
+        state = _attempt().state.read()
+        if arguments.name not in state:
+            raise _Absent()
+        _print(state[arguments.name])
+    elif command == "state-set":
+        _attempt().state[arguments.name] = _value(arguments.value)
+    elif command == "state-delete":
+        if not _attempt().state.delete(arguments.name):
+            raise _Absent()
+    elif command == "state-merge":
+        _attempt().state.merge(_assignments(arguments.assignments, "a state assignment"))
+    elif command == "runlog":
+        _attempt().log.append(arguments.kind, arguments.message, files=arguments.files)
+    elif command == "put":
+        attempt = _publishing()
+        print(attempt.put(arguments.source, arguments.destination))
+        _seal(attempt)
+    elif command == "remove":
+        attempt = _publishing()
+        print(attempt.remove(arguments.destination, missing_ok=arguments.missing_ok))
+        _seal(attempt)
+    elif command == "spawn":
+        _spawn(arguments)
+    elif command == "children":
+        _children(arguments)
+    elif command == "child":
+        _child(arguments)
     elif command == "advance":
-        _builder(arguments.draft).publish("advance", next_step=arguments.next_step, priority=arguments.priority)
-    elif command == "wait":
-        builder = _builder(arguments.draft)
-        join = JoinSpec(
-            builder.children,
-            arguments.condition,
-            arguments.count,
-            arguments.on_impossible,
+        _publishing().advance(
+            arguments.next_step,
+            state=_assignments(arguments.state, "a state assignment"),
+            priority=arguments.priority,
         )
-        builder.publish("wait", next_step=arguments.next_step, priority=arguments.priority, join=join)
+    elif command == "gather":
+        _publishing().gather(
+            arguments.next_step,
+            when=cast(JoinCondition, arguments.when),
+            count=arguments.count,
+            on_impossible=arguments.on_impossible,
+        )
     elif command == "succeed":
-        _builder(arguments.draft).publish("succeed")
+        _publishing().succeed()
     elif command == "fail":
-        failure = Failure(
+        details = None if not arguments.details else read_json(Path(str(arguments.details).removeprefix("@")))
+        _publishing().fail(
             arguments.code,
             arguments.message,
-            details=None if not arguments.details else read_json(Path(arguments.details)),
+            details=details,
+            retryable=arguments.retryable,
         )
-        _builder(arguments.draft).publish("fail", failure=failure.as_mapping())
     elif command == "retry":
-        _builder(arguments.draft).publish("retry", retry={"reason": arguments.reason})
+        _publishing().retry(arguments.reason)
     elif command == "pause":
-        _builder(arguments.draft).publish("pause", pause={"reason": arguments.reason})
-    elif command == "run":
-        argv = arguments.argv[1:] if arguments.argv[:1] == ["--"] else arguments.argv
-        checkers = tuple(CheckerSpec.from_mapping(read_json(Path(path))) for path in arguments.checker)
-        process_report = ProcessSupervisor(
-            checkers=checkers,
-            follow=tuple(source for checker in checkers for source in checker.sources),
-        ).run(
-            argv,
-            timeout=arguments.timeout,
-            termination_grace=arguments.grace,
-            stdout_path=arguments.stdout,
-            stderr_path=arguments.stderr,
+        _publishing().pause(arguments.reason)
+    elif command == "fail-unknown-step":
+        attempt = _publishing()
+        runner = attempt._runner
+        assert runner is not None
+        registered = ", ".join(sorted(runner.steps)) or "none"
+        attempt.fail(
+            "unknown_step",
+            f"step {attempt.step!r} is not implemented by the {runner.workflow} runner; "
+            f"registered steps: {registered}",
         )
-        process_report.write(arguments.report)
-        return (
-            124
-            if process_report.timed_out
-            else (
-                125
-                if process_report.termination.startswith("checker")
-                or any(item.stop for item in process_report.diagnostics)
-                else (0 if process_report.returncode == 0 else 22)
-            )
-        )
-    elif command == "calc":
+    elif command == "fail-no-outcome":
+        attempt = _publishing()
+        attempt.fail("no_outcome", f"step {attempt.step!r} finished without publishing an outcome")
+    elif command == "abort":
+        _abort(arguments)
+    elif command == "job-prepare":
+        _job_prepare(arguments)
+    elif command == "workdir-apply":
+        _workdir_apply(arguments)
+    else:
+        raise AssertionError(command)
+    return 0
+
+
+def _utility_command(arguments: argparse.Namespace) -> int:
+    """Run one subcommand that needs no attempt at all."""
+
+    command = arguments.command
+    if command == "run":
+        return _run(arguments)
+    if command == "calc":
         value = evaluate_expression(arguments.expression)
         print(int(value) if isinstance(value, bool) else f"{value:.14g}" if isinstance(value, float) else value)
     elif command == "template":
@@ -471,20 +821,22 @@ def _command(arguments: argparse.Namespace) -> int:
     elif command == "decompress":
         for output_path in decompress_files(arguments.paths, remove_source=arguments.remove_source):
             print(output_path)
-    elif command == "vasp-prepare":
+    else:
+        raise AssertionError(command)
+    return 0
+
+
+def _vasp_command(arguments: argparse.Namespace) -> int:
+    command = arguments.command
+    if command == "vasp-prepare":
         options = VaspPreparationOptions()
         if arguments.options:
-            raw = read_json(Path(arguments.options))
-            options = VaspPreparationOptions(**raw)
-        print(
-            json.dumps(
-                prepare_vasp_inputs(options, directory=arguments.directory), sort_keys=True, separators=(",", ":")
-            )
-        )
+            options = VaspPreparationOptions(**read_json(Path(arguments.options)))
+        _print(prepare_vasp_inputs(options, directory=arguments.directory))
     elif command == "vasp-get-tag":
         value = read_incar(arguments.path).get(arguments.tag.upper())
         if value is None:
-            return 1
+            raise _Absent()
         print(value)
     elif command == "vasp-set-tag":
         update_incar({arguments.tag: arguments.value}, arguments.path)
@@ -502,26 +854,21 @@ def _command(arguments: argparse.Namespace) -> int:
                 poscar=arguments.poscar, potcar=arguments.potcar, incar=arguments.incar, divisor=arguments.divisor
             )
         )
-    elif command == "vasp-energy":
-        value = last_oszicar_energy(arguments.path)
-        if value is None:
-            return 1
-        print(f"{value:.16g}")
-    elif command == "vasp-volume":
-        value = last_vasprun_volume(arguments.path)
-        if value is None:
-            return 1
-        print(f"{value:.16g}")
-    elif command == "vasp-potim":
-        value = outcar_potim(arguments.path)
-        if value is None:
-            return 1
-        print(f"{value:.16g}")
+    elif command in {"vasp-energy", "vasp-volume", "vasp-potim"}:
+        reader = {
+            "vasp-energy": last_oszicar_energy,
+            "vasp-volume": last_vasprun_volume,
+            "vasp-potim": outcar_potim,
+        }[command]
+        number = reader(arguments.path)
+        if number is None:
+            raise _Absent()
+        print(f"{number:.16g}")
     elif command == "vasp-plane-waves":
-        value = outcar_plane_wave_count(arguments.path)
-        if value is None:
-            return 1
-        print(value)
+        count = outcar_plane_wave_count(arguments.path)
+        if count is None:
+            raise _Absent()
+        print(count)
     elif command == "vasp-promote-contcar":
         contcar_to_poscar(arguments.contcar, reference=arguments.reference, output=arguments.output)
     elif command == "vasp-potcar-summary":
@@ -539,7 +886,7 @@ def _command(arguments: argparse.Namespace) -> int:
         rattle_poscar(arguments.path, amplitude=arguments.amplitude, seed=arguments.seed)
     elif command == "vasp-run":
         argv = arguments.argv[1:] if arguments.argv[:1] == ["--"] else arguments.argv
-        vasp_report = run_vasp(
+        report = run_vasp(
             argv,
             directory=arguments.directory,
             timeout=arguments.timeout,
@@ -552,7 +899,7 @@ def _command(arguments: argparse.Namespace) -> int:
             "nonconverged": 21,
             "process_failure": 22,
             "timeout": 124,
-        }[vasp_report.classification]
+        }[report.classification]
     elif command == "vasp-diagnose":
         diagnostics = diagnose_vasp_files(arguments.directory)
         write_json_atomic(
@@ -579,12 +926,68 @@ def _command(arguments: argparse.Namespace) -> int:
     return 0
 
 
+_UTILITY_COMMANDS = frozenset({"run", "calc", "template", "compress", "decompress"})
+
+
+def _command(arguments: argparse.Namespace) -> int:
+    command = str(arguments.command)
+    if command.startswith("vasp-"):
+        return _vasp_command(arguments)
+    if command in _UTILITY_COMMANDS:
+        return _utility_command(arguments)
+    return _attempt_command(arguments)
+
+
+def _report(exception: BaseException) -> int:
+    """Print one refusal or absence the way every subcommand reports it."""
+
+    if isinstance(exception, _Absent):
+        if exception.args and exception.args[0]:
+            print(f"httk-workflow: {exception}", file=sys.stderr)
+        return ABSENT
+    print(f"httk-workflow: {exception}", file=sys.stderr)
+    return REFUSED
+
+
+def _batch(parser: argparse.ArgumentParser, text: str) -> int:
+    """Run several newline-separated commands in this one process.
+
+    A Bash runner pays one Python interpreter start per bridge call, so a step
+    that composes many operations sends them as one batch instead. The commands
+    share this process's attempt and its draft, which is also what makes their
+    operation identifiers one sequence.
+    """
+
+    for number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        argv = shlex.split(line, comments=True)
+        if not argv:
+            continue
+        if argv[0] == "batch":
+            raise _Refused("a batch cannot contain another batch")
+        try:
+            code = _command(parser.parse_args(argv))
+        except SystemExit as exc:
+            code = REFUSED if exc.code in {None, 0} else int(cast(int, exc.code))
+        except Exception as exc:
+            code = _report(exc)
+        if code != 0:
+            print(f"httk-workflow: batch line {number} failed: {stripped}", file=sys.stderr)
+            return code
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    parser = _parser()
+    arguments = parser.parse_args(argv)
     try:
-        return _command(_parser().parse_args(argv))
+        if arguments.command == "batch":
+            return _batch(parser, sys.stdin.read())
+        return _command(arguments)
     except Exception as exc:
-        print(f"httk-workflow: {exc}", file=sys.stderr)
-        return 1
+        return _report(exc)
 
 
 if __name__ == "__main__":

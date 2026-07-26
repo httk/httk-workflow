@@ -3,6 +3,7 @@
 from .backends import AttemptLaunch, OutcomeCommit, PathRunnerBackend, RunnerBackend
 from .errors import (
     FormatError,
+    RunnerResolutionError,
     TransactionError,
     TransitionLostError,
     UnsupportedExtensionError,
@@ -11,13 +12,23 @@ from .errors import (
     WorkspaceUnavailableError,
 )
 from .manager import TaskManager
-from .models import Failure, JobDefinition, Marker, RetryPolicy, validate_failure
+from .models import (
+    CORE_PROFILE,
+    Failure,
+    JobDefinition,
+    Marker,
+    RetryPolicy,
+    job_digest,
+    validate_failure,
+)
 from .runtime import AttemptContext, AttemptRuntime, CommandResult, run_command
 from .runtime_builders import (
     ChildReference,
     JobSpec,
+    JobState,
     JoinSpec,
     OutcomeBuilder,
+    OutcomeDraft,
     ReplayableWorkdirBatch,
     RunLog,
     TransactionBuilder,
@@ -29,6 +40,14 @@ from .runtime_utils import (
     decompress_files,
     evaluate_expression,
     render_template,
+)
+from .sdk import (
+    Attempt,
+    ChildrenView,
+    ChildResult,
+    ChildSpec,
+    Runner,
+    RunnerRef,
 )
 from .supervision import (
     CheckerSpec,
@@ -87,22 +106,31 @@ from .vasp import (
 from .workspace import MarkerFault, WorkflowWorkspace
 
 __all__ = [
+    "CORE_PROFILE",
+    "Attempt",
     "AttemptContext",
     "AttemptLaunch",
     "AttemptRuntime",
     "CommandResult",
     "CheckerSpec",
     "ChildReference",
+    "ChildResult",
+    "ChildSpec",
+    "ChildrenView",
     "Diagnostic",
     "Failure",
     "FormatError",
     "JobDefinition",
     "JobSpec",
+    "JobState",
     "JoinSpec",
+    "Runner",
+    "RunnerRef",
     "Marker",
     "MarkerFault",
     "OutcomeCommit",
     "OutcomeBuilder",
+    "OutcomeDraft",
     "PathRunnerBackend",
     "PoscarHeader",
     "ProcessReport",
@@ -113,6 +141,7 @@ __all__ = [
     "RunLog",
     "RetryPolicy",
     "RunnerBackend",
+    "RunnerResolutionError",
     "WorkspaceCorruptionError",
     "WorkspaceUnavailableError",
     "TaskManager",
@@ -135,6 +164,7 @@ __all__ = [
     "acknowledge_transfer",
     "recover_transfers",
     "run_command",
+    "job_digest",
     "validate_failure",
     "prepare_job_payload",
     "evaluate_expression",
