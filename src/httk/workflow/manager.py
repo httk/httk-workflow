@@ -28,6 +28,7 @@ from ._util import (
     write_json_atomic,
 )
 from .backends import AttemptLaunch, OutcomeCommit, PathRunnerBackend, RunnerBackend
+from .configuration import verify_document
 from .errors import (
     FormatError,
     RunnerResolutionError,
@@ -98,6 +99,7 @@ _CANCELLING_MEMBERS = (
     "workdir",
     "started_at",
     "operator",
+    "operator_key",
     "operator_reason",
     "request_id",
 )
@@ -2466,11 +2468,44 @@ class TaskManager:
             extra=self._event("request_retired", request=claimed_path.name, reason=reason),
         )
 
+    def _request_operator_key(self, request: Mapping[str, Any]) -> str | None:
+        """Verify the optional operator signature and return the key that made it.
+
+        The signature is attribution, not authorization. A request that carries
+        none is applied exactly as before — that is what lets an installation
+        without an identity key, or one that predates signing, keep working — but
+        a signature that is present and does not verify is refused, because a
+        damaged or forged attribution is worse than none.
+        """
+
+        signature = verify_document(request)
+        if not signature.present:
+            _LOGGER.debug(
+                "request %s carries no operator signature",
+                request.get("request_id"),
+                extra=self._event("request_unsigned", request_id=str(request.get("request_id"))),
+            )
+            return None
+        if not signature.valid:
+            raise FormatError(f"operator signature is invalid: {signature.reason}")
+        _LOGGER.info(
+            "request %s is signed by %s",
+            request.get("request_id"),
+            signature.operator_key,
+            extra=self._event(
+                "request_signature_verified",
+                request_id=str(request.get("request_id")),
+                operator_key=signature.operator_key,
+            ),
+        )
+        return signature.operator_key
+
     def _apply_request(self, request: Mapping[str, Any]) -> str | None:
         """Apply one operator request, or say why it can never be applied."""
 
         if request.get("format") != "httk-workflow-request" or request.get("format_version") != 1:
             raise FormatError("request must use httk-workflow-request version 1")
+        operator_key = self._request_operator_key(request)
         marker = self.workspace.find_marker_by_id(str(request.get("job_id", "")))
         if marker is None:
             raise FormatError("request job does not exist")
@@ -2487,8 +2522,10 @@ class TaskManager:
             operator_reason=request.get("reason"),
             request_id=request.get("request_id"),
         )
+        if operator_key is not None:
+            audit = StateFrame.of(audit, operator_key=operator_key)
         if action == "cancel" and marker.kind not in TERMINAL_KINDS:
-            return self._request_cancel(marker, state, request)
+            return self._request_cancel(marker, state, request, operator_key)
         if action == "set_priority" and marker.kind in {"submitted", "ready", "waiting", "paused", "failed"}:
             priority = int(request.get("priority", -1))
             # A repriced job keeps the same state kind, so the members that make
@@ -2588,7 +2625,13 @@ class TaskManager:
             }
         return None
 
-    def _request_cancel(self, marker: Marker, state: StateFrame, request: Mapping[str, Any]) -> str | None:
+    def _request_cancel(
+        self,
+        marker: Marker,
+        state: StateFrame,
+        request: Mapping[str, Any],
+        operator_key: str | None = None,
+    ) -> str | None:
         """Fence one cancelled job, before anything is signalled or verified.
 
         Order is the whole point. A `running` job first moves to `cancelling`,
@@ -2605,6 +2648,8 @@ class TaskManager:
             operator_reason=request.get("reason"),
             request_id=request.get("request_id"),
         )
+        if operator_key is not None:
+            audited = StateFrame.of(audited, operator_key=operator_key)
         if marker.kind == "cancelling":
             return "the job is already being cancelled"
         if marker.kind == "running":

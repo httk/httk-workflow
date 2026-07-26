@@ -47,7 +47,7 @@ def _payload(root: Path) -> tuple[Path, str]:
 
 def test_all_command_groups_have_help(tmp_path: Path, capsys) -> None:
     context = CLIContext("httk", tmp_path)
-    for group in ("workspace", "job", "manager", "config", "project", "computer", "tasks"):
+    for group in ("workspace", "runner", "job", "manager", "config", "project", "computer", "remote"):
         assert command([group, "--help"], context) == 0
     assert command(["v1", "prepare", "--help"], context) == 0
     assert "usage:" in capsys.readouterr().out
@@ -200,7 +200,7 @@ def test_tasks_send_uses_adapter_status_push_import_and_ack(tmp_path: Path) -> N
     WorkflowWorkspace(source_root).submit(payload, "jobs")
     assert (
         command(
-            ["tasks", "send", "local", job_id, "--workspace", str(source_root)],
+            ["remote", "send", "local", job_id, "--source-workspace", str(source_root)],
             CLIContext("httk", source_root),
         )
         == 0
@@ -235,6 +235,9 @@ def test_tasks_send_resumes_after_copy_before_import(tmp_path: Path, monkeypatch
         return real_run_adapter(bundle, operation, request, timeout=timeout)
 
     monkeypatch.setattr(workflow_cli, "run_adapter", interrupt_import)
+    # Deliberately the superseded spelling of both the group and the option: a
+    # resumed transfer is exactly the situation in which an operator retypes a
+    # command they had in their shell history from before the rename.
     arguments = ["tasks", "send", "local", job_id, "--workspace", str(source_root)]
     assert command(arguments, CLIContext("httk", source_root)) == 2
     assert WorkflowWorkspace(source_root).find_marker_by_id(job_id) is None

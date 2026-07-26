@@ -20,10 +20,10 @@ You do not need to migrate every workflow at once.
 
 | Route | Workflow changes | Manager | Best use |
 | --- | --- | --- | --- |
-| Compatibility | None, normally | `httk-v1-taskmanager` | Establish an *httk₂* operational baseline quickly |
+| Compatibility | None, normally | `httk workflow v1 run` | Establish an *httk₂* operational baseline quickly |
 | Mixed | Per job type | Both managers on one workspace | Incremental migration with a direct fallback |
-| Native Bash | Replace `HT_TASK_*` and `VASP_*` calls | `httk-taskmanager` | Preserve a shell-oriented workflow |
-| Native Python | Replace the runner with Python calls | `httk-taskmanager` | New development and more structured logic |
+| Native Bash | Replace `HT_TASK_*` and `VASP_*` calls | `httk workflow manager run` | Preserve a shell-oriented workflow |
+| Native Python | Replace the runner with Python calls | `httk workflow manager run` | New development and more structured logic |
 
 Start with compatibility unless you already have tests that describe the
 workflow's inputs, outputs, restart behavior, and child-task behavior. A
@@ -70,7 +70,7 @@ Prepare an already instantiated *httk* v1 task without consuming the source:
 ```console
 httk workflow v1 prepare legacy-task prepared-v1 \
   --tag silicon-relax \
-  --set vasp \
+  --taskset vasp \
   --priority 4 \
   --attempts 10
 ```
@@ -88,7 +88,7 @@ Preparation and submission can also be combined:
 httk workflow v1 submit workflow-workspace legacy-task \
   --placement migration/reference/silicon-relax \
   --tag silicon-relax \
-  --set vasp \
+  --taskset vasp \
   --priority 4 \
   --attempts 10
 ```
@@ -97,7 +97,7 @@ Run only *httk* v1 compatibility jobs:
 
 ```console
 httk workflow v1 run workflow-workspace \
-  --set any \
+  --taskset any \
   --workers 4 \
   --until-idle
 ```
@@ -163,10 +163,10 @@ one *httk₂* workspace:
 
 ```console
 # Terminal or service 1: compatibility jobs
-httk-v1-taskmanager run workflow-workspace --set any --workers 2
+httk workflow v1 run workflow-workspace --taskset any --workers 2
 
 # Terminal or service 2: native jobs
-httk-taskmanager run workflow-workspace --pool vasp-native --workers 2
+httk workflow manager run workflow-workspace --pool vasp-native --workers 2
 ```
 
 If the future native jobs will use transactional data, create this shared
@@ -280,7 +280,7 @@ The `collect` example uses transactional data. Its workspace must have been
 created with that extension:
 
 ```console
-httk-taskmanager init native-workspace \
+httk workflow workspace init native-workspace \
   --extension transactional-data-v1
 ```
 
@@ -325,9 +325,9 @@ prepare_job_payload(
 Submit and run it:
 
 ```console
-httk-taskmanager submit native-workspace native-job \
+httk workflow job submit native-workspace native-job \
   --placement migration/native/silicon-relax
-httk-taskmanager run native-workspace \
+httk workflow manager run native-workspace \
   --pool vasp-native \
   --until-idle
 ```
@@ -688,8 +688,8 @@ For each migrated job type:
    result publication; verify that restart does not duplicate work or lose the
    authoritative outcome.
 6. Exercise a failed child as well as an all-successful child set.
-7. Verify `httk-taskmanager status --json` and the journal rather than relying
-   on directory names.
+7. Verify `httk workflow workspace status workflow-workspace --json` and the journal
+   rather than relying on directory names.
 8. Run several jobs with the intended pool, capabilities, resources, and
    worker count.
 
@@ -702,12 +702,13 @@ Stop instantiating new compatibility jobs first. Let submitted *httk* v1 jobs re
 terminal state or cancel them through recorded operator requests:
 
 ```console
-httk-taskmanager request workflow-workspace JOB_UUID cancel \
+httk workflow job request workflow-workspace JOB_UUID cancel \
   --operator "$USER" \
   --reason "replaced by validated native workflow"
 ```
 
-Then stop `httk-v1-taskmanager` while leaving `httk-taskmanager` running.
+Then stop the `httk workflow v1 run` managers while leaving the
+`httk workflow manager run` ones running.
 Retain the legacy source, its attribution, and reference results for
 reproducibility.
 

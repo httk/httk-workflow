@@ -1,18 +1,21 @@
 # Task-manager usage
 
-Installing *httk-workflow* provides the `httk-taskmanager` executable.
+Every command below is spelled the canonical way, `httk workflow …`. The
+`httk-taskmanager` executable installed beside it is an alias of the same tree
+(`init`, `submit`, `run`, `status`, and `request`); see
+[the project and workflow command line](workflow_cli.md) for the mapping.
 
 ## Initialize a workspace
 
 ```console
-httk-taskmanager init WORKSPACE
+httk workflow workspace init WORKSPACE
 ```
 
 This creates a `core-v2` workspace. Optional supported extensions are enabled at
 initialization:
 
 ```console
-httk-taskmanager init WORKSPACE \
+httk workflow workspace init WORKSPACE \
   --extension transactional-data-v1 \
   --extension detached-transfer-v1
 ```
@@ -142,7 +145,7 @@ A prepared payload is a directory containing an immutable `job.json` and its
 runner. Submit it at any arbitrary placement:
 
 ```console
-httk-taskmanager submit WORKSPACE PAYLOAD --placement project-a/00/17
+httk workflow job submit WORKSPACE PAYLOAD --placement project-a/00/17
 ```
 
 Submission copies by default. `--move` performs a same-filesystem rename and
@@ -178,14 +181,14 @@ against the ordered `--runner-search-path` roots of the manager.
 ## Run
 
 ```console
-httk-taskmanager run WORKSPACE --workers 8
+httk workflow manager run WORKSPACE --workers 8
 ```
 
 Without pool configuration, a manager advertises the reserved `default` pool.
 Additional routing and capability labels are explicit:
 
 ```console
-httk-taskmanager run WORKSPACE \
+httk workflow manager run WORKSPACE \
   --pool vasp \
   --capability gpu \
   --workers 4
@@ -232,13 +235,13 @@ is recovered from its expired lease by the next manager.
 ## Inspect and control
 
 ```console
-httk-taskmanager status WORKSPACE
-httk-taskmanager status WORKSPACE --json
+httk workflow workspace status WORKSPACE
+httk workflow workspace status WORKSPACE --json
 
-httk-taskmanager request WORKSPACE JOB_UUID pause \
+httk workflow job request WORKSPACE JOB_UUID pause \
   --operator "$USER" --reason "inspection"
 
-httk-taskmanager request WORKSPACE JOB_UUID continue \
+httk workflow job request WORKSPACE JOB_UUID continue \
   --operator "$USER" --reason "inputs repaired"
 ```
 
@@ -249,10 +252,20 @@ apply again — because the job has moved on — is moved to
 of being reread on every pass; a request for a runner backend this manager does
 not serve is left alone for a manager that does.
 
+When the publishing installation has an operator identity key — created by
+`httk workflow config init` — the request also carries a detached Ed25519
+signature over its canonical JSON, and the manager records the verified
+`operator_key` in the journalled state frame beside `operator` and `reason`. The
+signature is optional in both directions: a request without one is applied
+exactly as before, so a mixed deployment needs no flag day, while a request
+whose signature does not verify is quarantined with that reason rather than
+applied. It is attribution and not authorization; see
+[the project CLI guide](workflow_cli.md#operator-identity).
+
 **Cancelling a running job** is fenced and verified, not a single signal:
 
 ```console
-httk-taskmanager request WORKSPACE JOB_UUID cancel \
+httk workflow job request WORKSPACE JOB_UUID cancel \
   --operator "$USER" --reason "wrong inputs"
 ```
 
@@ -413,6 +426,6 @@ the process identity and commits the `running` marker before releasing that
 gate. If the manager disappears during this narrow launch interval, the gated
 process observes end-of-file and exits without executing the runner.
 
-`httk-taskmanager` executes only the normal `path` runner backend. Legacy
+`httk workflow manager run` executes only the normal `path` runner backend. Legacy
 `ht_steps` jobs use a distinct backend and are intentionally left untouched;
 run those with [*httk* v1 task compatibility](v1_compatibility.md).

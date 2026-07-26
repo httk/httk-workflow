@@ -125,7 +125,7 @@ $ httk workflow harvest workflow-workspace | head -1
 ```
 
 Jobs that ran on another computer are harvested the same way once they are
-home: `httk workflow tasks fetch --computer NAME --workspace WORKSPACE` imports
+home: `httk workflow remote fetch --computer NAME --workspace WORKSPACE` imports
 them into this workspace in the terminal state they stopped in, and the harvest
 that follows cannot tell them from jobs that ran locally. See
 {doc}`workflow_cli`.

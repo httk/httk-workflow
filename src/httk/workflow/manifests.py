@@ -13,16 +13,24 @@ import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from httk.core import ed25519_public_key, ed25519_sign, ed25519_verify
 
 from ._util import json_bytes, retry_delay, sha256_file, timestamp_seconds, utc_now
 from .projects import (
+    PROJECT_DIRECTORY,
+    PROJECT_FILE,
+    canonical_public_key,
     discover_project,
+    format_public_key,
+    key_fingerprint,
     project_exclusions,
     read_project,
+    read_public_key_file,
     require_project,
+    trusted_project_keys,
 )
 from .workspace import WorkflowWorkspace
 
@@ -30,6 +38,17 @@ _DOMAIN = b"httk-project-manifest-v2\0"
 
 MAINTENANCE_LOCK_FILE = "maintenance.lock"
 MAINTENANCE_LOCK_MAX_AGE_SECONDS = 24 * 60 * 60
+
+#: The signature verified and the signing key is a pinned trust anchor.
+VALID_TRUSTED = "valid_trusted"
+#: The signature verified, but nothing pins the key that made it. The manifest
+#: describes the tree faithfully; it does not say *who* described it.
+VALID_UNKNOWN_KEY = "valid_unknown_key"
+#: The manifest does not describe this tree, or its signature does not verify.
+INVALID = "invalid"
+
+#: What the command line exits with for each verdict.
+VERDICT_EXIT_CODES = {VALID_TRUSTED: 0, VALID_UNKNOWN_KEY: 3, INVALID: 1}
 
 
 def _excluded(path: str, patterns: Sequence[str]) -> bool:
@@ -306,27 +325,192 @@ def _parse_v2(path: Path) -> tuple[dict[str, object], list[dict[str, object]], d
     return header, values[1:-1], trailer, b"".join(lines[:-1])
 
 
-def verify_v2_manifest(root: Path, path: Path) -> bool:
+@dataclass(frozen=True)
+class ManifestVerification:
+    """What verifying one manifest against one tree established.
+
+    A signature check answers two separate questions, and reporting them as one
+    boolean loses the interesting one. *Does this manifest describe this tree,
+    unaltered?* is answered by the digests and the signature. *Was it made by
+    somebody this project trusts?* is answered only by comparing the signing key
+    with a trust anchor that did not come from the manifest itself.
+    """
+
+    verdict: str
+    reason: str
+    manifest: Path
+    manifest_format: str
+    public_key: str | None = None
+    trusted_keys: tuple[str, ...] = ()
+
+    @property
+    def valid(self) -> bool:
+        """Whether the manifest describes this tree and its signature verified."""
+
+        return self.verdict in {VALID_TRUSTED, VALID_UNKNOWN_KEY}
+
+    @property
+    def trusted(self) -> bool:
+        """Whether the verified signature was made by a pinned key."""
+
+        return self.verdict == VALID_TRUSTED
+
+    @property
+    def exit_code(self) -> int:
+        """The command-line status this verdict reports."""
+
+        return VERDICT_EXIT_CODES[self.verdict]
+
+    def __bool__(self) -> bool:
+        """A verification is truthy only when it is valid *and* trusted."""
+
+        return self.trusted
+
+    def as_mapping(self) -> dict[str, object]:
+        """Return the JSON representation of this verdict."""
+
+        return {
+            "format": "httk-project-manifest-verification",
+            "format_version": 1,
+            "verdict": self.verdict,
+            "reason": self.reason,
+            "manifest": str(self.manifest),
+            "manifest_format": self.manifest_format,
+            "public_key": self.public_key,
+            "trusted_keys": list(self.trusted_keys),
+        }
+
+
+def resolve_trusted_keys(
+    project: str | os.PathLike[str] | None = None,
+    *,
+    trusted_keys: Sequence[str | os.PathLike[str]] | None = None,
+) -> tuple[str, ...]:
+    """Return the trust anchors of *project* plus every explicitly named key.
+
+    An entry of *trusted_keys* is either a recorded key — ``ed25519:BASE64`` or
+    the bare base64 — or the path of a ``*.pub`` file holding one.
+    """
+
+    keys: list[str] = []
+    if project is not None:
+        try:
+            metadata = read_project(project)
+        except (OSError, ValueError):
+            metadata = {}
+        keys.extend(trusted_project_keys(metadata))
+    for supplied in trusted_keys or ():
+        text = str(supplied)
+        candidate = Path(text).expanduser()
+        recorded = read_public_key_file(candidate) if candidate.is_file() else canonical_public_key(text)
+        if recorded not in keys:
+            keys.append(recorded)
+    return tuple(keys)
+
+
+def _verdict_for_key(
+    public_key: str,
+    trusted: Sequence[str],
+    *,
+    manifest: Path,
+    manifest_format: str,
+) -> ManifestVerification:
+    """Classify a verified signature against the trust anchors of a project."""
+
+    if public_key in trusted:
+        return ManifestVerification(
+            VALID_TRUSTED,
+            f"signed by the pinned project key {key_fingerprint(public_key)}",
+            manifest,
+            manifest_format,
+            public_key,
+            tuple(trusted),
+        )
+    if not trusted:
+        reason = (
+            "the signature verifies, but this project pins no key to check it against: "
+            "the signing seed lives inside the tree, so anybody who can write the tree can "
+            "re-sign it. Adopt the current key with pin_project_key(), or pass the key you "
+            "expect explicitly"
+        )
+    else:
+        reason = (
+            f"the signature verifies, but it was made by {key_fingerprint(public_key)}, "
+            "which is not among this project's trusted keys"
+        )
+    return ManifestVerification(
+        VALID_UNKNOWN_KEY,
+        reason,
+        manifest,
+        manifest_format,
+        public_key,
+        tuple(trusted),
+    )
+
+
+def _verify_v2(root: Path, path: Path, trusted: Sequence[str]) -> ManifestVerification:
+    """Verify one v2 manifest against *root* and classify its signing key."""
+
     header, records, trailer, body = _parse_v2(path)
     exclusions = header.get("exclusions")
     if not isinstance(exclusions, list) or not all(isinstance(item, str) for item in exclusions):
         raise ValueError("manifest exclusions must be an array of strings")
+    invalid = partial(ManifestVerification, INVALID, manifest=path, manifest_format="v2")
     digest = hashlib.sha256(_DOMAIN + body).digest()
     if trailer.get("body_sha256") != digest.hex():
-        return False
+        return invalid(reason="the manifest body does not match its own recorded digest")
     try:
         public_key = base64.b64decode(str(header["public_key"]), validate=True)
         signature = base64.b64decode(str(trailer["signature"]), validate=True)
     except (KeyError, ValueError):
-        return False
-    if not ed25519_verify(public_key, digest, signature):
-        return False
-    actual = list(_records(root, exclusions))
-    return records == actual
+        return invalid(reason="the manifest header or trailer has no readable key or signature")
+    if len(public_key) != 32 or not ed25519_verify(public_key, digest, signature):
+        return invalid(reason="the manifest signature does not verify")
+    recorded = format_public_key(public_key)
+    # The identity of the project is part of what a manifest claims. A manifest
+    # made for another project, dropped into this tree, must never be reported
+    # as this project's manifest however well it verifies.
+    if (root / PROJECT_DIRECTORY / PROJECT_FILE).is_file():
+        expected = str(read_project(root).get("project_id", ""))
+        found = str(header.get("project_id", ""))
+        if expected and found != expected:
+            return invalid(
+                reason=f"the manifest names project {found or 'nothing'}, but this project is {expected}",
+                public_key=recorded,
+                trusted_keys=tuple(trusted),
+            )
+    if records != list(_records(root, exclusions)):
+        return invalid(
+            reason="the tree does not match the manifest",
+            public_key=recorded,
+            trusted_keys=tuple(trusted),
+        )
+    return _verdict_for_key(recorded, trusted, manifest=path, manifest_format="v2")
+
+
+def verify_v2_manifest(root: Path, path: Path) -> bool:
+    """Report whether a v2 manifest describes *root* and its signature verifies.
+
+    This deliberately says nothing about *whose* key signed it: the key comes
+    out of the manifest header. Use :func:`verify_manifest` for the trust
+    decision.
+    """
+
+    return _verify_v2(root, path, ()).valid
 
 
 def _legacy_file_digest(path: Path) -> str:
     return sha256_file(path)
+
+
+def _legacy_public_key(path: Path) -> str | None:
+    """Return the public key one legacy manifest names, when it is readable."""
+
+    try:
+        raw = bz2.decompress(path.read_bytes())
+        return format_public_key(base64.b64decode(raw.splitlines()[0].strip(), validate=True))
+    except (OSError, EOFError, IndexError, ValueError):
+        return None
 
 
 def verify_legacy_manifest(root: Path, path: Path) -> bool:
@@ -367,12 +551,43 @@ def verify_legacy_manifest(root: Path, path: Path) -> bool:
     return True
 
 
+def _verify_legacy(root: Path, path: Path, trusted: Sequence[str]) -> ManifestVerification:
+    """Verify a legacy manifest and classify the identity that signed it."""
+
+    public_key = _legacy_public_key(path)
+    if not verify_legacy_manifest(root, path):
+        return ManifestVerification(
+            INVALID,
+            "the legacy manifest does not verify against this tree",
+            path,
+            "legacy",
+            public_key,
+            tuple(trusted),
+        )
+    if public_key is None:
+        return ManifestVerification(
+            VALID_UNKNOWN_KEY,
+            "the legacy manifest verifies, but its signing key could not be read back",
+            path,
+            "legacy",
+            None,
+            tuple(trusted),
+        )
+    return _verdict_for_key(public_key, trusted, manifest=path, manifest_format="legacy")
+
+
 def verify_manifest(
     project: str | os.PathLike[str] | None = None,
     *,
     manifest: str | os.PathLike[str] | None = None,
-) -> bool:
-    """Auto-detect and verify a v2 or legacy project manifest."""
+    trusted_keys: Sequence[str | os.PathLike[str]] | None = None,
+) -> ManifestVerification:
+    """Auto-detect a v2 or legacy manifest and verify it against its trust anchors.
+
+    The trust anchor is the key pinned in ``project.json`` — never the key the
+    manifest being verified names in its own header — plus any key passed in
+    *trusted_keys*, as a recorded value or as the path of a ``*.pub`` file.
+    """
 
     supplied = Path(project).expanduser().resolve() if project is not None else Path.cwd().resolve()
     v2_root = discover_project(supplied)
@@ -393,20 +608,21 @@ def verify_manifest(
             if manifest is not None
             else legacy_root / "ht.project" / "manifest.bz2"
         )
-        return verify_legacy_manifest(legacy_root, path)
+        return _verify_legacy(legacy_root, path, resolve_trusted_keys(None, trusted_keys=trusted_keys))
+    trusted = resolve_trusted_keys(v2_root, trusted_keys=trusted_keys)
     if manifest is not None:
         path = Path(manifest).expanduser().resolve()
     else:
-        path = v2_root / ".httk-project" / "manifest.jsonl.bz2"
+        path = v2_root / PROJECT_DIRECTORY / "manifest.jsonl.bz2"
         if not path.is_file():
             legacy = v2_root / "ht.project" / "manifest.bz2"
             if legacy.is_file():
-                return verify_legacy_manifest(v2_root, legacy)
+                return _verify_legacy(v2_root, legacy, trusted)
     if not path.is_file():
         raise FileNotFoundError(path)
     try:
-        return verify_v2_manifest(v2_root, path)
+        return _verify_v2(v2_root, path, trusted)
     except ValueError as exc:
         if "not a v2" not in str(exc):
             raise
-        return verify_legacy_manifest(v2_root, path)
+        return _verify_legacy(v2_root, path, trusted)

@@ -364,14 +364,14 @@ def test_start_manager_from_the_command_line_counts_managers_and_defers_workers(
     fake_computer(project, workspace=str(workspace.root), workers="4")
     context = CLIContext("httk", project)
 
-    assert command(["tasks", "start-manager", "cluster", "--count", "2"], context) == 0
+    assert command(["remote", "start-manager", "cluster", "--count", "2"], context) == 0
     submitted = json.loads(capsys.readouterr().out)
     assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
     # No --workers on the command line, so the queue's setting is what runs.
     script = Path(str(submitted["script"])).read_text(encoding="utf-8")
     assert f"exec httk workflow manager run {workspace.root} --workers 4" in script
 
-    assert command(["tasks", "start-manager", "cluster", "--workers", "1"], context) == 0
+    assert command(["remote", "start-manager", "cluster", "--workers", "1"], context) == 0
     explicit = json.loads(capsys.readouterr().out)
     assert explicit["count"] == 1 and len(explicit["job_ids"]) == 1
     later = Path(str(explicit["script"])).read_text(encoding="utf-8")
@@ -543,7 +543,7 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
 
     assert (
         command(
-            ["tasks", "send", "cluster", job_id, "--workspace", str(source_root)],
+            ["remote", "send", "cluster", job_id, "--source-workspace", str(source_root)],
             CLIContext("httk", source_root),
         )
         == 0
