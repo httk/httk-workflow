@@ -389,7 +389,7 @@ class V1TaskManager(TaskManager):
         *,
         taskset: str = "any",
         maximum_workers: int = 1,
-        lease_seconds: float = 900.0,
+        lease_seconds: float | None = None,
         heartbeat_interval: float = 30.0,
         unsafe_persistent_takeover: bool = False,
         runtime_root: str | os.PathLike[str] | None = None,

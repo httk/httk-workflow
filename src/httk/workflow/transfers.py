@@ -12,7 +12,6 @@ from typing import Any
 
 from ._util import read_json, sha256_file, utc_now, write_json_atomic
 from .errors import FormatError, UnsupportedExtensionError, WorkspaceCorruptionError
-from .journal import JournalWriter
 from .models import (
     QUIESCENT_KINDS,
     STATE_KINDS,
@@ -305,7 +304,7 @@ def detach_job(
         raise ValueError("job participates in an unresolved join and cannot transfer")
     target_placement = normalize_placement(destination_placement or marker.placement)
     prior_state = workspace.read_state(marker)
-    with JournalWriter(workspace.control, durable=workspace.durable) as writer:
+    with workspace.open_journal_writer() as writer:
         transferring = workspace.transition(
             writer,
             marker,
@@ -469,7 +468,7 @@ def import_bundle(workspace: WorkflowWorkspace, bundle: str | os.PathLike[str]) 
             "payload_sha256": digest,
         },
     }
-    with JournalWriter(workspace.control, durable=workspace.durable) as writer:
+    with workspace.open_journal_writer() as writer:
         record_ref = writer.append(frame)
     destination = workspace.marker_path(
         prior_kind,
