@@ -173,6 +173,7 @@ step composed lives in shell state, so the subshell costs a step nothing.
 | `httk_workflow_input NAME [DEFAULT]` | one member of the job's `inputs` object |
 | `httk_workflow_context [FIELD]` | the attempt context, or one field of it |
 | `httk_workflow_state_get NAME` | one key of the job's JSON state |
+| `httk_workflow_declaration NAME` | one workflow declaration: the observed document, else the declared one; 1 when neither exists |
 | `httk_workflow_children [--all\|--succeeded\|--failed]` | one tab-separated row per observed child |
 | `httk_workflow_child LABEL FIELD` | one field of one observed child |
 | `$HTTK_WORKFLOW_STEP` | the step this attempt runs |
@@ -188,6 +189,24 @@ job. `httk_workflow_state_set NAME VALUE` stores one value,
 stored as that JSON value, and anything else as the string it is, so
 `state_set answer 42` stores a number and `state_set stage relaxing` a string.
 `NAME=@file.json` reads the value from a file.
+
+`httk_workflow_declare NAME FILE.json` records what this job *observed* about its
+own workflow declaration, and `httk_workflow_declaration NAME` prints one back —
+the observed document when the job wrote one, the document `job.json` declared
+otherwise, and exit status 1 when there is neither. The document is passed as a
+file because a whole JSON object is what a command line cannot quote, and it is
+carried verbatim: nothing in *httk-workflow* looks inside it. It is stored at
+`.httk-job/declarations/NAME.json`, digest-excluded like the rest of `.httk-job/`,
+and the last write of a name wins:
+
+```bash
+httk_workflow_declaration workflow >declared.json
+jq '.outputs = {"structures": 3}' declared.json >refined.json
+httk_workflow_declare workflow refined.json
+```
+
+See {doc}`declarations` for the declared/observed contract and what a harvest
+reports.
 
 `httk_workflow_children` prints `label`, terminal state, job key, workdir, and
 data directory, separated by tabs; the workdir and data columns are absolute

@@ -837,6 +837,24 @@ the immutable job digest like every other member. An implementation MUST reject 
 the payload or in transactional `data/`. A parent that synthesizes a child job
 varies normally only the child's `initial_step` and its `inputs`.
 
+The optional top-level `declarations` member carries workflow declarations: a
+JSON object mapping a declaration name to one declaration document. A
+declaration document states what a workflow is — its inputs, its method, its
+outputs — without describing a graph, and is intended to feed provenance.
+
+The document is carried **verbatim** and is opaque to this protocol. An
+implementation MUST validate that each member is a JSON object and MUST NOT
+interpret, wrap, normalize, or version it any further: versioning and
+self-description live inside the document itself, as the `$id`-style members of
+the property-definition conventions it follows. A declaration name MUST match
+`[A-Za-z0-9_][A-Za-z0-9._-]{0,63}`, because it is also one file basename in the
+payload area below. An implementation MUST reject a `declarations` object whose
+serialization exceeds 262144 bytes, which is the `inputs` allowance again and
+separate from it. Being members of `job.json`, declarations are immutable after
+submission and covered by the immutable job digest like every other member.
+Nothing is inherited: a synthesized child job carries the declarations its parent
+gave it and no others.
+
 `runner.backend` selects an installed execution adapter and defaults to
 `path` when omitted. The core task manager implements `path`; managers MUST
 leave jobs using an unavailable or disallowed backend unclaimed. This permits
@@ -1236,6 +1254,8 @@ Attempt control is separate from application workdir:
 │   ├── outcome.tmp.<nonce>/
 │   └── outcome.ready/
 ├── .httk-job/                   # optional runner-private job state
+│   └── declarations/            # optional observed workflow declarations
+│       └── <declaration-name>.json
 └── run/                         # persistent mode
 ```
 
@@ -1250,6 +1270,17 @@ there, atomically. Both `.httk-job/` and every `.httk-attempt.<attempt-id>/` are
 excluded from every payload digest — submission, child registration, and detached
 transfer alike — so publishing an outcome and writing job state can never disturb
 an immutability check of the payload.
+
+`.httk-job/declarations/<declaration-name>.json` is the one reserved name inside
+that area: the *observed* workflow declaration of that name, the runtime-refined
+counterpart of what `job.json` declared. A campaign that discovers its outputs
+only while running writes what it observed there, and the last write of a name
+wins. The document is carried verbatim and is opaque to the protocol exactly as
+in `job.json`, the basename before `.json` is the declaration name and MUST
+therefore satisfy the same syntax, and being below `.httk-job/` the file is
+excluded from every payload digest. An implementation MUST report the declared
+and the observed document side by side and MUST NOT merge them; a document that
+cannot be read is reported as absent, with the reading tool's damage flag set.
 
 Separating them matters in persistent mode: a late process from an old attempt
 can only publish beneath its own attempt-control name. Its outcome cannot

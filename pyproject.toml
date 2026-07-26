@@ -63,6 +63,17 @@ release = [
   "build>=1.2",
   "twine>=6.0",
 ]
+# Importing CWL needs a CWL *parser*; executing what was imported does not, so
+# this extra belongs on the machine that runs `httk workflow import cwl` and
+# nowhere else. cwltool is deliberately absent: httk executes the normalized
+# document on its own runner and manager, and never shells out to another engine.
+# The Python Workflow Definition importer needs no extra at all — its documents
+# are plain JSON, and the `python-workflow-definition` package is used as a
+# stricter validator only when an environment happens to have it.
+cwl = [
+  "cwl-utils>=0.32,<1",
+  "cwl-upgrader>=1.2,<2",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -96,6 +107,10 @@ namespaces = true
 "httk.workflow.runners" = [
   "*.sh",
 ]
+# httk.workflow.integrations follows the same rule and needs no entry of its own:
+# pwd_runner.py and cwl_runner.py are modules of that package, so a job
+# referencing pkg:httk.workflow.integrations/... finds them wherever the package
+# was installed. Nothing beside them is data.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

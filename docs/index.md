@@ -19,6 +19,8 @@ applications use `httk.workflow`; installations register the canonical
 - **Native Bash API**: {doc}`native_bash_api`
 - **Packaged VASP runners**: {doc}`vasp_runners`
 - **Harvesting results**: {doc}`harvest`
+- **Importing PWD and CWL workflows**: {doc}`importing_workflows`
+- **Workflow declarations**: {doc}`declarations`
 - **Project and workflow CLI**: {doc}`workflow_cli`
 - **Workflow filesystem API**: {doc}`workflow_filesystem_api`
 - **Examples notebook**: {doc}`notebooks/examples`
@@ -66,6 +68,8 @@ runtime_helpers
 native_bash_api
 vasp_runners
 harvest
+declarations
+importing_workflows
 workflow_cli
 workflow_filesystem_api
 notebooks/examples

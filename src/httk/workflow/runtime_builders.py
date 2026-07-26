@@ -31,6 +31,7 @@ from .models import (
     JOB_STATE_DIRECTORY,
     JobDefinition,
     normalize_placement,
+    validate_declarations,
     validate_failure,
     validate_inputs,
     validate_label,
@@ -171,6 +172,8 @@ class JobSpec:
     retry_on: tuple[str, ...] = ()
     resources: Mapping[str, object] = field(default_factory=dict)
     inputs: Mapping[str, object] = field(default_factory=dict)
+    #: Workflow declarations carried verbatim into ``job.json``, keyed by name.
+    declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
     def as_mapping(self, *, parent: Mapping[str, object] | None = None) -> dict[str, object]:
         limits = {
@@ -215,6 +218,8 @@ class JobSpec:
         }
         if self.inputs:
             result["inputs"] = validate_inputs(self.inputs)
+        if self.declarations:
+            result["declarations"] = validate_declarations(self.declarations)
         return result
 
 

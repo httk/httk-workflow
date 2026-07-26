@@ -148,6 +148,7 @@ the job publishes.
 | `a.state` | dict-like JSON state that belongs to the **job** |
 | `a.log` | the append-only structured run log of the workdir |
 | `a.children` | the typed children of the join that started this activation |
+| `a.declaration(name)` | one workflow declaration: the observed document, else the declared one, else `None` |
 
 `a.state` is stored inside the payload, below `.httk-job/`, so it survives
 retries, step advances, and isolated workdirs, and it travels with a transferred
@@ -161,6 +162,21 @@ a.state.merge({"attempts": 3, "energy": -12.5})
 if a.state.get("converged"):
     ...
 ```
+
+`a.declare(name, document)` records what this job *observed* about its own
+workflow declaration, and `a.declaration(name)` reads one back — the observed
+document when the job wrote one, the document `job.json` declared otherwise. The
+document is a JSON object carried verbatim; nothing in *httk-workflow* looks
+inside it. It is written to `.httk-job/declarations/<name>.json`, atomically and
+digest-excluded like the rest of `.httk-job/`, and the last write of a name wins,
+because a dynamic campaign refines what it declares as it learns it:
+
+```python
+a.declare("workflow", {**a.declaration("workflow"), "outputs": {"structures": 3}})
+```
+
+See {doc}`declarations` for the declared/observed contract and what a harvest
+reports.
 
 `a.children` is empty unless this activation followed a `gather`. Every child is
 a frozen `ChildResult` with its `label`, `job_id`, `job_key`, terminal `kind`,
