@@ -1,4 +1,9 @@
-"""Internal process adapter for an httk v1 ``ht_steps`` or ``ht_run``."""
+"""Internal process adapter for an httk v1 ``ht_steps`` or ``ht_run``.
+
+The module is executed as ``python -m httk.workflow._v1_runner``, so it is
+imported through the same package the manager itself was imported from and
+needs no path manipulation of its own.
+"""
 
 import argparse
 import bz2
@@ -12,10 +17,6 @@ import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
-
-# This file is executed by absolute path. Make source-tree execution work even
-# when a relative PYTHONPATH no longer resolves from the job workdir.
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from httk.workflow._util import read_json, write_json_atomic
 from httk.workflow.models import JobDefinition, normalize_placement
@@ -149,6 +150,25 @@ def _run_program(
             _active_process = None
 
 
+def _note(message: str, *, log_path: Path | None = None) -> None:
+    """Record one best-effort failure where an operator will actually see it.
+
+    Best effort must not mean invisible. The note goes to standard error, which
+    the manager captures in the attempt's ``stderr.log``, and into the legacy
+    run log beside the step output that is missing because of it.
+    """
+
+    text = f"httk-workflow: {message}\n"
+    print(text, end="", file=sys.stderr, flush=True)
+    if log_path is None:
+        return
+    try:
+        with log_path.open("ab") as stream:
+            stream.write(text.encode("utf-8"))
+    except OSError:
+        pass
+
+
 def _freeze(
     program_path: Path,
     *,
@@ -157,6 +177,14 @@ def _freeze(
     log_path: Path,
     wrapper: str | None,
 ) -> None:
+    """Run the legacy ``freeze`` step, reporting rather than hiding a failure.
+
+    A freeze is the last chance a legacy task gets to write down why it stopped,
+    and it runs while the job is already failing. It therefore never turns into
+    the outcome — a broken freeze must not replace the real failure — but it is
+    not silent either: whatever went wrong is noted in the run log.
+    """
+
     if program_path.name != "ht_steps":
         return
     (cwd / "ht.nextstep").unlink(missing_ok=True)
@@ -164,9 +192,14 @@ def _freeze(
     if wrapper is not None:
         command.insert(0, wrapper)
     try:
-        _run_program(command, cwd=cwd, environment=environment, log_path=log_path, timeout=300.0)
+        status, timed_out = _run_program(command, cwd=cwd, environment=environment, log_path=log_path, timeout=300.0)
+        if timed_out:
+            _note("the legacy freeze step exceeded its 300 second limit and was stopped", log_path=log_path)
+        elif status != 0:
+            _note(f"the legacy freeze step returned exit status {status}", log_path=log_path)
         replay_v1_atomic(cwd)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - a failing freeze must not replace the outcome
+        _note(f"the legacy freeze step could not be completed: {exc!r}", log_path=log_path)
         return
 
 
@@ -341,12 +374,21 @@ def _publish_outcome(
 ) -> None:
     temporary = control / f"outcome.tmp.{uuid.uuid4()}"
     temporary.mkdir()
-    children = _prepare_children(
-        temporary,
-        payload=Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]),
-        job=job,
-        context=context,
-        attempts=attempts,
+    # Only a job that continues can have children. A legacy task that succeeded
+    # or failed may still have unconsumed `ht.task.*.waitstart` directories in
+    # its payload — a task set it prepared and then abandoned, or one whose
+    # symlinks were never rewritten — and publishing those as spawned jobs would
+    # leave real, schedulable jobs behind a parent that nothing will ever join.
+    children = (
+        _prepare_children(
+            temporary,
+            payload=Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]),
+            job=job,
+            context=context,
+            attempts=attempts,
+        )
+        if action in {"advance", "wait"} or wait_for_children
+        else []
     )
     body: dict[str, object] = {
         "format": "httk-workflow-outcome",
@@ -398,7 +440,11 @@ def _archive_log(payload: Path, workdir: Path, compression: str) -> None:
     elif compression == "zstd":
         try:
             subprocess.run(["zstd", "--rm", str(destination)], check=True)
-        except (OSError, subprocess.CalledProcessError):
+        except (OSError, subprocess.CalledProcessError) as exc:
+            # The uncompressed log is still there and still complete, so this is
+            # a disk-space disappointment rather than a lost outcome — but an
+            # operator looking for a .zst that is not there deserves the reason.
+            _note(f"the run log could not be compressed with zstd: {exc!r}", log_path=destination)
             return
 
 

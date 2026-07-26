@@ -3,9 +3,11 @@
 The quickstart of ``docs/quickstart.md`` is not paraphrased here: its commands are
 read out of the document itself and run verbatim, with ``httk`` and
 ``httk-taskmanager`` shims on ``PATH`` that are the installed console scripts in
-every way that matters. What the assertions then read is the workspace those
-commands produced — a succeeded job whose published data holds a real OUTCAR and
-CONTCAR — so the page cannot drift from what works.
+every way that matters — the page uses the canonical ``httk workflow`` spelling,
+and the alias shim is there so that a page falling back to it would still run.
+What the assertions then read is the workspace those commands produced — a
+succeeded job whose published data holds a real OUTCAR and CONTCAR — so the page
+cannot drift from what works.
 """
 
 import json
@@ -122,7 +124,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
 
     # The page really is five commands, and they are the ones a newcomer types.
     assert sum(1 for line in commands if line.startswith(("httk", "export"))) == 5
-    assert "httk-taskmanager init quickstart-workspace --extension transactional-data-v1" in commands
+    assert "httk workflow workspace init quickstart-workspace --extension transactional-data-v1" in commands
     assert any(line.startswith("httk workflow job new quickstart-workspace --template vasp-relax") for line in commands)
 
     completed = _run(

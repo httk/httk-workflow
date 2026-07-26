@@ -53,7 +53,7 @@ def test_refusal_reaches_the_cli_without_a_traceback(tmp_path: Path, capsys) -> 
     metadata = json.loads((bundle / "computer.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = "/remote/runs"
     (bundle / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
-    assert command(["tasks", "status", "remote"], CLIContext("httk", project)) == 2
+    assert command(["remote", "status", "remote"], CLIContext("httk", project)) == 2
     captured = capsys.readouterr()
     assert "is not implemented" in captured.err
     assert "Traceback" not in captured.err

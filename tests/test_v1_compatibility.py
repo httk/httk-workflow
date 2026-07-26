@@ -1,7 +1,9 @@
+import sys
 from pathlib import Path
 
 from httk.workflow import TaskManager, V1TaskManager, WorkflowWorkspace, submit_v1_task
 from httk.workflow._v1_runner import replay_v1_atomic
+from httk.workflow.v1 import V1RunnerBackend
 
 
 def _legacy_source(root: Path, source: str, *, program: str = "ht_steps") -> Path:
@@ -235,6 +237,116 @@ HT_TASK_BROKEN
     assert not (workdir / "ht.nextstep").exists()
     state = workspace.read_state(marker)
     assert state["failure"]["code"] == "declared_failure"
+
+
+def test_v1_adapter_runs_as_a_module_of_this_package(tmp_path: Path) -> None:
+    """No file path and no sys.path hack: the adapter is imported as a module."""
+
+    source = _legacy_source(
+        tmp_path,
+        """#!/usr/bin/env bash
+. "$HTTK_DIR/Execution/tasks/ht_tasks_api.sh"
+HT_TASK_INIT "$@"
+HT_TASK_FINISHED
+""",
+    )
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    submitted = submit_v1_task(workspace, source, "project/module")
+    marker = workspace.find_marker_by_id(submitted.job_id)
+    assert marker is not None
+    backend = V1RunnerBackend(log_compression="none")
+    from httk.workflow.backends import AttemptLaunch
+
+    payload = workspace.payload_path(marker.placement, marker.job_key)
+    command = list(
+        backend.command(
+            AttemptLaunch(
+                job=workspace.load_job(marker),
+                marker=marker,
+                payload=payload,
+                workdir=payload,
+                control=payload,
+                context_path=payload / "context.json",
+                context={},
+                runner=payload / "ht_steps",
+            )
+        )
+    )
+    assert command[:3] == [sys.executable, "-m", "httk.workflow._v1_runner"]
+    assert not any(item.endswith("_v1_runner.py") for item in command)
+    assert "sys.path.insert" not in (Path(__file__).parents[1] / "src/httk/workflow/_v1_runner.py").read_text()
+
+
+def test_v1_terminal_outcome_does_not_publish_leftover_subtasks(tmp_path: Path) -> None:
+    """A finished parent must not spawn the task directories it abandoned."""
+
+    source = _legacy_source(
+        tmp_path,
+        """#!/usr/bin/env bash
+. "$HTTK_DIR/Execution/tasks/ht_tasks_api.sh"
+HT_TASK_INIT "$@"
+MAKE_CHILD() {
+    cp "$HT_TASK_TOP_DIR/child_ht_steps" ht_steps
+    chmod +x ht_steps
+}
+mkdir -p abandoned
+printf 'one\\n' | HT_TASK_CREATE MAKE_CHILD abandoned child any 4
+HT_TASK_FINISHED
+""",
+    )
+    child = source / "child_ht_steps"
+    child.write_text(
+        """#!/usr/bin/env bash
+. "$HTTK_DIR/Execution/tasks/ht_tasks_api.sh"
+HT_TASK_INIT "$@"
+HT_TASK_FINISHED
+""",
+        encoding="utf-8",
+    )
+    child.chmod(0o755)
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    parent = submit_v1_task(workspace, source, "project/abandoned")
+
+    with V1TaskManager(workspace, maximum_workers=2, heartbeat_interval=0.01, log_compression="none") as manager:
+        manager.run_until_idle(timeout=15)
+
+    marker = workspace.find_marker_by_id(parent.job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    # The abandoned task directory stays exactly what it was: a directory in the
+    # payload, not a schedulable job nothing will ever join.
+    assert [item.job_id for item in workspace.scan_markers()] == [parent.job_id]
+    workdir = workspace.payload_path(marker.placement, marker.job_key) / "ht.run.current"
+    leftover = list((workdir / "abandoned").glob("ht.task.any.one.child.*"))
+    assert len(leftover) == 1 and leftover[0].is_dir() and not leftover[0].is_symlink()
+
+
+def test_v1_failing_freeze_leaves_a_note_in_the_run_log(tmp_path: Path) -> None:
+    """Best effort must not mean invisible: a broken freeze says so."""
+
+    source = _legacy_source(
+        tmp_path,
+        """#!/usr/bin/env bash
+. "$HTTK_DIR/Execution/tasks/ht_tasks_api.sh"
+HT_TASK_INIT "$@"
+if [ "$STEP" = "freeze" ]; then
+    exit 7
+fi
+HT_TASK_BROKEN
+""",
+    )
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    submitted = submit_v1_task(workspace, source, "project/freeze-failure")
+
+    with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
+        manager.run_until_idle(timeout=10)
+
+    marker = workspace.find_marker_by_id(submitted.job_id)
+    assert marker is not None and marker.kind == "failed"
+    payload = workspace.payload_path(marker.placement, marker.job_key)
+    log = (payload / "ht.taskmgr.stdout").read_text(encoding="utf-8")
+    assert "httk-workflow: the legacy freeze step returned exit status 7" in log
+    # The freeze failure never replaces the real outcome.
+    assert workspace.read_state(marker)["failure"]["code"] == "declared_failure"
 
 
 def test_v1_atomic_replay_is_idempotent(tmp_path: Path) -> None:

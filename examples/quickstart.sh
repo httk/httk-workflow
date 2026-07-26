@@ -13,21 +13,13 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 
-# "httk workflow ..." and "httk-taskmanager ..." are the installed commands. When
-# their console scripts are not on PATH, these are the identical module forms.
+# "httk workflow ..." is the canonical command for everything below. When its
+# console script is not on PATH, this is the identical module form.
 httk_workflow() {
     if command -v httk >/dev/null 2>&1; then
         httk workflow "$@"
     else
         python -m httk.core.cli workflow "$@"
-    fi
-}
-
-taskmanager() {
-    if command -v httk-taskmanager >/dev/null 2>&1; then
-        httk-taskmanager "$@"
-    else
-        python -m httk.workflow.cli "$@"
     fi
 }
 
@@ -46,7 +38,7 @@ Direct
 END
 
 # 1. A workspace whose jobs may publish their results as transactional data.
-taskmanager init quickstart-workspace --extension transactional-data-v1
+httk_workflow workspace init quickstart-workspace --extension transactional-data-v1
 
 # 2. One job of the packaged relaxation runner, starting from that structure. The
 #    command prints one tab-separated line per job: its key and its payload.
@@ -62,7 +54,7 @@ printf 'submitted %s\n' "$job"
 export HTTK_VASP_COMMAND
 
 # 4. Run every ready job in the foreground until nothing is left to do.
-taskmanager run quickstart-workspace --until-idle
+httk_workflow manager run quickstart-workspace --until-idle
 
 # 5. What happened, and what it produced.
 httk_workflow job list quickstart-workspace

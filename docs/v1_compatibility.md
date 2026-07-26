@@ -1,9 +1,10 @@
 # *httk* v1 task compatibility
 
-Installing *httk-workflow* provides `httk-v1-taskmanager`, a specialized
-executor for instantiated *httk* v1 task directories containing an executable
-`ht_steps` or `ht_run`. It translates their filesystem decisions into the *httk₂*
-state protocol while leaving the legacy shell program unchanged.
+`httk workflow v1` is a specialized executor for instantiated *httk* v1 task
+directories containing an executable `ht_steps` or `ht_run`. It translates their
+filesystem decisions into the *httk₂* state protocol while leaving the legacy
+shell program unchanged. The `httk-v1-taskmanager` executable is an alias of
+this group and remains installed.
 
 The compatibility boundary is intentionally narrow: it does not import or
 continue an existing *httk* v1 task-manager queue. A task first becomes an ordinary
@@ -19,23 +20,23 @@ examples, see
 Initialize the workspace once with the normal command:
 
 ```console
-httk-taskmanager init WORKSPACE
+httk workflow workspace init WORKSPACE
 ```
 
 An already instantiated task template can then be prepared separately:
 
 ```console
-httk-v1-taskmanager prepare TEMPLATE PREPARED \
-  --tag silicon-relax --set vasp --priority 4 --attempts 10
-httk-taskmanager submit WORKSPACE PREPARED --placement project-a/00/17
+httk workflow v1 prepare TEMPLATE PREPARED \
+  --tag silicon-relax --taskset vasp --priority 4 --attempts 10
+httk workflow job submit WORKSPACE PREPARED --placement project-a/00/17
 ```
 
 Or it can be prepared and submitted in one operation:
 
 ```console
-httk-v1-taskmanager submit WORKSPACE TEMPLATE \
+httk workflow v1 submit WORKSPACE TEMPLATE \
   --placement project-a/00/17 \
-  --tag silicon-relax --set vasp --priority 4 --attempts 10
+  --tag silicon-relax --taskset vasp --priority 4 --attempts 10
 ```
 
 Preparation copies the source and does not consume it. Priorities map from *httk* v1
@@ -76,10 +77,12 @@ applications should prefer a materializer callback.
 Run only compatibility jobs:
 
 ```console
-httk-v1-taskmanager run WORKSPACE --set any --workers 8
+httk workflow v1 run WORKSPACE --taskset any --workers 8
 ```
 
-`--set NAME` restricts claiming to that *httk* v1 task set; `any` accepts every pool.
+`--taskset NAME` restricts claiming to that *httk* v1 task set; `any`, the
+default here, accepts every pool. It was spelled `--set` before, which still
+works and is no longer shown in the help.
 Useful legacy-style controls are:
 
 - `--wrap` / `-w` to prefix each shell invocation with one executable;
@@ -102,13 +105,13 @@ are available as data-oriented functions such as `read_poscar_header`,
 `automatic_kpoint_grid`, `update_incar`, and `assemble_potcar`. These APIs are
 independent *httk₂* designs rather than renamed `HT_TASK_*` or `VASP_*` methods.
 
-The ordinary `httk-taskmanager` executes only native `path` jobs, and the *httk* v1
-manager executes only `httk-v1` jobs. They may therefore be attached to the
+The ordinary `httk workflow manager run` executes only native `path` jobs, and
+`httk workflow v1 run` executes only `httk-v1` jobs. They may therefore be attached to the
 same workspace. Both can still use the common status and request interface:
 
 ```console
-httk-taskmanager status WORKSPACE
-httk-taskmanager request WORKSPACE JOB_UUID continue \
+httk workflow workspace status WORKSPACE
+httk workflow job request WORKSPACE JOB_UUID continue \
   --operator "$USER" --reason "manual repair complete"
 ```
 

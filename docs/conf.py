@@ -111,6 +111,9 @@ nitpick_ignore = [
     ("py:class", "typing.Optional"),
     ("py:class", "typing.Union"),
     ("py:class", "Ellipsis"),
+    # The command tree annotates the action `add_subparsers` returns, which is
+    # a private stdlib class the Python documentation has no page for.
+    ("py:class", "argparse._SubParsersAction"),
 ]
 copybutton_prompt_text = r">>> |\.\.\. |\$ "
 copybutton_prompt_is_regexp = True

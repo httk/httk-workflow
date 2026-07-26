@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ._util import read_json, sha256_file, utc_now, write_json_atomic
+from .configuration import sign_document, verify_document
 from .errors import FormatError, UnsupportedExtensionError, WorkspaceCorruptionError
 from .models import (
     QUIESCENT_KINDS,
@@ -393,19 +394,21 @@ def import_bundle(workspace: WorkflowWorkspace, bundle: str | os.PathLike[str]) 
             raise FileExistsError(f"destination already contains job UUID {manifest['job_id']}")
         if provenance.get("payload_sha256") != digest:
             raise WorkspaceCorruptionError("imported marker transfer digest mismatch")
-        duplicate_ack: dict[str, object] = {
-            "format": "httk-workflow-transfer-acknowledgement",
-            "format_version": 1,
-            "transfer_id": transfer_id,
-            "source_workspace_id": manifest["source_workspace_id"],
-            "destination_workspace_id": workspace.workspace_id,
-            "payload_sha256": digest,
-            "job_id": manifest["job_id"],
-            "job_key": manifest["job_key"],
-            "placement": duplicate_state["placement"],
-            "state": duplicates[0].kind,
-            "acknowledged_at": utc_now(),
-        }
+        duplicate_ack: dict[str, object] = sign_document(
+            {
+                "format": "httk-workflow-transfer-acknowledgement",
+                "format_version": 1,
+                "transfer_id": transfer_id,
+                "source_workspace_id": manifest["source_workspace_id"],
+                "destination_workspace_id": workspace.workspace_id,
+                "payload_sha256": digest,
+                "job_id": manifest["job_id"],
+                "job_key": manifest["job_key"],
+                "placement": duplicate_state["placement"],
+                "state": duplicates[0].kind,
+                "acknowledged_at": utc_now(),
+            }
+        )
         transfer_dir = workspace.payload_path(duplicates[0].placement, duplicates[0].job_key) / TRANSFER_DIRECTORY
         if transfer_dir.exists():
             shutil.rmtree(transfer_dir)
@@ -495,19 +498,24 @@ def import_bundle(workspace: WorkflowWorkspace, bundle: str | os.PathLike[str]) 
         durable=workspace.durable,
     )
     shutil.rmtree(transfer_dir)
-    acknowledgement: dict[str, object] = {
-        "format": "httk-workflow-transfer-acknowledgement",
-        "format_version": 1,
-        "transfer_id": transfer_id,
-        "source_workspace_id": manifest["source_workspace_id"],
-        "destination_workspace_id": workspace.workspace_id,
-        "payload_sha256": digest,
-        "job_id": manifest["job_id"],
-        "job_key": manifest["job_key"],
-        "placement": placement.as_posix(),
-        "state": prior_kind,
-        "acknowledged_at": utc_now(),
-    }
+    # The acknowledgement is what retires a sealed source, so it carries the
+    # optional identity signature of whoever imported the bundle: the source can
+    # then say which identity claimed the payload, not merely that somebody did.
+    acknowledgement: dict[str, object] = sign_document(
+        {
+            "format": "httk-workflow-transfer-acknowledgement",
+            "format_version": 1,
+            "transfer_id": transfer_id,
+            "source_workspace_id": manifest["source_workspace_id"],
+            "destination_workspace_id": workspace.workspace_id,
+            "payload_sha256": digest,
+            "job_id": manifest["job_id"],
+            "job_key": manifest["job_key"],
+            "placement": placement.as_posix(),
+            "state": prior_kind,
+            "acknowledged_at": utc_now(),
+        }
+    )
     write_json_atomic(acknowledgement_path, acknowledgement, durable=workspace.durable)
     return acknowledgement
 
@@ -546,15 +554,32 @@ def _retire_sealed_bundle(
 
 
 def acknowledge_transfer(workspace: WorkflowWorkspace, acknowledgement: Mapping[str, object]) -> Path:
-    """Validate an acknowledgement and retire the sealed source bundle."""
+    """Validate an acknowledgement and retire the sealed source bundle.
+
+    An acknowledgement that carries an identity signature must carry a valid
+    one: retiring a source is irreversible enough that a damaged or forged
+    attribution is refused rather than recorded. An acknowledgement with no
+    signature is accepted exactly as before, so a destination without an
+    identity key keeps working.
+    """
 
     if acknowledgement.get("format") != "httk-workflow-transfer-acknowledgement":
         raise FormatError("invalid transfer acknowledgement format")
+    signature = verify_document(acknowledgement)
+    if signature.present and not signature.valid:
+        raise FormatError(f"transfer acknowledgement signature is invalid: {signature.reason}")
     transfer_id = canonical_uuid(acknowledgement.get("transfer_id"), "transfer_id")
     ledger = read_json(_ledger_path(workspace, transfer_id))
     for name in ("source_workspace_id", "destination_workspace_id", "payload_sha256", "job_id", "job_key"):
         if acknowledgement.get(name) != ledger.get(name):
             raise FormatError(f"transfer acknowledgement disagrees on {name}")
+    if signature.present:
+        _LOGGER.info(
+            "transfer %s was acknowledged by %s",
+            transfer_id,
+            signature.operator_key,
+            extra={"event": "transfer_ack_verified", "transfer_id": transfer_id},
+        )
     return _retire_sealed_bundle(workspace, transfer_id, provenance={"acknowledgement": dict(acknowledgement)})
 
 

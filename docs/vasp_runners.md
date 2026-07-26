@@ -48,8 +48,8 @@ The payload carries the structure and the INCAR it starts from:
 ```console
 mkdir -p prepared-job/files
 cp POSCAR INCAR POTCAR prepared-job/files/
-httk-taskmanager submit workflow-workspace prepared-job --placement project/si
-httk-taskmanager run workflow-workspace
+httk workflow job submit workflow-workspace prepared-job --placement project/si
+httk workflow manager run workflow-workspace
 ```
 
 The same file can be published to the workspace runner store instead, which pins
@@ -69,7 +69,7 @@ sets nothing.
 
 ```console
 export HTTK_VASP_COMMAND="srun -n 32 vasp_std"
-httk-taskmanager run workflow-workspace --pool vasp
+httk workflow manager run workflow-workspace --pool vasp
 ```
 
 ## Job inputs
