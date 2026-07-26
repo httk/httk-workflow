@@ -46,7 +46,7 @@ from .introspection import (
     resolve_job,
 )
 from .manifests import create_manifest, release_maintenance_lock, verify_manifest
-from .models import CORE_PROFILE, STATE_KINDS
+from .models import CORE_PROFILE, STATE_KINDS, canonical_uuid
 from .projects import import_v1_project, initialize_project, require_project
 from .scaffold import (
     DEFAULT_PLACEMENT,
@@ -58,6 +58,14 @@ from .scaffold import (
     new_jobs,
     structure_files,
     structure_tag,
+)
+from .transfers import (
+    DEFAULT_OFFER_STATES,
+    TRANSFER_OFFER_FORMAT,
+    TRANSFER_RETIREMENT_FORMAT,
+    discard_staged_bundle,
+    offer_transfers,
+    retire_transfers,
 )
 from .workspace import WorkflowWorkspace
 
@@ -75,7 +83,7 @@ command groups:
   config      init, show, set, import-v1
   project     init, import-v1, manifest create, manifest verify
   computer    list, add, configure, install, import-v1
-  tasks       send, receive, start-manager, status
+  tasks       send, receive, fetch, offer, retire, start-manager, status
 """
 
 
@@ -690,13 +698,46 @@ def _computer(argv: Sequence[str], program: str, context: CLIContext) -> int:
     raise ValueError(f"unknown computer command: {action}")
 
 
-def _destination_from_adapter(target: Any, supplied: str | None) -> str:
+def _destination_from_adapter(target: Any, supplied: str | None, *, option: str = "--destination-workspace") -> str:
     if supplied:
         return supplied
     workspace = queue_settings(target.bundle, target.queue).get("workspace")
     if isinstance(workspace, str) and workspace:
         return workspace
-    raise ValueError("destination workspace is missing; use --destination-workspace or configure queue workspace=PATH")
+    raise ValueError(f"remote workspace is missing; use {option} or configure queue workspace=PATH")
+
+
+def _remote_workspace_id(target: Any, root: str, *, timeout: float | None, noun: str = "destination") -> str:
+    """Probe one remote workspace over the adapter and return its UUID.
+
+    The probe is the same for both directions of a transfer: nothing is sealed,
+    pushed, or pulled until the far side has answered with a status of the
+    profile and extension this protocol needs, so an incompatible or absent
+    workspace is reported before any state moves.
+    """
+
+    status = run_adapter(
+        target.bundle,
+        "status",
+        {"queue": target.queue, "argv": ["httk", "workflow", "workspace", "status", root, "--json"]},
+        timeout=timeout,
+    )
+    if status.get("returncode") != 0:
+        raise RuntimeError(f"{noun} workspace compatibility check failed: {status.get('stderr', '')}")
+    try:
+        status_data = json.loads(str(status.get("stdout", "")))
+        if (
+            status_data.get("format") != "httk-workflow-status"
+            or status_data.get("format_version") != 1
+            or status_data.get("core_profile") != CORE_PROFILE
+            or "detached-transfer-v1" not in status_data.get("extensions", [])
+        ):
+            raise ValueError
+        workspace_id = str(status_data["workspace_id"])
+        uuid.UUID(workspace_id)
+    except (AttributeError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+        raise ValueError(f"{noun} did not return a compatible workflow workspace status") from exc
+    return workspace_id
 
 
 def _tasks_send(argv: Sequence[str], program: str, context: CLIContext) -> int:
@@ -714,30 +755,7 @@ def _tasks_send(argv: Sequence[str], program: str, context: CLIContext) -> int:
     source = WorkflowWorkspace(source_root)
     target = resolve_computer(parsed.computer, project=context.cwd)
     destination_root = _destination_from_adapter(target, parsed.destination_workspace)
-    status = run_adapter(
-        target.bundle,
-        "status",
-        {
-            "queue": target.queue,
-            "argv": ["httk", "workflow", "workspace", "status", destination_root, "--json"],
-        },
-        timeout=parsed.timeout,
-    )
-    if status.get("returncode") != 0:
-        raise RuntimeError(f"destination workspace compatibility check failed: {status.get('stderr', '')}")
-    try:
-        status_data = json.loads(str(status.get("stdout", "")))
-        if (
-            status_data.get("format") != "httk-workflow-status"
-            or status_data.get("format_version") != 1
-            or status_data.get("core_profile") != CORE_PROFILE
-            or "detached-transfer-v1" not in status_data.get("extensions", [])
-        ):
-            raise ValueError
-        destination_workspace_id = str(status_data["workspace_id"])
-        uuid.UUID(destination_workspace_id)
-    except (AttributeError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
-        raise ValueError("destination did not return a compatible workflow workspace status") from exc
+    destination_workspace_id = _remote_workspace_id(target, destination_root, timeout=parsed.timeout)
     acknowledgements: list[dict[str, object]] = []
     for job_id in parsed.jobs:
         source.recover_transfers()
@@ -815,29 +833,227 @@ def _tasks_receive(argv: Sequence[str], program: str) -> int:
     return 0
 
 
+def _tasks_offer(argv: Sequence[str], program: str) -> int:
+    """Seal the finished jobs of one workspace for a workspace that will fetch them."""
+
+    parser = _parser(program, "Offer the finished jobs of one workspace as transfer bundles")
+    parser.add_argument("workspace")
+    parser.add_argument(
+        "--destination-workspace-id",
+        required=True,
+        help="the UUID of the workspace that will import these bundles",
+    )
+    parser.add_argument(
+        "--state",
+        action="append",
+        choices=HARVESTABLE_KINDS,
+        help=f"state kind to offer (repeatable, default: {', '.join(DEFAULT_OFFER_STATES)})",
+    )
+    parser.add_argument("--placement", help="offer only jobs at or below this placement")
+    parser.add_argument("--json", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    workspace = WorkflowWorkspace(parsed.workspace)
+    offers = offer_transfers(
+        workspace,
+        destination_workspace_id=parsed.destination_workspace_id,
+        states=parsed.state or DEFAULT_OFFER_STATES,
+        placement=parsed.placement,
+    )
+    if parsed.json:
+        document = {
+            "format": TRANSFER_OFFER_FORMAT,
+            "format_version": 1,
+            "workspace_id": workspace.workspace_id,
+            "destination_workspace_id": parsed.destination_workspace_id,
+            "offers": offers,
+        }
+        print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+        return 0
+    for offer in offers:
+        print(f"{offer['job_key']}\t{offer['state']}\t{offer['bundle_path']}")
+    return 0
+
+
+def _tasks_retire(argv: Sequence[str], program: str) -> int:
+    """Retire the sealed source bundles of jobs another workspace has imported."""
+
+    parser = _parser(program, "Retire the sealed source bundles of already imported jobs")
+    parser.add_argument("workspace")
+    parser.add_argument("jobs", nargs="+", help="the job UUIDs whose source bundles are no longer needed here")
+    parser.add_argument("--destination-workspace-id", help="refuse to retire a bundle sealed for another workspace")
+    parser.add_argument("--json", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    retired = retire_transfers(
+        WorkflowWorkspace(parsed.workspace),
+        parsed.jobs,
+        destination_workspace_id=parsed.destination_workspace_id,
+    )
+    if parsed.json:
+        document = {"format": TRANSFER_RETIREMENT_FORMAT, "format_version": 1, "retired": retired}
+        print(json.dumps(document, sort_keys=True, separators=(",", ":")))
+        return 0
+    for entry in retired:
+        print(f"{entry['job_key']}\t{entry['status']}\t{entry['retired_bundle']}")
+    return 0
+
+
+def _tasks_fetch(argv: Sequence[str], program: str, context: CLIContext) -> int:
+    """Bring the jobs that finished on one computer back into a local workspace.
+
+    The orchestration mirrors ``tasks send`` in the opposite direction: probe
+    the remote workspace, ask it to offer what stopped there, pull each offered
+    bundle into local staging, import it, and only then tell the remote to
+    retire the sources it still holds. Every step is idempotent, so an
+    interrupted fetch is finished by running the same command again.
+    """
+
+    parser = _parser(program, "Fetch the jobs that finished on one computer")
+    parser.add_argument("--computer", required=True, help="the computer to fetch from, as NAME or NAME:QUEUE")
+    parser.add_argument("--workspace", help="the local workspace to import into (default: the project's)")
+    parser.add_argument("--remote-workspace", help="the workspace on the computer (default: its queue workspace=PATH)")
+    parser.add_argument(
+        "--state",
+        action="append",
+        choices=HARVESTABLE_KINDS,
+        help=f"state kind to fetch (repeatable, default: {', '.join(DEFAULT_OFFER_STATES)})",
+    )
+    parser.add_argument("--placement", help="fetch only jobs at or below this placement")
+    parser.add_argument("--timeout", type=float)
+    parser.add_argument("--json", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    local_root = Path(parsed.workspace).resolve() if parsed.workspace else require_project(context.cwd)
+    local = WorkflowWorkspace(local_root)
+    target = resolve_computer(parsed.computer, project=context.cwd)
+    remote_root = _destination_from_adapter(target, parsed.remote_workspace, option="--remote-workspace")
+    _remote_workspace_id(target, remote_root, timeout=parsed.timeout, noun="remote")
+
+    offer_argv = [
+        "httk",
+        "workflow",
+        "tasks",
+        "offer",
+        remote_root,
+        "--destination-workspace-id",
+        local.workspace_id,
+        "--json",
+    ]
+    for state in parsed.state or DEFAULT_OFFER_STATES:
+        offer_argv += ["--state", state]
+    if parsed.placement:
+        offer_argv += ["--placement", parsed.placement]
+    offered = run_adapter(
+        target.bundle,
+        "invoke",
+        {"queue": target.queue, "argv": offer_argv},
+        timeout=parsed.timeout,
+    )
+    if offered.get("returncode") != 0:
+        raise RuntimeError(f"remote offer failed: {offered.get('stderr', '')}")
+    try:
+        document = json.loads(str(offered.get("stdout", "")))
+        if document.get("format") != TRANSFER_OFFER_FORMAT or document.get("format_version") != 1:
+            raise ValueError
+        offers = document["offers"]
+        if not isinstance(offers, list):
+            raise ValueError
+    except (AttributeError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+        raise ValueError("remote offer did not return a transfer offer document") from exc
+
+    staging_root = local.control / "transfers" / "incoming"
+    acknowledgements: list[dict[str, object]] = []
+    for offer in offers:
+        if not isinstance(offer, dict):
+            raise ValueError("remote offered something that is not an object")
+        transfer_id = canonical_uuid(offer.get("transfer_id"), "transfer_id")
+        staging = staging_root / transfer_id
+        pulled = run_adapter(
+            target.bundle,
+            "pull",
+            {"queue": target.queue, "source": str(offer["bundle_path"]), "destination": str(staging)},
+            timeout=parsed.timeout,
+        )
+        acknowledgement = local.import_bundle(str(pulled.get("path", staging)))
+        # The payload now lives at its placement in this workspace, so the
+        # staged copy is dropped through a rename rather than left to be
+        # re-imported by the next fetch.
+        discard_staged_bundle(local, staging)
+        acknowledgements.append(acknowledgement)
+
+    retired: list[object] = []
+    if acknowledgements:
+        retire_argv = [
+            "httk",
+            "workflow",
+            "tasks",
+            "retire",
+            remote_root,
+            *[str(acknowledgement["job_id"]) for acknowledgement in acknowledgements],
+            "--destination-workspace-id",
+            local.workspace_id,
+            "--json",
+        ]
+        response = run_adapter(
+            target.bundle,
+            "invoke",
+            {"queue": target.queue, "argv": retire_argv},
+            timeout=parsed.timeout,
+        )
+        if response.get("returncode") != 0:
+            raise RuntimeError(f"remote retirement failed: {response.get('stderr', '')}")
+        try:
+            report = json.loads(str(response.get("stdout", "")))
+            retired = list(report["retired"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError("remote retirement did not return a retirement report") from exc
+
+    if parsed.json:
+        print(json.dumps({"fetched": acknowledgements, "retired": retired}, indent=2, sort_keys=True))
+        return 0
+    for acknowledgement in acknowledgements:
+        print(f"{acknowledgement['job_key']}\t{acknowledgement['state']}\t{acknowledgement['placement']}")
+    return 0
+
+
 def _tasks_remote(argv: Sequence[str], program: str, context: CLIContext, operation: str) -> int:
     parser = _parser(program, f"Remote workflow {operation}")
     parser.add_argument("computer")
     parser.add_argument("--workspace")
     parser.add_argument("--timeout", type=float)
-    parser.add_argument("--workers", type=int, default=1)
+    if operation == "start-manager":
+        parser.add_argument(
+            "--workers",
+            type=int,
+            help="workers per manager (default: the queue's workers=N, else the manager's own default)",
+        )
+        parser.add_argument("--count", type=int, default=1, help="how many managers to start (default: 1)")
     parsed = _parse(parser, argv)
     if isinstance(parsed, int):
         return parsed
     target = resolve_computer(parsed.computer, project=context.cwd)
     workspace = _destination_from_adapter(target, parsed.workspace)
     if operation == "start-manager":
+        if parsed.count < 1:
+            raise ValueError("--count must be a positive integer")
+        manager_argv = ["httk", "workflow", "manager", "run", workspace]
+        # Left off unless asked for, so a queue configured with workers=N is not
+        # permanently shadowed by a command-line default.
+        if parsed.workers is not None:
+            if parsed.workers < 1:
+                raise ValueError("--workers must be a positive integer")
+            manager_argv += ["--workers", str(parsed.workers)]
         request = {
             "queue": target.queue,
-            "argv": [
-                "httk",
-                "workflow",
-                "manager",
-                "run",
-                workspace,
-                "--workers",
-                str(parsed.workers),
-            ],
+            "argv": manager_argv,
+            # Stated outright; the adapter can also read it back out of the argv
+            # above, but only as a documented fallback.
+            "workspace": workspace,
+            "count": parsed.count,
         }
     else:
         request = {
@@ -850,13 +1066,19 @@ def _tasks_remote(argv: Sequence[str], program: str, context: CLIContext, operat
 
 def _tasks(argv: Sequence[str], program: str, context: CLIContext) -> int:
     if not argv or argv[0] in {"-h", "--help"}:
-        print(f"usage: {program} send|receive|start-manager|status [ARG ...]")
+        print(f"usage: {program} send|receive|fetch|offer|retire|start-manager|status [ARG ...]")
         return 0
     action, rest = argv[0], argv[1:]
     if action == "send":
         return _tasks_send(rest, f"{program} send", context)
     if action == "receive":
         return _tasks_receive(rest, f"{program} receive")
+    if action == "fetch":
+        return _tasks_fetch(rest, f"{program} fetch", context)
+    if action == "offer":
+        return _tasks_offer(rest, f"{program} offer")
+    if action == "retire":
+        return _tasks_retire(rest, f"{program} retire")
     if action == "start-manager":
         return _tasks_remote(rest, f"{program} start-manager", context, "start-manager")
     if action == "status":

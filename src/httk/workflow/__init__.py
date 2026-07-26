@@ -63,7 +63,9 @@ from .transfers import (
     acknowledge_transfer,
     detach_job,
     import_bundle,
+    offer_transfers,
     recover_transfers,
+    retire_transfers,
     validate_bundle,
 )
 from .v1 import (
@@ -185,7 +187,9 @@ __all__ = [
     "validate_bundle",
     "import_bundle",
     "acknowledge_transfer",
+    "offer_transfers",
     "recover_transfers",
+    "retire_transfers",
     "run_command",
     "harvest",
     "new_job",
