@@ -1,75 +1,290 @@
 # Native runner helpers
 
-Native *httk₂* runners receive their attempt identity and filesystem paths through
-manager-provided environment variables. `AttemptRuntime` validates that
-context and publishes outcomes with the required temporary-directory plus
-atomic-rename protocol:
+A native *httk₂* runner is one program that implements the steps of one workflow.
+The manager launches it once per attempt, tells it which step to run, and reads
+exactly one published outcome back. `Runner` registers the steps, and
+`Runner.main` dispatches the requested step to its handler with one `Attempt`
+object that carries everything the step may read, do, and publish.
+
+Nothing declares the shape of a workflow. A step decides *at run time* which
+children to spawn and which step runs next, so the graph of a job is whatever its
+steps published — one runner can drive a two-step relaxation and a
+thousand-child campaign without a graph definition anywhere.
+
+## A complete runner
+
+This is a full defect campaign: it characterizes a structure, spawns one child
+job per candidate site, gathers them, and either reports or triages.
 
 ```python
-from httk.workflow import AttemptRuntime, run_command
+#!/usr/bin/env python3
+"""Defect campaign: characterize, relax every site, aggregate, triage."""
 
-runtime = AttemptRuntime.initialize()
-result = run_command(["simulation", "--input", "input.dat"], timeout=3600)
+import json
 
-if result.timed_out:
-    runtime.retry("simulation timed out")
-elif result.returncode:
-    runtime.fail(
-        "simulation_failure",
-        f"simulation exited with status {result.returncode}",
-    )
-else:
-    runtime.advance("collect")
+from httk.workflow import ChildSpec, Runner
+
+run = Runner("defects")
+
+
+@run.step
+def characterize(a):
+    result = a.run(["characterize", "--structure", "POSCAR"], timeout=600)
+    if result.returncode:
+        a.fail("characterize_failed", "site characterization failed", retryable=True)
+        return
+    sites = json.loads((a.workdir / "sites.json").read_text(encoding="utf-8"))
+    a.state["sites"] = len(sites)
+    for index, site in enumerate(sites):
+        a.spawn(
+            ChildSpec(step="relax", inputs={"site": site}, maximum_attempts_per_activation=2),
+            label=f"site-{index}",
+        )
+    a.gather("aggregate", when="all_terminal", on_impossible="triage")
+
+
+@run.step
+def relax(a):
+    site = a.input("site")
+    result = a.run(["relax", "--site", json.dumps(site)], timeout=3600)
+    if result.timed_out:
+        a.retry("the relaxation timed out")
+    elif result.returncode:
+        a.fail("relax_diverged", f"site {site} did not relax")
+    else:
+        a.succeed()
+
+
+@run.step
+def aggregate(a):
+    energies = {
+        child.label: json.loads((child.workdir / "energy.json").read_text(encoding="utf-8"))
+        for child in a.children.succeeded
+    }
+    (a.workdir / "campaign.json").write_text(json.dumps(energies, sort_keys=True), encoding="utf-8")
+    failed = [child.label for child in a.children.failed]
+    if failed:
+        a.advance("triage", state={"failed": failed})
+    else:
+        a.succeed()
+
+
+@run.step
+def triage(a):
+    failed = a.state.get("failed") or [child.label for child in a.children.failed]
+    a.log.append("triage", f"{len(failed)} of {a.state['sites']} sites did not relax")
+    a.fail("campaign_incomplete", "not every site relaxed", details={"failed": failed})
+
+
+if __name__ == "__main__":
+    raise SystemExit(run.main())
 ```
 
-`fail(code, message, details=..., retryable=...)` publishes the one canonical
-failure object, `{"code", "message", "details", "retryable"}`, which is also
-what the Bash bridge and the manager itself publish. `code` is the string a job
-lists in `retry_on`; `retryable` is advisory evidence and never overrides retry
-policy. A malformed failure is recorded by the manager as `protocol_error`.
+The runner is a single file, and every child job runs the same file at a
+different step. Publish it once in the workspace and every job — parent and
+child — references those bytes by digest:
 
-Other convenience outcomes are `succeed()` and `pause(reason)`. The API uses
-argv arrays and structured *httk₂* outcomes; it deliberately does not reproduce
-the *httk* v1 exit-code and `ht.nextstep` interface.
-
-`initialize()` also completes any sealed `ReplayableWorkdirBatch` left by an
-interrupted attempt. `runtime.state` is atomic JSON application state, not an
-executable shell fragment.
-
-## Transactions, children, and joins
-
-Complex outcomes are assembled below the current attempt-control directory and
-have no effect until the final publication rename:
+```console
+httk workflow runner publish defects.py --workspace workflow-workspace --name defects/run.py
+```
 
 ```python
-from httk.workflow import AttemptRuntime
+from httk.workflow import JobSpec, WorkflowWorkspace, prepare_job_payload
 
-runtime = AttemptRuntime.initialize()
-outcome = runtime.outcome()
-transaction = outcome.transaction()
-transaction.make_dir("results-dir", "results")
-transaction.put_file("energy", "energy.json", "results/energy.json")
-child = outcome.add_child("prepared-child", "branches/01")
-runtime.wait("aggregate", outcome)
+workspace = WorkflowWorkspace("workflow-workspace")
+reference = workspace.publish_runner("defects.py", name="defects/run.py")
+job = prepare_job_payload(
+    "prepared-job",
+    JobSpec(
+        name="Si vacancies",
+        workflow="defects",
+        runner_source="workspace",
+        runner_path=str(reference["path"]),
+        runner_sha256=str(reference["sha256"]),
+        initial_step="characterize",
+        inputs={"encut": 520, "supercell": [2, 2, 2]},
+    ),
+)
+workspace.submit("prepared-job", "project/si-vacancies")
 ```
 
-A join is resolvable only for children the manager registers, and children are
-registered from the same published bundle that names them. Both `runtime.wait`
-and `outcome.publish("wait", ...)` therefore publish through the builder holding
-the children; a childless builder cannot publish a wait.
+## Steps and dispatch
 
-The default wait condition is `all_succeeded` over exactly `outcome.children`.
-Pass `join=JoinSpec(outcome.children, condition=...)` to select `all_terminal`,
-`any_succeeded`, or `at_least`. `prepare_job_payload` and `JobSpec` create
-validated native payloads for submission or dynamic children. A named child that
-the manager cannot resolve fails the parent with `dependency_failure` once its
-grace expires rather than waiting forever.
+`@run.step` registers the handler under the function's own name;
+`@run.step(name="collect-results")` names it explicitly. Registering the same
+name twice is an error at decoration time, so the step set is complete and
+unambiguous before any work starts. `run.steps` is that set.
 
-`ProcessSupervisor` adds streamed stdout/stderr and followed-file monitoring,
-process-group timeout handling, and versioned executable checkers. A checker
-receives `httk-workflow-checker-event` version 1 JSON lines and emits
-`httk-workflow-checker-result` version 1 JSON lines. Commands and checker
-commands are always argument arrays.
+Because registration precedes work, every step name a handler *publishes* is
+checked against it at the call that names it: `a.advance("colect")` raises
+immediately, listing the registered steps, instead of failing the job one
+activation later. The same check covers `gather`, its `on_impossible` step, and
+the `step` of a `ChildSpec` that inherits this runner.
+
+`Runner.main` turns every ending into an outcome:
+
+| Ending | Published outcome |
+| --- | --- |
+| the handler publishes one | that outcome |
+| the handler returns without publishing | `fail("no_outcome", ...)` |
+| the step is not registered | `fail("unknown_step", "... registered steps: ...")` |
+| the handler raises | an `error.json` breadcrumb, then the exception reaches the manager, whose retry policy decides |
+
+`HTTK_WORKFLOW_DESCRIBE=1` (or `--describe`) makes `main` print
+`{"format": "httk-workflow-runner-description", "format_version": 1, "workflow":
+..., "steps": [...]}` and exit without binding an attempt or touching anything,
+so a tool can enumerate the steps of a runner it is not running. The step set is
+also recorded in the job's state frame as `runner_steps`, from the first outcome
+the job publishes.
+
+## What an attempt reads
+
+| Member | What it is |
+| --- | --- |
+| `a.context` | the immutable identity and restart evidence of this attempt |
+| `a.step` | the step this attempt runs |
+| `a.payload`, `a.workdir`, `a.workspace`, `a.data` | absolute paths; `a.data` is set only for a transactional job |
+| `a.job`, `a.inputs`, `a.input(name[, default])` | the job definition and its application-defined `inputs` object |
+| `a.state` | dict-like JSON state that belongs to the **job** |
+| `a.log` | the append-only structured run log of the workdir |
+| `a.children` | the typed children of the join that started this activation |
+
+`a.state` is stored inside the payload, below `.httk-job/`, so it survives
+retries, step advances, and isolated workdirs, and it travels with a transferred
+job. The directory is excluded from every payload digest, so writing state never
+disturbs an immutability check. Keys are strings, values are JSON, and every
+mutation is one atomic replace:
+
+```python
+a.state["converged"] = True
+a.state.merge({"attempts": 3, "energy": -12.5})
+if a.state.get("converged"):
+    ...
+```
+
+`a.children` is empty unless this activation followed a `gather`. Every child is
+a frozen `ChildResult` with its `label`, `job_id`, `job_key`, terminal `kind`,
+its published `failure` as the canonical `Failure`, and absolute `payload`,
+`workdir`, and `data` paths, so reading a child's results is a plain file read:
+
+```python
+for child in a.children.succeeded:
+    energy = json.loads((child.workdir / "energy.json").read_text(encoding="utf-8"))
+
+reference = a.children["site-0"]           # by label
+codes = [child.failure.code for child in a.children.failed]
+```
+
+A new activation reached by `advance` observes no children, which is why
+`aggregate` above hands what it learned to `triage` through `a.state`.
+
+## What an attempt publishes
+
+Exactly one outcome per attempt. `spawn`, `put`, and `remove` accumulate in one
+implicit draft below the attempt control directory, and the draft has no effect
+until a terminal call publishes it with a single atomic rename. A second
+terminal call raises, and a draft left by a handler that raises is discarded, so
+no half-outcome ever reaches the manager.
+
+| Call | Meaning |
+| --- | --- |
+| `a.advance(step, state=..., priority=...)` | run `step` next; `state` is written before publication |
+| `a.gather(step, when=..., count=..., on_impossible=...)` | wait for the children spawned on this attempt, then run `step` |
+| `a.succeed()` | the job is done |
+| `a.retry(reason)` | repeat this activation within the job's attempt budget |
+| `a.pause(reason)` | stop until an operator resumes the job |
+| `a.fail(code, message, details=..., retryable=...)` | the canonical failure record |
+
+`fail` publishes the one canonical failure object,
+`{"code", "message", "details", "retryable"}`, which is also what the Bash
+bridge and the manager itself publish. `code` is the string a job lists in
+`retry_on`; `retryable` declares that repeating the attempt could help, which the
+manager honours within the job's budgets. A malformed failure is recorded by the
+manager as `protocol_error`.
+
+### Spawning children
+
+`a.spawn(child, label=..., placement=...)` registers one child job, to be
+created when the outcome is published. The label is mandatory and unique within
+one attempt: it is how `gather` and `a.children` name that child later. It also
+becomes the child's job tag by default, so its payload directory is readable at a
+glance.
+
+A `ChildSpec` needs no prepared payload at all. It synthesizes a complete
+`job.json` from the step and inputs the child starts with, and everything else
+follows the spawning job: workflow, claim pool, priority, resources, and runner.
+`RunnerRef.inherit()` — the default — copies the parent's own `(source, path,
+sha256)`, which is what a campaign whose steps all live in one published runner
+wants; `RunnerRef.workspace(path, sha256)` and `RunnerRef.installed(path,
+sha256)` name another shared runner. A payload runner cannot be inherited,
+because a synthesized child has no payload to copy it into: publish it with
+`WorkflowWorkspace.publish_runner`, or spawn a prepared payload directory
+instead:
+
+```python
+prepare_job_payload(
+    a.workdir / "child",
+    JobSpec(name="Child", workflow="defects", runner_path="files/runner"),
+)
+a.spawn(a.workdir / "child", label="prepared", placement="project/children")
+```
+
+`placement` defaults to the placement of the spawning job.
+
+### Gathering them
+
+`a.gather(step)` joins exactly the children spawned on this attempt — the same
+bundle that creates them, which is what makes the join resolvable — and runs
+`step` when the condition holds. `when` is `all_succeeded` (the default),
+`all_terminal`, `any_succeeded`, or `at_least` with `count`. When the condition
+can no longer be met the job advances to `on_impossible` if one is named, and
+fails with `dependency_failure` otherwise. A named child the manager cannot
+resolve fails the parent with `dependency_failure` once its grace expires,
+rather than waiting forever.
+
+### Data and workdir changes
+
+For a job with `data_mode="transactional"`, `a.put(source, destination)` stages a
+file or a directory and `a.remove(destination, missing_ok=...)` stages a removal.
+The manager applies them exactly once when it commits the outcome. Operation
+identifiers are generated in call order (`op-0001`, `op-0002`, …), so replaying
+the same step produces the same manifest:
+
+```python
+a.put(a.workdir / "energy.json", "results/energy.json")
+a.put(a.workdir / "bands", "results/bands")
+a.remove("scratch", missing_ok=True)
+a.succeed()
+```
+
+`a.workdir_batch()` groups changes to the *workdir* into a sealed batch that is
+replayed idempotently: `Attempt.initialize`, and therefore every dispatch through
+`Runner.main`, completes any batch an interrupted attempt sealed but did not
+apply.
+
+`a.run(argv, timeout=...)` runs an argv array in the workdir and terminates its
+whole process group on timeout. `ProcessSupervisor` adds streamed stdout/stderr
+and followed-file monitoring, process-group timeout handling, and versioned
+executable checkers; a checker receives `httk-workflow-checker-event` version 1
+JSON lines and emits `httk-workflow-checker-result` version 1 JSON lines.
+Commands and checker commands are always argument arrays: this API deliberately
+does not reproduce the *httk* v1 exit-code and `ht.nextstep` interface.
+
+## Superseded interfaces
+
+`AttemptRuntime`, `OutcomeBuilder`, `JoinSpec`, and `WorkdirState` still work in
+this release and emit a `DeprecationWarning`. Their replacements:
+
+| Superseded | Replacement |
+| --- | --- |
+| `AttemptRuntime.initialize()` | `Runner.main()`, or `Attempt.initialize()` for a single-step runner |
+| `AttemptRuntime.from_environment()` | `Attempt.initialize()`, which always recovers an interrupted attempt |
+| `AttemptRuntime.wait(step, outcome)` (removed) | `Attempt.gather(step, ...)` |
+| `runtime.outcome()` with `OutcomeBuilder` | the one implicit draft of an `Attempt` |
+| `JoinSpec(children, condition, ...)` | `Attempt.gather(step, when=..., count=...)` |
+| `WorkdirState` | `Attempt.state`, which is per job rather than per workdir |
+
+Native Bash runners use the same protocol through {doc}`native_bash_api`.
 
 ## VASP files
 
@@ -106,8 +321,6 @@ only the Python standard library and other `httk.workflow` modules. No numeric
 or atomistic capability package is required. Legacy Unix-compress
 `POTCAR.Z` is the one external-format exception: it is read through a checked
 argv invocation of `gzip` or `uncompress` when either executable is available.
-
-Native Bash runners use the same implementation through {doc}`native_bash_api`.
 
 For unchanged *httk* v1 `ht_steps`, continue sourcing the exact historic filenames
 under `$HTTK_DIR/Execution/tasks/`. Those are thin redirects to the attributed

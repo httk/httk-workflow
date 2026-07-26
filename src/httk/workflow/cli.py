@@ -50,6 +50,13 @@ def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
     run.add_argument("--timeout", type=float, default=3600.0)
     run.add_argument("--unsafe-persistent-takeover", action="store_true")
     run.add_argument(
+        "--runner-search-path",
+        action="append",
+        default=[],
+        metavar="DIRECTORY",
+        help="ordered root for jobs whose runner.source is installed (repeatable)",
+    )
+    run.add_argument(
         "--drain-timeout",
         type=float,
         default=30.0,
@@ -160,6 +167,7 @@ def _run(workspace: WorkflowWorkspace, arguments: argparse.Namespace) -> int:
         lease_seconds=arguments.lease_seconds,
         heartbeat_interval=arguments.heartbeat_interval,
         unsafe_persistent_takeover=arguments.unsafe_persistent_takeover,
+        runner_search_paths=arguments.runner_search_path,
     ) as manager:
         log_file = Path(arguments.log_file) if arguments.log_file else manager.manager_directory / "log"
         add_log_file(log_file, level=arguments.log_level or "info", json_logs=arguments.json_logs)

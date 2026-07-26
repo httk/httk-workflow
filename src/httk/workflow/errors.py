@@ -27,3 +27,17 @@ class UnsupportedExtensionError(WorkflowError):
 
 class TransactionError(WorkflowError):
     """A transactional-data manifest cannot be safely replayed."""
+
+
+class RunnerResolutionError(WorkflowError):
+    """A shared runner cannot be resolved, staged, or verified.
+
+    The failure carries the exact protocol failure ``code`` the manager records,
+    so an unresolvable runner (``runner_unavailable``) and a runner whose staged
+    bytes disagree with the digest the job pinned (``runner_mismatch``) stay
+    distinguishable to an operator.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code

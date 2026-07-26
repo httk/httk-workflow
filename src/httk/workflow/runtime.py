@@ -1,7 +1,9 @@
-"""Application-side helpers for native v2 workflow attempts.
+"""Attempt identity, supervised commands, and the superseded runtime class.
 
-This API publishes the v2 outcome protocol directly. It is intentionally not
-a Python spelling of the v1 ``HT_TASK_*`` functions.
+The attempt context and :func:`run_command` are protocol-level facilities every
+native runner uses. :class:`AttemptRuntime` is the first-generation outcome
+publication API, superseded by :class:`httk.workflow.Runner` and
+:class:`httk.workflow.Attempt`.
 """
 
 import os
@@ -16,14 +18,14 @@ from typing import Any, Self
 from ._util import read_json
 from .models import Failure
 from .runtime_builders import (
-    JoinSpec,
     OutcomeBuilder,
     ReplayableWorkdirBatch,
     RunLog,
     WorkdirState,
+    _warn_deprecated,
 )
 
-_OUTCOME_ACTIONS = frozenset({"advance", "retry", "wait", "succeed", "fail", "pause"})
+_OUTCOME_ACTIONS = frozenset({"advance", "retry", "succeed", "fail", "pause", "wait"})
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,53 @@ class AttemptContext:
 
 
 @dataclass(frozen=True)
+class _AttemptEnvironment:
+    """The attempt one process was launched for, read from the environment."""
+
+    context: AttemptContext
+    control: Path
+    payload: Path
+    workdir: Path
+    workspace: Path
+    data: Path | None
+    step: str
+
+
+def _read_environment(environment: Mapping[str, str] | None = None) -> _AttemptEnvironment:
+    """Bind one process to the attempt its manager launched it for.
+
+    Binding is a pure read: nothing on disk changes, so a caller that only wants
+    to inspect the attempt is free to do it. Recovering an interrupted attempt is
+    a separate, deliberate step.
+    """
+
+    values = os.environ if environment is None else environment
+
+    def required(name: str) -> str:
+        value = values.get(name)
+        if not value:
+            raise ValueError(f"missing workflow runtime variable: {name}")
+        return value
+
+    context = AttemptContext.read(required("HTTK_WORKFLOW_CONTEXT"))
+    step = values.get("HTTK_WORKFLOW_STEP") or context.step
+    if step != context.step:
+        raise ValueError(
+            f"HTTK_WORKFLOW_STEP is {step!r} but the attempt context names step {context.step!r}",
+        )
+    data_value = values.get("HTTK_WORKFLOW_DATA_DIR")
+    return _AttemptEnvironment(
+        context=context,
+        control=Path(required("HTTK_WORKFLOW_CONTROL_DIR")).resolve(),
+        payload=Path(required("HTTK_WORKFLOW_JOB_DIR")).resolve(),
+        workdir=Path(required("HTTK_WORKFLOW_WORKDIR")).resolve(),
+        workspace=Path(required("HTTK_WORKFLOW_WORKSPACE_DIR")).resolve(),
+        data=None if not data_value else Path(data_value).resolve(),
+        step=step,
+    )
+
+
+@dataclass(frozen=True)
 class CommandResult:
     """Result of an argv-only supervised child process."""
 
@@ -170,7 +219,14 @@ def run_command(
 
 @dataclass(frozen=True)
 class AttemptRuntime:
-    """Paths and outcome publication methods exposed to a native v2 runner."""
+    """Paths and outcome publication methods exposed to a native v2 runner.
+
+    .. deprecated:: 0.2
+       Use :class:`httk.workflow.Runner` and the :class:`httk.workflow.Attempt`
+       it dispatches to. The replacement dispatches steps, keeps one implicit
+       outcome draft per attempt, enforces that exactly one outcome is published,
+       and reads job state and spawned children as typed values.
+    """
 
     context: AttemptContext
     control: Path
@@ -179,27 +235,25 @@ class AttemptRuntime:
     workspace: Path
     data: Path | None = None
 
+    def __post_init__(self) -> None:
+        _warn_deprecated("AttemptRuntime", "httk.workflow.Runner and httk.workflow.Attempt")
+
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> Self:
-        """Construct the runtime from manager-provided environment variables."""
+        """Bind the runtime without recovering an interrupted attempt.
 
-        values = os.environ if environment is None else environment
+        Applications use :class:`httk.workflow.Attempt`, whose only constructor
+        recovers; this classmethod disappears together with the class.
+        """
 
-        def required(name: str) -> str:
-            value = values.get(name)
-            if not value:
-                raise ValueError(f"missing workflow runtime variable: {name}")
-            return value
-
-        context = AttemptContext.read(required("HTTK_WORKFLOW_CONTEXT"))
-        data_value = values.get("HTTK_WORKFLOW_DATA_DIR")
+        bound = _read_environment(environment)
         return cls(
-            context=context,
-            control=Path(required("HTTK_WORKFLOW_CONTROL_DIR")).resolve(),
-            job=Path(required("HTTK_WORKFLOW_JOB_DIR")).resolve(),
-            workdir=Path(required("HTTK_WORKFLOW_WORKDIR")).resolve(),
-            workspace=Path(required("HTTK_WORKFLOW_WORKSPACE_DIR")).resolve(),
-            data=None if not data_value else Path(data_value).resolve(),
+            context=bound.context,
+            control=bound.control,
+            job=bound.payload,
+            workdir=bound.workdir,
+            workspace=bound.workspace,
+            data=bound.data,
         )
 
     @classmethod
@@ -301,26 +355,3 @@ class AttemptRuntime:
         """Pause the job for operator action."""
 
         return self.publish("pause", pause={"reason": reason})
-
-    def wait(
-        self,
-        next_step: str,
-        outcome: OutcomeBuilder,
-        *,
-        join: JoinSpec | None = None,
-        priority: int | None = None,
-    ) -> Path:
-        """Wait for the children of *outcome* before starting *next_step*.
-
-        A join is resolvable only when the manager registers the children named
-        by it, and children are registered from the very outcome bundle that
-        publishes the wait. The wait therefore must be published through the
-        builder that holds those children, never through a fresh childless one.
-        Omit *join* for the default ``all_succeeded`` condition over exactly
-        ``outcome.children``, or pass a :class:`~httk.workflow.JoinSpec` to select another
-        condition.
-        """
-
-        if outcome.runtime is not self:
-            raise ValueError("outcome builder belongs to a different attempt runtime")
-        return outcome.publish("wait", next_step=next_step, join=join, priority=priority)

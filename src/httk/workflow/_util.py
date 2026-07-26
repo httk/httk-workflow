@@ -5,7 +5,7 @@ import json
 import os
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -89,11 +89,19 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def tree_digest(path: Path) -> str:
-    """Hash a tree without following symlinks."""
+def tree_digest(path: Path, *, skip: Callable[[str], bool] | None = None) -> str:
+    """Hash a tree without following symlinks.
+
+    *skip* names top-level entries to leave out of the digest entirely, which is
+    how a payload digest ignores the runner-private directories that live inside
+    a payload without being part of the job.
+    """
 
     digest = hashlib.sha256()
     for entry in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()):
+        parts = entry.relative_to(path).parts
+        if skip is not None and parts and skip(parts[0]):
+            continue
         relative = entry.relative_to(path).as_posix().encode()
         if entry.is_symlink():
             raise FormatError(f"symlink is forbidden in immutable bundle: {entry}")

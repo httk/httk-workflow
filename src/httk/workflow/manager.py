@@ -1,16 +1,18 @@
-"""Core-v1 workflow task manager."""
+"""Filesystem workflow task manager for the current core profile."""
 
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from importlib.resources import files
+from pathlib import Path, PurePosixPath
 from types import FrameType
 from typing import Any, BinaryIO, Self
 
@@ -18,6 +20,8 @@ from ._util import (
     read_json,
     require_int,
     require_mapping,
+    require_string,
+    sha256_file,
     timestamp_seconds,
     tree_digest,
     utc_now,
@@ -26,6 +30,7 @@ from ._util import (
 from .backends import AttemptLaunch, OutcomeCommit, PathRunnerBackend, RunnerBackend
 from .errors import (
     FormatError,
+    RunnerResolutionError,
     TransactionError,
     TransitionLostError,
     UnsupportedExtensionError,
@@ -34,13 +39,17 @@ from .errors import (
 from .journal import JournalWriter
 from .manifests import read_maintenance_lock
 from .models import (
+    CORE_PROFILE,
     TERMINAL_KINDS,
     Failure,
     JobDefinition,
     Marker,
     canonical_uuid,
+    is_payload_private,
     normalize_placement,
+    parse_package_runner,
     validate_failure,
+    validate_label,
     validate_step,
 )
 from .transactions import replay_transaction
@@ -48,6 +57,11 @@ from .workspace import WorkflowWorkspace
 
 _LOGGER = logging.getLogger(__name__)
 _DRAIN_SIGNALS = (signal.SIGTERM, signal.SIGINT)
+DEFAULT_RUNNER_MODULES = ("httk.workflow",)
+# The entry point of a staged runner tree. A single file is the common case; a
+# tree is pinned and staged as a whole, and this is the one name inside it the
+# manager will execute.
+RUNNER_TREE_ENTRY = "run"
 
 
 @dataclass
@@ -80,12 +94,25 @@ class TaskManager:
         allowed_backends: Sequence[str] | None = None,
         accept_any_pool: bool = False,
         join_grace_seconds: float = 3600.0,
+        runner_search_paths: Iterable[str | os.PathLike[str]] = (),
+        runner_modules: Iterable[str] = DEFAULT_RUNNER_MODULES,
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
         if join_grace_seconds < 0:
             raise ValueError("join_grace_seconds cannot be negative")
+        if workspace.core_profile != CORE_PROFILE:
+            # Serving a workspace means writing it, so an older profile is
+            # refused here as well as at attach time.
+            raise UnsupportedExtensionError(
+                f"cannot serve a {workspace.core_profile!r} workspace: this manager writes {CORE_PROFILE!r}"
+            )
         self.workspace = workspace
+        # Ordered roots for jobs whose runner.source is installed, plus the
+        # module prefixes the reserved pkg: form may name. Both are deployment
+        # policy of this manager and never taken from a job.
+        self.runner_search_paths: tuple[Path, ...] = tuple(Path(item).expanduser() for item in runner_search_paths)
+        self.runner_modules: tuple[str, ...] = tuple(runner_modules)
         self.pools = frozenset(pools)
         self.capabilities = frozenset(capabilities)
         self.maximum_workers = maximum_workers
@@ -130,6 +157,8 @@ class TaskManager:
                 "pools": sorted(self.pools),
                 "capabilities": sorted(self.capabilities),
                 "runner_backends": sorted(self.allowed_backends),
+                "runner_search_paths": [str(path) for path in self.runner_search_paths],
+                "runner_modules": list(self.runner_modules),
                 "accept_any_pool": self.accept_any_pool,
                 "started_at": utc_now(),
             },
@@ -672,14 +701,139 @@ class TaskManager:
     def _fail_attempt_preparation(self, marker: Marker, job: JobDefinition, exc: Exception) -> None:
         """Fail one claimed job whose attempt could not be prepared."""
 
-        code = "protocol_error" if isinstance(exc, FormatError) else "process_failure"
+        if isinstance(exc, RunnerResolutionError):
+            code = exc.code
+            message = str(exc)
+        else:
+            code = "protocol_error" if isinstance(exc, FormatError) else "process_failure"
+            message = f"cannot prepare attempt: {exc}"
         _LOGGER.error(
             "cannot prepare an attempt for %s: %s",
             marker.job_key,
             exc,
             extra=self._event("launch_error", marker, failure_code=code),
         )
-        self._handle_attempt_failure(marker, job, code, f"cannot prepare attempt: {exc}")
+        self._handle_attempt_failure(marker, job, code, message)
+
+    def _resolve_shared_runner(self, job: JobDefinition) -> Path:
+        """Return the file or tree naming one runner stored outside the payload."""
+
+        if job.runner_source == "workspace":
+            try:
+                candidate = self.workspace.runner_store_path(job.runner_path)
+            except FormatError as exc:
+                raise RunnerResolutionError("runner_unavailable", str(exc)) from exc
+            if not candidate.exists():
+                raise RunnerResolutionError(
+                    "runner_unavailable",
+                    f"workspace runner {job.runner_path.as_posix()} is not published in {self.workspace.runners}",
+                )
+            return candidate
+        package = parse_package_runner(job.runner_path.as_posix())
+        if package is not None:
+            return self._resolve_package_runner(*package)
+        for root in self.runner_search_paths:
+            installed = self._contained(root, job.runner_path.parts)
+            if installed is not None and installed.exists():
+                return installed
+        searched = ", ".join(str(path) for path in self.runner_search_paths) or "no configured search path"
+        raise RunnerResolutionError(
+            "runner_unavailable",
+            f"installed runner {job.runner_path.as_posix()} was not found in {searched}",
+        )
+
+    def _resolve_package_runner(self, module: str, resource: PurePosixPath) -> Path:
+        """Resolve one ``pkg:<module>/<resource>`` runner inside the allowlist."""
+
+        if not any(module == allowed or module.startswith(f"{allowed}.") for allowed in self.runner_modules):
+            raise RunnerResolutionError(
+                "runner_unavailable",
+                f"runner module {module} is not in this manager's runner module allowlist "
+                f"({', '.join(self.runner_modules) or 'empty'})",
+            )
+        try:
+            root = Path(str(files(module)))
+        except (ImportError, TypeError, ValueError) as exc:
+            raise RunnerResolutionError(
+                "runner_unavailable", f"runner module {module} is not importable: {exc}"
+            ) from exc
+        candidate = self._contained(root, resource.parts)
+        if candidate is None or not candidate.exists():
+            raise RunnerResolutionError(
+                "runner_unavailable",
+                f"installed runner pkg:{module}/{resource.as_posix()} does not exist",
+            )
+        return candidate
+
+    @staticmethod
+    def _contained(root: Path, parts: Sequence[str]) -> Path | None:
+        """Return ``root/parts`` when it really stays below the resolved *root*."""
+
+        candidate = root.joinpath(*parts)
+        try:
+            resolved_root = root.resolve()
+            resolved = candidate.resolve()
+        except OSError:
+            return None
+        return candidate if resolved.is_relative_to(resolved_root) else None
+
+    def _stage_runner(self, job: JobDefinition, control: Path) -> Path:
+        """Stage and verify one shared runner, returning what will be executed.
+
+        Nothing outside the payload is ever executed in place: the resolved
+        runner is copied below the attempt control directory, the digest the job
+        pinned is verified on that staged copy, and only the copy is launched. A
+        runner replaced between resolution and execution therefore cannot be
+        substituted for the verified bytes.
+        """
+
+        source = self._resolve_shared_runner(job)
+        staged = control / "runner"
+        try:
+            if source.is_dir():
+                shutil.copytree(source, staged, symlinks=False)
+                for entry in sorted(staged.rglob("*")):
+                    entry.chmod(0o500)
+                staged.chmod(0o500)
+                digest = tree_digest(staged)
+            else:
+                shutil.copyfile(source, staged)
+                staged.chmod(0o500)
+                digest = sha256_file(staged)
+        except OSError as exc:
+            raise RunnerResolutionError(
+                "runner_unavailable",
+                f"cannot stage runner {source} for {job.job_key}: {exc}",
+            ) from exc
+        except FormatError as exc:
+            raise RunnerResolutionError("runner_unavailable", f"cannot pin runner {source}: {exc}") from exc
+        if digest != job.runner_sha256:
+            raise RunnerResolutionError(
+                "runner_mismatch",
+                f"{job.runner_source} runner {job.runner_path.as_posix()} has digest {digest}, "
+                f"but the job pinned {job.runner_sha256}",
+            )
+        executable = staged / RUNNER_TREE_ENTRY if staged.is_dir() else staged
+        if not executable.is_file():
+            raise RunnerResolutionError(
+                "runner_unavailable",
+                f"staged runner tree {job.runner_path.as_posix()} has no {RUNNER_TREE_ENTRY} entry point",
+            )
+        _LOGGER.info(
+            "staged %s runner %s for %s as %s (digest %s)",
+            job.runner_source,
+            job.runner_path.as_posix(),
+            job.job_key,
+            executable,
+            digest,
+            extra=self._event(
+                "runner_staged",
+                runner=job.runner_path.as_posix(),
+                runner_source=job.runner_source,
+                sha256=digest,
+            ),
+        )
+        return executable
 
     def _launch_claimed(self, marker: Marker, job: JobDefinition, previous_state: Mapping[str, Any]) -> None:
         claimed_state = self.workspace.read_state(marker)
@@ -690,6 +844,9 @@ class TaskManager:
         payload = self.workspace.payload_path(marker.placement, marker.job_key)
         control = payload / str(claimed_state["attempt_control"])
         control.mkdir(exist_ok=False)
+        runner = payload.joinpath(*job.runner_path.parts)
+        if job.runner_source != "payload":
+            runner = self._stage_runner(job, control)
         if job.workdir_mode == "persistent":
             workdir = payload.joinpath(*job.workdir_path.parts)
             workdir_reused = workdir.exists()
@@ -722,6 +879,10 @@ class TaskManager:
             "data_generation": claimed_state.get("data_generation"),
             "resources": dict(job.resources),
             "join": claimed_state.get("join_summary"),
+            # The enriched, labeled observations of this activation's join, or an
+            # empty array when the activation follows no join. ``join`` keeps the
+            # summary exactly as earlier profiles published it.
+            "children": self._context_children(claimed_state.get("join_summary")),
         }
         context_path = control / "context.json"
         write_json_atomic(context_path, context, durable=self.workspace.durable)
@@ -756,6 +917,7 @@ class TaskManager:
                     control=control,
                     context_path=context_path,
                     context=context,
+                    runner=runner,
                 )
             )
         )
@@ -841,6 +1003,14 @@ class TaskManager:
             workdir,
             extra=self._event("launch", running, attempt_id=attempt_id, pid=process.pid, step=context["step"]),
         )
+
+    @staticmethod
+    def _context_children(join_summary: object) -> list[dict[str, object]]:
+        """Return the enriched child observations one activation may read."""
+
+        if not isinstance(join_summary, Sequence) or isinstance(join_summary, (str, bytes)):
+            return []
+        return [dict(item) for item in join_summary if isinstance(item, Mapping)]
 
     def _reap_launcher(self, process: subprocess.Popen[bytes], *, grace_seconds: float = 5.0) -> None:
         """Terminate and reap a launcher whose attempt was never committed."""
@@ -993,6 +1163,10 @@ class TaskManager:
     def _begin_commit(self, marker: Marker, state: Mapping[str, Any], outcome_path: Path) -> None:
         outcome = self._read_outcome(outcome_path / "outcome.json", marker, state)
         child_digests = self._child_digests(outcome_path)
+        # The spawn set is validated before the marker leaves running, so a
+        # missing or ambiguous child label is a protocol error of the published
+        # outcome rather than a commit failure of an accepted one.
+        child_labels = self._spawn_labels(outcome_path)
         self._transition(
             marker,
             "committing",
@@ -1004,6 +1178,7 @@ class TaskManager:
                 "attempt_control": state["attempt_control"],
                 "outcome_action": outcome["action"],
                 "child_digests": child_digests,
+                "child_labels": child_labels,
                 "reason": "outcome_published",
             },
         )
@@ -1090,6 +1265,7 @@ class TaskManager:
         action = outcome["action"]
         progress = self._state_progress(state)
         progress["data_generation"] = data_generation
+        self._record_runner_steps(marker, outcome, progress)
         priority_raw = outcome.get("priority")
         next_priority = (
             marker.priority if priority_raw is None else require_int(priority_raw, "outcome.priority", maximum=999)
@@ -1114,7 +1290,12 @@ class TaskManager:
             self._transition(
                 marker,
                 "waiting",
-                {**progress, "next_step": next_step, "join": dict(join), "reason": "waiting_for_children"},
+                {
+                    **progress,
+                    "next_step": next_step,
+                    "join": self._labeled_join(join, outcome_path),
+                    "reason": "waiting_for_children",
+                },
                 priority=next_priority,
             )
         elif action == "succeed":
@@ -1135,6 +1316,26 @@ class TaskManager:
                 reason = "protocol_error"
             else:
                 reason = "declared_failure"
+                if failure.retryable and self._retry_budget_available(job, state):
+                    # The runner that produced the failure is the authority on
+                    # whether repeating the attempt can help; the manager still
+                    # owns the budget, and the same activation is repeated.
+                    _LOGGER.info(
+                        "retrying %s: the runner declared %s retryable",
+                        marker.job_key,
+                        failure.code,
+                        extra=self._event("declared_retry", marker, failure_code=failure.code),
+                    )
+                    self._retry(
+                        marker,
+                        job,
+                        state,
+                        progress,
+                        failure.code,
+                        unclean=False,
+                        priority=next_priority,
+                    )
+                    return
             self._transition(
                 marker,
                 "failed",
@@ -1150,6 +1351,32 @@ class TaskManager:
             )
         else:
             raise FormatError(f"unsupported outcome action: {action!r}")
+
+    def _record_runner_steps(
+        self,
+        marker: Marker,
+        outcome: Mapping[str, Any],
+        progress: dict[str, object],
+    ) -> None:
+        """Copy the step set a runner declared into the resulting state frame.
+
+        The member is advisory evidence for an operator and for tools that draw a
+        job's reachable steps, never an input of a manager decision, so a
+        malformed declaration is logged and dropped instead of failing the job.
+        """
+
+        declared = outcome.get("runner_steps")
+        if declared is None:
+            return
+        if not isinstance(declared, Sequence) or isinstance(declared, (str, bytes)):
+            _LOGGER.warning("ignoring runner_steps of %s: not an array", marker.job_key)
+            return
+        try:
+            steps = [validate_step(item, "runner_steps item") for item in declared]
+        except FormatError as exc:
+            _LOGGER.warning("ignoring runner_steps of %s: %s", marker.job_key, exc)
+            return
+        progress["runner_steps"] = steps
 
     def _read_outcome(self, path: Path, marker: Marker, state: Mapping[str, Any]) -> dict[str, Any]:
         outcome = read_json(path)
@@ -1170,7 +1397,68 @@ class TaskManager:
         jobs_dir = outcome_path / "children" / "jobs"
         if not jobs_dir.is_dir():
             return {}
-        return {path.name: tree_digest(path) for path in sorted(jobs_dir.iterdir()) if path.is_dir()}
+        return {
+            path.name: tree_digest(path, skip=is_payload_private)
+            for path in sorted(jobs_dir.iterdir())
+            if path.is_dir()
+        }
+
+    def _spawn_labels(self, outcome_path: Path) -> dict[str, str]:
+        """Return the label of every spawned child, keyed by child job key.
+
+        Every entry of a spawn set must carry a nonempty label that is unique
+        within that set. A gather step selects its inputs by label, so an unnamed
+        or ambiguous child would leave the parent's own join unusable, and the
+        published outcome is rejected as a protocol error instead.
+        """
+
+        spawn_path = outcome_path / "children" / "spawn.json"
+        if not spawn_path.is_file():
+            return {}
+        entries = read_json(spawn_path).get("children")
+        if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
+            raise FormatError("spawn children must be an array")
+        labels: dict[str, str] = {}
+        used: set[str] = set()
+        for raw in entries:
+            if not isinstance(raw, Mapping):
+                raise FormatError("spawn child must be an object")
+            job_key = require_string(raw.get("job_key"), "spawn child job_key")
+            label = validate_label(raw.get("label"), "spawn child label")
+            if label in used:
+                raise FormatError(f"spawn child label is not unique within the spawn set: {label}")
+            used.add(label)
+            labels[job_key] = label
+        return labels
+
+    def _labeled_join(self, join: Mapping[str, Any], outcome_path: Path) -> dict[str, object]:
+        """Return *join* with every child reference carrying its spawn label.
+
+        A label is declared once, in the spawn set of the very outcome that
+        registers the children a join names. Copying it into the waiting frame
+        keeps join resolution a pure read of authoritative state, and keeps an
+        explicit label in a reference authoritative over the derived one.
+        """
+
+        labels = self._spawn_labels(outcome_path)
+        children = join.get("children")
+        if not isinstance(children, Sequence) or isinstance(children, (str, bytes)):
+            # Labeling is purely additive: a malformed join is recorded exactly
+            # as the runner published it, and join evaluation reports it as that
+            # runner's protocol error rather than as a commit failure here.
+            return dict(join)
+        referenced: list[object] = []
+        for raw in children:
+            if not isinstance(raw, Mapping):
+                referenced.append(raw)
+                continue
+            reference = dict(raw)
+            if reference.get("label") is None:
+                label = labels.get(str(reference.get("job_key", "")))
+                if label is not None:
+                    reference["label"] = label
+            referenced.append(reference)
+        return {**join, "children": referenced}
 
     def _register_children(self, marker: Marker, state: Mapping[str, Any], outcome_path: Path) -> None:
         children_dir = outcome_path / "children"
@@ -1180,6 +1468,9 @@ class TaskManager:
         entries = spawn.get("children")
         if not isinstance(entries, Sequence) or isinstance(entries, (str, bytes)):
             raise FormatError("spawn children must be an array")
+        # Registration is the point of no return for a spawn set, so its labels
+        # are revalidated here even though publication already checked them.
+        self._spawn_labels(outcome_path)
         expected_digests = state.get("child_digests", {})
         if not isinstance(expected_digests, Mapping):
             raise FormatError("committing child_digests must be an object")
@@ -1197,11 +1488,14 @@ class TaskManager:
                 child = JobDefinition.from_mapping(read_json(source / "job.json"))
                 if child.job_key != job_key:
                     raise FormatError("spawn job_key disagrees with child job.json")
-                if tree_digest(source) != expected_digest:
+                if tree_digest(source, skip=is_payload_private) != expected_digest:
                     raise FormatError("spawn child changed after outcome publication")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 self.workspace._publish_path(source, target)
-            if not target.is_dir() or tree_digest(target) != expected_digest:
+            # A registered child may already be running, so its own attempt
+            # control directory and job state are excluded here exactly as they
+            # are from the digest recorded before publication.
+            if not target.is_dir() or tree_digest(target, skip=is_payload_private) != expected_digest:
                 raise FormatError(f"registered child bundle does not match: {job_key}")
             child = JobDefinition.from_mapping(read_json(target / "job.json"))
             existing = self.workspace.find_markers(job_key)
@@ -1290,6 +1584,17 @@ class TaskManager:
             },
             priority=priority,
         )
+
+    def _retry_budget_available(self, job: JobDefinition, state: Mapping[str, Any]) -> bool:
+        """Report whether another attempt of this activation is still permitted."""
+
+        attempts = self._state_int(state, "attempt_ordinal", default=1)
+        total = self._state_int(state, "total_attempts", default=attempts)
+        per_activation = job.retry_policy.maximum_attempts_per_activation
+        if per_activation is not None and attempts >= per_activation:
+            return False
+        maximum_total = job.retry_policy.maximum_total_attempts
+        return maximum_total is None or total < maximum_total
 
     def _handle_attempt_failure(
         self,
@@ -1415,12 +1720,20 @@ class TaskManager:
         return children
 
     def _observe_join_children(self, children: Sequence[object]) -> tuple[list[dict[str, object]], str | None]:
-        """Observe every join child, reporting the first unresolvable child id."""
+        """Observe every join child, reporting the first unresolvable child id.
+
+        One observation is the complete typed record of a child a gather step is
+        allowed to depend on: its label, its terminal state kind, the failure it
+        published if it ended badly, and the workspace-relative payload and
+        workdir paths through which its results are read.
+        """
 
         observations: list[dict[str, object]] = []
         for child_ref in children:
             reference = require_mapping(child_ref, "join child")
             child_id = canonical_uuid(reference.get("job_id"), "join child job_id")
+            label_raw = reference.get("label")
+            label = None if label_raw is None else validate_label(label_raw, "join child label")
             child_marker = None
             placement_hint = reference.get("placement_hint")
             job_key = reference.get("job_key")
@@ -1437,13 +1750,71 @@ class TaskManager:
                     "workspace_id": self.workspace.workspace_id,
                     "job_id": child_id,
                     "job_key": child_marker.job_key,
+                    "label": label,
                     "placement": child_marker.placement.as_posix(),
                     "kind": child_marker.kind,
                     "state_generation": child_marker.generation,
                     "record_ref": child_marker.record_ref,
+                    "payload_path": (child_marker.placement / child_marker.job_key).as_posix(),
+                    **self._child_evidence(child_marker),
                 }
             )
         return observations, None
+
+    def _child_evidence(self, marker: Marker) -> dict[str, object]:
+        """Return the terminal evidence a gather step needs about one child.
+
+        Everything is derived from authoritative state, and every path is
+        workspace relative so an observation survives moving the workspace.
+        Evidence that cannot be read is reported as null instead of failing the
+        parent: a gather step must still be able to see that a child ended badly
+        when it is exactly the child's own payload that is damaged.
+        """
+
+        payload = marker.placement / marker.job_key
+        try:
+            state: Mapping[str, Any] = self.workspace.read_state(marker)
+        except (WorkflowError, OSError) as exc:
+            _LOGGER.debug("cannot read the state frame of join child %s: %s", marker.job_key, exc)
+            state = {}
+        failure: object = None
+        if marker.kind in {"failed", "cancelled"}:
+            raw = state.get("failure")
+            if isinstance(raw, Mapping):
+                try:
+                    failure = validate_failure(raw).as_mapping()
+                except FormatError:
+                    # Evidence of a malformed record is still evidence.
+                    failure = dict(raw)
+        return {
+            "failure": failure,
+            "workdir_path": self._child_workdir_path(marker, state, payload),
+            "data_generation": state.get("data_generation"),
+        }
+
+    def _child_workdir_path(
+        self,
+        marker: Marker,
+        state: Mapping[str, Any],
+        payload: PurePosixPath,
+    ) -> str | None:
+        """Return the workspace-relative workdir of one observed child."""
+
+        try:
+            job = self.workspace.load_job(marker)
+        except (WorkflowError, OSError):
+            recorded = state.get("workdir")
+            return (payload / PurePosixPath(recorded)).as_posix() if isinstance(recorded, str) and recorded else None
+        if job.workdir_mode == "persistent":
+            return (payload / job.workdir_path).as_posix()
+        attempt_id = state.get("attempt_id")
+        if isinstance(attempt_id, str) and attempt_id:
+            # An isolated workdir belongs to one attempt, so the last attempt
+            # recorded in the child's own state frame names the last workdir.
+            base = job.workdir_path
+            return (payload / base.parent / f"{base.name}.{attempt_id}").as_posix()
+        recorded = state.get("workdir")
+        return (payload / PurePosixPath(recorded)).as_posix() if isinstance(recorded, str) and recorded else None
 
     def _join_child_grace_expired(self, marker: Marker, child_id: str) -> bool:
         """Report whether one unresolvable join child has outlived its grace.
@@ -1770,6 +2141,14 @@ class TaskManager:
             "attempt_ordinal",
             "total_attempts",
             "data_generation",
+            # The observed children of the join that started this activation are
+            # inputs of the activation, exactly like its step: every attempt of
+            # it, including one recovered from an abandoned claim or a retry,
+            # must see the same children. A new activation resets the member.
+            "join_summary",
+            # The step set the runner of this job declared, carried forward until
+            # a later outcome declares a different one.
+            "runner_steps",
         )
         return {name: state[name] for name in names if name in state}
 

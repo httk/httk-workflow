@@ -217,54 +217,54 @@ set -euo pipefail
 
 source "$HTTK_WORKFLOW_BASH_API"
 source "$HTTK_WORKFLOW_VASP_BASH_API"
-httk_workflow_init
+httk_workflow_runner vasp.relax prepare run collect
 
-case "$HTTK_WORKFLOW_STEP" in
-  prepare)
-    for input in POSCAR INCAR; do
-      if [ ! -e "$input" ]; then
-        cp -- "$HTTK_WORKFLOW_JOB_DIR/files/$input" "$input"
-      fi
-    done
-    httk_vasp_prepare \
-      --options "$HTTK_WORKFLOW_JOB_DIR/files/vasp-options.json"
-    httk_workflow_advance run
-    ;;
-
-  run)
-    httk_vasp_preclean --keep WAVECAR
-    if httk_vasp_run \
-      --timeout 86400 \
-      --report vasp-run-report.json \
-      -- vasp_std; then
-        httk_workflow_advance collect
-    else
-      status=$?
-      if httk_vasp_remedy_plan \
-        vasp-run-report.json \
-        --output remedy.json; then
-          httk_vasp_remedy_apply remedy.json
-          httk_workflow_retry "reviewed VASP remedy applied"
-      fi
-      httk_workflow_fail vasp.failed \
-        "VASP stopped with status $status"
+step_prepare() {
+  local input
+  for input in POSCAR INCAR; do
+    if [ ! -e "$input" ]; then
+      cp -- "$HTTK_WORKFLOW_JOB_DIR/files/$input" "$input"
     fi
-    ;;
+  done
+  httk_vasp_prepare \
+    --options "$HTTK_WORKFLOW_JOB_DIR/files/vasp-options.json"
+  httk_workflow_advance run
+}
 
-  collect)
-    httk_workflow_outcome_begin >/dev/null
-    httk_workflow_transaction_put_file \
-      outcar "$PWD/OUTCAR" results/OUTCAR
-    httk_workflow_transaction_put_file \
-      oszicar "$PWD/OSZICAR" results/OSZICAR
-    httk_workflow_succeed
-    ;;
-esac
+step_run() {
+  local status=0
+  httk_vasp_preclean --keep WAVECAR
+  if httk_vasp_run \
+    --timeout 86400 \
+    --report vasp-run-report.json \
+    -- vasp_std; then
+      httk_workflow_advance collect
+      return
+  fi
+  status=$?
+  if httk_vasp_remedy_plan \
+    vasp-run-report.json \
+    --output remedy.json; then
+      httk_vasp_remedy_apply remedy.json
+      httk_workflow_retry "reviewed VASP remedy applied"
+      return
+  fi
+  httk_workflow_fail vasp.failed \
+    "VASP stopped with status $status"
+}
+
+step_collect() {
+  httk_workflow_put OUTCAR results/OUTCAR >/dev/null
+  httk_workflow_put OSZICAR results/OSZICAR >/dev/null
+  httk_workflow_succeed
+}
+
+httk_workflow_main
 ```
 
-The outcome functions publish exactly one decision and then exit the Bash
-runner. Do not additionally return a legacy decision code or write
-`ht.nextstep`.
+The outcome functions publish exactly one decision and then *return*:
+`httk_workflow_main` owns the process exit status. Do not additionally return a
+legacy decision code or write `ht.nextstep`.
 
 The `collect` example uses transactional data. Its workspace must have been
 created with that extension:
@@ -332,20 +332,20 @@ The native API is intentionally not a spelling change of the *httk* v1 API.
 
 | *httk* v1 operation | Native Bash | Native Python |
 | --- | --- | --- |
-| `HT_TASK_INIT` | `httk_workflow_init` | `AttemptRuntime.initialize()` |
-| `HT_TASK_NEXT step` | `httk_workflow_advance step` | `runtime.advance("step")` |
-| `HT_TASK_FINISHED` | `httk_workflow_succeed` | `runtime.succeed()` |
-| `HT_TASK_BROKEN` | `httk_workflow_fail CODE MESSAGE` | `runtime.fail(code, message)` |
-| `HT_TASK_SUBTASKS` | explicit children plus `httk_workflow_wait` | `OutcomeBuilder` plus `JoinSpec` |
-| `HT_TASK_ATOMIC_*` | outcome transaction or workdir spec | `TransactionBuilder` or `ReplayableWorkdirBatch` |
-| `HT_TASK_STORE_VAR` | `httk_workflow_state_set` | `runtime.state.set()` |
-| `HT_TASK_RUN_CONTROLLED` | `httk_workflow_run` | `ProcessSupervisor` |
+| `HT_TASK_INIT` | `httk_workflow_runner` plus `httk_workflow_main` | `Runner.main()` dispatches the step |
+| `HT_TASK_NEXT step` | `httk_workflow_advance step` | `a.advance("step")` |
+| `HT_TASK_FINISHED` | `httk_workflow_succeed` | `a.succeed()` |
+| `HT_TASK_BROKEN` | `httk_workflow_fail CODE MESSAGE` | `a.fail(code, message)` |
+| `HT_TASK_SUBTASKS` | `httk_workflow_spawn` plus `httk_workflow_gather` | `a.spawn(ChildSpec(...), label=...)` plus `a.gather(step)` |
+| `HT_TASK_ATOMIC_*` | `httk_workflow_put` / `remove` or a workdir spec | `a.put()` / `a.remove()` or `a.workdir_batch()` |
+| `HT_TASK_STORE_VAR` | `httk_workflow_state_set` | `a.state["name"] = value` |
+| `HT_TASK_RUN_CONTROLLED` | `httk_workflow_run` | `a.run(argv)` or `ProcessSupervisor` |
 | `HT_TASK_SET_PRIORITY` | `--priority` on an outcome | `priority=` on publication |
-| run-log helpers | `httk_workflow_runlog_*` | `runtime.runlog.append()` |
+| run-log helpers | `httk_workflow_runlog_*` | `a.log.append()` |
 | `HT_FCALC` / `HT_FTEST` | `httk_calc` | `evaluate_expression()` |
 | `HT_TEMPLATE` | `httk_template_render` | `render_template()` |
 | compress/uncompress | explicit `httk_compress` / `httk_decompress` paths | `compress_files()` / `decompress_files()` |
-| `HT_FIND_NBR_NODES` | declared attempt resources | `runtime.context.resources` |
+| `HT_FIND_NBR_NODES` | declared attempt resources | `a.context.resources` |
 
 State values are JSON, not sourced shell assignments:
 
@@ -518,39 +518,51 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from httk.workflow import AttemptRuntime, JobSpec, JoinSpec, prepare_job_payload
+from httk.workflow import JobSpec, Runner, prepare_job_payload
 
-runtime = AttemptRuntime.initialize()
-outcome = runtime.outcome()
+run = Runner("example.volume-scan")
 
-with tempfile.TemporaryDirectory(dir=runtime.workdir) as draft_root:
-    for index, parameter in enumerate(("0.95", "1.00", "1.05")):
-        child = Path(draft_root) / f"child-{index}"
-        shutil.copytree(runtime.job / "files" / "child-template", child)
-        (child / "parameter.txt").write_text(
-            parameter + "\n",
-            encoding="utf-8",
-        )
-        child_id = uuid.uuid5(
-            uuid.UUID(runtime.context.job_id),
-            f"volume-{index}",
-        )
-        prepare_job_payload(
-            child,
-            JobSpec(
-                name=f"volume point {index}",
-                workflow="example.volume-point",
-                runner_path="files/run.py",
-                tag=f"volume-{index}",
-                job_id=str(child_id),
-                initial_step="run",
-                claim_pool="vasp-native",
-            ),
-        )
-        outcome.add_child(child, f"volume-scan/{index:03d}")
 
-join = JoinSpec(outcome.children, condition="all_terminal")
-outcome.publish("wait", next_step="collect", join=join)
+@run.step
+def branch(a):
+    with tempfile.TemporaryDirectory(dir=a.workdir) as draft_root:
+        for index, parameter in enumerate(("0.95", "1.00", "1.05")):
+            child = Path(draft_root) / f"child-{index}"
+            shutil.copytree(a.payload / "files" / "child-template", child)
+            (child / "parameter.txt").write_text(
+                parameter + "\n",
+                encoding="utf-8",
+            )
+            child_id = uuid.uuid5(
+                uuid.UUID(a.context.job_id),
+                f"volume-{index}",
+            )
+            prepare_job_payload(
+                child,
+                JobSpec(
+                    name=f"volume point {index}",
+                    workflow="example.volume-point",
+                    runner_path="files/run.py",
+                    tag=f"volume-{index}",
+                    job_id=str(child_id),
+                    initial_step="run",
+                    claim_pool="vasp-native",
+                ),
+            )
+            a.spawn(
+                child,
+                label=f"volume-{index}",
+                placement=f"volume-scan/{index:03d}",
+            )
+    a.gather("collect", when="all_terminal")
+```
+
+A child whose steps live in the same runner needs no payload at all: publish the
+runner once in the workspace and spawn a `ChildSpec`, which synthesizes the whole
+child job from its step and inputs and inherits the parent's runner reference.
+
+```python
+a.spawn(ChildSpec(step="run", inputs={"scale": parameter}), label=f"volume-{index}")
 ```
 
 Use `all_succeeded` when any failed child should make the join impossible.
@@ -558,14 +570,17 @@ Use `all_succeeded` when any failed child should make the join impossible.
 broken descendant no longer counts as active. Other native conditions are
 `any_succeeded` and `at_least`.
 
-For Bash, prepare child directories and specifications first, then compose one
-outcome:
+A Bash step spawns the same children by step and inputs, and gathers exactly the
+ones it spawned:
 
 ```bash
-httk_workflow_outcome_begin >/dev/null
-httk_workflow_child_add child-0 volume-scan/000
-httk_workflow_child_add child-1 volume-scan/001
-httk_workflow_wait collect --condition all_terminal
+for index in 000 001; do
+    httk_workflow_spawn "volume-$index" \
+        --step run \
+        --input scale="0.$index" \
+        --placement "volume-scan/$index" >/dev/null
+done
+httk_workflow_gather collect --when all_terminal
 ```
 
 The complete child set is sealed with the outcome. A native parent cannot add
@@ -581,7 +596,7 @@ A native Python VASP runner can express the same steps without a shell facade:
 import shutil
 
 from httk.workflow import (
-    AttemptRuntime,
+    Runner,
     VaspPreparationOptions,
     apply_vasp_remedy,
     plan_vasp_remedy,
@@ -589,82 +604,63 @@ from httk.workflow import (
     run_vasp,
 )
 
+run = Runner("example.vasp-relax")
 
-def main() -> int:
-    runtime = AttemptRuntime.initialize()
 
-    if runtime.context.step == "prepare":
-        for name in ("POSCAR", "INCAR"):
-            destination = runtime.workdir / name
-            if not destination.exists():
-                shutil.copy2(runtime.job / "files" / name, destination)
-        prepare_vasp_inputs(
-            VaspPreparationOptions(
-                kpoint_density=40,
-                centering="Gamma",
-                pseudopotential_library="/data/vasp/potpaw_PBE",
-                parallel_tag="NPAR",
-                parallel_value=4,
-            ),
-            directory=runtime.workdir,
-        )
-        runtime.advance("run")
-        return 0
+@run.step
+def prepare(a):
+    for name in ("POSCAR", "INCAR"):
+        destination = a.workdir / name
+        if not destination.exists():
+            shutil.copy2(a.payload / "files" / name, destination)
+    prepare_vasp_inputs(
+        VaspPreparationOptions(
+            kpoint_density=40,
+            centering="Gamma",
+            pseudopotential_library="/data/vasp/potpaw_PBE",
+            parallel_tag="NPAR",
+            parallel_value=4,
+        ),
+        directory=a.workdir,
+    )
+    a.advance("run")
 
-    if runtime.context.step == "run":
-        report = run_vasp(
-            ["vasp_std"],
-            directory=runtime.workdir,
-            timeout=86400,
-        )
-        if report.classification == "completed":
-            runtime.advance("collect")
-            return 0
 
-        history = ".httk-vasp/remedies.json"
-        decision = plan_vasp_remedy(
-            report.diagnostics,
-            history_path=history,
-        )
-        if not decision.give_up:
-            apply_vasp_remedy(
-                decision,
-                directory=runtime.workdir,
-                history_path=history,
-            )
-            runtime.retry("reviewed VASP remedy applied")
-            return 0
+@run.step(name="run")
+def run_step(a):
+    report = run_vasp(["vasp_std"], directory=a.workdir, timeout=86400)
+    if report.classification == "completed":
+        a.advance("collect")
+        return
 
-        runtime.fail(
-            "vasp_failure",
-            f"VASP stopped with classification {report.classification}",
-            details=report.as_mapping(),
-        )
-        return 0
+    history = ".httk-vasp/remedies.json"
+    decision = plan_vasp_remedy(report.diagnostics, history_path=history)
+    if not decision.give_up:
+        apply_vasp_remedy(decision, directory=a.workdir, history_path=history)
+        a.retry("reviewed VASP remedy applied")
+        return
 
-    if runtime.context.step == "collect":
-        outcome = runtime.outcome()
-        transaction = outcome.transaction()
-        transaction.put_file(
-            "outcar",
-            runtime.workdir / "OUTCAR",
-            "results/OUTCAR",
-        )
-        transaction.put_file(
-            "oszicar",
-            runtime.workdir / "OSZICAR",
-            "results/OSZICAR",
-        )
-        outcome.publish("succeed")
-        return 0
+    a.fail(
+        "vasp_failure",
+        f"VASP stopped with classification {report.classification}",
+        details=report.as_mapping(),
+    )
 
-    runtime.fail("unknown_step", f"unknown step {runtime.context.step!r}")
-    return 0
+
+@run.step
+def collect(a):
+    a.put(a.workdir / "OUTCAR", "results/OUTCAR")
+    a.put(a.workdir / "OSZICAR", "results/OSZICAR")
+    a.succeed()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(run.main())
 ```
+
+There is no step-dispatch chain and no `unknown_step` branch to write: `Runner.main`
+dispatches the step the manager asked for, and reports an unimplemented step, a step
+that published nothing, and a step that raised as the corresponding outcome.
 
 As in the Bash example, the transaction requires a transactional-data job and
 a workspace initialized with `transactional-data-v1`.

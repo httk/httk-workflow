@@ -16,6 +16,7 @@ from ._util import (
     fsync_directory,
     read_json,
     retry_delay,
+    sha256_file,
     tree_digest,
     utc_now,
     write_json_atomic,
@@ -32,12 +33,15 @@ from .journal import JournalWriter, read_record
 from .models import (
     CORE_PROFILE,
     CORE_STATE_KINDS,
+    READABLE_CORE_PROFILES,
     STATE_KINDS,
     SUPPORTED_EXTENSIONS,
     JobDefinition,
     Marker,
+    is_payload_private,
     marker_basename,
     normalize_placement,
+    validate_runner_path,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,13 +71,23 @@ class WorkflowWorkspace:
     def __init__(self, root: str | os.PathLike[str], *, mutable: bool = True, durable: bool = False) -> None:
         self.root = Path(root).resolve()
         self.control = self.root / ".httk-workflow"
+        self.runners = self.control / "runners"
         self.durable = durable
         self._reported_faults: set[Path] = set()
         self.format = read_json(self.control / "format.json")
         if self.format.get("format") != "httk-workflow-filesystem" or self.format.get("format_version") != 1:
             raise FormatError("workspace must use httk-workflow-filesystem format version 1")
-        if self.format.get("core_profile") != CORE_PROFILE:
-            raise UnsupportedExtensionError(f"unsupported core profile: {self.format.get('core_profile')!r}")
+        self.core_profile = self.format.get("core_profile")
+        if self.core_profile not in READABLE_CORE_PROFILES:
+            raise UnsupportedExtensionError(f"unsupported core profile: {self.core_profile!r}")
+        if mutable and self.core_profile != CORE_PROFILE:
+            # An older profile can be read and exported, never written: its
+            # spawn sets, join summaries, and runner references predate the
+            # shapes this implementation now publishes.
+            raise UnsupportedExtensionError(
+                f"workspace core profile {self.core_profile!r} cannot be mutated by this "
+                f"implementation, which writes {CORE_PROFILE!r}; attach read-only to inspect it"
+            )
         extensions_raw = self.format.get("extensions", [])
         if not isinstance(extensions_raw, list) or not all(isinstance(item, str) for item in extensions_raw):
             raise FormatError("workspace extensions must be an array of strings")
@@ -109,7 +123,7 @@ class WorkflowWorkspace:
             raise UnsupportedExtensionError(f"unsupported extensions: {', '.join(sorted(unsupported))}")
         name_max = os.pathconf(root_path, "PC_NAME_MAX")
         if name_max < 213:
-            raise FormatError(f"filesystem NAME_MAX {name_max} is below the core-v1 requirement of 213")
+            raise FormatError(f"filesystem NAME_MAX {name_max} is below the {CORE_PROFILE} requirement of 213")
         control = root_path / ".httk-workflow"
         control.mkdir(exist_ok=False)
         for relative in (
@@ -117,6 +131,7 @@ class WorkflowWorkspace:
             "quarantine",
             "journal",
             "managers",
+            "runners",
             "requests/tmp",
             "requests/ready",
             "requests/claimed",
@@ -164,6 +179,78 @@ class WorkflowWorkspace:
             self.format = updated
             self.extensions = frozenset(updated["extensions"])
         return self.extensions
+
+    def runner_store_path(self, path: str | PurePosixPath) -> Path:
+        """Return the store location of one workspace runner.
+
+        The store is flat and name-keyed below ``.httk-workflow/runners/``.
+        Relative subdirectories are permitted so a campaign can group runners,
+        but a name can never escape the store.
+        """
+
+        relative = validate_runner_path(str(PurePosixPath(path)), "workspace")
+        resolved = self.runners.joinpath(*relative.parts)
+        root = self.runners.resolve()
+        if not Path(os.path.normpath(resolved)).is_relative_to(root):
+            raise FormatError(f"runner name must remain below the workspace runner store: {relative}")
+        return resolved
+
+    def publish_runner(
+        self,
+        source: str | os.PathLike[str],
+        *,
+        name: str | PurePosixPath | None = None,
+        replace: bool = False,
+    ) -> dict[str, object]:
+        """Install one runner in the workspace store and describe the reference.
+
+        Publication is content addressed: republishing identical bytes is an
+        idempotent no-op, and replacing a name whose content differs requires
+        *replace* so a live campaign referring to the old digest can never be
+        changed underneath by accident.
+        """
+
+        source_path = Path(source).expanduser()
+        if source_path.is_symlink() or not source_path.is_file():
+            raise FormatError(f"a published runner must be a regular file: {source_path}")
+        digest = sha256_file(source_path)
+        target = self.runner_store_path(name if name is not None else source_path.name)
+        if target.exists():
+            if target.is_symlink() or not target.is_file():
+                raise FormatError(f"workspace runner store entry is not a regular file: {target}")
+            existing = sha256_file(target)
+            if existing == digest:
+                _LOGGER.debug("workspace runner %s already holds digest %s", target, digest)
+            elif not replace:
+                raise FileExistsError(
+                    f"workspace runner {target.relative_to(self.runners).as_posix()} already holds a "
+                    f"different digest {existing}; pass replace to overwrite it"
+                )
+            else:
+                self._install_runner_file(source_path, target)
+        else:
+            self._install_runner_file(source_path, target)
+        relative = target.relative_to(self.runners)
+        _LOGGER.info(
+            "published workspace runner %s with digest %s",
+            relative.as_posix(),
+            digest,
+            extra={"event": "runner_published", "runner": relative.as_posix(), "sha256": digest},
+        )
+        return {"source": "workspace", "path": relative.as_posix(), "sha256": digest}
+
+    def _install_runner_file(self, source: Path, target: Path) -> None:
+        """Atomically replace one store entry with the bytes of *source*."""
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        staging = self.control / "tmp" / f"runner.{uuid.uuid4()}"
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, staging)
+        staging.chmod(0o555)
+        try:
+            os.replace(staging, target)
+        finally:
+            staging.unlink(missing_ok=True)
 
     def detach(
         self,
@@ -266,8 +353,8 @@ class WorkflowWorkspace:
         """Report an uninterpretable state entry loudly once, then quietly.
 
         A marker whose basename or placement cannot be parsed is workspace
-        corruption rather than a job state: core-v1 leaves its repair to an
-        explicit workspace tool, so a manager only reports it and never
+        corruption rather than a job state: the core profile leaves its repair
+        to an explicit workspace tool, so a manager only reports it and never
         schedules or relocates it.
         """
 
@@ -315,7 +402,7 @@ class WorkflowWorkspace:
 
     def load_job(self, marker: Marker) -> JobDefinition:
         path = self.payload_path(marker.placement, marker.job_key) / "job.json"
-        job = JobDefinition.from_mapping(read_json(path))
+        job = JobDefinition.from_path(path)
         if job.job_key != marker.job_key:
             raise FormatError("job.json identity disagrees with marker")
         if job.priority != marker.priority and marker.generation == 0:
@@ -464,7 +551,7 @@ class WorkflowWorkspace:
         """Copy or move a complete payload into the workspace and publish it."""
 
         source_path = Path(source).resolve()
-        job = JobDefinition.from_mapping(read_json(source_path / "job.json"))
+        job = JobDefinition.from_path(source_path / "job.json")
         if job.data_mode == "transactional" and "transactional-data-v1" not in self.extensions:
             raise UnsupportedExtensionError("job requires transactional-data-v1")
         normalized_placement = normalize_placement(placement)
@@ -522,7 +609,12 @@ class WorkflowWorkspace:
         return destination
 
     def payload_digest(self, marker: Marker) -> str:
-        return tree_digest(self.payload_path(marker.placement, marker.job_key))
+        """Return the digest of one payload, ignoring runner-private entries."""
+
+        return tree_digest(
+            self.payload_path(marker.placement, marker.job_key),
+            skip=is_payload_private,
+        )
 
     def publish_request(self, request: Mapping[str, object]) -> Path:
         """Atomically publish an operator request."""

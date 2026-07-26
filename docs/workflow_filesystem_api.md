@@ -5,9 +5,19 @@
 This document specifies the filesystem protocol around which the
 *httk-workflow* engine is built. It is the normative on-disk protocol rather
 than Python API documentation. The current `httk.workflow` implementation
-supports `core-v1`, `transactional-data-v1`, and `priority-bands-v1`;
-relocation and cross-workspace transfer remain reserved optional extensions and
-are rejected rather than partially executed.
+writes and serves the `core-v2` profile and supports the
+`transactional-data-v1`, `priority-bands-v1`, and `detached-transfer-v1`
+extensions; relocation and cross-workspace children remain reserved optional
+extensions and are rejected rather than partially executed.
+
+`core-v2` is `core-v1` plus four on-disk refinements: every `spawn.json` entry
+carries a mandatory unique `label`; a join summary records typed per-child
+observations which the next activation also reads as `children` in its attempt
+context; `runner` in `job.json` may name a shared runner outside the payload
+through `source` and `sha256`; and a runner-declared failure marked
+`retryable` is retried within the job's existing attempt budgets. A `core-v1`
+workspace remains readable, so it can be inspected and exported, but is never
+mutated in place: the sections below describe `core-v2`.
 
 The protocol is language independent. A workflow step may be a shell script, a
 Python program, a compiled executable, or any other program that can read and
@@ -162,8 +172,8 @@ provide fencing. Correctness comes from moving the one current state marker.
 
 ## Conformance profiles
 
-The protocol is deliberately phased. A conforming **core-v1** implementation
-supports:
+The protocol is deliberately phased. A conforming **core** implementation of the
+current profile, **core-v2**, supports:
 
 - one workflow workspace per job and all references within that workspace;
 - submission, validation, claiming, leases, execution, and outcomes;
@@ -263,7 +273,7 @@ rename/prune rules below.
 {
   "format": "httk-workflow-filesystem",
   "format_version": 1,
-  "core_profile": "core-v1",
+  "core_profile": "core-v2",
   "extensions": [],
   "record_ref_encoding": "hwref-v1",
   "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
@@ -575,7 +585,7 @@ another writer's segment. Segments rotate at a configured size, not per job.
 Submission needs no journal file per invocation because the initial marker
 uses `init`.
 
-A `core-v1` segment begins with the 12 bytes
+A core journal segment begins with the 12 bytes
 `48 54 54 4b 2d 48 57 4a 2d 56 31 0a` (`HTTK-HWJ-V1` plus newline).
 Segment filenames are lowercase base-36 numbers without leading zeroes. Each
 frame then contains:
@@ -600,7 +610,7 @@ zeroes except for zero itself.
 `checksum128` is the first 128 bits of the SHA-256 checksum over the encoded
 frame length and payload, rendered as 32 lowercase hexadecimal digits. The
 complete checksum remains in the frame. No alternate encoding is permitted in
-a `core-v1` workspace, so independent implementations resolve marker names
+a core workspace, so independent implementations resolve marker names
 identically.
 
 The worst-case noninitial marker basename is 213 ASCII bytes:
@@ -715,6 +725,13 @@ A minimal `job.json` is:
 immutable after submission. Small workflow-specific parameters SHOULD be stored
 directly in it instead of one file per parameter.
 
+The optional top-level `inputs` member is the place for them: a JSON object with
+string keys and application-defined values, opaque to the protocol and covered by
+the immutable job digest like every other member. An implementation MUST reject an
+`inputs` object whose serialization exceeds 262144 bytes; bulk content belongs in
+the payload or in transactional `data/`. A parent that synthesizes a child job
+varies normally only the child's `initial_step` and its `inputs`.
+
 `runner.backend` selects an installed execution adapter and defaults to
 `path` when omitted. The core task manager implements `path`; managers MUST
 leave jobs using an unavailable or disallowed backend unclaimed. This permits
@@ -722,11 +739,41 @@ specialized managers to share a workspace without either one accidentally runnin
 the other's job profile. Backend-specific immutable fields belong in
 `job.json`, and their submission validation is owned by that backend.
 
-`runner.path` is resolved relative to the current payload directory. It MUST
-remain beneath that directory unless an administrator has enabled external
-runners. `arguments` is an argument vector, never a shell command string. A
-backend may treat the path as a backend-specific program while retaining these
-path-containment rules.
+`runner.source` selects the root `runner.path` is resolved against and defaults
+to `payload`:
+
+| `runner.source` | Root of `runner.path` |
+| --- | --- |
+| `payload` | the job's own payload directory |
+| `workspace` | `<workspace>/.httk-workflow/runners/` |
+| `installed` | one ordered runner search path configured in the manager |
+
+`runner.path` MUST remain beneath its root under every source. `arguments` is an
+argument vector, never a shell command string. A backend may treat the path as a
+backend-specific program while retaining these path-containment rules.
+
+A `payload` runner is already pinned by the immutable job digest, so
+`runner.sha256` MUST be absent for it. Every other source names one file, or one
+tree, shared by arbitrarily many jobs, so `runner.sha256` is REQUIRED and pins
+it: the digest of a file is over its bytes, and the digest of a tree is the
+canonical tree digest. Sharing one runner file between the millions of jobs of
+one campaign is the purpose of the non-payload sources.
+
+A manager MUST NOT execute a shared runner in place. It resolves the runner,
+copies it below the attempt control directory as `runner`, verifies
+`runner.sha256` against that staged copy, and executes only the copy. A digest
+disagreement fails the job with `runner_mismatch`; a runner that cannot be
+resolved fails it with `runner_unavailable`. Both are ordinary continuable
+failures, never silent substitutions. A staged tree is entered at its top-level
+`run` file.
+
+An `installed` path may also use the reserved form `pkg:<module>/<resource>`,
+which resolves inside an installed Python package. A manager MUST restrict that
+form to an explicit module allowlist, `httk.workflow` by default.
+
+The immutable job digest a manager records is the SHA-256 over the stored
+`job.json` file bytes exactly as submitted. Nothing renormalizes those bytes, so
+any implementation with a hash utility reproduces the digest.
 
 `files/` is optional and contains submitted code, templates, or immutable input
 objects that require separate files. Small inputs SHOULD be embedded in
@@ -933,14 +980,24 @@ Attempt control is separate from application workdir:
 <workspace>/<placement>/<job-key>/
 ├── .httk-attempt.<attempt-id>/
 │   ├── context.json
+│   ├── runner                   # the verified staged copy of a shared runner
 │   ├── outcome.tmp.<nonce>/
 │   └── outcome.ready/
+├── .httk-job/                   # optional runner-private job state
 └── run/                         # persistent mode
 ```
 
 In isolated mode the application directory is
 `run.<attempt-id>/` instead of `run/`. The runner's current working directory is
 the selected application workdir, not the attempt control directory.
+
+`.httk-job/` is runner-private state that belongs to the job rather than to one
+attempt: it survives retries, step advances, and isolated workdirs, and it travels
+with the payload when the job is transferred. A runner MAY store what it needs
+there, atomically. Both `.httk-job/` and every `.httk-attempt.<attempt-id>/` are
+excluded from every payload digest — submission, child registration, and detached
+transfer alike — so publishing an outcome and writing job state can never disturb
+an immutability check of the payload.
 
 Separating them matters in persistent mode: a late process from an old attempt
 can only publish beneath its own attempt-control name. Its outcome cannot
@@ -1031,7 +1088,8 @@ An unclean persistent retry context is:
   "workdir_reused": true,
   "data_generation": null,
   "resources": {},
-  "join": null
+  "join": null,
+  "children": []
 }
 ```
 
@@ -1086,6 +1144,13 @@ An outcome MAY contain `priority`, an integer from 0 through 999. The manager
 uses it for the marker produced by the committed action; omission preserves
 the current priority. This allows a workflow decision and its scheduling
 preference to share one atomic marker transition.
+
+An outcome MAY also contain `runner_steps`, the array of step names the publishing
+runner implements. A manager copies a valid array verbatim into the state frame it
+writes and carries it forward, and ignores a malformed one with a log entry: the
+member is evidence for an operator or a tool drawing the reachable steps of a job,
+never an input of a manager decision. A runner that declares it SHOULD do so in the
+first outcome the job publishes.
 
 Actions are:
 
@@ -1261,7 +1326,7 @@ permanent revision and manifest hierarchy per step.
 ## Relocating and transferring jobs
 
 This section requires `relocation-v1`, `multiworkspace-v1`, or
-`detached-transfer-v1` as indicated. A `core-v1` implementation does not create
+`detached-transfer-v1` as indicated. A core implementation does not create
 `relocating` or `transferring` states.
 
 Arbitrary placement is dynamic. A job may move after submission, but a raw
@@ -1389,9 +1454,15 @@ A step places complete child bundles in its outcome:
 
 Each child `job.json` names parent workspace, parent job, parent activation, and
 spawn ID. `spawn.json` chooses the target workspace and arbitrary placement for
-each child. Child UUIDs and tags are chosen before outcome publication. In
-`core-v1`, the target workspace MUST be the parent's workspace; cross-workspace children
-require `multiworkspace-v1`.
+each child. Child UUIDs and tags are chosen before outcome publication. In the
+core profile, the target workspace MUST be the parent's workspace;
+cross-workspace children require `multiworkspace-v1`.
+
+Every `spawn.json` entry MUST also carry a `label`: a nonempty tag-syntax name
+that is unique within that spawn set. A gathering step selects its inputs by
+label, so a missing or ambiguous label makes the parent's own join unusable and
+the manager rejects the published outcome with `protocol_error` instead of
+registering any child of the set.
 
 While the parent is `committing`, the manager:
 
@@ -1476,13 +1547,21 @@ and fails the parent after `join_grace_seconds`, one hour by default; a
 restarted manager restarts that grace, which is safe because the grace exists
 only to absorb transient nonvisibility.
 
-In `core-v1`, a child named by an unresolved join MUST NOT relocate, so its
-placement hint remains valid. Extension implementations MAY relocate it only
+In the core profile, a child named by an unresolved join MUST NOT relocate, so
+its placement hint remains valid. Extension implementations MAY relocate it only
 when they provide the forwarding and full-scan fallback above.
 
 When satisfied, the manager appends a ready frame for a new activation and
 renames waiting to ready. Its attempt context summarizes the exact child state
-generation, terminal data generation, and failure information. Child committed
+generation, terminal data generation, and failure information. Each observation
+is one object carrying the child's `workspace_id`, `label`, `job_id`, `job_key`,
+`placement`, `kind`, `state_generation`, `record_ref`, its published `failure`
+object when it ended `failed` or `cancelled`, its `data_generation`, and the
+workspace-relative `payload_path` and `workdir_path` through which its results
+are read. The
+observations appear in the attempt context both as the `join` summary and as the
+`children` array, which is empty for an activation that follows no join. Child
+committed
 data may be exposed through read-only paths named in the context. A
 transactional parent imports selected child data through its own transaction.
 A non-transactional workflow may instead let application code inspect or copy
@@ -1563,12 +1642,27 @@ Codes emitted by this manager itself are reserved. Those currently in use are:
 - `budget_exhausted` — an attempt or activation budget exceeded;
 - `dependency_failure` — a join became impossible, or a named join child stayed
   unresolvable past the manager's bounded grace;
-- `transaction_corruption` — a published transaction could not be replayed.
+- `transaction_corruption` — a published transaction could not be replayed;
+- `runner_unavailable` — a runner outside the payload could not be resolved,
+  staged, or entered at all;
+- `runner_mismatch` — the staged copy of such a runner did not match the
+  `runner.sha256` the job pinned.
 
-`timeout`, `resource_unsatisfiable`, `manager_error`, and `cancelled` remain
-reserved for manager use but are not currently emitted by this implementation.
-Application codes SHOULD be namespaced, as in `vasp.nonconvergent`, to keep
-them distinct from the reserved set.
+A runner library that dispatches steps on a runner's behalf publishes ordinary
+runner failures, so its codes are reserved too. Those of the runner libraries
+shipped with this implementation are:
+
+- `no_outcome` — the step handler returned without publishing an outcome;
+- `unknown_step` — the job asked for a step this runner does not implement;
+- `declared_failure` — a legacy `ht_steps` task declared itself broken, published
+  by the *httk* v1 compatibility runner only.
+
+`resource_unsatisfiable`, `manager_error`, and `cancelled` remain reserved for
+manager use but are not currently emitted by this implementation. `timeout` is
+likewise reserved for a manager-enforced attempt timeout, which this manager does
+not yet apply; the *httk* v1 compatibility runner does publish it for a legacy
+task that exceeded its own timeout. Application codes SHOULD be namespaced, as in
+`vasp.nonconvergent`, to keep them distinct from the reserved set.
 
 The failure frame contains job, step, activation, and attempt IDs; the failure
 object with its code, message, and details such as exit status or signal; retry
