@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from httk.workflow import (
-    AttemptRuntime,
+    Attempt,
     Failure,
     FormatError,
     TaskManager,
@@ -48,10 +48,15 @@ def _payload(root: Path, runner_source: str, *, initial_step: str = "prepare") -
 _BASH_FAIL_RUNNER = """#!/usr/bin/env bash
 set -euo pipefail
 source "$HTTK_WORKFLOW_BASH_API"
-httk_workflow_init
-printf '%s\\n' '{"iterations": 61}' > details.json
-httk_workflow_fail vasp.nonconvergent \\
-    "electronic minimization did not converge" --details "$PWD/details.json"
+httk_workflow_runner tests.failure prepare
+
+step_prepare() {
+    printf '%s\\n' '{"iterations": 61}' >details.json
+    httk_workflow_fail vasp.nonconvergent \\
+        "electronic minimization did not converge" --details @details.json
+}
+
+httk_workflow_main
 """
 
 _LEGACY_SHAPE_RUNNER = """#!/usr/bin/env python3
@@ -80,9 +85,17 @@ import sys
 
 sys.path.insert(0, {_SRC!r})
 
-from httk.workflow import AttemptRuntime
+from httk.workflow import Runner
 
-AttemptRuntime.initialize().succeed()
+run = Runner("tests.child")
+
+
+@run.step
+def run_child(a):
+    a.succeed()
+
+
+raise SystemExit(run.main())
 """
 
 _WAIT_RUNNER = f"""#!/usr/bin/env python3
@@ -90,13 +103,14 @@ import sys
 
 sys.path.insert(0, {_SRC!r})
 
-from httk.workflow import AttemptRuntime, JobSpec, prepare_job_payload
+from httk.workflow import JobSpec, Runner, prepare_job_payload
 
-runtime = AttemptRuntime.initialize()
-if runtime.context.step == "aggregate":
-    runtime.succeed()
-else:
-    payload = runtime.workdir / "child-payload"
+run = Runner("tests.wait")
+
+
+@run.step
+def branch(a):
+    payload = a.workdir / "child-payload"
     files = payload / "files"
     files.mkdir(parents=True)
     child_runner = files / "runner"
@@ -109,13 +123,20 @@ else:
             workflow="tests.child",
             runner_path="files/runner",
             tag="child",
-            initial_step="run",
+            initial_step="run_child",
         ),
     )
-    outcome = runtime.outcome()
-    child = outcome.add_child(payload, "project/children")
-    (runtime.workdir / "child-id.txt").write_text(child.job_id, encoding="utf-8")
-    runtime.wait("aggregate", outcome)
+    child = a.spawn(payload, label="only", placement="project/children")
+    (a.workdir / "child-id.txt").write_text(child.job_id, encoding="utf-8")
+    a.gather("aggregate")
+
+
+@run.step
+def aggregate(a):
+    a.succeed()
+
+
+raise SystemExit(run.main())
 """
 
 _GHOST_JOIN_RUNNER = """#!/usr/bin/env python3
@@ -216,7 +237,7 @@ def test_malformed_published_failure_becomes_a_protocol_error(tmp_path: Path) ->
     assert "malformed failure object" in state["failure"]["message"]
 
 
-def test_runtime_wait_registers_the_children_it_joins_on(tmp_path: Path) -> None:
+def test_gather_registers_the_children_it_joins_on(tmp_path: Path) -> None:
     workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _WAIT_RUNNER, initial_step="branch")
     workspace.submit(payload, "project/wait-parent")
@@ -232,7 +253,7 @@ def test_runtime_wait_registers_the_children_it_joins_on(tmp_path: Path) -> None
     assert len(list(workspace.scan_markers(("succeeded",)))) == 2
 
 
-def test_wait_rejects_a_builder_from_another_attempt(tmp_path: Path) -> None:
+def test_gather_refuses_a_join_over_no_children(tmp_path: Path) -> None:
     control = tmp_path / "control"
     control.mkdir()
     context = {
@@ -256,10 +277,12 @@ def test_wait_rejects_a_builder_from_another_attempt(tmp_path: Path) -> None:
         "HTTK_WORKFLOW_WORKDIR": str(tmp_path / "run"),
         "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
     }
-    runtime = AttemptRuntime.from_environment(environment)
-    other = AttemptRuntime.from_environment(environment)
-    with pytest.raises(ValueError, match="different attempt runtime"):
-        runtime.wait("aggregate", other.outcome())
+    # A join is resolvable only for children the publishing bundle registers, so
+    # a gather without a spawn on this attempt can never become work.
+    attempt = Attempt.initialize(environment)
+    with pytest.raises(ValueError, match="none were spawned"):
+        attempt.gather("aggregate")
+    assert not (control / "outcome.ready").exists()
 
 
 def test_unresolvable_join_child_fails_instead_of_waiting_forever(tmp_path: Path) -> None:

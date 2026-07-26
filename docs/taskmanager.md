@@ -8,7 +8,7 @@ Installing *httk-workflow* provides the `httk-taskmanager` executable.
 httk-taskmanager init WORKSPACE
 ```
 
-This creates a `core-v1` workspace. Optional supported extensions are enabled at
+This creates a `core-v2` workspace. Optional supported extensions are enabled at
 initialization:
 
 ```console
@@ -28,6 +28,33 @@ httk-taskmanager submit WORKSPACE PAYLOAD --placement project-a/00/17
 
 Submission copies by default. `--move` performs a same-filesystem rename and
 consumes the source directory.
+
+## Share one runner between many jobs
+
+A campaign of millions of jobs should not copy its runner into every payload.
+Publish the runner once into the workspace runner store instead:
+
+```console
+httk workflow runner publish ./relax.py --workspace WORKSPACE --name relax.py
+```
+
+The command prints the reference to embed in every `job.json` that uses it:
+
+```json
+{"path": "relax.py", "sha256": "…", "source": "workspace"}
+```
+
+Publication is content addressed. Publishing identical bytes again changes
+nothing, and replacing a stored name whose content differs requires `--replace`,
+because live jobs already reference the stored digest. Before each attempt the
+manager copies the runner below the attempt control directory, verifies the
+pinned digest against that copy, and executes only the copy; a mismatch fails
+the job with `runner_mismatch` and an unresolvable runner with
+`runner_unavailable`. A detached transfer carries the runners its job
+references, and importing installs the missing ones at the destination.
+
+Runners deployed outside any workspace use `"source": "installed"` and resolve
+against the ordered `--runner-search-path` roots of the manager.
 
 ## Run
 

@@ -24,6 +24,8 @@ DEFAULT_MANIFEST_EXCLUSIONS = (
     ".httk-workflow/**",
     "**/.httk-attempt.*",
     "**/.httk-attempt.*/**",
+    "**/.httk-job",
+    "**/.httk-job/**",
 )
 
 

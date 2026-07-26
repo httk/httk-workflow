@@ -1,19 +1,23 @@
+"""Protocol-level outcome bundles, supervised processes, and the VASP helpers.
+
+The Bash authoring SDK that publishes through these bundles is tested in
+:mod:`tests.test_bash_sdk`, and its parity with the Python SDK in
+:mod:`tests.test_parity`.
+"""
+
 import json
-import os
-import subprocess
 import sys
 import uuid
 from pathlib import Path
 
 from httk.workflow import (
-    AttemptRuntime,
+    AttemptContext,
     Diagnostic,
     JobSpec,
+    OutcomeDraft,
     ProcessSupervisor,
     ReplayableWorkdirBatch,
-    TaskManager,
     VaspRemedyDecision,
-    WorkflowWorkspace,
     apply_vasp_remedy,
     clean_vasp_outputs,
     diagnose_vasp_files,
@@ -23,7 +27,9 @@ from httk.workflow import (
 )
 
 
-def _runtime(tmp_path: Path, *, data_generation: int | None = None) -> AttemptRuntime:
+def _draft(tmp_path: Path, *, data_generation: int | None = None) -> OutcomeDraft:
+    """Return one unpublished outcome draft of a fabricated attempt."""
+
     control = tmp_path / "control"
     control.mkdir()
     context = control / "context.json"
@@ -53,19 +59,12 @@ def _runtime(tmp_path: Path, *, data_generation: int | None = None) -> AttemptRu
         ),
         encoding="utf-8",
     )
-    environment = {
-        "HTTK_WORKFLOW_CONTEXT": str(context),
-        "HTTK_WORKFLOW_CONTROL_DIR": str(control),
-        "HTTK_WORKFLOW_JOB_DIR": str(tmp_path / "job"),
-        "HTTK_WORKFLOW_WORKDIR": str(tmp_path / "run"),
-        "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
-    }
     (tmp_path / "run").mkdir()
-    return AttemptRuntime.from_environment(environment)
+    return OutcomeDraft(AttemptContext.read(context), control)
 
 
 def test_composed_outcome_contains_transaction_and_children(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path, data_generation=2)
+    outcome = _draft(tmp_path, data_generation=2)
     source = tmp_path / "result.txt"
     source.write_text("result\n", encoding="utf-8")
     child = tmp_path / "child"
@@ -85,11 +84,10 @@ def test_composed_outcome_contains_transaction_and_children(tmp_path: Path) -> N
         ),
     )
 
-    outcome = runtime.outcome()
     transaction = outcome.transaction()
     transaction.make_dir("results-dir", "results")
     transaction.put_file("result", source, "results/value.txt")
-    reference = outcome.add_child(child, "children/a")
+    reference = outcome.add_child(child, "children/a", label="first")
     ready = outcome.publish("wait", next_step="collect")
 
     body = json.loads((ready / "outcome.json").read_text(encoding="utf-8"))
@@ -100,11 +98,11 @@ def test_composed_outcome_contains_transaction_and_children(tmp_path: Path) -> N
     assert body["join"]["children"][0]["job_id"] == reference.job_id
     assert [item["op"] for item in manifest["operations"]] == ["make-dir", "put-file"]
     assert spawn["children"][0]["placement"] == "children/a"
+    assert spawn["children"][0]["label"] == "first"
 
 
 def test_outcome_rejects_stale_explicit_generation(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path, data_generation=2)
-    outcome = runtime.outcome()
+    outcome = _draft(tmp_path, data_generation=2)
     outcome.transaction().make_dir("results", "results")
     try:
         outcome.publish("advance", next_step="collect", expected_data_generation=1)
@@ -250,116 +248,3 @@ Path("OSZICAR").write_text("")
             encoding="utf-8",
         )
         assert "incomplete_outcar" not in {item.code for item in diagnose_vasp_files(tmp_path)}
-
-
-def test_installed_style_bash_runner_uses_manager_paths(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
-    payload = tmp_path / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    runner = files / "runner"
-    runner.write_text(
-        """#!/usr/bin/env bash
-set -euo pipefail
-source "$HTTK_WORKFLOW_BASH_API"
-source "$HTTK_WORKFLOW_VASP_BASH_API"
-httk_workflow_init
-case "$HTTK_WORKFLOW_STEP" in
-  start)
-    printf '%s\n' result > result.txt
-    httk_workflow_outcome_begin >/dev/null
-    httk_workflow_transaction_put_file result "$PWD/result.txt" result.txt
-    httk_workflow_advance collect
-    ;;
-  collect)
-    test "$(cat "$HTTK_WORKFLOW_DATA_DIR/result.txt")" = result
-    httk_workflow_state_set answer 42
-    httk_workflow_succeed
-    ;;
-esac
-""",
-        encoding="utf-8",
-    )
-    runner.chmod(0o755)
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="bash",
-            workflow="tests.bash",
-            runner_path="files/runner",
-            tag="bash",
-            initial_step="start",
-            job_id=str(uuid.uuid4()),
-            data_mode="transactional",
-        ),
-    )
-    workspace.submit(payload, "bash/jobs")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle()
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "succeeded"
-    state = workspace.payload_path(marker.placement, marker.job_key) / "run" / ".httk-runner" / "state.json"
-    assert json.loads(state.read_text(encoding="utf-8")) == {"answer": 42}
-    data = workspace.payload_path(marker.placement, marker.job_key) / "data" / "result.txt"
-    assert data.read_text(encoding="utf-8") == "result\n"
-
-
-def test_shell_library_is_safe_with_set_u(tmp_path: Path) -> None:
-    shell = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "shell" / "httk-workflow.sh"
-    completed = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'set -euo pipefail; source "$1"; test "$HTTK_WORKFLOW_BASH_API_VERSION" = 1',
-            "bash",
-            str(shell),
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-
-
-def test_bash_composes_transaction_without_jq_or_eval(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path, data_generation=0)
-    shell = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "shell" / "httk-workflow.sh"
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "HTTK_WORKFLOW_CONTEXT": str(runtime.control / "context.json"),
-            "HTTK_WORKFLOW_CONTROL_DIR": str(runtime.control),
-            "HTTK_WORKFLOW_JOB_DIR": str(runtime.job),
-            "HTTK_WORKFLOW_WORKDIR": str(runtime.workdir),
-            "HTTK_WORKFLOW_WORKSPACE_DIR": str(runtime.workspace),
-            "HTTK_WORKFLOW_PYTHON": sys.executable,
-            "HTTK_WORKFLOW_BASH_API": str(shell),
-            "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
-        }
-    )
-    completed = subprocess.run(
-        [
-            "bash",
-            "-c",
-            """set -euo pipefail
-source "$HTTK_WORKFLOW_BASH_API"
-httk_workflow_init
-printf '%s\\n' 'literal; $(touch unsafe)' > result.txt
-httk_workflow_outcome_begin >/dev/null
-httk_workflow_transaction_put_file result "$PWD/result.txt" "results/result.txt"
-httk_workflow_advance collect
-""",
-        ],
-        cwd=runtime.workdir,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    assert not (runtime.workdir / "unsafe").exists()
-    ready = runtime.control / "outcome.ready"
-    body = json.loads((ready / "outcome.json").read_text(encoding="utf-8"))
-    assert body["action"] == "advance"
-    assert body["expected_data_generation"] == 0
-    assert (ready / "transaction" / "payload" / "result").read_text(encoding="utf-8").startswith("literal;")

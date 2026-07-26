@@ -5,8 +5,8 @@ HTTK_VASP_BASH_API_VERSION=1
 
 _httk_vasp_require_workflow_api() {
     if ! declare -F _httk_workflow_bridge >/dev/null 2>&1; then
-        printf '%s\n' "source HTTK_WORKFLOW_BASH_API before HTTK_WORKFLOW_VASP_BASH_API" >&2
-        return 1
+        printf 'httk-workflow: source HTTK_WORKFLOW_BASH_API before HTTK_WORKFLOW_VASP_BASH_API\n' >&2
+        return 2
     fi
 }
 

@@ -14,7 +14,12 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class AttemptLaunch:
-    """Paths and context needed to construct an attempt command."""
+    """Paths and context needed to construct an attempt command.
+
+    ``runner`` is the executable the manager resolved for this attempt. A
+    payload runner is the file inside ``payload``; a shared runner is the
+    verified copy the manager staged below ``control``, never the original.
+    """
 
     job: JobDefinition
     marker: Marker
@@ -23,6 +28,15 @@ class AttemptLaunch:
     control: Path
     context_path: Path
     context: Mapping[str, Any]
+    runner: Path | None = None
+
+    @property
+    def runner_command(self) -> Path:
+        """Return the executable to run, defaulting to the payload runner."""
+
+        if self.runner is not None:
+            return self.runner
+        return self.payload.joinpath(*self.job.runner_path.parts)
 
 
 @dataclass(frozen=True)
@@ -64,15 +78,16 @@ class PathRunnerBackend:
     name = "path"
 
     def validate(self, job: JobDefinition, payload: Path) -> None:
+        if job.runner_source != "payload":
+            # A shared runner lives outside the immutable payload, so it is
+            # resolved, staged, and digest-verified per attempt instead.
+            return
         runner = payload.joinpath(*job.runner_path.parts)
         if not runner.is_file():
             raise FormatError(f"runner does not exist or is not a regular file: {job.runner_path}")
 
     def command(self, launch: AttemptLaunch) -> Sequence[str]:
-        return [
-            str(launch.payload.joinpath(*launch.job.runner_path.parts)),
-            *launch.job.runner_arguments,
-        ]
+        return [str(launch.runner_command), *launch.job.runner_arguments]
 
     def commit_outcome(self, commit: OutcomeCommit) -> None:
         return

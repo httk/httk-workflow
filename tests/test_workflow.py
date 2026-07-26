@@ -348,6 +348,7 @@ os.rename(temporary, control / "outcome.ready")
             "workspace_id": context["workspace_id"],
             "job_id": child_id,
             "job_key": child_key,
+            "label": "child",
             "placement": "project/children",
         }]
     }))

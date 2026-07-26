@@ -15,14 +15,31 @@ from .journal import JournalWriter
 from .models import (
     QUIESCENT_KINDS,
     STATE_KINDS,
+    JobDefinition,
     Marker,
     canonical_uuid,
+    is_payload_private,
     normalize_placement,
+    validate_runner_path,
+    validate_sha256,
 )
 from .workspace import WorkflowWorkspace
 
 TRANSFER_DIRECTORY = ".httk-transfer"
 TRANSFER_MANIFEST = "manifest.json"
+TRANSFER_RUNNERS = "runners"
+
+
+def _excluded_from_bundle(name: str) -> bool:
+    """Report whether one top-level payload entry stays out of the digest.
+
+    The transfer directory describes the bundle rather than the job, and the
+    runner-private entries of a payload — attempt control directories and job
+    state — are excluded from every payload digest, so a job that ran before it
+    was detached digests exactly like one that never did.
+    """
+
+    return name == TRANSFER_DIRECTORY or is_payload_private(name)
 
 
 def _payload_digest(payload: Path) -> str:
@@ -30,7 +47,7 @@ def _payload_digest(payload: Path) -> str:
     entries = [
         item
         for item in payload.rglob("*")
-        if not item.relative_to(payload).parts or item.relative_to(payload).parts[0] != TRANSFER_DIRECTORY
+        if item.relative_to(payload).parts and not _excluded_from_bundle(item.relative_to(payload).parts[0])
     ]
     for entry in sorted(entries, key=lambda item: item.relative_to(payload).as_posix()):
         relative = entry.relative_to(payload).as_posix().encode("utf-8")
@@ -42,6 +59,77 @@ def _payload_digest(payload: Path) -> str:
         else:
             raise FormatError(f"transfer payload rejects symlink or special entry: {entry}")
     return digest.hexdigest()
+
+
+def _bundled_runners(workspace: WorkflowWorkspace, payload: Path, transfer_dir: Path) -> list[dict[str, str]]:
+    """Copy the workspace runners one job references into its bundle.
+
+    A detached job must remain runnable at its destination, so a runner it only
+    references by name and digest travels with it. Payload runners are already
+    inside the payload, and an installed runner is deployment state of the
+    destination rather than of the job, so neither is bundled.
+    """
+
+    job = JobDefinition.from_path(payload / "job.json")
+    if job.runner_source != "workspace" or job.runner_sha256 is None:
+        return []
+    relative = job.runner_path
+    source = workspace.runner_store_path(relative)
+    if not source.is_file():
+        raise FormatError(f"referenced workspace runner is not published: {relative.as_posix()}")
+    digest = sha256_file(source)
+    if digest != job.runner_sha256:
+        raise WorkspaceCorruptionError(
+            f"workspace runner {relative.as_posix()} has digest {digest}, but the job pinned {job.runner_sha256}"
+        )
+    embedded = transfer_dir / TRANSFER_RUNNERS / Path(*relative.parts)
+    embedded.parent.mkdir(parents=True, exist_ok=True)
+    if not embedded.is_file() or sha256_file(embedded) != digest:
+        shutil.copyfile(source, embedded)
+        embedded.chmod(0o555)
+    return [{"path": relative.as_posix(), "sha256": digest}]
+
+
+def _install_bundled_runners(workspace: WorkflowWorkspace, bundle: Path, manifest: Mapping[str, Any]) -> None:
+    """Install every runner a bundle carries into the destination store.
+
+    Installation is content addressed and therefore idempotent: an entry whose
+    digest already matches is skipped, and a name that already holds different
+    content is a conflict rather than something to overwrite, because live jobs
+    at the destination may already reference the stored digest.
+    """
+
+    for entry in _manifest_runners(manifest):
+        relative = validate_runner_path(entry["path"], "workspace")
+        digest = entry["sha256"]
+        source = bundle / TRANSFER_DIRECTORY / TRANSFER_RUNNERS / Path(*relative.parts)
+        target = workspace.runner_store_path(relative)
+        if target.is_file():
+            existing = sha256_file(target)
+            if existing == digest:
+                continue
+            raise WorkspaceCorruptionError(
+                f"destination workspace runner {relative.as_posix()} holds digest {existing}, "
+                f"but the transfer carries {digest}"
+            )
+        if not source.is_file():
+            raise FormatError(f"transfer bundle does not carry the runner it declares: {relative.as_posix()}")
+        workspace.publish_runner(source, name=relative)
+
+
+def _manifest_runners(manifest: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Validate and return the ``runners`` list of one transfer manifest."""
+
+    raw = manifest.get("runners", [])
+    if not isinstance(raw, list):
+        raise FormatError("transfer manifest runners must be an array")
+    result: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            raise FormatError("transfer manifest runner must be an object")
+        relative = validate_runner_path(item.get("path"), "workspace")
+        result.append({"path": relative.as_posix(), "sha256": validate_sha256(item.get("sha256"), "runner.sha256")})
+    return result
 
 
 def _ledger_path(workspace: WorkflowWorkspace, transfer_id: str) -> Path:
@@ -80,6 +168,7 @@ def _seal_transferring(workspace: WorkflowWorkspace, marker: Marker, state: Mapp
     if not isinstance(prior, Mapping):
         raise FormatError("transferring state has no prior_state object")
     prior_kind = str(state.get("prior_kind"))
+    runners = _bundled_runners(workspace, payload, transfer_dir)
     manifest = {
         "format": "httk-workflow-detached-transfer",
         "format_version": 1,
@@ -92,6 +181,7 @@ def _seal_transferring(workspace: WorkflowWorkspace, marker: Marker, state: Mapp
         "source_placement": marker.placement.as_posix(),
         "destination_placement": str(state["destination_placement"]),
         "payload_sha256": _payload_digest(payload),
+        "runners": runners,
         "prior_kind": prior_kind,
         "prior_state": dict(prior),
         "priority": marker.priority,
@@ -189,6 +279,14 @@ def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
         raise FormatError("sealed transfer marker is absent")
     if _payload_digest(payload) != manifest.get("payload_sha256"):
         raise FormatError("detached transfer payload digest mismatch")
+    # Bundled runners sit beside the manifest rather than inside the payload, so
+    # each one is verified against its own declared digest.
+    for entry in _manifest_runners(manifest):
+        carried = payload / TRANSFER_DIRECTORY / TRANSFER_RUNNERS / Path(*PurePosixPath(entry["path"]).parts)
+        if not carried.is_file():
+            raise FormatError(f"transfer bundle does not carry the runner it declares: {entry['path']}")
+        if sha256_file(carried) != entry["sha256"]:
+            raise FormatError(f"bundled runner digest mismatch: {entry['path']}")
     return manifest
 
 
@@ -213,6 +311,9 @@ def import_bundle(workspace: WorkflowWorkspace, bundle: str | os.PathLike[str]) 
         return existing_ack
     if manifest["destination_workspace_id"] != workspace.workspace_id:
         raise ValueError("bundle names a different destination workspace")
+    # Runners are installed before anything about the job is published, because
+    # an imported job must never become schedulable without the runner it pins.
+    _install_bundled_runners(workspace, source, manifest)
     duplicates = [marker for marker in _all_markers(workspace) if marker.job_id == manifest["job_id"]]
     if duplicates:
         if len(duplicates) != 1:

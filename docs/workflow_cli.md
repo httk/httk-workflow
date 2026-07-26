@@ -11,6 +11,7 @@ The complete tree is:
 
 ```text
 httk workflow workspace init|status|upgrade|unlock
+httk workflow runner publish
 httk workflow job submit|request
 httk workflow manager run
 httk workflow v1 prepare|submit|run
