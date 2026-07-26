@@ -7,6 +7,7 @@ from pathlib import Path
 from httk.workflow import TaskManager, WorkflowWorkspace
 from httk.workflow.errors import TransitionLostError
 from httk.workflow.journal import JournalWriter, read_record
+from httk.workflow.models import StateFrame
 
 
 def _payload(
@@ -148,7 +149,7 @@ def test_new_manager_replays_published_outcome(tmp_path: Path) -> None:
             running = workspace.find_marker_by_id(job_id)
             assert running is not None
             state = workspace.read_state(running)
-            if running.kind == "running" and first._outcome_path(running, state).exists():
+            if running.kind == "running" and first._outcome_path(running, StateFrame.from_mapping(state)).exists():
                 first.tick()
                 break
             time.sleep(0.01)
@@ -393,14 +394,14 @@ def test_invalid_submission_moves_to_failed(tmp_path: Path) -> None:
 
 
 def test_priority_request_renames_authoritative_marker(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", extensions=["priority-bands-v1"])
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
     submitted = workspace.submit(payload, "project/request")
     with TaskManager(workspace, pools=("other",)) as manager:
         manager.tick()
         ready = workspace.find_marker_by_id(job_id)
         assert ready is not None and ready.kind == "ready"
-        assert "p5xx" in ready.path.parts
+        assert ready.path.name.startswith(f"{ready.job_key}.p500.")
         workspace.publish_request(
             {
                 "format": "httk-workflow-request",
@@ -419,5 +420,6 @@ def test_priority_request_renames_authoritative_marker(tmp_path: Path) -> None:
     changed = workspace.find_marker_by_id(job_id)
     assert changed is not None
     assert changed.priority == 25
-    assert "p0xx" in changed.path.parts
+    assert changed.kind == "ready"
+    assert changed.path.name.startswith(f"{changed.job_key}.p025.")
     assert changed.generation > submitted.generation

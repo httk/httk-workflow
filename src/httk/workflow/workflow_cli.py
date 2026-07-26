@@ -31,6 +31,7 @@ from .configuration import (
     write_config,
 )
 from .errors import WorkflowError
+from .gc import iter_report_rows
 from .harvest import DEFAULT_HARVEST_STATES, HARVESTABLE_KINDS, harvest
 from .introspection import (
     JOB_HISTORY_FORMAT,
@@ -46,7 +47,7 @@ from .introspection import (
     resolve_job,
 )
 from .manifests import create_manifest, release_maintenance_lock, verify_manifest
-from .models import CORE_PROFILE, STATE_KINDS, canonical_uuid
+from .models import CORE_PROFILE, POLICY_KEYS, STATE_KINDS, canonical_uuid
 from .projects import import_v1_project, initialize_project, require_project
 from .scaffold import (
     DEFAULT_PLACEMENT,
@@ -74,7 +75,7 @@ _HELP = """usage: {program} GROUP COMMAND [ARG ...]
 Filesystem-native workflow execution and project management.
 
 command groups:
-  workspace   init, status, upgrade, unlock
+  workspace   init, status, policy, fsck, gc, upgrade, unlock
   runner      publish
   job         new, submit, request, list, show, log, why, debug
   harvest     stream the finished jobs of a workspace as records
@@ -133,6 +134,107 @@ def _workspace_upgrade(argv: Sequence[str], program: str) -> int:
         return parsed
     workspace = WorkflowWorkspace(parsed.workspace)
     print("\n".join(sorted(workspace.upgrade(parsed.extension))))
+    return 0
+
+
+def _policy_value(key: str, text: str) -> object:
+    """Parse one command-line policy value as the JSON it denotes."""
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"policy {key} must be given as JSON: {text!r} ({exc})") from exc
+
+
+def _workspace_policy(argv: Sequence[str], program: str) -> int:
+    """Show or update the tunables one workspace shares with every attacher."""
+
+    parser = _parser(program, "Show or set the shared policy of one workflow workspace")
+    parser.add_argument("action", choices=("show", "set"))
+    parser.add_argument("workspace")
+    parser.add_argument("key", nargs="?", help="one of " + ", ".join(sorted(POLICY_KEYS)))
+    parser.add_argument("value", nargs="?", help="the JSON value to store")
+    parser.add_argument("--json", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    if parsed.action == "show":
+        if parsed.key is not None:
+            raise ValueError("policy show takes no key")
+        policy = WorkflowWorkspace(parsed.workspace, mutable=False).policy
+    else:
+        if parsed.key is None or parsed.value is None:
+            raise ValueError("policy set requires KEY and VALUE")
+        # A retention member is addressed directly so that setting one limit
+        # does not require restating the whole object as JSON.
+        if parsed.key.startswith("retention."):
+            member = parsed.key.split(".", 1)[1]
+            workspace = WorkflowWorkspace(parsed.workspace)
+            retention = dict(workspace.policy.retention.as_mapping())
+            retention[member] = _policy_value(parsed.key, parsed.value)
+            policy = workspace.set_policy({"retention": retention})
+        else:
+            policy = WorkflowWorkspace(parsed.workspace).set_policy(
+                {parsed.key: _policy_value(parsed.key, parsed.value)}
+            )
+    if parsed.json:
+        print(json.dumps(policy.as_mapping(), indent=2, sort_keys=True))
+        return 0
+    for key, value in sorted(policy.as_mapping().items()):
+        print(f"{key}\t{json.dumps(value, sort_keys=True)}")
+    return 0
+
+
+def _workspace_fsck(argv: Sequence[str], program: str) -> int:
+    """Check, and optionally repair, the marker-to-journal integrity."""
+
+    parser = _parser(program, "Check that every marker resolves to its journal frame")
+    parser.add_argument("workspace")
+    parser.add_argument("--repair", action="store_true", help="re-point damaged markers at the last readable frame")
+    parser.add_argument(
+        "--quarantine-unrepairable",
+        action="store_true",
+        help="with --repair, move a marker with no readable history into the quarantine",
+    )
+    parser.add_argument("--json", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    workspace = WorkflowWorkspace(parsed.workspace, mutable=parsed.repair)
+    report = workspace.check(repair=parsed.repair, quarantine_unrepairable=parsed.quarantine_unrepairable)
+    if parsed.json:
+        print(json.dumps(report.as_mapping(), indent=2, sort_keys=True))
+    else:
+        for finding in report.findings:
+            print(f"{finding.action}\t{finding.problem}\t{finding.job_key or '-'}\t{finding.entry}\t{finding.detail}")
+        print(f"checked {report.markers_checked} markers, {len(report.findings)} findings")
+    # A clean workspace and a fully repaired one both exit zero; anything an
+    # operator still has to deal with exits one, as a check command should.
+    return 1 if report.unresolved else 0
+
+
+def _workspace_gc(argv: Sequence[str], program: str) -> int:
+    """Free the disk the workspace retention policy says may be freed."""
+
+    parser = _parser(program, "Collect the garbage one workflow workspace has accumulated")
+    parser.add_argument("workspace")
+    parser.add_argument("--dry-run", action="store_true", help="report what would be removed without touching it")
+    parser.add_argument("--json", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    workspace = WorkflowWorkspace(parsed.workspace, mutable=not parsed.dry_run)
+    report = workspace.collect_garbage(dry_run=parsed.dry_run)
+    if parsed.json:
+        print(json.dumps(report.as_mapping(), indent=2, sort_keys=True))
+        return 0
+    print(f"{'category':<24}{'candidates':>12}{'removed':>9}{'bytes':>14}")
+    for name, candidates, removed, reclaimed in iter_report_rows(report):
+        print(f"{name:<24}{candidates:>12}{removed:>9}{reclaimed:>14}")
+    for skipped in report.skipped:
+        print(f"skipped {skipped}")
+    if parsed.dry_run:
+        print("dry run: nothing was removed")
     return 0
 
 
@@ -1098,7 +1200,7 @@ def command(argv: Sequence[str], context: CLIContext) -> int:
     try:
         if group == "workspace":
             if not rest or rest[0] in {"-h", "--help"}:
-                print(f"usage: {program} workspace init|status|upgrade|unlock [ARG ...]")
+                print(f"usage: {program} workspace init|status|policy|fsck|gc|upgrade|unlock [ARG ...]")
                 return 0
             action, tail = rest[0], rest[1:]
             if action in {"init", "status"}:
@@ -1107,6 +1209,12 @@ def command(argv: Sequence[str], context: CLIContext) -> int:
                 return _workspace_upgrade(tail, f"{program} workspace upgrade")
             if action == "unlock":
                 return _workspace_unlock(tail, f"{program} workspace unlock")
+            if action == "policy":
+                return _workspace_policy(tail, f"{program} workspace policy")
+            if action == "fsck":
+                return _workspace_fsck(tail, f"{program} workspace fsck")
+            if action == "gc":
+                return _workspace_gc(tail, f"{program} workspace gc")
         elif group == "runner":
             return _runner(rest, f"{program} runner")
         elif group == "job":

@@ -10,7 +10,7 @@ httk workflow --help
 The complete tree is:
 
 ```text
-httk workflow workspace init|status|upgrade|unlock
+httk workflow workspace init|status|policy|fsck|upgrade|unlock
 httk workflow runner publish
 httk workflow job new|submit|request|list|show|log|why|debug
 httk workflow harvest
@@ -115,6 +115,89 @@ httk workflow workspace unlock WORKSPACE --force
 ```
 
 Without `--force` only a stale lock is removed.
+
+## Workspace policy and integrity
+
+The tunables a workspace shares with every process attaching it — the
+visibility deadline, the default lease, the journal segment size, and the
+retention limits — are stored in `format.json` and edited in place:
+
+```console
+httk workflow workspace policy show WORKSPACE
+httk workflow workspace policy show WORKSPACE --json
+httk workflow workspace policy set WORKSPACE visibility_deadline_seconds 60
+httk workflow workspace policy set WORKSPACE retention.trash_days 14
+```
+
+`workspace fsck` verifies that every state marker still resolves to a readable
+journal frame that agrees with it, and can re-point damaged markers at the last
+good frame of their job:
+
+```console
+httk workflow workspace fsck WORKSPACE
+httk workflow workspace fsck WORKSPACE --repair --json
+httk workflow workspace fsck WORKSPACE --repair --quarantine-unrepairable
+```
+
+It exits `1` while anything remains for an operator to deal with. See
+[the task-manager guide](taskmanager.md) for what each problem code means and
+for exactly what a repair will and will not touch.
+
+## Freeing disk
+
+Nothing in the engine deletes anything on its own: neither a runner nor a
+manager is ever required to run cleanup code, so every artefact a crash could
+orphan is simply left in place. `workspace gc` is the separate, explicit
+collector, driven entirely by the workspace's `policy.retention`:
+
+```console
+httk workflow workspace gc WORKSPACE --dry-run
+httk workflow workspace gc WORKSPACE
+httk workflow workspace gc WORKSPACE --json
+```
+
+It prints one row per category with the candidates it found, what it removed,
+and an estimate of the bytes reclaimed; `--json` lists every individual entry
+as well. `--dry-run` touches nothing at all and reports what a real run would
+remove. A run that removed anything also appends one `httk-workflow-gc` frame
+to the journal summarizing the same counts, so the collection is itself part of
+the workspace's durable history.
+
+A retention limit that is not configured means *keep*, so on a workspace whose
+policy is empty the command only prunes what cannot carry information: empty
+placement mirrors below the state kinds, staging entries abandoned for a day,
+and month-old request leftovers — those claimed by a manager that is gone and
+those a manager explicitly retired. Configure the limits to collect the rest:
+
+```console
+httk workflow workspace policy set WORKSPACE retention.attempt_control_days 14
+httk workflow workspace policy set WORKSPACE retention.trash_days 14
+httk workflow workspace policy set WORKSPACE retention.journal_days 90
+```
+
+| Category | Retention limit | What goes |
+| --- | --- | --- |
+| `attempt_control` | `attempt_control_days` | `.httk-attempt.*` directories of terminal jobs, never the newest one of a job |
+| `transaction_trash` | `trash_days` | trees a replayed transaction moved aside, once the job left `committing` |
+| `retired_bundles` | `trash_days` | acknowledged transfer bundles below `transfers/retired/` |
+| `transfer_records` | `trash_days` | per-transfer receipts below `transfers/acks/` and `transfers/imported/` |
+| `journal_segments` | `journal_days` | segments no current marker references, written by a writer no live manager owns |
+| `manager_directories` | `journal_days` | directories of dead managers whose segments are gone |
+| `placement_directories` | always safe | empty placement mirrors below `state/<kind>/` |
+| `tmp_entries` | always safe | staging entries older than 24 hours |
+| `retired_requests` | always safe | requests claimed over 30 days ago by a manager now gone, and requests retired over 30 days ago with their `.retirement` records |
+
+The collector never touches the quarantine, a sealed transfer bundle, a
+persistent workdir, a payload beyond its aged attempt-control directories, any
+marker, a segment a current marker references, a manager that is still
+heartbeating, or the runner store. Removal is bottom-up and rewrites no state,
+so a collection killed halfway leaves the workspace exactly as consistent as it
+was, and running it again simply finishes the job.
+
+Collecting journal segments has one honest cost. Only the segment a marker
+points into is protected, so the deep history of an old job goes with the
+segments behind it; `harvest` and `job log` then report that job's timeline
+with `gaps` set. Its state, payload, and outcome are unaffected.
 
 ## Computer adapters
 

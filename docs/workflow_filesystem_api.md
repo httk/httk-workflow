@@ -6,9 +6,9 @@ This document specifies the filesystem protocol around which the
 *httk-workflow* engine is built. It is the normative on-disk protocol rather
 than Python API documentation. The current `httk.workflow` implementation
 writes and serves the `core-v2` profile and supports the
-`transactional-data-v1`, `priority-bands-v1`, and `detached-transfer-v1`
-extensions; relocation and cross-workspace children remain reserved optional
-extensions and are rejected rather than partially executed.
+`transactional-data-v1` and `detached-transfer-v1` extensions; relocation and
+cross-workspace children remain reserved optional extensions and are rejected
+rather than partially executed.
 
 `core-v2` is `core-v1` plus four on-disk refinements: every `spawn.json` entry
 carries a mandatory unique `label`; a join summary records typed per-child
@@ -87,9 +87,22 @@ data is:
 | `job.json` | 1 file | Job lifetime |
 | Authoritative state marker | 1 file | Job lifetime |
 | Shared journal records | 0 files | Packed into writer segments |
+| Runner | 0 files | Shared and referenced by digest, unless it lives in the payload |
+| `.httk-job/` runner job state | 0 or 1 directory | Job lifetime, when a runner keeps state across attempts |
 | Attempt control directory | 0 or 1 directory | Attempt/retention lifetime |
 | Persistent/isolated workdir | 0 or 1 directory | Application policy |
 | Per-state/per-event/per-failure files | 0 | Not used |
+
+The permanent floor is therefore **three inodes**: the payload directory, its
+`job.json`, and the one marker. The floor is reachable in practice and not only
+in theory, because a runner may live outside the payload — `runner.source`
+naming the workspace runner store or an installed search path, pinned by
+`runner.sha256` — so a campaign of a million children that all execute the same
+program stores that program once and each child's payload is exactly its
+`job.json`. A payload runner is the alternative, not the requirement, and costs
+whatever its own files cost. A runner that keeps state across the attempts and
+steps of one job adds `.httk-job/`, and a live or retained attempt adds its
+attempt-control directory and workdir.
 
 Shard and journal directories are shared by many jobs. Application inputs,
 outputs, code, and logs naturally add their own files; the table only counts
@@ -190,12 +203,26 @@ The following are optional extensions:
 | `relocation-v1` | Moving payloads between placements in one workspace. |
 | `multiworkspace-v1` | Cross-workspace children, joins, and coordinated transfer. |
 | `detached-transfer-v1` | Sealed standalone transfer bundles. |
-| `priority-bands-v1` | Coarse authoritative ready-state priority directories. |
 
 A workspace declares its core profile and enabled extensions in `format.json`.
 A manager MUST refuse to mutate a workspace whose core profile or enabled
 extensions it does not support. It MAY attach such a workspace read-only for
 inspection. Unknown state kinds are never treated as failed or orphaned jobs.
+
+**Withdrawn: `priority-bands-v1`.** An earlier revision defined an extension
+that sharded `state/ready/` into ten `p0xx/` through `p9xx/` directories. It is
+withdrawn and MUST NOT be enabled. It bought nothing: the exact priority is in
+every marker basename already, so nothing needed the directory to know a job's
+priority; a scan looking for the best available work still had to walk all ten
+bands; and because a band is part of the marker path, enabling it was an
+irreversible decision taken at workspace creation. It also made priority a
+placement-changing transition, which is the one thing ordinary transitions
+promise not to do. The `p<priority>` field of the marker basename stays exactly
+as specified — nothing about priority encoding changes. A workspace that
+declares this extension cannot be interpreted, because its ready markers carry
+one path component that would otherwise read as a placement, so an
+implementation MUST refuse to attach it — read-only included — and say that the
+workspace has to be re-initialized rather than migrated.
 
 This split is about implementation scope, not separate data models. Extensions
 retain the same job definition, marker, journal, and verified-rename rules.
@@ -218,6 +245,7 @@ WORKSPACE/
 │   │   ├── claimed/<placement>/
 │   │   ├── running/<placement>/
 │   │   ├── committing/<placement>/
+│   │   ├── cancelling/<placement>/
 │   │   ├── relocating/<placement>/
 │   │   ├── transferring/<placement>/
 │   │   ├── waiting/<placement>/
@@ -234,7 +262,8 @@ WORKSPACE/
 │   └── requests/
 │       ├── tmp/
 │       ├── ready/
-│       └── claimed/
+│       ├── claimed/
+│       └── retired/
 └── project-17/
     └── 0/
         └── 03a/
@@ -277,27 +306,53 @@ rename/prune rules below.
   "extensions": [],
   "record_ref_encoding": "hwref-v1",
   "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
-  "created_at": "2026-07-24T12:00:00Z"
+  "created_at": "2026-07-24T12:00:00Z",
+  "policy": {
+    "visibility_deadline_seconds": 5.0,
+    "lease_seconds": 900.0,
+    "journal_segment_bytes": 67108864,
+    "retention": {}
+  }
 }
 ```
 
-There is no configured sharding depth. Priority is encoded in marker names
-rather than represented by another directory level in the core profile.
+### Workspace policy
 
-The optional `priority-bands-v1` extension changes only ready-marker placement:
+Everything this specification calls *configured* is one object in
+`format.json`, because a tunable that lives in each process cannot be agreed
+on by two implementations attaching the same workspace. The `policy` object is
+part of format version 1 and holds exactly these members:
 
-```text
-state/ready/p0xx/<placement>/  # priorities 000 through 099
-...
-state/ready/p9xx/<placement>/  # priorities 900 through 999
-```
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `visibility_deadline_seconds` | number | `5.0` | How long a reader keeps re-probing before it declares a marker rename or a referenced journal frame incoherent. |
+| `lease_seconds` | number | `900.0` | The default claim lease of a manager that does not state its own. |
+| `journal_segment_bytes` | integer | `67108864` | The size at which a writer rotates to its next journal segment. |
+| `retention` | object | `{}` | Optional `attempt_control_days`, `journal_days`, and `trash_days` limits for collection. |
 
-The marker remains the sole authoritative state entry, and its basename still
-contains the exact priority. Moving it between bands is a state transition, not
-maintenance of a second index. Managers using the core layout provide
-best-effort priority scheduling: a cold start and an incremental scan may
-temporarily discover lower-priority work first. Strict global priority is not a
-core guarantee.
+An implementation MUST refuse a `policy` member it does not know rather than
+ignore it, and MUST read an absent `policy` object, or an absent member of one,
+as the default above; a workspace written before this section existed is
+therefore attached without migration. Values are validated on write:
+`lease_seconds` is at least one second, `visibility_deadline_seconds` is at
+most one day, and `journal_segment_bytes` is at least 4096.
+
+Policy is administrative rather than protocol state. A change is an ordinary
+read-modify-write of `format.json` through an exclusively created temporary
+file and a rename, so no reader ever sees a torn object, but concurrent policy
+writers are not serialized against each other and the last writer wins. A
+manager reads policy when it attaches; a change reaches already-running
+managers only when they restart.
+
+There is no configured sharding depth and no priority directory level at all:
+priority is encoded in marker names, and the withdrawn `priority-bands-v1`
+extension described in “Conformance profiles” is the only thing that ever
+proposed otherwise. A marker's path below its state kind is its placement and
+nothing else.
+
+Managers therefore provide best-effort priority scheduling: a cold start and an
+incremental scan may temporarily discover lower-priority work first. Strict
+global priority is not a guarantee of this protocol.
 
 `.httk-workflow/tmp/` contains unpublished entries. Task managers MUST ignore
 it for scheduling. Garbage collection may remove old temporary entries, but
@@ -477,8 +532,8 @@ three-digit integer from `000` through `999`.
 The complete relative marker path is the authoritative current state:
 
 - its state directory gives the state kind;
-- the directories after the state kind give current placement, after the
-  optional ready priority band when that extension is enabled;
+- the directories after the state kind give current placement, and nothing
+  else: no priority, shard, or index level is ever inserted between them;
 - its `p<priority>` component gives current priority;
 - its job key gives identity;
 - its generation prevents stale operator actions;
@@ -537,9 +592,28 @@ corruption.
 
 This algorithm applies to every correctness-critical rename in this
 specification: marker transitions, submission, outcome publication, transaction
-operations, child registration, relocation, and transfer. When a loser prepared
-a journal record but another transition won, its unreferenced record is
-harmless.
+operations, child registration, relocation, and transfer.
+
+When a loser prepared a journal record but another transition won, its
+unreferenced record stays in the journal. That record is *off-chain* and is
+harmless by construction, because every reconstruction of a job's history
+starts at the authoritative marker and walks `previous_record_ref` backwards.
+An orphan is on nobody's chain — no marker ever referenced it and no frame ever
+named it as its predecessor — so it cannot be observed as a transition, and no
+implementation may reconstruct history by scanning the journal forwards.
+Readers therefore need no special handling of orphan records, and none is
+specified: no tombstone, no supersession record, no compaction requirement.
+
+The one operation that legitimately reads the journal *without* a chain to walk
+is marker repair, because there the frame holding the backward link is exactly
+the unreadable one. Repair is bounded instead: it considers only frames of the
+same job at a generation strictly lower than the damaged marker's own, never
+walks forward onto a frame no marker committed, and records the reference of
+the frame it adopted in the repair frame it writes. An orphan always shares its
+generation with the transition that actually won, so a repair that reaches back
+across a lost race MAY adopt the loser's members; the recorded
+`fsck_repair.recovered_record_ref` is what makes that visible and auditable
+afterwards.
 
 Empty state-placement parents MAY be removed only with operations that fail
 when a directory is nonempty. A pruner racing a transition either observes the
@@ -581,7 +655,8 @@ previous incarnation of the same manager. A zombie and its replacement
 therefore write different paths and heartbeats.
 
 Each process is the sole writer of its own segments and never appends to
-another writer's segment. Segments rotate at a configured size, not per job.
+another writer's segment. Segments rotate at the size
+`policy.journal_segment_bytes` configures, not per job.
 Submission needs no journal file per invocation because the initial marker
 uses `init`.
 
@@ -633,13 +708,24 @@ the storage-durable profile, synchronize the segment. A marker can therefore
 never legally reference a torn tail. An unreferenced partial final frame is
 ignored and may be truncated during journal repair.
 
+This implementation runs the storage-durable profile by default: every journal
+frame, every protocol JSON publication, and the directory entries that carry
+them are synchronized before the rename that makes them authoritative. The
+opt-out (`--no-durable`) exists for throwaway and test workspaces only. Without
+it, a node that loses power can leave a marker naming a frame its storage never
+received, which is exactly the damage `workspace fsck` below has to repair.
+
 On a network filesystem, visibility of a marker and visibility of the newly
 extended journal segment may reach different clients at different times. A
 reader that sees a referenced frame as absent, short, or checksum-incomplete
 MUST close and reopen or otherwise refresh the segment and retry with bounded
-backoff. It declares corruption only after the workspace's configured visibility
-deadline, and it MUST NOT mutate the marker while the referenced frame is
-temporarily unreadable.
+backoff. It declares corruption only after the workspace's configured
+visibility deadline — `policy.visibility_deadline_seconds` in `format.json` —
+and it MUST NOT mutate the marker while the referenced frame is temporarily
+unreadable. Damage that no amount of waiting can repair, such as a frame whose
+checksum is present and wrong, is reported at once rather than waited out. The
+same deadline bounds the retries of a verified state-marker rename and of any
+other metadata-visibility probe.
 
 Every state frame includes:
 
@@ -679,6 +765,25 @@ They may be compressed only into a random-access archive format that preserves
 record references. A derived SQL database or in-memory map MAY accelerate
 queries, but it is a cache: the state tree and referenced journal frames remain
 authoritative.
+
+Three rules make such a cache safe, and they are what this implementation's
+job-id-to-marker index obeys:
+
+1. **A hit is confirmed before it is used.** The cached location is a path; the
+   marker either is there or is not, and a marker another actor moved is
+   detected by the check rather than reported as current state.
+2. **A miss is never an answer.** Absence is reported only after the ladder in
+   [Waiting and joining](#waiting-and-joining) has been walked to its end,
+   including one complete scan. Any other rule would let a job that another
+   manager has just published be reported as nonexistent.
+3. **It is process-local.** This implementation keeps the index in memory, per
+   attached workspace, built lazily from one scan and updated by every rename
+   the same process performs. There is deliberately no on-disk index file: a
+   workspace has many concurrent writers and no protocol-level way to order
+   their updates to a shared derived file, so a durable cache would need a
+   synchronization and repair story that the authoritative state tree already
+   provides for nothing. An implementation that wants a shared derived
+   database MAY build one, under exactly the same three rules.
 
 ## Job definition and submission
 
@@ -844,6 +949,17 @@ ready state frame, and renaming the same marker from `submitted` to the
 mirrored path below `state/ready/`. A crash before this rename leaves the job
 visibly submitted; another manager repeats validation.
 
+`g0.init` describes the marker submission creates, not every marker that may be
+found in `submitted`. A job can be acted on before any manager registers it —
+`set_priority` and `pause` both apply to `submitted` — and such a request is an
+ordinary verified transition, so it appends a frame and renames the marker to
+`<job-key>.p<new-priority>.g1.<record-ref>` in the same state directory.
+Registration MUST therefore accept both forms of a submitted marker: generation
+0 referencing `init`, whose priority is the one in `job.json`, and a later
+generation referencing a real frame, whose priority is the operator's and may
+differ from `job.json`. The marker is authoritative for priority in both cases;
+only at generation 0 does the `job.json` priority have to agree with it.
+
 If the submitted marker is well formed but `job.json`, its immutable files, or
 their relationship to the marker fails validation, the manager appends a
 `failed` frame with class `protocol_error` and moves that same marker to
@@ -874,6 +990,7 @@ The state kinds are:
 | `claimed` | A manager won the claim but has not launched the attempt. |
 | `running` | The current attempt may have a live process. |
 | `committing` | The attempt is fenced; its outcome is being replayed. |
+| `cancelling` | The attempt is fenced by a cancellation; its process is being stopped and its exit verified. |
 | `relocating` | `relocation-v1`: no attempt may run; placement is changing. |
 | `transferring` | Transfer extensions: a quiescent payload is moving or detaching. |
 | `waiting` | Waiting for a declared child join. |
@@ -882,32 +999,138 @@ The state kinds are:
 | `failed` | Failed until explicit operator continuation. |
 | `cancelled` | Cancelled terminal state. |
 
-Normal transitions are:
+**“Terminal” is used in two senses in this document, and they are not the same
+thing.** *Terminal for scheduling* means that no manager will move the marker on
+its own: the three kinds `succeeded`, `failed`, and `cancelled`. That is the
+sense a join condition uses, the sense `state/failed/` is a complete collection
+in, and the sense in which a failure's own frame is the job's last automatic
+one. *Permanent* means that nothing moves the marker again at all, and only
+`succeeded` and `cancelled` are permanent: a `failed` job is terminal for
+scheduling but explicitly revivable by an operator `continue` or
+`override_step`, which is the whole point of tracking broken jobs in the state
+tree. Where this document says “terminal” without qualification it means
+terminal for scheduling. `cancelling` is neither: it is a live state in which a
+fenced attempt is being stopped.
+
+The scheduling cycle is:
 
 ```text
-submitted ──validate──> ready ──claim──> claimed ──launch──> running
-                           ▲                  │                 │
-                           │                  └────recovery─────┤
-                           │                                    ▼
-                           │                               committing
-                           │                              /    |    \
-                           ├────────advance/retry────────┘     |     \
-                           │                                  |      ├─> succeeded
-                           ├────────join satisfied──── waiting <      ├─> failed
-                           │                                         └─> paused
-                           └────operator continuation──── failed/paused
+the cycle
+  submitted ─validate─> ready ─claim─> claimed ─launch─> running ─outcome─> committing
+                          ▲                                                       │
+                          └──────────── advance or retry ────────────────────────┘
+
+  committing ─────> ready | waiting | succeeded | failed | paused
+
+back to ready
+  claimed ─release────────────────────────────────────────────────> ready
+  running ─retry within budget────────────────────────────────────> ready
+  waiting ─join satisfied, or on_impossible advance───────────────> ready
+  failed | paused ─operator continue or override_step─────────────> ready
+
+into failed
+  submitted ─protocol_error───────────────────────────────────────> failed
+  claimed   ─prepare failure──────────────────────────────────────> failed
+  running   ─lease loss, process failure, or an exhausted budget──> failed
+  waiting   ─dependency_failure, or a join that cannot be read────> failed
+
+cancellation
+  running ─operator cancel─> cancelling ─verified exit─> cancelled
+                                 ▲   │
+                                 └───┘ the exit is not proven yet: stay fenced
+  any other nonterminal state ─operator cancel───────────────────> cancelled
+
+operator moves that do not change the kind, or only queue the job
+  submitted | ready | waiting ─pause──────────────────────────────> paused
+  submitted | ready | waiting | paused | failed ─set_priority────> the same kind
 ```
+
+Every transition of the core profile, exhaustively:
+
+| From | To | Trigger |
+| --- | --- | --- |
+| `submitted` | `ready` | Validation and registration. |
+| `submitted` | `failed` | `protocol_error`: the payload, `job.json`, or its relationship to the marker is invalid. |
+| `ready` | `claimed` | A manager won the claim. |
+| `claimed` | `running` | The attempt was launched. |
+| `claimed` | `ready` | Release: the manager may no longer launch it — a maintenance lock appeared, its budget changed — and it undoes the attempt counters it took. |
+| `claimed` | `failed` | The attempt could not be prepared: `protocol_error`, `process_failure`, `runner_unavailable`, or `runner_mismatch`. |
+| `running` | `committing` | A valid outcome was published; the rename fences the attempt. |
+| `running` | `ready` | Retry within budget after `lease_lost` or `process_failure`. |
+| `running` | `failed` | Retry budget exhausted, or a failure the policy does not retry. |
+| `running` | `cancelling` | Operator `cancel` of a job that may have a live process. |
+| `committing` | `ready` | `advance` to a new activation, or `retry` of this one. |
+| `committing` | `waiting` | A `wait` outcome naming a child join. |
+| `committing` | `succeeded` | A `succeed` outcome. |
+| `committing` | `failed` | A `fail` outcome, an unusable one, or an exhausted budget. |
+| `committing` | `paused` | A `pause` outcome. |
+| `waiting` | `ready` | The join was satisfied, or became impossible and `on_impossible` names a step. |
+| `waiting` | `failed` | `dependency_failure`: the join became impossible with no `on_impossible`, or a named child stayed unresolvable past the join grace. |
+| `waiting` | `failed` | `protocol_error`: the recorded join itself cannot be read. |
+| `failed`, `paused` | `ready` | Operator `continue` (retry the activation) or `override_step` (new activation). |
+| `cancelling` | `cancelled` | The exit of the fenced attempt was verified. |
+| any nonterminal | `cancelled` | Operator `cancel` where no live attempt has to be stopped first. |
+| `submitted`, `ready`, `waiting` | `paused` | Operator `pause`. |
+| `submitted`, `ready`, `waiting`, `paused`, `failed` | the same kind | Operator `set_priority`, which renames the marker to a new priority at the next generation. |
+
+Each row is one verified rename of the same marker; no other rename of a marker
+is defined, and the two extension states `relocating` and `transferring` are
+described in their own sections.
 
 `advance` may name any next step, including the same textual name. It creates a
 new activation. Retry retains the activation ID and increments the attempt
 ordinal.
 
 Any non-terminal state can be cancelled by an authorized operator. Cancellation
-of `running` first fences the attempt by moving its marker; a late outcome from
-that attempt can no longer commit.
+of `running` first fences the attempt by moving its marker to `cancelling`; a
+late outcome from that attempt can no longer commit. `cancelling` is not a
+terminal state and not a quiescent one: it is the interval in which the fenced
+process is stopped and its exit is verified. See
+[Cancellation](#cancellation).
 
 When `relocation-v1` is enabled, quiescent states may also pass through
 `relocating` and return to the same logical state at a different placement.
+
+### Cancellation
+
+Cancelling a job that may have a live process is three ordered steps, and the
+order is the guarantee:
+
+1. **Fence first.** The manager renames the exact `running` marker to
+   `cancelling`. From that instant no manager accepts an outcome from that
+   attempt, because the state tree no longer names it as current. Nothing has
+   been signalled yet, so this step cannot be skipped by a race.
+2. **Then stop the process.** The owning manager — or, if it has died, any
+   manager that can see the process — sends `SIGTERM` to the recorded process
+   group, and `SIGKILL` after a configured grace period. The `cancelling` frame
+   names the attempt, its attempt-control directory, and its previous owner, so
+   a recovering manager has everything it needs.
+3. **Only then finish, against evidence.** The marker moves to `cancelled` only
+   once the exit has actually been verified, and the verification is recorded
+   in the `cancellation` member of the terminal frame.
+
+A manager MUST NOT publish `cancelled` for an attempt it has merely signalled.
+Acceptable evidence is:
+
+| `cancellation.verified` | Meaning |
+| --- | --- |
+| `process_exited` | The manager launched the process and reaped it; the exit status is recorded. |
+| `process_group_absent` | The process was recorded on this host and its process group no longer exists. |
+| `no_launched_process` | No process identity was ever durably recorded, so the launch gate guarantees the runner never executed. |
+| `no_live_attempt` | The job was cancelled from a state that has no live attempt at all. |
+
+A cancellation whose process cannot be proven stopped — typically one recorded
+on a different host — MUST leave the marker in `cancelling`, journal why, and
+retry. Staying in `cancelling` is the safe outcome: the attempt remains fenced,
+so it can produce no state, and an operator sees a stalled cancellation rather
+than a terminal state that falsely asserts that nothing is still writing the
+workdir. A site whose batch system can confirm that an allocation has ended MAY
+treat that confirmation as evidence and record it in the same member.
+
+Because the fence is a marker rename, cancellation composes with everything
+else by construction: an attempt that publishes an outcome after being fenced
+finds its marker in `cancelling` rather than `running`, and the outcome is
+ignored exactly like any other outcome from a fenced attempt.
 
 ## Claiming, leases, and fencing
 
@@ -952,6 +1175,16 @@ A recoverer uses the state frame, heartbeat, batch scheduler when available,
 and a configured grace period. It MUST NOT steal a job merely because one
 delayed metadata read appears stale.
 
+A heartbeat is a statement about the manager, not about its scheduling pass, so
+a manager MUST NOT let one pass over the state tree hold its heartbeat: it
+takes heartbeat opportunities *between* the state kinds it scans and *within*
+long scans of one kind. A manager whose workspace is too large to serve inside
+one lease SHOULD also bound how many markers of a kind it processes per pass
+and resume the rest on the next pass, in a stable order so that no marker
+starves. An implementation SHOULD report a pass that consumes a large fraction
+of its own lease, because that is the condition under which a healthy manager
+begins to look abandoned.
+
 Once policy determines that an attempt is abandoned, a recoverer appends a new
 claimed frame and renames the exact old claimed or running marker. That rename
 fences the old attempt. Even if its process later wakes, no task manager accepts
@@ -962,15 +1195,34 @@ state. A manager merely releasing work transitions back to ready. Both retain
 the activation ID for a retry.
 
 Filesystem fencing cannot prevent a partitioned old process from producing
-external side effects or modifying a persistent workdir. For an isolated
-workdir, managers SHOULD terminate its process group or cancel its batch
-allocation before recovery when possible. For a persistent workdir, the
-default safe policy MUST establish that the previous writer can no longer
-modify the workdir—for example, by scheduler-confirmed allocation expiry or
-cancellation and process-group termination—before launching a replacement.
-Lease expiry alone is not sufficient. A site MAY enable lease-only persistent
-takeover as an explicit unsafe policy; that choice and every use of it MUST be
-recorded in the new attempt frame.
+external side effects or modifying a persistent workdir, and it does not make
+a duplicated attempt free: two allocations burning for one activation is a real
+cost whichever workdir mode the job uses. Lease expiry alone is therefore never
+sufficient evidence to relaunch an attempt, in either mode.
+
+For a persistent workdir, the default safe policy MUST establish that the
+previous writer can no longer modify the workdir—for example, by
+scheduler-confirmed allocation expiry or cancellation and process-group
+termination—before launching a replacement. A site MAY enable lease-only
+persistent takeover as an explicit unsafe policy.
+
+For an isolated workdir, a replacement corrupts nothing, so the requirement is
+weaker but not absent: a manager MUST have one of
+
+- the recorded process is provably gone on this host,
+- a scheduler confirmation that the allocation has ended, or
+- a heartbeat that has been silent for a configured multiple of the lease —
+  the *takeover grace*, by default twice the lease.
+
+A manager SHOULD terminate the old process group or cancel its batch allocation
+before relaunching when it can. The grace exists because an expired lease says
+only that a manager is slow: a manager whose scan of a very large workspace
+overruns one lease is alive and its attempts are running, and taking those over
+at the first expired lease is how one slow node becomes twice the bill.
+
+Every takeover MUST record its evidence in the new attempt frame — which rule
+admitted it, and the observed heartbeat age — and every use of an explicitly
+unsafe policy MUST be recorded there too.
 
 ## Attempt control, workdirs, and runner contract
 
@@ -1059,12 +1311,21 @@ HTTK_WORKFLOW_ATTEMPT_REASON=<reason>
 HTTK_WORKFLOW_STEP=<current step>
 HTTK_WORKFLOW_PYTHON=<manager Python interpreter>
 HTTK_WORKFLOW_BASH_API=<absolute native workflow Bash library>
-HTTK_WORKFLOW_VASP_BASH_API=<absolute native VASP Bash library>
 ```
 
 `HTTK_WORKFLOW_DATA_DIR` is additionally set only for transactional-data jobs.
 The JSON file is the source of truth; scalar environment variables are
 language-neutral conveniences.
+
+A manager MAY export further variables that belong to the runner libraries it
+ships rather than to this protocol. They are SDK or application conveniences: a
+conforming manager that exports none of them is still conforming, and a runner
+that needs one MUST treat its absence as a missing dependency of that library
+rather than as a protocol violation. The ones this implementation exports are:
+
+```text
+HTTK_WORKFLOW_VASP_BASH_API=<absolute native VASP Bash library>
+```
 
 An unclean persistent retry context is:
 
@@ -1530,12 +1791,23 @@ placement as `placement_hint`, and the condition. The placement is explicitly a
 lookup hint rather than identity. No join file or child marker is added to the
 parent directory. New unrelated descendants cannot affect the join.
 
-A manager first checks every applicable state kind—and every ready priority
-band when enabled—at the child's `placement_hint`; ordinary state transitions
-do not change placement. It then uses its in-memory job-key map. If the hint is
-stale under `relocation-v1` or `multiworkspace-v1`, it follows any packed
-relocation/transfer forwarding record and finally falls back to a complete
-marker scan of the named workspace. A cache is never the only recovery path.
+A manager resolves each named child through this ladder, in order:
+
+1. the finite set of state kinds at the child's `placement_hint`, when the
+   reference carries one — ordinary state transitions never change placement,
+   so this is a bounded number of directory lookups and resolves the normal
+   case;
+2. its in-memory job-id-to-marker index, confirmed against the filesystem
+   before it is used;
+3. under `relocation-v1` or `multiworkspace-v1`, any packed relocation or
+   transfer forwarding record;
+4. a complete marker scan of the named workspace.
+
+A cache is never the only recovery path, and a cache miss is never the answer:
+the ladder always ends in step 4 before a child is called unresolvable. The
+consequence that matters at scale is that a waiting parent's per-tick cost is
+independent of how many children its join names — each child is one hint lookup
+or one confirmed index hit — rather than one complete scan per child.
 Failure to find the child after bounded workspace visibility retries is an
 unavailable/corrupt dependency, not evidence that a join condition is
 impossible. Such a join is nevertheless never allowed to wait forever: because
@@ -1589,6 +1861,40 @@ selects an error-handling step or the parent fails with
 `dependency_failure`. A later revival of that child does not retract the
 committed `on_impossible` transition. Cancellation is terminal but not
 successful.
+
+`on_impossible` is optional and has exactly one defined form:
+
+```json
+{"action": "advance", "next_step": "handle_child_failure"}
+```
+
+`advance` is the only legal action, and `next_step` MUST be a valid step name —
+any application-defined name, including the step the parent just ran. The
+member behaves exactly like an `advance` outcome: it starts a new activation of
+the parent at that step, carrying the observation vector as the join summary, so
+the error-handling step sees precisely what the satisfied step would have seen.
+An absent `on_impossible`, or one whose `action` is anything else, means the
+parent fails with `dependency_failure`; a manager MUST NOT invent another
+action, and MUST NOT treat an unrecognized one as a reason to keep waiting.
+
+#### Reviving a child a decided join consumed
+
+A join decision is final, but a child of a decided join is still an ordinary
+job, and `continue` or `override_step` on it would start writing its workdir and
+payload again — possibly while the parent activation that consumed it is reading
+exactly those files. Nothing in the protocol can order those two writers.
+
+A manager MUST therefore refuse a `continue` or `override_step` request for a
+job that a decided join has already observed, unless the request explicitly
+carries `"force": true`. The check is a cheap, exact one and needs no index: a
+child's `job.json` names its `parent`, and the parent's current state frame
+carries the `join_summary` of the activation it is in, so the refusal applies
+precisely while the consuming activation is the parent's current one. A refused
+request is retired with the reason, which names the parent, so an operator can
+continue the parent instead. With `"force": true` the manager applies the
+request and MUST record the hazard it accepted in the resulting state frame, as
+a `revival_hazard` object naming the parent, its state, and the observation that
+consumed this child.
 
 An advance or succeed outcome may also publish detached children without a
 join.
@@ -1684,13 +1990,17 @@ recovery.
 ## Manual continuation and control requests
 
 Operators MUST NOT edit state markers, journal segments, or `job.json`.
-They publish one temporary request file under `requests/ready/` by sibling
-rename. A request names:
+They write one complete request file in `requests/tmp/` and atomically rename it
+into `requests/ready/` under the same name, so a manager never reads a partially
+written request and the publication is the same verified rename as every other
+one in this protocol. A request names:
 
 - job UUID and job key;
 - exact expected marker generation and record reference;
 - requested action;
 - operator identity and reason;
+- optionally `force`, the operator's explicit acceptance of a hazard the
+  manager would otherwise refuse;
 - any selected retained files for manual import;
 - for relocation or transfer, the exact destination workspace and placement plus a
   unique operation ID.
@@ -1714,12 +2024,16 @@ Action validity is deliberately narrow:
 - `relocate` and `transfer` apply only to the quiescent states permitted by
   their extension;
 - `cancel` may target any nonterminal state and uses the explicit fencing and
-  process-termination procedure for a live attempt.
+  process-termination procedure of [Cancellation](#cancellation) for a live
+  attempt. A second `cancel` of a job already in `cancelling` is not an error
+  and changes nothing: the first one is still being carried out.
 
 `continue` and `override_step` remain subject to job budgets unless the request
 contains an authorized, auditable budget change under site policy. Because
 `job.json` is immutable, such an override lives in the operator journal frame,
-not by editing the job definition.
+not by editing the job definition. They are additionally refused, without
+`force`, for a job that a decided join already consumed; see
+[Reviving a child a decided join consumed](#reviving-a-child-a-decided-join-consumed).
 
 In particular, `set_priority` and operator `pause` MUST NOT rename a `claimed`,
 `running`, or `committing` marker behind its owning manager. An operator who
@@ -1735,6 +2049,45 @@ stops the fenced attempt; it does not infer ownership merely from an errno.
 
 The result is written to the shared journal. The transient request file may be
 removed after retention policy permits; there is no per-job request directory.
+
+A claimed request lives in `requests/claimed/<manager-id>/` until the manager
+that claimed it has decided about it: a request that was applied is removed, and
+one that can never become actionable is retired.
+
+A request that has been claimed and can never become actionable — its expected
+generation or record reference no longer matches, the job moved while the
+request was being applied, or it asks for something the protocol refuses such as
+reviving a job a decided join already consumed — MUST be retired rather than
+left where it will be read again. Retiring means writing a retirement record and
+then moving the claimed file to `requests/retired/`; a retired request is never
+rescanned. The record sits beside the request under the request's own name plus
+`.retirement` and is one object:
+
+```json
+{
+  "format": "httk-workflow-retired-request",
+  "format_version": 1,
+  "request": "3f2b0a1c-6c2e-4a2a-9a94-1b7c3e5f0d21.json",
+  "manager_id": "b0d1e2f3-4455-6677-8899-aabbccddeeff",
+  "reason": "the job is at generation 7, not the expected one",
+  "retired_at": "2026-07-26T09:12:44.512314Z"
+}
+```
+
+Both the retired request and its record are transient evidence for an operator,
+not protocol state: nothing reads them back, and “Retention gates and
+always-safe collection” below collects them after a month. This is distinct
+from two neighbouring cases that MUST NOT be retired:
+
+- a request whose job is served by a *runner backend this manager does not
+  serve* is left in `requests/ready/` for a manager that does serve it. A
+  manager that has decided this about a request SHOULD remember the decision
+  rather than reread the file on every pass;
+- a request that cannot be applied *right now* — a held maintenance lock, an
+  unavailable workspace — stays actionable and is simply retried.
+
+A request that violates the protocol, including one naming a job that does not
+exist, is quarantined as malformed input rather than retired.
 
 Manual continuation preserves failure history. In persistent mode it reuses the
 declared workdir in place; the new attempt context records
@@ -1787,12 +2140,15 @@ A manager:
    each attached workspace;
 4. resumes markers in `committing` and, when enabled, `relocating` and
    `transferring`;
-5. examines possibly abandoned claimed and running markers;
-6. evaluates waiting joins, including cross-workspace references when enabled;
-7. handles submitted jobs and operator requests;
-8. claims eligible ready work in pool, capability, priority, and resource
+5. resumes markers in `cancelling`: every one of them names a fenced attempt
+   that still has to be stopped and verified, whether this manager fenced it or
+   inherited it from one that died mid-cancellation;
+6. examines possibly abandoned claimed and running markers;
+7. evaluates waiting joins, including cross-workspace references when enabled;
+8. handles submitted jobs and operator requests;
+9. claims eligible ready work in pool, capability, priority, and resource
    order;
-9. continues watching for workspaces being attached, renamed, or detached.
+10. continues watching for workspaces being attached, renamed, or detached.
 
 It does not need to reconcile a separate state index. Listing `state/` is
 listing the authoritative scheduler state.
@@ -1807,16 +2163,59 @@ A high-scale implementation SHOULD:
 - use filesystem notifications only as hints, since notifications may be lost;
 - workspace task-manager query caches outside per-job directories.
 
-Without `priority-bands-v1`, discovering the globally highest-priority ready
-job requires enumerating the ready tree. Incremental scans MAY therefore cause
-long-lived operational priority inversion, especially after cold start;
-priority is a preference rather than a strict global ordering guarantee. Sites
-needing efficient coarse band precedence should enable `priority-bands-v1`.
-Neither mode changes claim correctness.
+Discovering the globally highest-priority ready job requires enumerating the
+ready tree. Incremental scans MAY therefore cause long-lived operational
+priority inversion, especially after cold start; priority is a preference
+rather than a strict global ordering guarantee. This is not a gap an extension
+should close by adding directory levels — see the withdrawn `priority-bands-v1`
+above — and no scan strategy changes claim correctness.
+
+## Workspace check and marker repair
+
+A marker that no longer resolves to its journal frame is the one form of damage
+a manager cannot route around: the marker is authoritative, and everything
+beyond its kind, priority, and generation lives in the frame. A workspace check
+walks every marker of every state kind and verifies that its record reference
+resolves, within the configured visibility deadline, to a readable frame whose
+checksum verifies and whose `workspace_id`, `job_id`, `job_key`, `kind`, and
+`state_generation` agree with the marker name. The `init` reference of a
+submitted marker resolves to nothing by definition and is verified as such.
+Each unresolved marker is reported with a stable problem code: `missing_segment`,
+`short_read`, `checksum_mismatch`, `length_mismatch`, `trailer_mismatch`,
+`reference_mismatch`, `invalid_header`, `undecodable_frame`,
+`invalid_record_ref`, `identity_mismatch`, or `unparseable_name` for a
+marker-shaped entry whose basename cannot be interpreted at all.
+
+Repair is optional, separate, and conservative. Because the frame that holds
+`previous_record_ref` is precisely the unreadable one, a repair cannot follow
+the chain of the job; it walks the journal segments instead, collects the
+readable frames naming that job, and adopts the newest one whose
+`state_generation` is *strictly older* than the marker's. Adopting a frame at
+or beyond the marker's own generation is forbidden: such a frame is either the
+damaged one or a transition that was appended and never committed by a rename,
+and publishing it would invent state no marker ever carried. The repair then
+appends one ordinary state frame with `reason: "fsck_repair"`, whose
+`previous_record_ref` is the recovered frame and whose members are carried
+forward from it, keeping the marker's own kind, placement, and priority, and
+renames the marker onto that frame at the next generation. A repair therefore
+adds history rather than rewriting it, and the job becomes loadable and
+schedulable again.
+
+A repair MUST NOT touch a `claimed`, `running`, `committing`, or `cancelling`
+marker whose owning manager — identified from the readable frames of that job —
+is still heartbeating within its lease. Such a marker is reported only; its
+manager owns the transition that follows. `cancelling` belongs in that set for
+a reason of its own: the marker *is* the fence a live manager put in place and
+is still acting on, and re-pointing it at an older frame would take away the
+attempt identity that manager needs to finish stopping and verifying the
+process. A marker with no readable older frame is
+unrepairable and is likewise reported, and may be moved into
+`.httk-workflow/quarantine/` only when an operator asks for that explicitly.
 
 ## Garbage collection and compaction
 
-The following may be collected under explicit retention policy:
+The following may be collected under the explicit retention policy the
+workspace publishes in `policy.retention`:
 
 - unpublished workspace temporary entries;
 - placed payload directories that never reached submitted state, except sealed
@@ -1827,6 +2226,15 @@ The following may be collected under explicit retention policy:
 - abandoned and completed isolated workdirs;
 - transaction trash after the destination marker transition;
 - retained diagnostic application files.
+
+That list is permissive: it bounds what a conforming collector *may* touch, not
+what one must. The `httk workflow workspace gc` implementation collects the
+subset tabulated in “Retention gates and always-safe collection” below, and
+adds the retired transfer bundles and per-transfer receipts the
+`detached-transfer-v1` extension accumulates. It deliberately leaves isolated
+workdirs, incomplete outcome directories, and payloads that never reached
+`submitted` alone, because each of those is the only remaining evidence of a
+job that went wrong.
 
 Journal compaction operates on shared segments, not by creating files per job.
 It must preserve every record reference reachable from a current marker and the
@@ -1857,15 +2265,96 @@ several state kinds even though the marker inode count remains one per job.
 No recovery operation begins by broadly deleting `tmp`, run, or unknown files.
 Cleanup is separate from correctness.
 
+### Retention gates and always-safe collection
+
+An absent member of `policy.retention` means **keep**. A collector MUST NOT
+prune a category whose limit is unconfigured; a workspace whose operator has
+said nothing therefore loses nothing.
+
+Three categories are exempt because the entries in them cannot carry
+information, and are collected whatever `policy.retention` says:
+
+- an empty placement mirror below a state kind, pruned by `rmdir` alone;
+- an entry still sitting in `.httk-workflow/tmp/` or
+  `.httk-workflow/requests/tmp/` more than 24 hours after it was written, since
+  every publication renames its staging entry away within one operation;
+- a request in `.httk-workflow/requests/claimed/<manager-id>/` more than 30
+  days old whose manager is no longer heartbeating;
+- a request in `.httk-workflow/requests/retired/`, and its `.retirement`
+  record, more than 30 days old. A retired request was already decided about
+  and is never rescanned, so it is evidence for an operator and nothing else.
+
+The remaining categories are gated as follows.
+
+| Category | Gate | Additional condition |
+| --- | --- | --- |
+| Attempt-control directory | `attempt_control_days` | The job is in `succeeded`, `failed`, or `cancelled`, and this is not its newest attempt-control directory. |
+| Transaction trash | `trash_days` | The job's marker has reached a quiescent kind, so the destination transition has happened and no replay consults the trash again. |
+| Retired transfer bundle | `trash_days` | Below `transfers/retired/`; the ledger describing it is kept. |
+| Import acknowledgement and import record | `trash_days` | Below `transfers/acks/` and `transfers/imported/`. |
+| Journal segment | `journal_days` | No current marker — nor the sealed marker of a bundle awaiting handover — references it, and its writer belongs to no manager heartbeating within its lease. |
+| Manager directory | `journal_days` | The manager's heartbeat is expired and none of its writer's segments were retained. |
+
+The newest attempt-control directory of a terminal job is retained regardless
+of age: it holds the outcome, the failure breadcrumb, and the runner logs of
+the attempt that decided the job.
+
+A collector MUST NOT prune the runner store. A runner is referenced by digest
+from `job.json` and from transfer manifests, an attached workspace can gain a
+job referring to one at any time, and the store is small; a future version may
+add an explicit runner-retention rule, but generic collection never applies
+one.
+
+### The cost of collecting journal history
+
+Only the segment a marker's `record_ref` points *into* is protected, not the
+whole chain behind it. Collecting older segments of the same writer is exactly
+what `journal_days` buys, and the consequence must be stated plainly: the deep
+history of an old job goes with those segments. `harvest` and `job log` then
+report that job's timeline from whatever frames remain and set `gaps` — the
+job's current state, marker, payload, and terminal outcome are unaffected,
+because they never depended on the older frames.
+
+### Crash safety and journaling of a collection
+
+A collection MUST be interruptible at any instruction. It therefore removes
+entries bottom-up, renames nothing, and rewrites no protocol state: the remains
+of an interrupted removal are scratch that the next collection removes again.
+Empty-placement pruning tolerates `ENOTEMPTY` and `ENOENT` as ordinary
+outcomes, never as faults, because a concurrent transition recreating exactly
+that path is expected.
+
+A collection that removed anything appends one summarizing frame to the
+journal:
+
+```json
+{
+  "format": "httk-workflow-gc",
+  "format_version": 1,
+  "workspace_id": "…",
+  "collected_at": "2026-07-26T09:12:44.512314Z",
+  "retention": {"journal_days": 30},
+  "removed": 41,
+  "bytes_reclaimed": 918273,
+  "categories": {"attempt_control": {"candidates": 12, "removed": 12, "bytes_reclaimed": 40960}}
+}
+```
+
+This is not a state frame, so every reader that walks the journal for job
+history ignores it. A collection that removed nothing writes no frame at all,
+since opening a journal writer creates a writer directory and an empty
+collection must not create the garbage it came to collect.
+
 ## Manual filesystem inspection
 
 The layout is intentionally legible without a database:
 
-- `state/ready/<arbitrary-placement>/` is the core runnable queue, with `p000`
-  through `p999` encoded in marker names; the priority-bands extension inserts
-  `p0xx/` through `p9xx/` before the placement;
+- `state/ready/<arbitrary-placement>/` is the runnable queue, with `p000`
+  through `p999` encoded in marker names and no priority directory level;
 - `state/running/` is everything presently believed to execute;
 - `state/committing/` is exactly the replay backlog;
+- `state/cancelling/` is every attempt already fenced by a cancellation whose
+  exit has not been verified yet;
 - `state/waiting/` is the join backlog;
 - `state/failed/` is the current broken-job collection;
 - `state/succeeded/` is the finalized-success collection;
