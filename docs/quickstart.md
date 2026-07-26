@@ -39,10 +39,10 @@ END
 ## The five commands
 
 ```console
-$ httk-taskmanager init quickstart-workspace --extension transactional-data-v1
+$ httk workflow workspace init quickstart-workspace --extension transactional-data-v1
 $ httk workflow job new quickstart-workspace --template vasp-relax --from POSCAR --tag silicon
 $ export HTTK_VASP_COMMAND="$PWD/examples/mock_vasp.py"
-$ httk-taskmanager run quickstart-workspace --until-idle
+$ httk workflow manager run quickstart-workspace --until-idle
 $ httk workflow harvest quickstart-workspace
 ```
 
@@ -143,8 +143,8 @@ marker.
   `examples/defect_campaign.sh`.
 - {doc}`native_bash_api` — the same runner protocol from Bash.
 - {doc}`harvest` — turning finished jobs into stored results.
-- Running on a cluster — `tasks send` puts jobs on a computer, `tasks
-  start-manager` runs them there, and `tasks fetch` brings the finished ones
+- Running on a cluster — `remote send` puts jobs on a computer, `remote
+  start-manager` runs them there, and `remote fetch` brings the finished ones
   back into this workspace for `harvest`; see {doc}`workflow_cli`.
 - {doc}`taskmanager` and {doc}`workflow_cli` — running managers for real, and the
   complete command tree.

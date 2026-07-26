@@ -183,7 +183,7 @@ def _live_bundles(workspace: WorkflowWorkspace) -> list[Path]:
 
 def _offer(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> dict[str, Any]:
     argv = [
-        "tasks",
+        "remote",
         "offer",
         str(pair.remote_root),
         "--destination-workspace-id",
@@ -196,7 +196,7 @@ def _offer(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> d
 
 
 def _fetch(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> dict[str, Any]:
-    argv = ["tasks", "fetch", "--computer", "cluster", "--workspace", str(pair.local_root), "--json", *arguments]
+    argv = ["remote", "fetch", "--computer", "cluster", "--workspace", str(pair.local_root), "--json", *arguments]
     assert command(argv, pair.context) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -260,7 +260,7 @@ def test_offer_refuses_a_state_no_finished_job_can_be_in(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     argv = [
-        "tasks",
+        "remote",
         "offer",
         str(pair.remote_root),
         "--destination-workspace-id",
@@ -358,7 +358,7 @@ def test_fetch_resumes_after_an_interruption_between_pull_and_import(
         return real_import(self, bundle)  # pyright: ignore[reportArgumentType]
 
     monkeypatch.setattr(WorkflowWorkspace, "import_bundle", interrupt)
-    argv = ["tasks", "fetch", "--computer", "cluster", "--workspace", str(pair.local_root), "--json"]
+    argv = ["remote", "fetch", "--computer", "cluster", "--workspace", str(pair.local_root), "--json"]
     assert command(argv, pair.context) == 2
     assert interrupted
 
@@ -452,7 +452,7 @@ def test_retire_is_idempotent_and_refuses_a_job_it_never_sealed(
     _offer(pair, capsys)
     local_id = pair.local.workspace_id
     argv = [
-        "tasks",
+        "remote",
         "retire",
         str(pair.remote_root),
         pair.ids["succeeded"],
@@ -472,5 +472,5 @@ def test_retire_is_idempotent_and_refuses_a_job_it_never_sealed(
 
     # The pending job was never sealed, so retiring it is an error rather than a
     # silent success.
-    assert command(["tasks", "retire", str(pair.remote_root), pair.ids["pending"]], pair.context) == 2
+    assert command(["remote", "retire", str(pair.remote_root), pair.ids["pending"]], pair.context) == 2
     assert "no detached transfer" in capsys.readouterr().err

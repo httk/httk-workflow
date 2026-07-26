@@ -324,10 +324,13 @@ class V1RunnerBackend:
         compatibility = _compatibility(launch.job)
         job_attempts = require_int(compatibility.get("attempts"), "compatibility.attempts")
         effective_attempts = min(self.attempts, job_attempts)
-        runner = Path(__file__).with_name("_v1_runner.py")
+        # The adapter runs as a module of this package rather than as a file
+        # path: it is then imported exactly the way the manager imported this
+        # module, whatever the attempt's working directory turns out to be.
         command = [
             sys.executable,
-            str(runner),
+            "-m",
+            "httk.workflow._v1_runner",
             "--runtime-root",
             str(self.runtime_root),
             "--timeout",

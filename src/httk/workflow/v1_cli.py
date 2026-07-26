@@ -1,28 +1,60 @@
-"""Command-line interface installed as :command:`httk-v1-taskmanager`."""
+"""Command-line interface installed as :command:`httk-v1-taskmanager`.
+
+This executable is a thin alias for the ``v1`` group of the canonical
+:command:`httk workflow` tree. It declares no arguments and implements no
+behaviour of its own: every subcommand is built by the very function that
+builds the canonical one, and dispatched to the very handler the canonical one
+dispatches to.
+
+===============================  =================================
+``httk-v1-taskmanager``          canonical spelling
+===============================  =================================
+``prepare``                      ``httk workflow v1 prepare``
+``submit``                       ``httk workflow v1 submit``
+``run``                          ``httk workflow v1 run``
+===============================  =================================
+"""
 
 import argparse
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
-from .errors import WorkflowError
-from .v1 import V1TaskManager, prepare_v1_payload, submit_v1_task
-from .workspace import WorkflowWorkspace
+from httk.core import CLIContext
 
+from .workflow_cli import (
+    V1_TASKMANAGER_EPILOG,
+    HelpFormatter,
+    add_v1_prepare_arguments,
+    add_v1_run_arguments,
+    add_v1_submit_arguments,
+    dispatch,
+    handle_v1_prepare,
+    handle_v1_run,
+    handle_v1_submit,
+)
 
-def _job_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--id", dest="job_id")
-    parser.add_argument("--tag", default="v1-task")
-    parser.add_argument("--name", default="httk v1 task")
-    parser.add_argument("--step", default="start")
-    parser.add_argument("--set", dest="taskset", default="default")
-    parser.add_argument("--priority", type=int, choices=range(1, 6), default=3)
-    parser.add_argument("--attempts", "-a", type=int, default=10)
+#: Every alias, with the arguments it declares and the handler it runs.
+_ALIASES = (
+    (
+        "prepare",
+        "turn an instantiated v1 task directory into a v2 payload",
+        add_v1_prepare_arguments,
+        handle_v1_prepare,
+    ),
+    ("submit", "prepare and submit an instantiated v1 task", add_v1_submit_arguments, handle_v1_submit),
+    ("run", "run only httk-v1 jobs in a v2 workspace", add_v1_run_arguments, handle_v1_run),
+)
 
 
 def _parser(program: str = "httk-v1-taskmanager") -> argparse.ArgumentParser:
+    """Build the alias parser out of the canonical tree's own declarations."""
+
     parser = argparse.ArgumentParser(
         prog=program,
         description="Prepare and execute httk v1 task templates through the v2 workflow engine",
+        epilog=V1_TASKMANAGER_EPILOG,
+        formatter_class=HelpFormatter,
     )
     parser.add_argument(
         "--durable",
@@ -34,107 +66,25 @@ def _parser(program: str = "httk-v1-taskmanager") -> argparse.ArgumentParser:
         action="store_true",
         help="do not fsync protocol publications; a crashed node may then strand markers",
     )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    prepare = subparsers.add_parser("prepare", help="turn an instantiated v1 task directory into a v2 payload")
-    prepare.add_argument("source")
-    prepare.add_argument("destination")
-    _job_options(prepare)
-
-    submit = subparsers.add_parser("submit", help="prepare and submit an instantiated v1 task")
-    submit.add_argument("workspace")
-    submit.add_argument("source")
-    submit.add_argument("--placement", required=True)
-    _job_options(submit)
-
-    run = subparsers.add_parser("run", help="run only httk-v1 jobs in a v2 workspace")
-    run.add_argument("workspace")
-    run.add_argument("--set", "-s", dest="taskset", default="any")
-    run.add_argument("--wrap", "-w")
-    run.add_argument("--task-timeout", "-t", type=float, default=21600.0)
-    run.add_argument("--attempts", "-a", type=int, default=10)
-    run.add_argument("--workers", type=int, default=1)
-    run.add_argument(
-        "--lease-seconds",
-        type=float,
-        help="lease length for this manager (default: the workspace policy's lease_seconds)",
-    )
-    run.add_argument("--heartbeat-interval", type=float, default=30.0)
-    run.add_argument("--poll-interval", type=float, default=1.0)
-    run.add_argument("--until-idle", action="store_true")
-    run.add_argument("--idle-timeout", type=float, default=3600.0)
-    run.add_argument("--unsafe-persistent-takeover", action="store_true")
-    run.add_argument("--httk-v1-root")
-    compression = run.add_mutually_exclusive_group()
-    compression.add_argument("--no-bzip2log", "-b", action="store_true")
-    compression.add_argument("--zstdlog", action="store_true")
+    parser.set_defaults(handler=None, help_parser=parser)
+    subparsers = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    for name, summary, declare, handler in _ALIASES:
+        alias = subparsers.add_parser(
+            name,
+            help=summary,
+            description=summary.capitalize(),
+            formatter_class=HelpFormatter,
+        )
+        alias.set_defaults(handler=handler)
+        declare(alias)
     return parser
 
 
 def main(argv: Sequence[str] | None = None, *, program: str = "httk-v1-taskmanager") -> int:
     """Run the httk v1 compatibility command."""
 
-    parser = _parser(program)
-    arguments = parser.parse_args(argv)
-    try:
-        if arguments.command == "prepare":
-            job = prepare_v1_payload(
-                arguments.source,
-                arguments.destination,
-                job_id=arguments.job_id,
-                tag=arguments.tag,
-                name=arguments.name,
-                initial_step=arguments.step,
-                pool="default" if arguments.taskset == "any" else arguments.taskset,
-                priority=arguments.priority,
-                attempts=arguments.attempts,
-            )
-            print(job.job_key)
-            return 0
-        workspace = WorkflowWorkspace(arguments.workspace, durable=not arguments.no_durable)
-        if arguments.command == "submit":
-            marker = submit_v1_task(
-                workspace,
-                arguments.source,
-                arguments.placement,
-                job_id=arguments.job_id,
-                tag=arguments.tag,
-                name=arguments.name,
-                initial_step=arguments.step,
-                pool="default" if arguments.taskset == "any" else arguments.taskset,
-                priority=arguments.priority,
-                attempts=arguments.attempts,
-            )
-            print(marker.path)
-            return 0
-        if arguments.command == "run":
-            compression = "zstd" if arguments.zstdlog else "none" if arguments.no_bzip2log else "bzip2"
-            with V1TaskManager(
-                workspace,
-                taskset=arguments.taskset,
-                maximum_workers=arguments.workers,
-                lease_seconds=arguments.lease_seconds,
-                heartbeat_interval=arguments.heartbeat_interval,
-                unsafe_persistent_takeover=arguments.unsafe_persistent_takeover,
-                runtime_root=arguments.httk_v1_root,
-                timeout=arguments.task_timeout,
-                wrapper=arguments.wrap,
-                log_compression=compression,
-                attempts=arguments.attempts,
-            ) as manager:
-                if arguments.until_idle:
-                    manager.run_until_idle(
-                        timeout=arguments.idle_timeout,
-                        poll_interval=arguments.poll_interval,
-                    )
-                else:
-                    manager.serve(poll_interval=arguments.poll_interval)
-            return 0
-    except (WorkflowError, OSError, ValueError) as exc:
-        print(f"{program}: {exc}", file=sys.stderr)
-        return 2
-    parser.error(f"unknown command: {arguments.command}")
-    return 2
+    arguments = sys.argv[1:] if argv is None else argv
+    return dispatch(_parser(program), arguments, CLIContext("httk", Path.cwd()))
 
 
 if __name__ == "__main__":

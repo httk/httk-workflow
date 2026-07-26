@@ -1,0 +1,39 @@
+"""The public name of the computer-adapter protocol implementation.
+
+A computer adapter is a versioned directory whose executable ``configure``,
+``install``, ``invoke``, ``push``, ``pull``, ``start-manager`` and ``status``
+operations each read one JSON request file and print one JSON result. The
+maintained ``local``, ``local-slurm`` and ``ssh-slurm`` templates implement that
+protocol by executing this module, which selects its behaviour from the ``kind``
+recorded in the bundle's ``computer.json`` and refuses any other kind rather
+than running it in the wrong place.
+
+This module is the documented surface of that contract. The implementation
+lives in :mod:`httk.workflow.adapter_runtime`, which is what the packaged
+wrappers execute; both names refer to the same objects. See
+:doc:`/workflow_cli` for the operations and the settings each one uses.
+
+Every subprocess started by the implementation is an argument vector, so no
+shell ever parses a value that came from a request or from settings. ``ssh`` is
+the one unavoidable exception, because it always joins its command words for a
+login shell on the far side; every remote command string is therefore built by a
+single element-wise quoting helper.
+"""
+
+from .adapter_runtime import (
+    BATCH_DIRECTIVES,
+    BATCH_DIRECTORY,
+    SUPPORTED_KINDS,
+    main,
+)
+
+__all__ = [
+    "BATCH_DIRECTIVES",
+    "BATCH_DIRECTORY",
+    "SUPPORTED_KINDS",
+    "main",
+]
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
+    raise SystemExit(main())

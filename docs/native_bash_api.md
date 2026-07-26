@@ -13,7 +13,11 @@ exactly the same implementation as the Python
 publish the same bytes for the same campaign.
 
 The manager exports absolute paths to the two packaged, sourced libraries, so a
-runner never has to locate Python package data itself.
+runner never has to locate Python package data itself. Each function of those
+libraries is one invocation of one subcommand of
+{py:mod}`httk.workflow.shell_bridge`, the public name of the command bridge that
+publishes through the same implementation the Python SDK does; read that module
+when writing a runner in a third language.
 
 ## A complete runner
 

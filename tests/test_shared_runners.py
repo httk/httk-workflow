@@ -313,3 +313,28 @@ def test_core_v1_workspaces_are_readable_but_never_mutated(tmp_path: Path) -> No
     assert inspected.core_profile == "core-v1"
     with pytest.raises(UnsupportedExtensionError, match="cannot serve"):
         TaskManager(inspected)
+
+
+def test_runner_describe_reports_every_published_reference(tmp_path: Path, capsys) -> None:
+    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    first = workspace.publish_runner(_runner_file(tmp_path / "source"))
+    second = workspace.publish_runner(
+        _runner_file(tmp_path / "other", _OTHER_RUNNER, name="step.py"),
+        name="campaign/step.py",
+    )
+
+    assert workflow_command(["runner", "describe", "--workspace", str(workspace.root), "--json"], context) == 0
+    described = json.loads(capsys.readouterr().out)
+    assert described == sorted([first, second], key=lambda reference: str(reference["path"]))
+
+    assert workflow_command(["runner", "describe", "--workspace", str(workspace.root)], context) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines == [f"{reference['path']}\t{reference['sha256']}" for reference in described]
+
+    # One name at a time, and a name that was never published is an error.
+    argv = ["runner", "describe", "campaign/step.py", "--workspace", str(workspace.root), "--json"]
+    assert workflow_command(argv, context) == 0
+    assert json.loads(capsys.readouterr().out) == [second]
+    assert workflow_command(["runner", "describe", "absent.py", "--workspace", str(workspace.root)], context) == 2
+    assert "no such workspace runner" in capsys.readouterr().err

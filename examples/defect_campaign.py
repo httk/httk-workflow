@@ -25,11 +25,11 @@ characterization — the point is the campaign, not the physics):
 
 .. code-block:: console
 
-    httk-taskmanager init campaign-workspace --extension transactional-data-v1
+    httk workflow workspace init campaign-workspace --extension transactional-data-v1
     httk workflow job new campaign-workspace \\
         --template examples/defect_campaign.py --step characterize \\
         --input sites=3 --input diverging=1 --tag campaign
-    httk-taskmanager run campaign-workspace --until-idle
+    httk workflow manager run campaign-workspace --until-idle
     httk workflow job list campaign-workspace
 
 The campaign then fails by design, with ``defects.child_failed``, because

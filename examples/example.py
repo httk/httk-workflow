@@ -69,7 +69,7 @@ def main() -> int:
     print(f"submitted {job.job_key} at {job.placement}, running {job.runner['path']}")
 
     # One manager, in this process, until nothing is ready. A deployment runs the
-    # same manager as `httk-taskmanager run WORKSPACE` instead.
+    # same manager as `httk workflow manager run WORKSPACE` instead.
     with TaskManager(workspace) as manager:
         manager.run_until_idle(timeout=300.0)
 

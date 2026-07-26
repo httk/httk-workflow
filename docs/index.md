@@ -5,8 +5,9 @@ This site documents the *httk-workflow* module. For the full documentation of
 
 The module implements a recoverable, language-neutral workflow protocol whose
 source of truth is a single atomically renamed state marker per job. Python
-applications use `httk.workflow`; installations also provide the
-`httk-taskmanager` and `httk-v1-taskmanager` commands.
+applications use `httk.workflow`; installations register the canonical
+`httk workflow` command tree, plus the `httk-taskmanager` and
+`httk-v1-taskmanager` executables, which are aliases of it.
 
 ```{admonition} Quick links
 :class: tip
@@ -23,7 +24,7 @@ applications use `httk.workflow`; installations also provide the
 - **Examples notebook**: {doc}`notebooks/examples`
 - [*httk* v1 migration guide](httk_v1_migration_guide.md)
 - [*httk* v1 compatibility](v1_compatibility.md)
-````
+```
 
 ## Install
 
@@ -40,9 +41,9 @@ python -m pip install -e .
 One workspace, one job of a packaged runner, and one manager that runs it:
 
 ```console
-httk-taskmanager init workflow-workspace --extension transactional-data-v1
+httk workflow workspace init workflow-workspace --extension transactional-data-v1
 httk workflow job new workflow-workspace --template vasp-relax --from POSCAR --tag silicon
-httk-taskmanager run workflow-workspace --until-idle
+httk workflow manager run workflow-workspace --until-idle
 httk workflow harvest workflow-workspace
 ```
 
@@ -51,7 +52,7 @@ without VASP installed. A complete payload prepared some other way is still
 submitted directly:
 
 ```console
-httk-taskmanager submit workflow-workspace prepared-job --placement project/00
+httk workflow job submit workflow-workspace prepared-job --placement project/00
 ```
 
 ```{toctree}

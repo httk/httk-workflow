@@ -7,23 +7,218 @@ Installing *httk-workflow* registers the lazy `workflow` command with
 httk workflow --help
 ```
 
-The complete tree is:
+## Three executables, one tree
+
+**`httk workflow …` is the canonical spelling of every command in this
+package.** It is one nested command tree: each group answers `--help`, each
+command answers `--help`, and a mistyped action is reported by the group it was
+mistyped in.
+
+Two further executables are installed, and both are thin aliases that reuse the
+canonical tree's own parsers and handlers rather than a second implementation
+of it. They remain supported; prefer the canonical spelling in new work and in
+anything you write down.
+
+| Executable | Alias of | Kept for |
+| --- | --- | --- |
+| `httk workflow` | — | **canonical** |
+| `httk-taskmanager` | `httk workflow workspace`/`job`/`manager` leaves | operators and scripts predating `httk workflow` |
+| `httk-v1-taskmanager` | `httk workflow v1` | *httk* v1 compatibility operators |
 
 ```text
-httk workflow workspace init|status|policy|fsck|upgrade|unlock
-httk workflow runner publish
-httk workflow job new|submit|request|list|show|log|why|debug
-httk workflow harvest
-httk workflow manager run
-httk workflow v1 prepare|submit|run
-httk workflow config init|show|set|import-v1
-httk workflow project init|import-v1|manifest create|manifest verify
-httk workflow computer list|add|configure|install|import-v1
-httk workflow tasks send|receive|fetch|offer|retire|start-manager|status
+httk-taskmanager init     ->  httk workflow workspace init
+httk-taskmanager submit   ->  httk workflow job submit
+httk-taskmanager run      ->  httk workflow manager run
+httk-taskmanager status   ->  httk workflow workspace status
+httk-taskmanager request  ->  httk workflow job request
+
+httk-v1-taskmanager prepare  ->  httk workflow v1 prepare
+httk-v1-taskmanager submit   ->  httk workflow v1 submit
+httk-v1-taskmanager run      ->  httk workflow v1 run
 ```
 
-`httk-taskmanager` and `httk-v1-taskmanager` remain supported and dispatch the
-same native and *httk* v1 command functions.
+Both aliases keep their own flags, including the `--durable`/`--no-durable`
+switch they have always accepted *before* the subcommand. The canonical tree
+carries the same switch on the leaf that acts on it, so both spellings work.
+
+## The complete tree
+
+```text
+httk workflow workspace  init | status | policy show | policy set | fsck | gc | upgrade | unlock
+httk workflow runner     publish | describe
+httk workflow job        new | submit | request | list | show | log | why | debug
+httk workflow harvest
+httk workflow manager    run
+httk workflow v1         prepare | submit | run
+httk workflow config     init | show | set | unset | import-v1
+httk workflow project    init | import-v1 | show | doctor | manifest create | manifest verify
+httk workflow computer   list | add | configure | install | import-v1 | show | remove
+httk workflow remote     send | fetch | offer | retire | start-manager | status
+```
+
+### `workspace` — the workspace itself, not its jobs
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `workspace init WORKSPACE` | initialize a workspace, printing its root | `--extension`, `--no-durable` |
+| `workspace status WORKSPACE` | summarize the authoritative markers | `--json` |
+| `workspace policy show WORKSPACE` | print the shared policy | `--json` |
+| `workspace policy set WORKSPACE KEY VALUE` | store one policy member | `--json` |
+| `workspace fsck WORKSPACE` | check every marker against its journal frame | `--repair`, `--quarantine-unrepairable`, `--json` |
+| `workspace gc WORKSPACE` | collect what the retention policy allows | `--dry-run`, `--json` |
+| `workspace upgrade WORKSPACE` | enable an implemented extension | `--extension` (required) |
+| `workspace unlock WORKSPACE` | release a maintenance lock | `--force` |
+
+### `runner` — the shared runners a workspace publishes
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `runner publish FILE` | publish one runner, pinned by digest | `--workspace` (required), `--name`, `--replace` |
+| `runner describe [NAME]` | report the published runners and their digests | `--workspace` (required), `--json` |
+
+### `job` — making jobs, and finding out about them
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `job new WORKSPACE` | scaffold and submit jobs from a template | `--template` (required), `--from`, `--file`, `--input`, `--tag`, `--placement`, `--json` |
+| `job submit WORKSPACE SOURCE` | submit one prepared payload directory | `--placement` (required), `--move` |
+| `job request WORKSPACE JOB_ID ACTION` | publish an operator request | `--operator`, `--reason` (both required), `--priority`, `--step`, `--force` |
+| `job list WORKSPACE` | list the jobs as a cheap table | `--kind`, `--placement`, `--json` |
+| `job show WORKSPACE JOB` | describe one job from its state | `--json` |
+| `job log WORKSPACE JOB` | print the transition history | `--limit`, `--json` |
+| `job why WORKSPACE JOB` | explain why a job is not running | `--json` |
+| `job debug WORKSPACE JOB` | drive one job to a terminal state, in front of you | `--step`, `--placement`, `--follow-children`, `--timeout`, `--log-level` |
+
+`JOB` is a job UUID, a `tag--uuid` job key, or any unique prefix of either.
+
+### `harvest` — the finished jobs, as records
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `harvest WORKSPACE` | stream one record per finished job | `--state`, `--placement`, `--jsonl` (default), `--json` |
+
+### `manager` — the process that runs the jobs
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `manager run WORKSPACE` | run one task manager | `--workers`, `--pool`, `--capability`, `--until-idle`, `--idle-timeout`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--log-level`, `--log-file`, `--json-logs` |
+
+### `v1` — *httk* v1 task templates on the v2 engine
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `v1 prepare SOURCE DESTINATION` | turn an instantiated v1 task into a payload | `--taskset` (default `default`), `--tag`, `--step`, `--priority`, `--attempts` |
+| `v1 submit WORKSPACE SOURCE` | prepare and submit one v1 task | `--placement` (required), `--taskset` (default `default`) |
+| `v1 run WORKSPACE` | run only the httk-v1 jobs of a workspace | `--taskset` (default `any`), `--wrap`, `--task-timeout`, `--workers`, `--until-idle`, `--idle-timeout` |
+
+`--taskset` deliberately defaults differently between siblings, because the
+siblings mean different things by it. `prepare` and `submit` **assign** a task
+set to the job they create, so their default is the ordinary `default` set;
+`run` **filters** the jobs it will claim, so its default is `any`, which accepts
+every set. Unifying them would either strand every submitted job under a manager
+filtering for one set, or quietly file every prepared task under a set literally
+named `any`.
+
+### `config` — the per-user configuration and identity
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `config init` | write the configuration and the identity key | `--name`, `--email`, `--non-interactive` |
+| `config show [KEY]` | print the configuration, or one member | |
+| `config set KEY VALUE` | store one member | |
+| `config unset KEY` | remove one member | |
+| `config import-v1 [SOURCE]` | read a legacy `~/.httk` configuration | |
+
+### `project` — the directory a campaign lives in
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `project init [PATH]` | create a project, its key, and its workspace | `--name`, `--description`, `--default-queue`, `--exclude`, `--non-interactive` |
+| `project import-v1 [PATH]` | read a legacy `ht.project` | `--source`, `--name` |
+| `project show [PATH]` | describe the project, its keys, its workspace, its manifest | `--no-verify`, `--json` |
+| `project doctor [PATH]` | check, and optionally repair, the project | `--repair`, `--json` |
+| `project manifest create [PROJECT]` | write the signed manifest | `--manifest` |
+| `project manifest verify [PROJECT]` | verify the manifest against the tree | `--manifest`, `--trusted-key` |
+
+### `computer` — the adapters that reach other machines
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `computer list` | list the computers this project can reach | |
+| `computer add NAME` | create a computer from a packaged template | `--template`, `--global`, `--non-interactive` |
+| `computer configure COMPUTER` | run the adapter's `configure` operation | `--set KEY=VALUE`, `--adapter-timeout` |
+| `computer install COMPUTER` | run the adapter's `install` operation | `--set KEY=VALUE`, `--adapter-timeout` |
+| `computer import-v1 SOURCE` | map a legacy computer bundle | `--name`, `--global` |
+| `computer show NAME` | describe one computer and its queues | `--json` |
+| `computer remove NAME` | remove one computer bundle | `--force` |
+
+`computer show` never prints a credential *value*: a queue setting stored in
+the manifest-excluded `credentials.json` is reported by name only, so a
+description an operator pastes into a bug report cannot carry a password.
+
+`computer remove` refuses while an unretired transfer still depends on the
+computer, because removing it would leave that transfer with no way home;
+`--force` skips the interactive confirmation and **nothing else** — the refusal
+stands either way. Fetch or retire the transfer first.
+
+### `remote` — work that travels to another computer
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `remote send COMPUTER JOB_ID …` | detach named jobs and import them on the computer | `--source-workspace`, `--destination-workspace`, `--destination-placement`, `--adapter-timeout` |
+| `remote fetch` | bring the jobs that finished on a computer back here | `--computer` (required), `--workspace`, `--remote-workspace`, `--state`, `--placement`, `--adapter-timeout`, `--json` |
+| `remote offer WORKSPACE` | seal the finished jobs here for a workspace that will fetch | `--destination-workspace-id` (required), `--state`, `--placement`, `--json` |
+| `remote retire WORKSPACE JOB_ID …` | retire the sealed sources another workspace imported | `--destination-workspace-id`, `--json` |
+| `remote start-manager COMPUTER` | start managers on the computer | `--count`, `--workers`, `--remote-workspace`, `--adapter-timeout` |
+| `remote status COMPUTER` | report the status of the workspace on the computer | `--remote-workspace`, `--adapter-timeout` |
+
+Every workspace option says which side of the transfer it names. `send` leaves
+`--source-workspace` here and arrives at `--destination-workspace` there;
+`fetch` leaves `--remote-workspace` there and arrives at `--workspace` here;
+`start-manager` and `status` only ever mean the far side, and say so with
+`--remote-workspace`.
+
+## Migrating from the old spellings
+
+Every spelling below still parses, and none of them appears in `--help` any
+more. They are kept for one release; move to the canonical column.
+
+| Deprecated | Canonical | Note |
+| --- | --- | --- |
+| `httk workflow tasks …` | `httk workflow remote …` | the whole group was renamed |
+| `remote send --workspace` | `remote send --source-workspace` | it names the local side |
+| `remote start-manager --workspace` | `remote start-manager --remote-workspace` | it names the far side |
+| `remote status --workspace` | `remote status --remote-workspace` | it names the far side |
+| `remote … --timeout` | `remote … --adapter-timeout` | it bounds adapter calls, not the work |
+| `computer configure/install --timeout` | `--adapter-timeout` | as above |
+| `manager run --timeout` | `manager run --idle-timeout` | it is the `--until-idle` wait |
+| `v1 prepare/submit/run --set` | `--taskset` | `--set` now means `KEY=VALUE` only, on `computer configure` |
+| `tasks receive` | `internal receive` | see below; the invoked spelling is protocol |
+
+`remote fetch --workspace` is **not** deprecated: on `fetch` that option has
+always named the local destination, which is what it still means.
+
+### The one spelling that is protocol, not interface
+
+`remote send` finishes by asking the far side to import the bundle it pushed,
+and `remote fetch` asks the far side to offer and then retire. Those argument
+vectors run on a machine whose *httk* may be older or newer than yours, so their
+spelling is frozen:
+
+```text
+httk workflow tasks receive --workspace WORKSPACE --bundle BUNDLE
+httk workflow tasks offer WORKSPACE --destination-workspace-id UUID --json
+httk workflow tasks retire WORKSPACE JOB_ID … --destination-workspace-id UUID --json
+httk workflow workspace status WORKSPACE --json
+httk workflow manager run WORKSPACE
+```
+
+They are listed once, as module constants, in
+{py:mod}`httk.workflow.workflow_cli`. `receive` is an import half rather than an
+operator command, so its canonical home is the unadvertised
+`httk workflow internal receive`; `remote receive` and `tasks receive` both
+still work, and the *invoked* spelling will not change until every supported
+release understands the new one.
 
 ## Creating jobs
 
@@ -81,19 +276,53 @@ overrides. Legacy `~/.httk` data is read only through `config import-v1`; its
 
 ```console
 httk workflow config init --name "A User" --email user@example.org
+httk workflow config set name "Another User"
+httk workflow config unset email
 httk workflow project init . --name example --default-queue default
 ```
+
+`config set` accepts only the keys the configuration actually has — `name` and
+`email` — and names them when it refuses another, so a typo cannot become a
+member that nothing ever reads. `format` and `format_version` describe the
+document and are written by *httk* itself. A configuration whose `format` is
+something else is refused rather than read as if its members meant what *httk*
+means by them; one with no `format_version` at all predates versioning and is
+read as version 1.
 
 A project has `.httk-project/project.json`, a standard 32-byte Ed25519 seed
 stored with mode `0600`, and a workflow workspace with
 `detached-transfer-v1` enabled. Commands discover the nearest project in the
 working directory's parent chain.
 
+### Describing and checking a project
+
+```console
+httk workflow project show
+httk workflow project show --json
+httk workflow project doctor
+httk workflow project doctor --repair
+```
+
+`project show` reports the project's metadata, whether it pins a key and which,
+its workspace and job counts, and what its manifest currently verifies as;
+`--no-verify` skips the tree walk that last part needs, which is what makes the
+command cheap on a very large project.
+
+`project doctor` checks the conditions that quietly break a project later — an
+uninitialized workspace, a stale maintenance lock, an unpinned key, staging
+leftovers, a legacy identity, an unverifiable manifest — and reports them all.
+`--repair` fixes the ones that can be fixed automatically, says exactly what it
+did, and journals it in the project's workspace, so the repair is part of that
+workspace's durable history. The command exits `1` only when a check is actually
+*broken*; a warning, such as a project that has no manifest yet, is something to
+know about rather than something to fail a script on.
+
 ## Signed manifests
 
 ```console
 httk workflow project manifest create
 httk workflow project manifest verify
+httk workflow project manifest verify --trusted-key keys/collaborator.pub
 ```
 
 The *httk₂* manifest is deterministic canonical JSON-lines compressed with bzip2.
@@ -102,6 +331,86 @@ directories, and symlink targets. Special files are rejected. A
 domain-separated body digest is signed with Ed25519. Creation fences manager
 launches and refuses active work. Verification also recognizes the legacy
 `ht.project/manifest.bz2` format without changing it.
+
+### What a verified manifest actually proves
+
+Be precise about the threat this addresses, because the signing key lives in the
+tree it signs. `.httk-project/keys/project.seed` is a file of the project, mode
+`0600` and excluded from the manifest, but excluded is not absent: **anybody who
+can write the project directory can re-sign it**. A manifest therefore proves
+that the tree is exactly the tree somebody with the seed described — it does not
+prove that nobody changed the tree, and it is not a tamper seal against an
+attacker who had write access.
+
+What it does prove is worth having. Against accidental damage — a truncated
+copy, a partial `rsync`, bit rot on an archive volume, a stray edit in a
+directory nobody meant to touch — the digests are exact. Across a copy that
+travelled without the seed, and against a *replaced* tree signed by a different
+key, the signature is the check that catches it. That is why verification
+compares the signing key with a **trust anchor that did not come from the
+manifest**: the key pinned in `project.json` at `httk workflow project init`,
+plus any key named with `--trusted-key`. Reading the key out of the manifest
+header and checking the manifest against itself would always say *valid*.
+
+Verification is therefore three-way, not a boolean:
+
+| Verdict | Exit | Meaning |
+| --- | --- | --- |
+| `valid_trusted` | `0` | the manifest describes this tree and a pinned key signed it |
+| `valid_unknown_key` | `3` | the manifest describes this tree, but nothing here pins the key that signed it |
+| `invalid` | `1` | the tree does not match the manifest, the signature does not verify, or the manifest names another project |
+
+`invalid` also covers a manifest whose `project_id` disagrees with
+`project.json`: a manifest of a different project dropped into this tree is
+refused by name however well it verifies internally.
+
+### Pinning and adopting keys
+
+A project created by `project init` pins its own key at creation, so its
+manifests verify as `valid_trusted` immediately. A project made before pinning
+existed has no `public_key` in `project.json`, so every manifest of it verifies
+as `valid_unknown_key` until somebody decides which key to trust. That decision
+is explicit, because it is the whole trust model in one act:
+
+```python
+from httk.workflow.projects import pin_project_key, trust_project_key
+
+pin_project_key("/path/to/project")                 # adopt keys/project.pub
+trust_project_key("/path/to/project", "ed25519:…")  # adopt somebody else's key
+```
+
+`pin_project_key` adopts the key that is in the tree *right now* — do it only on
+a tree you have reason to believe is the one you left. `trust_project_key` adds
+a further anchor to `project.json`'s `trusted_keys`; `project import-v1` fills
+that list with the legacy identities of an imported *httk* v1 project, so its
+old `ht.project/manifest.bz2` verifies as trusted too. `--trusted-key` accepts
+either an `ed25519:BASE64` value or the path of a `*.pub` file and is the
+one-off equivalent that writes nothing.
+
+For attribution *between* machines — who published this request, who imported
+this transfer — see the operator identity key below, which is a different key
+with a different job.
+
+### Operator identity
+
+`httk workflow config init` creates `identity.seed`/`identity.pub` below
+`$XDG_DATA_HOME/httk/keys/`. That key signs the small documents an operator
+publishes: an operator request (`httk workflow job request …`) and a transfer
+acknowledgement. The signature is detached, covers the canonical JSON of the
+whole document, and is domain-separated from every other httk signature.
+
+It is optional in both directions, deliberately. An installation with no
+identity key publishes unsigned documents, and a manager or a transfer source
+accepts them exactly as before — so a mixed deployment needs no flag day. A
+signature that *is* present must verify: a request with a broken signature is
+quarantined with the reason, and an acknowledgement with a broken signature will
+not retire a sealed bundle. A verified request records its `operator_key` in the
+journalled state frame beside the operator name and reason.
+
+The semantics are attribution, not authorization. The key says *which identity
+published this document*; it grants nothing, and no operation is permitted
+because a document is signed. Anyone who can write the workspace's request
+directory can still publish an unsigned request.
 
 The fence is `.httk-workflow/maintenance.lock`, holding the recording process
 identifier, hostname, and creation time. A lock whose same-host process is gone,
@@ -205,7 +514,10 @@ Computer definitions are versioned directories containing `computer.json` and
 executable `configure`, `install`, `invoke`, `push`, `pull`, `start-manager`,
 and `status` operations. Each receives one versioned JSON request filename and
 prints one JSON result; diagnostics belong on stderr. Commands and remote
-commands are always argument arrays.
+commands are always argument arrays. The maintained templates implement that
+protocol through {py:mod}`httk.workflow.adapter_protocol`, which is the public
+name of the packaged implementation and the module to read when writing an
+adapter of your own.
 
 Maintained `local`, `local-slurm`, and `ssh-slurm` templates are packaged with
 the module. Project definitions shadow global definitions. `NAME:QUEUE`
@@ -221,7 +533,9 @@ the wrong place.
 `time_limit`, `username`, `workers`, and `workspace` in the shareable
 `computer.json`. Every other key is stored per queue in `credentials.json` with
 mode `0600` beside it, which project manifests exclude. Adapters receive both
-together as the request's `queue_settings`.
+together as the request's `queue_settings`. `computer show NAME` reports which
+file each setting came from, and the name — never the value — of every
+credential.
 
 ### What each kind does
 
@@ -295,7 +609,7 @@ A transfer fences an explicit quiescent marker, seals it in the payload,
 validates the payload digest at import, publishes the preserved UUID and prior
 state only at the destination, and retires the source only after an
 idempotent acknowledgement. Transfer UUID and digest checks suppress retries;
-sealed and retired bundles are retained for recovery. Repeating `tasks send`
+sealed and retired bundles are retained for recovery. Repeating `remote send`
 resumes the matching sealed transfer, including the copy-before-import and
 lost-acknowledgement boundaries.
 
@@ -313,50 +627,50 @@ The complete loop is four commands. Work is sent to a computer, run there,
 fetched back once it has stopped, and harvested locally:
 
 ```console
-httk workflow tasks send CLUSTER JOB_ID ...          # local -> computer
-httk workflow tasks start-manager CLUSTER --count 2 --workers 4
-httk workflow tasks fetch --computer CLUSTER --workspace LOCAL_WS
+httk workflow remote send CLUSTER JOB_ID ...          # local -> computer
+httk workflow remote start-manager CLUSTER --count 2 --workers 4
+httk workflow remote fetch --computer CLUSTER --workspace LOCAL_WS
 httk workflow harvest LOCAL_WS --state succeeded --state failed
 ```
 
-`tasks send` detaches each named job from the local workspace and imports it on
-the computer. `--workspace` names the local workspace when it is not the
+`remote send` detaches each named job from the local workspace and imports it on
+the computer. `--source-workspace` names the local workspace when it is not the
 project's, `--destination-workspace` overrides the queue's `workspace=PATH`, and
 `--destination-placement` puts the arriving jobs somewhere other than the
-placement they had here. `tasks status` reports the remote workspace status
-through the adapter, and `tasks receive` is the remote half `send` invokes.
+placement they had here. `remote status` reports the remote workspace status
+through the adapter, and `internal receive` is the remote half `send` invokes.
 
-`tasks start-manager` starts managers on the computer: `--count N` submits the
+`remote start-manager` starts managers on the computer: `--count N` submits the
 generated batch script `N` times, `--workers N` fixes the workers per manager,
 and leaving `--workers` off lets the queue's configured `workers=N` decide. Both
-take `--workspace` and `--timeout`.
+take `--remote-workspace` and `--adapter-timeout`.
 
-`tasks fetch` is the local half. It probes the remote workspace over the
+`remote fetch` is the local half. It probes the remote workspace over the
 adapter's `status` operation, asks it to `offer` what has stopped, `pull`s each
 offered bundle into `.httk-workflow/transfers/incoming/`, imports it, and only
 then tells the remote to `retire` the sources it still holds. Both the computer
 and its workspace can be named explicitly:
 
 ```console
-httk workflow tasks fetch --computer CLUSTER:large --remote-workspace /scratch/me/runs \
+httk workflow remote fetch --computer CLUSTER:large --remote-workspace /scratch/me/runs \
     --state succeeded --state failed --placement project/screening --json
 ```
 
 `--remote-workspace` defaults to the queue's configured `workspace=PATH`, the
-same setting `tasks send` uses. `--state` accepts the kinds a stopped job can be
+same setting `remote send` uses. `--state` accepts the kinds a stopped job can be
 in and defaults to `succeeded` and `failed`; `--placement` restricts the fetch to
-one subtree; `--timeout` bounds every adapter operation the fetch runs, as it
-does for `send`, `start-manager`, and `status`. A fetched job arrives as an
+one subtree; `--adapter-timeout` bounds every adapter operation the fetch runs, as
+it does for `send`, `start-manager`, and `status`. A fetched job arrives as an
 ordinary job of the local workspace, in
 the terminal state and at the placement it had on the computer, so
 `httk workflow harvest` then reports it exactly like a job that ran at home.
 
-The other two commands are the remote half, invoked over the adapter by `tasks
+The other two commands are the remote half, invoked over the adapter by `remote
 fetch` but usable on their own on the computer itself:
 
 ```console
-httk workflow tasks offer WORKSPACE --destination-workspace-id UUID --json
-httk workflow tasks retire WORKSPACE JOB_ID ... --destination-workspace-id UUID
+httk workflow remote offer WORKSPACE --destination-workspace-id UUID --json
+httk workflow remote retire WORKSPACE JOB_ID ... --destination-workspace-id UUID
 ```
 
 `offer` detaches every finished job into its sealed bundle and prints one entry
