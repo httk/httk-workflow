@@ -391,11 +391,29 @@ The `httk_vasp_*` surface corresponds directly to functions in
   `rattle_poscar`, and the energy, volume, POTIM, plane-wave, and POTCAR
   summary extractors.
 
-Source `$HTTK_WORKFLOW_VASP_BASH_API` after `$HTTK_WORKFLOW_BASH_API`.
+Source `$HTTK_WORKFLOW_VASP_BASH_API` after `$HTTK_WORKFLOW_BASH_API`. Every option
+of the underlying subcommand is available, because the arguments are passed through
+untouched.
 
 Remedies are never automatic. Applying a decision uses a replayable workdir batch
 and records before/after input digests and policy history. Preparation also
 enforces the conservative 240-byte VASP workdir-path limit.
+
+Version 2 of this library keeps the function surface of version 1 and changes three
+defaults, in Bash and in Python at once:
+
+- k-point centering starts at `Monkhorst-Pack`, because the reviewed ladder promotes
+  `Gamma` as the fix for two k-point failure classes;
+- `httk_vasp_preclean` keeps `CONTCAR` and `vasp-run-report.json`, which are what a
+  remedy and a restart read; `--also-remove NAME` deletes them anyway;
+- `httk_vasp_rattle_poscar` requires `--seed` or `--entropy`, because an unseeded
+  retry rattles a structure exactly like the attempt before it.
+
+`httk_vasp_remedy_plan` prints the diagnosed problem on stdout, takes `--directory`
+(the calculation the remedy is validated against) and `--policy`, and records the
+escalation ladder in the job state directory rather than in the workdir, so a job
+with an isolated workdir keeps climbing it. A complete Bash VASP runner built on
+these functions ships with the module: see {doc}`vasp_runners`.
 
 ## Mapping from *httk* v1
 

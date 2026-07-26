@@ -12,7 +12,8 @@ The complete tree is:
 ```text
 httk workflow workspace init|status|upgrade|unlock
 httk workflow runner publish
-httk workflow job submit|request
+httk workflow job new|submit|request|list|show|log|why|debug
+httk workflow harvest
 httk workflow manager run
 httk workflow v1 prepare|submit|run
 httk workflow config init|show|set|import-v1
@@ -23,6 +24,49 @@ httk workflow tasks send|receive|start-manager|status
 
 `httk-taskmanager` and `httk-v1-taskmanager` remain supported and dispatch the
 same native and *httk* v1 command functions.
+
+## Creating jobs
+
+`job new` scaffolds and submits jobs from a template — a packaged runner name or
+the path of a runner file of your own — and needs no prepared payload:
+
+```console
+httk workflow job new WORKSPACE --template vasp-relax --from POSCAR --tag silicon
+httk workflow job new WORKSPACE --template vasp-relax --from structures/ --placement project/screening
+httk workflow job new WORKSPACE --template ./my_runner.py --step characterize --input sites=8
+```
+
+`--from` is a structure file, staged as the `files/POSCAR` the packaged runners
+read, or a directory of `POSCAR*` and `*.vasp` files, which becomes one job each,
+tagged after its file. `--file NAME=PATH` stages anything else, `--input
+NAME=VALUE` writes the job's inputs — JSON when the value parses as JSON, a string
+otherwise, and `NAME=@FILE` reads a JSON file — and the command prints one
+tab-separated `job_key<TAB>payload` line per job, or `--json` reports. The runner
+file is published into the workspace runner store and pinned by digest unless
+`--publish installed` names a packaged runner where it is installed. See
+{doc}`quickstart`.
+
+## Inspecting and debugging jobs
+
+`job list`, `job show`, `job log`, and `job why` read one workspace without
+writing anything, and `job debug` drives a single job to a terminal state in the
+foreground:
+
+```console
+httk workflow job list WORKSPACE --kind ready
+httk workflow job show WORKSPACE JOB
+httk workflow job log WORKSPACE JOB --limit 20
+httk workflow job why WORKSPACE JOB
+httk workflow job debug WORKSPACE PAYLOAD_OR_JOB --follow-children
+```
+
+`JOB` is a job UUID, a `tag--uuid` job key, or any unique prefix of either, and
+each command takes `--json`. `job debug` exits `0` on success, `3` on failure, and
+`4` when the job stopped without finishing. See
+{doc}`taskmanager` for what each command reports.
+
+`httk workflow harvest WORKSPACE` streams one record per finished job for a data
+layer to store, as JSON lines by default; see {doc}`harvest`.
 
 ## Configuration and projects
 

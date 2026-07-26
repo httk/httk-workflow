@@ -10,11 +10,19 @@ retains the `httk-taskmanager` executable. The separate
 communicate through atomically published filesystem state, so interrupted
 managers and calculations can be recovered without cleanup hooks.
 
+From nothing to a finished VASP relaxation, without writing a runner:
+
 ```console
-httk-taskmanager init workflow-workspace
-httk-taskmanager submit workflow-workspace prepared-job --placement project/00
-httk-taskmanager run workflow-workspace
+httk-taskmanager init workflow-workspace --extension transactional-data-v1
+httk workflow job new workflow-workspace --template vasp-relax --from POSCAR --tag silicon
+export HTTK_VASP_COMMAND="$PWD/examples/mock_vasp.py"   # or: srun -n 32 vasp_std
+httk-taskmanager run workflow-workspace --until-idle
+httk workflow harvest workflow-workspace
 ```
+
+[`docs/quickstart.md`](docs/quickstart.md) explains each command, and
+`examples/quickstart.sh` runs the whole sequence — with the mock VASP above
+standing in for VASP on a machine that has none.
 
 The unified CLI also manages XDG configuration, signed projects, versioned
 computer adapters, and crash-recoverable detached transfer:

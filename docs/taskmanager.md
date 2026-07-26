@@ -105,6 +105,93 @@ httk-taskmanager request WORKSPACE JOB_UUID continue \
 Requests capture the exact current marker generation and record reference.
 A delayed request therefore cannot mutate a newer job state.
 
+## Inspecting jobs
+
+Five commands read one job the way a manager reads it — the authoritative marker,
+the journal frame that marker names, and the immutable `job.json` — and none of
+them writes protocol state:
+
+```console
+httk workflow job list WORKSPACE --kind ready --placement project-a
+httk workflow job show WORKSPACE JOB
+httk workflow job log WORKSPACE JOB --limit 20
+httk workflow job why WORKSPACE JOB
+```
+
+`JOB` is a job UUID, a complete `tag--uuid` job key, or any unique prefix of
+either; an ambiguous prefix is refused with the jobs it matched. Every command
+also accepts `--json` and prints one object: a report, a frame array, a
+diagnosis, or a job array.
+
+`job show` reports the state kind, placement, priority, generation, job digest,
+runner identity, the budgets of the retry policy against what has been consumed,
+the current and initial step, any step set the runner declared, the last
+failure, the join and per-child state of a waiting job, and the payload,
+workdir, and data paths.
+
+`job log` walks the journal backward from the marker through
+`previous_record_ref` and prints one line per state frame, oldest first, with the
+timestamp, the transition, the step, the attempt ordinal, the reason, and any
+failure code. A frame that cannot be read is reported in place; whatever history
+remains readable is still shown.
+
+`job why` answers "why is this job not running?" for every state:
+
+- `submitted`: whether any manager has registered it, and which live managers
+  serve its runner backend;
+- `ready`: every claim precondition, one line each — runner backend, claim pool,
+  required capabilities, the maintenance lock, the workspace core profile, the
+  attempt budgets, and which live manager would accept the job;
+- `claimed` and `running`: the owning manager, its heartbeat age against the
+  recorded lease, and whether an expired lease means recovery rather than a stuck
+  job;
+- `committing`: that a published outcome is being committed and any manager
+  serving the backend resumes it;
+- `waiting`: the join condition, every child with its label and state, which
+  children block, and which cannot be resolved in this workspace;
+- `failed`: the failure, whether an operator `continue` still fits inside the
+  retry budget, and the `error.json` breadcrumb of the last attempt;
+- `paused`, `succeeded`, and `cancelled`: the state and how to proceed.
+
+The job side of every precondition comes from `job.json` and cannot drift. The
+other side — pools, capabilities, and served backends — is deployment policy of
+whichever manager is running and is read from the manifest each manager
+publishes, so a manager that is not running is reported as absent rather than
+assumed.
+
+Reading *results* rather than status is a harvest: `httk workflow harvest
+WORKSPACE`, or `httk.workflow.harvest`, streams one record per finished job for a
+data layer to store; see {doc}`harvest`.
+
+## The foreground debug runner
+
+```console
+httk workflow job debug WORKSPACE PAYLOAD --step relax
+httk workflow job debug WORKSPACE JOB --follow-children
+```
+
+`job debug` drives exactly one job to a terminal state in the foreground and
+streams the attempt's `stdout.log` and `stderr.log` to the console as they grow.
+Every transition is performed by a private task manager whose scans are
+restricted to that one job, so the debugged job runs through exactly the code
+paths a production manager uses and no unrelated work is claimed. Lines are
+prefixed with the step that produced them, and `[debug]` marks each transition
+the polling loop observed; `job log` always holds the complete record afterwards.
+`--log-level` raises the private manager's own console log, which is quiet by
+default.
+
+The first argument is either a payload directory, which is submitted fresh at
+`--placement` (`debug` by default), or a selector of a job that already exists.
+`--step` overrides the initial step of a fresh payload; overriding the step of a
+job that already has a history is refused, because rewriting history is what the
+recorded `override_step` request is for. `--follow-children` drives the children a
+waiting job spawned, depth first, and then resumes the parent.
+
+The exit status is `0` when the job succeeded, `3` when it failed, and `4` when
+it stopped without finishing — paused, cancelled, or waiting for children
+without `--follow-children`. A live maintenance lock is refused up front, since
+it would stop every launch anyway.
+
 ## Runner contract
 
 The runner executes in the selected persistent or isolated workdir. It reads

@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
 
-# Native httk VASP Bash API, version 1. Source httk-workflow.sh first.
-HTTK_VASP_BASH_API_VERSION=1
+# Native httk VASP Bash API, version 2. Source httk-workflow.sh first.
+#
+# Every function is one bridge subcommand, and every option of that subcommand is
+# available here: the arguments are passed through untouched. Version 2 keeps that
+# surface and changes three defaults, in both languages at once:
+#
+#   * k-point centering starts at Monkhorst-Pack, because the reviewed remedy
+#     ladder promotes Gamma as the fix for two k-point failure classes;
+#   * httk_vasp_preclean keeps CONTCAR and vasp-run-report.json, which are what a
+#     remedy and a restart read; pass --also-remove NAME to delete them anyway;
+#   * httk_vasp_rattle_poscar requires --seed or --entropy, because an unseeded
+#     retry rattles a structure exactly like the attempt before it.
+#
+# httk_vasp_remedy_plan and httk_vasp_remedy_apply record the escalation ladder in
+# the job state directory by default, so a job with an isolated workdir keeps
+# climbing it; httk_vasp_remedy_plan prints the diagnosed problem on stdout and
+# takes --directory (the calculation it validates the remedy against) and --policy.
+HTTK_VASP_BASH_API_VERSION=2
 
 _httk_vasp_require_workflow_api() {
     if ! declare -F _httk_workflow_bridge >/dev/null 2>&1; then
