@@ -143,5 +143,8 @@ marker.
   `examples/defect_campaign.sh`.
 - {doc}`native_bash_api` — the same runner protocol from Bash.
 - {doc}`harvest` — turning finished jobs into stored results.
+- Running on a cluster — `tasks send` puts jobs on a computer, `tasks
+  start-manager` runs them there, and `tasks fetch` brings the finished ones
+  back into this workspace for `harvest`; see {doc}`workflow_cli`.
 - {doc}`taskmanager` and {doc}`workflow_cli` — running managers for real, and the
   complete command tree.
