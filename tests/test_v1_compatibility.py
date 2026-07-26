@@ -234,7 +234,7 @@ HT_TASK_BROKEN
     assert (workdir / "freeze-result").read_text(encoding="utf-8") == "frozen\n"
     assert not (workdir / "ht.nextstep").exists()
     state = workspace.read_state(marker)
-    assert state["failure"]["class"] == "declared_failure"
+    assert state["failure"]["code"] == "declared_failure"
 
 
 def test_v1_atomic_replay_is_idempotent(tmp_path: Path) -> None:

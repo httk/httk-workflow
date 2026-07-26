@@ -142,13 +142,13 @@ httk_workflow_succeed() {
 
 httk_workflow_fail() {
     local code=$1
-    local summary=$2
+    local message=$2
     shift 2
     local draft_args=()
     if [ -n "${HTTK_WORKFLOW_OUTCOME_DRAFT:-}" ]; then
         draft_args=(--draft "$HTTK_WORKFLOW_OUTCOME_DRAFT")
     fi
-    _httk_workflow_bridge fail "$code" "$summary" "${draft_args[@]}" "$@" || return
+    _httk_workflow_bridge fail "$code" "$message" "${draft_args[@]}" "$@" || return
     exit 0
 }
 

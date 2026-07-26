@@ -6,15 +6,18 @@ import fnmatch
 import hashlib
 import json
 import os
+import socket
 import stat
 import tempfile
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from httk.core import ed25519_public_key, ed25519_sign, ed25519_verify
 
-from ._util import json_bytes, sha256_file
+from ._util import json_bytes, retry_delay, sha256_file, timestamp_seconds, utc_now
 from .projects import (
     discover_project,
     project_exclusions,
@@ -24,6 +27,9 @@ from .projects import (
 from .workspace import WorkflowWorkspace
 
 _DOMAIN = b"httk-project-manifest-v2\0"
+
+MAINTENANCE_LOCK_FILE = "maintenance.lock"
+MAINTENANCE_LOCK_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 def _excluded(path: str, patterns: Sequence[str]) -> bool:
@@ -77,15 +83,149 @@ def _seed(project: Path) -> bytes:
     return seed
 
 
+@dataclass(frozen=True)
+class MaintenanceLock:
+    """Recorded holder of one workspace maintenance lock."""
+
+    path: Path
+    pid: int | None
+    hostname: str | None
+    created: str | None
+
+    @property
+    def age_seconds(self) -> float | None:
+        """Age of the lock, or ``None`` when its timestamp is unusable."""
+
+        if self.created is None:
+            return None
+        try:
+            return max(0.0, time.time() - timestamp_seconds(self.created))
+        except ValueError:
+            return None
+
+    @property
+    def local(self) -> bool:
+        """Whether the recorded host is the host inspecting the lock."""
+
+        return self.hostname is not None and self.hostname == socket.gethostname()
+
+    @property
+    def dead(self) -> bool:
+        """Whether a same-host holder process is known to be gone."""
+
+        if not self.local or self.pid is None or self.pid <= 0:
+            return False
+        try:
+            os.kill(self.pid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            # A live process owned by another user still holds the lock.
+            return False
+        return False
+
+    def is_stale(self, *, max_age_seconds: float = MAINTENANCE_LOCK_MAX_AGE_SECONDS) -> bool:
+        """Whether the lock can be reclaimed without operator confirmation."""
+
+        if self.pid is None or self.hostname is None or self.created is None:
+            return True
+        if self.dead:
+            return True
+        age = self.age_seconds
+        return age is None or age > max_age_seconds
+
+    def describe(self) -> str:
+        """Describe the holder for an operator diagnostic."""
+
+        who = "an unrecorded process" if self.pid is None else f"pid {self.pid}"
+        where = "an unrecorded host" if self.hostname is None else f"host {self.hostname}"
+        when = "an unrecorded time" if self.created is None else self.created
+        age = self.age_seconds
+        return f"{who} on {where} since {when}" + ("" if age is None else f" (age {age:.0f}s)")
+
+
+def _read_maintenance_lock(path: Path) -> MaintenanceLock | None:
+    """Describe an existing lock, retrying to distinguish races from damage."""
+
+    for attempt in range(4):
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        except (OSError, UnicodeError):
+            raw = ""
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError:
+            value = None
+        if isinstance(value, dict):
+            pid = value.get("pid")
+            hostname = value.get("hostname")
+            created = value.get("created")
+            return MaintenanceLock(
+                path=path,
+                pid=pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+                hostname=hostname if isinstance(hostname, str) and hostname else None,
+                created=created if isinstance(created, str) and created else None,
+            )
+        time.sleep(retry_delay(attempt))
+    # Legacy plain-pid content, truncation, or a foreign writer: reclaimable.
+    return MaintenanceLock(path=path, pid=None, hostname=None, created=None)
+
+
+def read_maintenance_lock(workspace: WorkflowWorkspace) -> MaintenanceLock | None:
+    """Describe the workspace maintenance lock, or ``None`` when it is absent."""
+
+    return _read_maintenance_lock(workspace.control / MAINTENANCE_LOCK_FILE)
+
+
+def _acquire_maintenance_lock(path: Path) -> None:
+    """Create the lock exclusively, reclaiming a provably stale predecessor."""
+
+    body = json_bytes({"created": utc_now(), "hostname": socket.gethostname(), "pid": os.getpid()}) + b"\n"
+    for _ in range(3):
+        try:
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            holder = _read_maintenance_lock(path)
+            if holder is not None and not holder.is_stale():
+                raise ValueError(
+                    "project maintenance is already in progress; the maintenance lock is held by "
+                    f"{holder.describe()}; release it with 'httk workflow workspace unlock' once that "
+                    "operation is known to be finished"
+                ) from None
+            path.unlink(missing_ok=True)
+            continue
+        try:
+            # One write keeps readers from ever observing a partial record.
+            os.write(descriptor, body)
+        finally:
+            os.close(descriptor)
+        return
+    raise ValueError(f"cannot acquire the project maintenance lock: {path}")
+
+
+def release_maintenance_lock(workspace: WorkflowWorkspace, *, force: bool = False) -> str:
+    """Remove a stale, or with *force* any, maintenance lock and report it."""
+
+    path = workspace.control / MAINTENANCE_LOCK_FILE
+    holder = read_maintenance_lock(workspace)
+    if holder is None:
+        return f"no maintenance lock is present: {path}"
+    stale = holder.is_stale()
+    if not stale and not force:
+        raise ValueError(f"maintenance lock is held by {holder.describe()}; rerun with --force to remove it anyway")
+    path.unlink(missing_ok=True)
+    return f"removed {'stale' if stale else 'live'} maintenance lock held by {holder.describe()}: {path}"
+
+
 @contextmanager
 def workspace_maintenance_guard(workspace: WorkflowWorkspace) -> Iterator[None]:
     """Fence manager launches while a project snapshot is inspected."""
 
-    path = workspace.control / "maintenance.lock"
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    path = workspace.control / MAINTENANCE_LOCK_FILE
+    _acquire_maintenance_lock(path)
     try:
-        with os.fdopen(descriptor, "w", encoding="ascii") as stream:
-            stream.write(f"{os.getpid()}\n")
         unresolved = list(workspace.scan_markers(("claimed", "running", "committing", "transferring")))
         if unresolved:
             states = ", ".join(f"{item.job_key}:{item.kind}" for item in unresolved)

@@ -10,7 +10,7 @@ httk workflow --help
 The complete tree is:
 
 ```text
-httk workflow workspace init|status|upgrade
+httk workflow workspace init|status|upgrade|unlock
 httk workflow job submit|request
 httk workflow manager run
 httk workflow v1 prepare|submit|run
@@ -58,6 +58,19 @@ domain-separated body digest is signed with Ed25519. Creation fences manager
 launches and refuses active work. Verification also recognizes the legacy
 `ht.project/manifest.bz2` format without changing it.
 
+The fence is `.httk-workflow/maintenance.lock`, holding the recording process
+identifier, hostname, and creation time. A lock whose same-host process is gone,
+whose content is unreadable, or that is older than twenty-four hours is
+reclaimed automatically; any other lock is reported with its holder. Operators
+can also clear one explicitly:
+
+```console
+httk workflow workspace unlock WORKSPACE
+httk workflow workspace unlock WORKSPACE --force
+```
+
+Without `--force` only a stale lock is removed.
+
 ## Computer adapters
 
 Computer definitions are versioned directories containing `computer.json` and
@@ -71,7 +84,16 @@ the module. Project definitions shadow global definitions. `NAME:QUEUE`
 selects an explicit queue; otherwise the project default and then `default`
 are tried. `computer import-v1` maps recognized legacy bundles by reading
 assignment-only configuration; legacy shell executables are never copied or
-run.
+run. Only `local` executes work today: `local-slurm` and `ssh-slurm` are
+refusing placeholders whose operations report an explicit error until batch and
+remote support lands.
+
+`computer configure --set KEY=VALUE` persists only the non-secret keys
+`account`, `host`, `legacy_settings`, `partition`, `port`, `reservation`,
+`time_limit`, `username`, and `workspace` in the shareable `computer.json`.
+Every other key is stored per queue in `credentials.json` with mode `0600`
+beside it, which project manifests exclude. Adapters receive both together as
+the request's `queue_settings`.
 
 ## Detached transfers
 
