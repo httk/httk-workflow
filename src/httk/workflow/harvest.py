@@ -46,7 +46,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote
 
-from ._util import require_mapping, require_string
+from ._util import read_json, require_mapping, require_string
 from .errors import FormatError
 from .introspection import (
     _job_of,
@@ -57,6 +57,7 @@ from .introspection import (
     job_frames,
 )
 from .models import (
+    JOB_STATE_DIRECTORY,
     STATE_KINDS,
     TERMINAL_KINDS,
     Failure,
@@ -66,6 +67,7 @@ from .models import (
     normalize_placement,
     parse_job_key,
     parse_package_runner,
+    validate_declaration_name,
     validate_failure,
     validate_label,
 )
@@ -437,9 +439,13 @@ class HarvestRecord:
     runner_steps: tuple[str, ...] | None
     #: The labeled children this job spawned, keyed by spawn label.
     children: Mapping[str, Mapping[str, object]]
-    #: Reserved: the verbatim OPTIMADE property declarations of a job attach here
-    #: in a later phase, once ``job.json`` carries them. Always empty today.
-    declarations: Mapping[str, object]
+    #: The workflow declarations of this job, carried verbatim and keyed by name.
+    #: Every name either source knows maps to ``{"declared": ..., "observed":
+    #: ...}``: what ``job.json`` declared before the job ran, and what the job
+    #: itself observed at run time, each ``None`` when that source has nothing.
+    #: The two are reported side by side and never merged — only a consumer that
+    #: understands the vocabulary may reconcile them.
+    declarations: Mapping[str, Mapping[str, Mapping[str, object] | None]]
     #: Reserved: the machine-readable self-description a runner prints for
     #: ``--describe`` attaches here in a later phase. Always ``None`` today.
     runner_description: Mapping[str, object] | None = None
@@ -491,7 +497,13 @@ class HarvestRecord:
             "runner_steps": None if self.runner_steps is None else list(self.runner_steps),
             "runner_description": None if self.runner_description is None else dict(self.runner_description),
             "children": {label: dict(child) for label, child in self.children.items()},
-            "declarations": dict(self.declarations),
+            "declarations": {
+                name: {
+                    "declared": None if entry.get("declared") is None else dict(entry["declared"] or {}),
+                    "observed": None if entry.get("observed") is None else dict(entry["observed"] or {}),
+                }
+                for name, entry in self.declarations.items()
+            },
         }
 
     @classmethod
@@ -521,7 +533,7 @@ class HarvestRecord:
             provenance={} if provenance is None else dict(require_mapping(provenance, "provenance")),
             runner_steps=_steps(value.get("runner_steps")),
             children=_children(value.get("children")),
-            declarations=dict(require_mapping(value.get("declarations", {}), "declarations")),
+            declarations=_declarations(value.get("declarations")),
             runner_description=None if not isinstance(description, Mapping) else dict(description),
         )
 
@@ -540,6 +552,61 @@ def _recorded_steps(value: object) -> tuple[str, ...] | None:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return None
     return tuple(item for item in value if isinstance(item, str) and item)
+
+
+def _declarations(value: object) -> dict[str, dict[str, Mapping[str, object] | None]]:
+    """Rebuild the declared/observed pairs :meth:`as_mapping` produced."""
+
+    mapping = require_mapping({} if value is None else value, "declarations")
+    result: dict[str, dict[str, Mapping[str, object] | None]] = {}
+    for name, entry in mapping.items():
+        declaration = validate_declaration_name(name, "declaration name")
+        item = require_mapping(entry, f"declarations.{declaration}")
+        result[declaration] = {
+            side: None if item.get(side) is None else dict(require_mapping(item[side], f"declarations.{name}.{side}"))
+            for side in ("declared", "observed")
+        }
+    return result
+
+
+def declarations_of(
+    job: JobDefinition, payload: Path
+) -> tuple[dict[str, dict[str, Mapping[str, object] | None]], bool]:
+    """Return the declarations of one job and whether any observed one is lost.
+
+    Every name either source knows appears exactly once. ``declared`` is the
+    document ``job.json`` carried, and ``observed`` is the runtime-refined one
+    the job wrote below ``.httk-job/declarations/``; both are carried verbatim
+    and reported side by side, because merging them would require understanding
+    a vocabulary this module deliberately does not implement. An observed
+    document that cannot be read is reported as ``None`` with the damage flag
+    set, exactly like every other unreadable evidence a harvest still reports.
+    """
+
+    result: dict[str, dict[str, Mapping[str, object] | None]] = {
+        name: {"declared": dict(document), "observed": None} for name, document in sorted(job.declarations.items())
+    }
+    damaged = False
+    directory = payload / JOB_STATE_DIRECTORY / "declarations"
+    try:
+        stored = sorted(item for item in directory.glob("*.json") if item.is_file())
+    except OSError as exc:
+        _LOGGER.warning("cannot list the observed declarations of %s: %s", job.job_key, exc)
+        return result, True
+    for path in stored:
+        try:
+            name = validate_declaration_name(path.name.removesuffix(".json"), "declaration name")
+        except FormatError as exc:
+            _LOGGER.warning("ignoring the observed declaration %s of %s: %s", path.name, job.job_key, exc)
+            damaged = True
+            continue
+        entry = result.setdefault(name, {"declared": None, "observed": None})
+        try:
+            entry["observed"] = read_json(path)
+        except FormatError as exc:
+            _LOGGER.warning("cannot read the observed declaration %s of %s: %s", name, job.job_key, exc)
+            damaged = True
+    return result, damaged
 
 
 def _children(value: object) -> dict[str, Mapping[str, object]]:
@@ -577,6 +644,9 @@ def record_of(workspace: WorkflowWorkspace, marker: Marker) -> HarvestRecord | N
         provenance["gaps"] = True
     payload_path = marker.placement / marker.job_key
     workdir = _workdir_relative(job, state)
+    declarations, declarations_damaged = declarations_of(job, workspace.payload_path(marker.placement, marker.job_key))
+    if declarations_damaged:
+        provenance["gaps"] = True
     return HarvestRecord(
         workspace_root=workspace.root,
         workspace_id=workspace.workspace_id,
@@ -594,9 +664,7 @@ def record_of(workspace: WorkflowWorkspace, marker: Marker) -> HarvestRecord | N
         provenance=provenance,
         runner_steps=_recorded_steps(state.get("runner_steps")),
         children=children_of(frames),
-        # The protocol has no declarations member yet: verbatim OPTIMADE property
-        # declarations of a job attach here once job.json carries them.
-        declarations={},
+        declarations=declarations,
     )
 
 

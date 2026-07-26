@@ -78,6 +78,10 @@ MAXIMUM_JOURNAL_SEGMENT_BYTES = 1 << 40
 # Inputs describe one job; bulk data belongs in the payload or in transactional
 # data, so a small bound keeps job.json readable and cheap to digest.
 MAXIMUM_INPUTS_BYTES = 262144
+# The serialized budget of the optional ``declarations`` object, which gets its
+# own allowance of exactly the same size as ``inputs`` for exactly the same
+# reason: a declaration describes one job, it is not a place for bulk content.
+MAXIMUM_DECLARATIONS_BYTES = 262144
 
 _UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _TAG_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
@@ -85,6 +89,10 @@ _MARKER_PATTERN = re.compile(
     r"(?P<job_key>.+)\.p(?P<priority>[0-9]{3})\.g(?P<generation>[0-9a-z]+)\.(?P<record_ref>init|w[0-9a-f]{32}-s[0-9a-z]+-o[0-9a-z]+-l[0-9a-z]+-h[0-9a-f]{32})"
 )
 _LABEL_PATTERN = _TAG_PATTERN
+# A declaration name is also one file basename below ``.httk-job/declarations/``,
+# so it stays within the same conservative character set as every other name the
+# protocol coins, plus the underscore the property vocabularies use.
+_DECLARATION_NAME_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 _FAILURE_MEMBERS = frozenset({"code", "message", "details", "retryable"})
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _MODULE_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
@@ -159,6 +167,49 @@ def validate_inputs(value: object, name: str = "inputs") -> dict[str, object]:
             "put bulk content in the job payload or in transactional data instead"
         )
     return dict(mapping)
+
+
+def validate_declaration_name(value: object, name: str = "declaration name") -> str:
+    """Validate one declaration name of a job.
+
+    The name keys the ``declarations`` object of ``job.json`` and is also the
+    basename of the runtime-refined document below ``.httk-job/declarations/``,
+    so it must be a safe single path component and nothing else.
+    """
+
+    text = require_string(value, name)
+    if not _DECLARATION_NAME_PATTERN.fullmatch(text) or ".." in text:
+        raise FormatError(f"{name} has invalid component syntax")
+    return text
+
+
+def validate_declarations(value: object, name: str = "declarations") -> dict[str, dict[str, object]]:
+    """Validate the optional ``declarations`` object of a job.
+
+    Each member is one workflow-declaration document carried verbatim: the
+    protocol checks that a declaration is a JSON object and never looks inside
+    it, because what the members mean is owned by the vocabulary the document
+    names itself — the OPTIMADE workflow-declaration work is standardizing
+    exactly that, and an engine that reinterpreted it would only be able to
+    disagree with it. The bytes live in ``job.json`` and are therefore covered
+    by the immutable job digest like every other member.
+    """
+
+    mapping = require_mapping(value, name)
+    result: dict[str, dict[str, object]] = {}
+    for key, document in mapping.items():
+        declaration = validate_declaration_name(key, f"{name} key")
+        result[declaration] = dict(require_mapping(document, f"{name}.{declaration}"))
+    try:
+        size = len(json_bytes(result))
+    except (TypeError, ValueError) as exc:
+        raise FormatError(f"{name} must contain only JSON values: {exc}") from exc
+    if size > MAXIMUM_DECLARATIONS_BYTES:
+        raise FormatError(
+            f"{name} serializes to {size} bytes, which exceeds the {MAXIMUM_DECLARATIONS_BYTES}-byte limit; "
+            "a declaration describes one job, so bulk content belongs in the payload or in transactional data"
+        )
+    return result
 
 
 def validate_sha256(value: object, name: str) -> str:
@@ -814,6 +865,8 @@ class JobDefinition:
     retry_policy: RetryPolicy
     resources: Mapping[str, object]
     inputs: Mapping[str, object]
+    #: The workflow declarations of this job, carried verbatim, keyed by name.
+    declarations: Mapping[str, Mapping[str, object]]
     parent: Mapping[str, object] | None
     raw: Mapping[str, object]
     stored_digest: str | None = None
@@ -905,6 +958,8 @@ class JobDefinition:
         resources = require_mapping(value.get("resources", {}), "resources")
         inputs_raw = value.get("inputs")
         inputs = {} if inputs_raw is None else validate_inputs(inputs_raw)
+        declarations_raw = value.get("declarations")
+        declarations = {} if declarations_raw is None else validate_declarations(declarations_raw)
         parent_raw = value.get("parent")
         parent = None if parent_raw is None else require_mapping(parent_raw, "parent")
         return cls(
@@ -927,6 +982,7 @@ class JobDefinition:
             retry_policy=RetryPolicy.from_mapping(value.get("retry_policy", {})),
             resources=dict(resources),
             inputs=inputs,
+            declarations=declarations,
             parent=None if parent is None else dict(parent),
             raw=dict(value),
         )

@@ -47,6 +47,7 @@ carries the same switch on the leaf that acts on it, so both spellings work.
 httk workflow workspace  init | status | policy show | policy set | fsck | gc | upgrade | unlock
 httk workflow runner     publish | describe
 httk workflow job        new | submit | request | list | show | log | why | debug
+httk workflow import     pwd | cwl
 httk workflow harvest
 httk workflow manager    run
 httk workflow v1         prepare | submit | run
@@ -90,6 +91,20 @@ httk workflow remote     send | fetch | offer | retire | start-manager | status
 | `job debug WORKSPACE JOB` | drive one job to a terminal state, in front of you | `--step`, `--placement`, `--follow-children`, `--timeout`, `--log-level` |
 
 `JOB` is a job UUID, a `tag--uuid` job key, or any unique prefix of either.
+
+### `import` — workflows written in another language
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `import pwd WORKSPACE DOCUMENT` | import one Python Workflow Definition document as one job | `--module`, `--module-path`, `--input`, `--allow-module`, `--attempts`, `--allow-unknown-version`, `--placement`, `--tag`, `--name`, `--priority`, `--data-mode`, `--json` |
+| `import cwl WORKSPACE WORKFLOW INPUTS` | import one CWL workflow or command-line tool as one job | `--placement`, `--tag`, `--name`, `--priority`, `--data-mode`, `--json` |
+
+Both print one tab-separated `job_key<TAB>payload` line, or a JSON report with
+`--json`, exactly as `job new` does. Importing is one way, and neither writes a
+runner file: the job references the packaged runner of the format through the
+reserved installed form. `import cwl` needs `pip install httk-workflow[cwl]` on
+the machine that imports, and nothing extra on the machine that runs the result.
+See {doc}`importing_workflows`.
 
 ### `harvest` — the finished jobs, as records
 
@@ -240,6 +255,22 @@ tab-separated `job_key<TAB>payload` line per job, or `--json` reports. The runne
 file is published into the workspace runner store and pinned by digest unless
 `--publish installed` names a packaged runner where it is installed. See
 {doc}`quickstart`.
+
+## Importing workflows written elsewhere
+
+A Python Workflow Definition document or a CWL document becomes one job without
+being rewritten:
+
+```console
+httk workflow import pwd WORKSPACE workflow.json --module workflow.py --tag arithmetic
+httk workflow import cwl WORKSPACE flow.cwl job.yml --tag echo --data-mode transactional
+```
+
+The imported job runs on httk's own runner and manager — no other engine is
+invoked, and `cwltool` is neither used nor bundled — and it is claimed, retried,
+journalled and harvested like every other job. {doc}`importing_workflows`
+documents both formats, the supported CWL subset, everything that is refused and
+why, and what running a PWD document means for security.
 
 ## Inspecting and debugging jobs
 
