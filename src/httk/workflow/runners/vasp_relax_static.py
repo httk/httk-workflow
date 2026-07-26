@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+"""One relaxation followed by one static calculation, chained in one job.
+
+The five steps are the whole workflow: ``prepare`` and ``run`` are the relaxation,
+``promote`` archives the relaxation, makes its CONTCAR the new structure, and
+re-derives the inputs for a single point, ``static`` runs that single point, and
+``collect`` publishes both stages — the relaxation under ``relax/`` and the single
+point under ``static/``.
+
+This is the *httk* v1 formation-energy template without its database half: a
+formation energy is assembled at harvest time from the total energies of several
+such jobs and the elemental references they are compared against, which is an
+analysis over finished jobs rather than a step of one job. What this runner
+guarantees is the pair of numbers that assembly needs — one relaxed structure and
+one total energy of it, both with the evidence of how they were produced.
+
+Both stages share one job: one remedy budget, one remedy ladder, one workdir. The
+job inputs are documented in :mod:`httk.workflow.runners`. Nothing here imports
+anything but an installed *httk-workflow*, so this one file is the whole runner:
+reference it as ``pkg:httk.workflow.runners/vasp_relax_static.py``, publish it to a
+workspace runner store, or copy it and edit it.
+"""
+
+import os
+import shlex
+import shutil
+import sys
+from collections.abc import Mapping
+from dataclasses import replace
+from pathlib import Path
+
+try:
+    from httk.workflow import (
+        Attempt,
+        Runner,
+        VaspPreparationOptions,
+        apply_vasp_remedy,
+        clean_vasp_outputs,
+        contcar_to_poscar,
+        job_remedy_history_path,
+        last_oszicar_energy,
+        plan_vasp_remedy,
+        prepare_vasp_inputs,
+        rattle_poscar,
+        run_vasp,
+        validate_vasp_workdir,
+    )
+except ModuleNotFoundError:  # pragma: no cover - interpreter bootstrap
+    # The manager launches this file directly, so the interpreter is whatever the
+    # shebang found on PATH, which on a cluster is not necessarily the one httk is
+    # installed in. HTTK_WORKFLOW_PYTHON is the interpreter the manager itself runs,
+    # so re-exec under it once and let a second failure be reported honestly.
+    _python = os.environ.get("HTTK_WORKFLOW_PYTHON")
+    if _python is None or os.environ.get("HTTK_WORKFLOW_RUNNER_BOOTSTRAP") == "1":
+        raise
+    os.environ["HTTK_WORKFLOW_RUNNER_BOOTSTRAP"] = "1"
+    os.execv(_python, [_python, os.path.abspath(__file__), *sys.argv[1:]])
+
+WORKFLOW = "httk.vasp.relax-static"
+#: What makes the second stage a single point: no ionic step, and no ionic loop.
+DEFAULT_STATIC_TAGS: dict[str, object] = {"IBRION": -1, "NSW": 0}
+#: Where the relaxation is archived inside the workdir before it is overwritten.
+RELAX_ARCHIVE = "relax"
+DEFAULT_COLLECT = "INCAR KPOINTS OUTCAR CONTCAR OSZICAR vasprun.xml vasp-run-report.json POTCAR.provenance.json"
+DEFAULT_TIMEOUT = 86400.0
+DEFAULT_MAXIMUM_REMEDIES = 8
+# Kept across a remedied rerun because they are what makes the rerun cheaper, and
+# because VASP overwrites them itself when it reuses them.
+KEEP_BETWEEN_RUNS = ("WAVECAR", "CHGCAR", "CHG")
+
+run = Runner(WORKFLOW)
+
+
+def text_input(a: Attempt, name: str, default: str) -> str:
+    """Return one string input, refusing a value of another type."""
+
+    value = a.input(name, default)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"job input {name!r} must be a string, not {type(value).__name__}")
+    return value
+
+
+def number_input(a: Attempt, name: str, default: float | None) -> float | None:
+    """Return one numeric input, refusing a value of another type."""
+
+    value = a.input(name, default)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"job input {name!r} must be a number, not {type(value).__name__}")
+    return float(value)
+
+
+def tags_input(a: Attempt, name: str) -> dict[str, object]:
+    """Return one INCAR tag object input."""
+
+    value = a.input(name, {})
+    if not isinstance(value, Mapping):
+        raise ValueError(f"job input {name!r} must be an object of INCAR tags")
+    return {str(tag): item for tag, item in value.items()}
+
+
+def names_input(a: Attempt, name: str, default: str) -> tuple[str, ...]:
+    """Return one space-separated list input as a tuple of file names."""
+
+    return tuple(text_input(a, name, default).split())
+
+
+def state_int(a: Attempt, name: str) -> int:
+    """Return one nonnegative integer job-state counter, absent meaning zero."""
+
+    value = a.state.get(name, 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def preparation_options(a: Attempt, *, library: str | None) -> VaspPreparationOptions:
+    """Build the preparation options this job's inputs describe."""
+
+    parallel_tag = text_input(a, "parallel_tag", "") or None
+    parallel_value = number_input(a, "parallel_value", None)
+    return VaspPreparationOptions(
+        kpoint_density=number_input(a, "kpoint_density", 20.0) or 20.0,
+        centering=text_input(a, "centering", VaspPreparationOptions.centering),
+        accuracy_per_atom=number_input(a, "accuracy_per_atom", 0.001),
+        pseudopotential_library=library,
+        parallel_tag=parallel_tag,
+        parallel_value=None if parallel_value is None else int(parallel_value),
+        incar_tags=tags_input(a, "incar_tags"),
+    )
+
+
+def stage_inputs(a: Attempt, *, extra_tags: Mapping[str, object] | None = None) -> dict[str, object] | None:
+    """Stage the payload inputs into the workdir and derive the rest.
+
+    Returns the preparation record, or ``None`` after publishing the failure of a
+    job whose starting structure is not where its inputs say it is.
+    """
+
+    validate_vasp_workdir(a.workdir)
+    poscar = a.payload / text_input(a, "poscar", "files/POSCAR")
+    if not poscar.is_file():
+        a.fail(
+            "vasp.input_missing",
+            f"the starting structure {poscar.name} is not in this payload",
+            details={"expected": str(poscar)},
+        )
+        return None
+    shutil.copyfile(poscar, a.workdir / "POSCAR")
+    incar = a.payload / text_input(a, "incar", "files/INCAR")
+    if incar.is_file():
+        shutil.copyfile(incar, a.workdir / "INCAR")
+    else:
+        # Everything an INCAR needs is derived below, so an absent one is a valid
+        # starting point rather than a reason to refuse the job.
+        (a.workdir / "INCAR").write_text("", encoding="utf-8")
+    potcar = a.payload / text_input(a, "potcar", "files/POTCAR")
+    library: str | None = text_input(a, "pseudopotential_library", "") or None
+    if potcar.is_file():
+        shutil.copyfile(potcar, a.workdir / "POTCAR")
+        library = None
+    options = preparation_options(a, library=library)
+    if extra_tags:
+        options = replace(options, incar_tags={**extra_tags, **options.incar_tags})
+    record = prepare_vasp_inputs(options, directory=a.workdir)
+    a.log.append("note", f"prepared a {WORKFLOW} calculation")
+    return record
+
+
+def vasp_argv(a: Attempt) -> tuple[str, ...]:
+    """Return the VASP command as an argv array, deployment first.
+
+    ``HTTK_VASP_COMMAND`` is deployment state, so it wins over the job's own
+    ``vasp_command``: one machine's ``srun -n 32 vasp_std`` is not something a job
+    submitted somewhere else can know.
+    """
+
+    text = os.environ.get("HTTK_VASP_COMMAND") or text_input(a, "vasp_command", "")
+    return tuple(shlex.split(text))
+
+
+def execute(a: Attempt, *, next_step: str) -> None:
+    """Run VASP once and publish what its classified result means.
+
+    Exactly one outcome is published: the next step when the calculation
+    completed, another attempt when a remedy was applied, and ``vasp.failed`` when
+    the ladder has nothing left to try.
+    """
+
+    argv = vasp_argv(a)
+    if not argv:
+        a.fail(
+            "vasp.command_missing",
+            "no VASP command is configured: set HTTK_VASP_COMMAND on the machine that runs this job, "
+            "or give the job a vasp_command input",
+        )
+        return
+    history = job_remedy_history_path(a.payload)
+    # A rerun must not read the previous run's outputs. CONTCAR and the run report
+    # survive on purpose: they are what a remedy and a restart are derived from.
+    clean_vasp_outputs(a.workdir, keep=KEEP_BETWEEN_RUNS)
+    report = run_vasp(
+        argv,
+        directory=a.workdir,
+        timeout=number_input(a, "timeout", DEFAULT_TIMEOUT),
+    )
+    a.log.append("note", f"VASP {report.classification}")
+    energy = last_oszicar_energy(a.workdir / "OSZICAR") if (a.workdir / "OSZICAR").is_file() else None
+    state: dict[str, object] = {"classification": report.classification}
+    if energy is not None:
+        state["energy"] = energy
+    if report.classification == "completed":
+        a.advance(next_step, state=state)
+        return
+    applied = state_int(a, "remedies")
+    maximum = int(number_input(a, "maximum_remedies", DEFAULT_MAXIMUM_REMEDIES) or 0)
+    # The decision is planned before the budget is consulted so that a job which
+    # stops here says which remedy it would have applied, and why the ladder ended.
+    try:
+        decision = plan_vasp_remedy(
+            report.diagnostics,
+            directory=a.workdir,
+            history_path=history,
+            policy=text_input(a, "remedy_policy", "reviewed-v1"),
+        )
+    except ValueError as exception:
+        # An unregistered policy or an unusable history is a job that cannot be
+        # remedied, not a runner that should die of an exception.
+        a.state.merge(state)
+        a.fail("vasp.failed", f"planning a VASP remedy failed: {exception}")
+        return
+    if decision.give_up or applied >= maximum:
+        message = (
+            f"VASP {report.classification} after {applied} remedies"
+            if applied >= maximum
+            else f"VASP {report.classification} with no remaining remedy"
+        )
+        a.state.merge(state)
+        a.fail("vasp.failed", message, details=decision.as_mapping())
+        return
+    apply_vasp_remedy(decision, directory=a.workdir, history_path=history)
+    amplitude = number_input(a, "rattle_amplitude", 0.0) or 0.0
+    if amplitude > 0:
+        # The entropy is the attempt itself, so the perturbation is reproducible
+        # and no two attempts of this job rattle the same way.
+        rattle_poscar(
+            a.workdir / "POSCAR",
+            amplitude=amplitude,
+            entropy=f"{a.context.job_key}:{a.context.attempt_ordinal}",
+        )
+    state["remedies"] = applied + 1
+    a.state.merge(state)
+    a.log.append("note", f"applied a remedy for {decision.problem}")
+    a.retry(f"applied the {decision.policy} remedy for {decision.problem}")
+
+
+def publish(a: Attempt, *, prefix: str, directory: Path | None = None) -> None:
+    """Publish the collected files of one finished calculation stage."""
+
+    root = a.workdir if directory is None else directory
+    names = names_input(a, "collect", DEFAULT_COLLECT)
+    published: list[str] = []
+    for name in names:
+        source = root / name
+        if not source.is_file():
+            continue
+        if a.context.data_generation is not None:
+            a.put(source, f"{prefix}/{name}")
+        published.append(name)
+    if a.context.data_generation is None:
+        # Without transactional data the persistent workdir *is* the result, so
+        # nothing is copied and nothing is deleted.
+        a.log.append("note", f"kept in the workdir: {', '.join(published) or 'nothing'}")
+    else:
+        a.log.append("note", f"published to data/{prefix}: {', '.join(published) or 'nothing'}")
+
+
+@run.step
+def prepare(a: Attempt) -> None:
+    """Stage the payload inputs, derive the rest, and go on to relax."""
+
+    record = stage_inputs(a)
+    if record is not None:
+        a.advance("run")
+
+
+@run.step(name="run")
+def run_step(a: Attempt) -> None:
+    """Relax, remedy a recognized failure, or fail with what was diagnosed."""
+
+    execute(a, next_step="promote")
+
+
+@run.step
+def promote(a: Attempt) -> None:
+    """Archive the relaxation, adopt its CONTCAR, and derive the static inputs."""
+
+    contcar = a.workdir / "CONTCAR"
+    if not contcar.is_file() or not contcar.read_text(encoding="utf-8", errors="replace").strip():
+        a.fail(
+            "vasp.no_relaxed_structure",
+            "the relaxation completed without leaving a CONTCAR to run statically",
+        )
+        return
+    archive = a.workdir / RELAX_ARCHIVE
+    archive.mkdir(exist_ok=True)
+    for name in names_input(a, "collect", DEFAULT_COLLECT):
+        source = a.workdir / name
+        if source.is_file():
+            shutil.copyfile(source, archive / name)
+    # The relaxed cell is the structure of the single point, and the reference
+    # POSCAR only lends it its comment line, which carries the MAGMOM override.
+    contcar_to_poscar(contcar, reference=a.workdir / "POSCAR", output=a.workdir / "POSCAR")
+    options = replace(
+        preparation_options(a, library=None),
+        incar_tags={
+            **(tags_input(a, "static_incar_tags") or DEFAULT_STATIC_TAGS),
+            **tags_input(a, "incar_tags"),
+        },
+    )
+    # Re-derived rather than reused: the relaxed cell has its own k-point grid and
+    # its own convergence budget. Tags the relaxation already fixed — NBANDS,
+    # MAGMOM — are left exactly as they were, because they are already explicit.
+    prepare_vasp_inputs(options, directory=a.workdir)
+    relaxed = a.state.get("energy")
+    a.log.append("note", "promoted the relaxed structure to a static calculation")
+    a.advance("static", state={"relax_energy": relaxed, "relax_classification": a.state.get("classification")})
+
+
+@run.step
+def static(a: Attempt) -> None:
+    """Run the single point, remedy a recognized failure, or fail."""
+
+    execute(a, next_step="collect")
+
+
+@run.step
+def collect(a: Attempt) -> None:
+    """Publish both stages and complete the job."""
+
+    prefix = text_input(a, "data_prefix", "")
+    publish(a, prefix=f"{prefix}/static" if prefix else "static")
+    publish(
+        a,
+        prefix=f"{prefix}/{RELAX_ARCHIVE}" if prefix else RELAX_ARCHIVE,
+        directory=a.workdir / RELAX_ARCHIVE,
+    )
+    a.state["static_energy"] = a.state.get("energy")
+    a.succeed()
+
+
+if __name__ == "__main__":
+    raise SystemExit(run.main())

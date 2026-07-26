@@ -171,7 +171,11 @@ def test_vasp_remedy_is_planned_then_explicitly_applied(tmp_path: Path) -> None:
     (tmp_path / "INCAR").write_text("ISPIN = 2\nISYM = 2\n", encoding="utf-8")
     (tmp_path / "KPOINTS").write_text("mesh\n0\nMonkhorst-Pack\n3 4 5\n0 0 0\n", encoding="utf-8")
     diagnostic = Diagnostic("kpoints_class", "error", "mismatch", "stdout")
-    decision = plan_vasp_remedy((diagnostic,), history_path=tmp_path / ".httk-vasp" / "remedies.json")
+    decision = plan_vasp_remedy(
+        (diagnostic,),
+        directory=tmp_path,
+        history_path=tmp_path / ".httk-vasp" / "remedies.json",
+    )
     assert not decision.give_up
     assert decision.changes == (("bump_kpoints", 1),)
     apply_vasp_remedy(decision, directory=tmp_path)
@@ -185,8 +189,12 @@ def test_vasp_remedy_is_planned_then_explicitly_applied(tmp_path: Path) -> None:
 def test_vasp_zpotrf_remedy_is_bounded_and_rounds_bands(tmp_path: Path) -> None:
     _poscar(tmp_path / "POSCAR")
     (tmp_path / "INCAR").write_text("NBANDS = 10\nNPAR = 4\n", encoding="utf-8")
+    # Planning validates every rung against the real directory, so the KPOINTS the
+    # second rung modifies has to be staged for that rung to be proposed at all.
+    (tmp_path / "KPOINTS").write_text("mesh\n0\nMonkhorst-Pack\n3 3 3\n0 0 0\n", encoding="utf-8")
     decision = plan_vasp_remedy(
         (Diagnostic("zpotrf", "fatal", "factorization failed", "stdout"),),
+        directory=tmp_path,
         history_path=tmp_path / ".httk-vasp" / "remedies.json",
     )
     assert not decision.give_up
@@ -196,6 +204,7 @@ def test_vasp_zpotrf_remedy_is_bounded_and_rounds_bands(tmp_path: Path) -> None:
 
     second = plan_vasp_remedy(
         (Diagnostic("zpotrf", "fatal", "factorization failed", "stdout"),),
+        directory=tmp_path,
         history_path=tmp_path / ".httk-vasp" / "remedies.json",
     )
     assert second.changes == (("bump_kpoints", 1),)

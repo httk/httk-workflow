@@ -117,9 +117,19 @@ copybutton_prompt_is_regexp = True
 
 suppress_warnings = ["myst.xref_missing", "autoapi.python_import_resolution"]
 
+# Names that a submodule and a re-export of the package share. The Python domain
+# holds one object per fully qualified name, so documenting both
+# ``httk.workflow.harvest`` the module and ``httk.workflow.harvest`` the function
+# the package re-exports is a duplicate. The module page documents the function
+# in full, so the re-export is what gets dropped from the package page.
+shadowed_by_module = {"httk.workflow.harvest"}
+
+
 def skip_member(app, what, name, obj, skip, options):
     # Skip private members (those starting with _)
     if name.startswith('_'):
+        return True
+    if what != "module" and name in shadowed_by_module:
         return True
     return skip
 

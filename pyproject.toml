@@ -90,6 +90,12 @@ namespaces = true
   "adapter_templates/*/start-manager",
   "adapter_templates/*/status",
 ]
+# The Python runners are modules of the package and ship with it; the Bash runner
+# beside them is data, and a job referencing pkg:httk.workflow.runners/... needs it
+# installed exactly like the shell libraries above.
+"httk.workflow.runners" = [
+  "*.sh",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
