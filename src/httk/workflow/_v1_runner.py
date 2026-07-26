@@ -435,7 +435,7 @@ def main() -> int:
             context,
             job,
             action="fail",
-            failure={"class": "declared_failure", "summary": "legacy task declared ht_broken"},
+            failure={"code": "declared_failure", "message": "legacy task declared ht_broken"},
             priority=priority,
             attempts=arguments.attempts,
         )
@@ -467,8 +467,8 @@ def main() -> int:
             job,
             action="fail",
             failure={
-                "class": "retry_exhausted",
-                "summary": "legacy manager attempt limit exceeded",
+                "code": "retry_exhausted",
+                "message": "legacy manager attempt limit exceeded",
             },
             priority=priority,
             attempts=arguments.attempts,
@@ -538,7 +538,7 @@ def main() -> int:
             context,
             job,
             action="fail",
-            failure={"class": "declared_failure", "summary": "legacy task returned exit status 4"},
+            failure={"code": "declared_failure", "message": "legacy task returned exit status 4"},
             priority=priority,
             attempts=arguments.attempts,
         )
@@ -555,7 +555,7 @@ def main() -> int:
             context,
             job,
             action="fail",
-            failure={"class": "timeout", "summary": "legacy task exceeded its manager timeout"},
+            failure={"code": "timeout", "message": "legacy task exceeded its manager timeout"},
             priority=priority,
             attempts=arguments.attempts,
         )
@@ -566,9 +566,9 @@ def main() -> int:
             job,
             action="fail",
             failure={
-                "class": "process_failure",
-                "summary": f"legacy task returned undefined exit status {result}",
-                "exit_status": result,
+                "code": "process_failure",
+                "message": f"legacy task returned undefined exit status {result}",
+                "details": {"exit_status": result},
             },
             priority=priority,
             attempts=arguments.attempts,

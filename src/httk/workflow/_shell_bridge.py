@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
 from ._util import read_json, sha256_file, tree_digest, write_json_atomic
-from .models import validate_label
+from .models import Failure, validate_label
 from .runtime import AttemptRuntime
 from .runtime_builders import (
     JobSpec,
@@ -112,7 +112,7 @@ def _parser() -> argparse.ArgumentParser:
     succeed.add_argument("--draft")
     fail = commands.add_parser("fail")
     fail.add_argument("code")
-    fail.add_argument("summary")
+    fail.add_argument("message")
     fail.add_argument("--details")
     fail.add_argument("--draft")
     retry = commands.add_parser("retry")
@@ -424,10 +424,12 @@ def _command(arguments: argparse.Namespace) -> int:
     elif command == "succeed":
         _builder(arguments.draft).publish("succeed")
     elif command == "fail":
-        failure: dict[str, object] = {"code": arguments.code, "summary": arguments.summary}
-        if arguments.details:
-            failure["details"] = read_json(Path(arguments.details))
-        _builder(arguments.draft).publish("fail", failure=failure)
+        failure = Failure(
+            arguments.code,
+            arguments.message,
+            details=None if not arguments.details else read_json(Path(arguments.details)),
+        )
+        _builder(arguments.draft).publish("fail", failure=failure.as_mapping())
     elif command == "retry":
         _builder(arguments.draft).publish("retry", retry={"reason": arguments.reason})
     elif command == "pause":

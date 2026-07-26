@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Self
 
 from ._util import read_json
+from .models import Failure
 from .runtime_builders import (
     JoinSpec,
     OutcomeBuilder,
@@ -276,17 +277,20 @@ class AttemptRuntime:
 
     def fail(
         self,
-        error_class: str,
+        code: str,
         message: str,
         *,
         details: Mapping[str, object] | None = None,
+        retryable: bool = False,
     ) -> Path:
-        """Publish a structured terminal failure."""
+        """Publish a structured terminal failure.
 
-        failure: dict[str, object] = {"class": error_class, "message": message}
-        if details is not None:
-            failure["details"] = dict(details)
-        return self.publish("fail", failure=failure)
+        ``retryable`` is advisory evidence for an operator or a later report.
+        Manager retry policy is keyed on ``code`` through ``retry_on``.
+        """
+
+        failure = Failure(code, message, details=details, retryable=retryable)
+        return self.publish("fail", failure=failure.as_mapping())
 
     def retry(self, reason: str) -> Path:
         """Request another attempt of the current activation."""
@@ -301,10 +305,22 @@ class AttemptRuntime:
     def wait(
         self,
         next_step: str,
-        join: JoinSpec,
+        outcome: OutcomeBuilder,
         *,
+        join: JoinSpec | None = None,
         priority: int | None = None,
     ) -> Path:
-        """Wait for an explicit child set before starting *next_step*."""
+        """Wait for the children of *outcome* before starting *next_step*.
 
-        return self.outcome().publish("wait", next_step=next_step, join=join, priority=priority)
+        A join is resolvable only when the manager registers the children named
+        by it, and children are registered from the very outcome bundle that
+        publishes the wait. The wait therefore must be published through the
+        builder that holds those children, never through a fresh childless one.
+        Omit *join* for the default ``all_succeeded`` condition over exactly
+        ``outcome.children``, or pass a :class:`~httk.workflow.JoinSpec` to select another
+        condition.
+        """
+
+        if outcome.runtime is not self:
+            raise ValueError("outcome builder belongs to a different attempt runtime")
+        return outcome.publish("wait", next_step=next_step, join=join, priority=priority)

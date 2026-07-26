@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._util import write_json_atomic
 from .configuration import data_home
 from .projects import discover_project, read_project
 
@@ -24,6 +25,25 @@ ADAPTER_OPERATIONS = (
     "pull",
     "start-manager",
     "status",
+)
+
+CREDENTIALS_FILE = "credentials.json"
+
+#: Queue settings that may be persisted in the signed, shareable
+#: ``computer.json``. Everything else is treated as a credential and is written
+#: to the manifest-excluded ``credentials.json`` instead.
+PERSISTABLE_QUEUE_SETTINGS = frozenset(
+    {
+        "account",
+        "host",
+        "legacy_settings",
+        "partition",
+        "port",
+        "reservation",
+        "time_limit",
+        "username",
+        "workspace",
+    }
 )
 
 
@@ -176,6 +196,54 @@ def add_computer(
     return destination
 
 
+def split_settings(settings: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    """Partition ``--set`` values into persistable settings and credentials."""
+
+    persistable = {key: value for key, value in settings.items() if key in PERSISTABLE_QUEUE_SETTINGS}
+    credentials = {key: value for key, value in settings.items() if key not in PERSISTABLE_QUEUE_SETTINGS}
+    return persistable, credentials
+
+
+def read_credentials(bundle: str | os.PathLike[str], queue: str) -> dict[str, Any]:
+    """Read queue-scoped credentials that never enter a project manifest."""
+
+    path = Path(bundle).expanduser().resolve() / CREDENTIALS_FILE
+    if not path.is_file():
+        return {}
+    scoped = _read_object(path).get(queue)
+    return dict(scoped) if isinstance(scoped, Mapping) else {}
+
+
+def store_credentials(
+    bundle: str | os.PathLike[str],
+    queue: str,
+    settings: Mapping[str, str],
+) -> Path:
+    """Merge *settings* into the queue-scoped, manifest-excluded credentials."""
+
+    root = Path(bundle).expanduser().resolve()
+    path = root / CREDENTIALS_FILE
+    document = _read_object(path) if path.is_file() else {}
+    scoped = document.get(queue)
+    merged: dict[str, Any] = dict(scoped) if isinstance(scoped, Mapping) else {}
+    merged.update(settings)
+    document[queue] = merged
+    write_json_atomic(path, document)
+    os.chmod(path, 0o600)
+    return path
+
+
+def queue_settings(bundle: str | os.PathLike[str], queue: str) -> dict[str, Any]:
+    """Return persisted queue settings with credentials merged back in."""
+
+    root = Path(bundle).expanduser().resolve()
+    queues = _read_object(root / "computer.json").get("queues", {})
+    scoped = queues.get(queue) if isinstance(queues, Mapping) else None
+    settings: dict[str, Any] = dict(scoped) if isinstance(scoped, Mapping) else {}
+    settings.update(read_credentials(root, queue))
+    return settings
+
+
 _LEGACY_SETTING = re.compile(r"[A-Z][A-Z0-9_]*")
 
 
@@ -290,11 +358,15 @@ def run_adapter(
     operations = metadata["operations"]
     assert isinstance(operations, Mapping)
     executable = root / str(operations[operation])
+    requested_queue = request.get("queue")
     payload = {
         "format": "httk-computer-request",
         "format_version": 1,
         "operation": operation,
         "adapter_dir": str(root),
+        # Persisted settings and their manifest-excluded credentials reach the
+        # adapter together, so splitting the two storage locations is invisible.
+        **({"queue_settings": queue_settings(root, requested_queue)} if isinstance(requested_queue, str) else {}),
         **dict(request),
     }
     descriptor, temporary_name = tempfile.mkstemp(prefix="httk-adapter-", suffix=".json")

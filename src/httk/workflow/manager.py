@@ -1,5 +1,6 @@
 """Core-v1 workflow task manager."""
 
+import logging
 import os
 import signal
 import socket
@@ -10,11 +11,13 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from types import FrameType
 from typing import Any, BinaryIO, Self
 
 from ._util import (
     read_json,
     require_int,
+    require_mapping,
     timestamp_seconds,
     tree_digest,
     utc_now,
@@ -29,15 +32,22 @@ from .errors import (
     WorkflowError,
 )
 from .journal import JournalWriter
+from .manifests import read_maintenance_lock
 from .models import (
     TERMINAL_KINDS,
+    Failure,
     JobDefinition,
     Marker,
+    canonical_uuid,
     normalize_placement,
+    validate_failure,
     validate_step,
 )
 from .transactions import replay_transaction
 from .workspace import WorkflowWorkspace
+
+_LOGGER = logging.getLogger(__name__)
+_DRAIN_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 
 
 @dataclass
@@ -69,9 +79,12 @@ class TaskManager:
         runner_backends: Sequence[RunnerBackend] = (),
         allowed_backends: Sequence[str] | None = None,
         accept_any_pool: bool = False,
+        join_grace_seconds: float = 3600.0,
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
+        if join_grace_seconds < 0:
+            raise ValueError("join_grace_seconds cannot be negative")
         self.workspace = workspace
         self.pools = frozenset(pools)
         self.capabilities = frozenset(capabilities)
@@ -79,6 +92,7 @@ class TaskManager:
         self.lease_seconds = lease_seconds
         self.heartbeat_interval = heartbeat_interval
         self.unsafe_persistent_takeover = unsafe_persistent_takeover
+        self.join_grace_seconds = join_grace_seconds
         backends = [PathRunnerBackend(), *runner_backends]
         self.runner_backends = {backend.name: backend for backend in backends}
         if len(self.runner_backends) != len(backends):
@@ -96,7 +110,14 @@ class TaskManager:
         self._manager_dir = workspace.control / "managers" / self.manager_id
         self._manager_dir.mkdir(parents=True, exist_ok=False)
         self._running: dict[str, RunningAttempt] = {}
+        # Parent job key -> (unresolvable child job id, monotonic first-seen).
+        self._join_unresolved: dict[str, tuple[str, float]] = {}
         self._last_heartbeat = 0.0
+        # Repeating anomaly key -> last reported text, so a permanently broken
+        # job is reported loudly once instead of once per poll interval.
+        self._reported: dict[str, str] = {}
+        self._draining = False
+        self._drain_signals = 0
         write_json_atomic(
             self._manager_dir / "manager.json",
             {
@@ -115,12 +136,29 @@ class TaskManager:
             durable=workspace.durable,
         )
         self.heartbeat(force=True)
+        _LOGGER.info(
+            "manager %s attached to workspace %s as %s pools=%s capabilities=%s backends=%s workers=%d",
+            self.manager_id,
+            self.workspace.workspace_id,
+            self.hostname,
+            ",".join(sorted(self.pools)) or "-",
+            ",".join(sorted(self.capabilities)) or "-",
+            ",".join(sorted(self.allowed_backends)),
+            self.maximum_workers,
+            extra=self._event("manager_started", workspace=str(self.workspace.root)),
+        )
         for name in self.allowed_backends:
             try:
                 self.runner_backends[name].reconcile(self.workspace)
-            except (WorkflowError, OSError):
+            except (WorkflowError, OSError) as exc:
                 # Backend views are derived and must never prevent the manager
                 # from attaching to authoritative marker state.
+                _LOGGER.warning(
+                    "runner backend %s could not reconcile its derived view: %s",
+                    name,
+                    exc,
+                    extra=self._event("backend_error", backend=name),
+                )
                 continue
 
     def __enter__(self) -> Self:
@@ -134,6 +172,44 @@ class TaskManager:
             attempt.close_logs()
         self._running.clear()
         self.writer.close()
+
+    @property
+    def manager_directory(self) -> Path:
+        """Return this manager's own directory below ``managers/``."""
+
+        return self._manager_dir
+
+    def _event(self, event: str, marker: Marker | None = None, **fields: object) -> dict[str, object]:
+        """Return structured logging fields describing one manager event."""
+
+        data: dict[str, object] = {"event": event, "manager_id": self.manager_id}
+        if marker is not None:
+            data.update(
+                {
+                    "job_key": marker.job_key,
+                    "job_id": marker.job_id,
+                    "kind": marker.kind,
+                    "generation": marker.generation,
+                }
+            )
+        data.update(fields)
+        return data
+
+    def _report_anomaly(
+        self,
+        key: str,
+        text: str,
+        fields: Mapping[str, object],
+        *,
+        level: int = logging.ERROR,
+    ) -> None:
+        """Report a possibly repeating anomaly loudly once, then quietly."""
+
+        if self._reported.get(key) == text:
+            _LOGGER.debug("%s (unchanged)", text, extra=dict(fields))
+            return
+        self._reported[key] = text
+        _LOGGER.log(level, "%s", text, extra=dict(fields))
 
     def heartbeat(self, *, force: bool = False) -> None:
         now = time.monotonic()
@@ -157,17 +233,53 @@ class TaskManager:
         changed |= self._evaluate_joins()
         changed |= self._poll_running()
         changed |= self._recover_abandoned_claims()
-        if (self.workspace.control / "maintenance.lock").exists():
+        if self._draining:
+            _LOGGER.debug("draining: not claiming new work")
+            return changed
+        if self._maintenance_paused():
             return changed
         for marker in self._eligible_ready():
             if len(self._running) >= self.maximum_workers:
                 break
             try:
-                self._claim_and_launch(marker)
-            except TransitionLostError:
+                changed |= self._claim_and_launch(marker)
+            except TransitionLostError as exc:
+                _LOGGER.debug("claim of %s was lost to another actor: %s", marker.job_key, exc)
                 continue
-            changed = True
+            except (WorkflowError, OSError) as exc:
+                # Defense in depth: no single job may abort the claim pass.
+                self._report_anomaly(
+                    f"claim:{marker.job_key}",
+                    f"cannot claim or launch {marker.job_key}: {exc}",
+                    self._event("claim_error", marker),
+                )
+                changed = True
+                continue
         return changed
+
+    def _maintenance_paused(self) -> bool:
+        """Report whether a live maintenance lock forbids launching work."""
+
+        lock = read_maintenance_lock(self.workspace)
+        if lock is None:
+            self._reported.pop("maintenance", None)
+            return False
+        if lock.is_stale():
+            self._report_anomaly(
+                "maintenance",
+                f"ignoring a stale maintenance lock held by {lock.describe()}; "
+                "clear it with 'httk workflow workspace unlock'",
+                self._event("maintenance_lock_stale", lock=str(lock.path)),
+                level=logging.WARNING,
+            )
+            return False
+        self._report_anomaly(
+            "maintenance",
+            f"launching is paused by the maintenance lock held by {lock.describe()}",
+            self._event("maintenance_lock_held", lock=str(lock.path)),
+            level=logging.INFO,
+        )
+        return True
 
     def _backend_for(self, job: JobDefinition) -> RunnerBackend | None:
         if job.runner_backend not in self.allowed_backends:
@@ -183,26 +295,151 @@ class TaskManager:
         priority: int | None = None,
     ) -> Marker:
         moved = self.workspace.transition(self.writer, marker, kind, updates, priority=priority)
+        _LOGGER.info(
+            "job %s moved from %s to %s (reason %s)",
+            moved.job_key,
+            marker.kind,
+            kind,
+            updates.get("reason", "-"),
+            extra=self._event("transition", moved, previous_kind=marker.kind, reason=updates.get("reason")),
+        )
         try:
             job = self.workspace.load_job(moved)
             backend = self._backend_for(job)
             if backend is not None:
                 backend.marker_changed(self.workspace, moved)
-        except (WorkflowError, OSError):
+        except (WorkflowError, OSError) as exc:
             # Backend views are recoverable derivatives. The committed marker
             # transition must remain successful even if refreshing one fails.
-            pass
+            _LOGGER.warning(
+                "runner backend view for %s could not be refreshed: %s",
+                moved.job_key,
+                exc,
+                extra=self._event("backend_error", moved),
+            )
         return moved
 
-    def serve(self, *, poll_interval: float = 1.0) -> None:
-        """Run until interrupted."""
+    def serve(
+        self,
+        *,
+        poll_interval: float = 1.0,
+        drain_timeout: float = 30.0,
+        drain_grace_seconds: float = 10.0,
+    ) -> None:
+        """Run until interrupted, draining running attempts on a stop signal.
 
+        A first ``SIGTERM`` or ``SIGINT`` — what a batch system sends at
+        walltime — stops claiming new work, terminates the local attempts, and
+        keeps ticking so their outcomes are committed. A second signal exits at
+        once. The drain is process-local: everything an interrupted attempt
+        needs is already recorded by the transitions it produces, and any
+        attempt left behind is recovered from its expired lease.
+        """
+
+        previous: dict[int, Any] = {}
+        self._draining = False
+        self._drain_signals = 0
+        for number in _DRAIN_SIGNALS:
+            try:
+                previous[number] = signal.signal(number, self._request_drain)
+            except ValueError:
+                # Only the main thread may install handlers; an embedded
+                # manager still serves, it just cannot drain on a signal.
+                _LOGGER.warning("cannot install a drain handler for signal %d outside the main thread", number)
         try:
-            while True:
-                self.tick()
-                time.sleep(poll_interval)
+            self._serve_loop(
+                poll_interval=poll_interval,
+                drain_timeout=drain_timeout,
+                drain_grace_seconds=drain_grace_seconds,
+            )
         except KeyboardInterrupt:
-            return
+            _LOGGER.info("interrupted; stopping without a drain", extra=self._event("interrupted"))
+        finally:
+            for installed, handler in previous.items():
+                signal.signal(installed, handler)
+            self._draining = False
+
+    def _request_drain(self, number: int, frame: FrameType | None) -> None:
+        """Record one drain request from a signal handler."""
+
+        self._drain_signals += 1
+        self._draining = True
+
+    def _serve_loop(
+        self,
+        *,
+        poll_interval: float,
+        drain_timeout: float,
+        drain_grace_seconds: float,
+    ) -> None:
+        drain_deadline: float | None = None
+        kill_at: float | None = None
+        while True:
+            if self._drain_signals >= 2:
+                _LOGGER.warning(
+                    "second stop signal: killing %d running attempt(s) and exiting",
+                    len(self._running),
+                    extra=self._event("drain_forced", attempts=len(self._running)),
+                )
+                self._signal_running_attempts(signal.SIGKILL)
+                return
+            if self._draining and drain_deadline is None:
+                now = time.monotonic()
+                drain_deadline = now + drain_timeout
+                kill_at = now + drain_grace_seconds
+                _LOGGER.info(
+                    "draining: terminating %d running attempt(s) with a %.0fs timeout",
+                    len(self._running),
+                    drain_timeout,
+                    extra=self._event("drain_started", attempts=len(self._running)),
+                )
+                self._signal_running_attempts(signal.SIGTERM)
+            self.tick()
+            if self._draining and drain_deadline is not None:
+                now = time.monotonic()
+                if not self._running:
+                    _LOGGER.info("drain complete: no local attempt remains", extra=self._event("drain_complete"))
+                    return
+                if now >= drain_deadline:
+                    _LOGGER.warning(
+                        "drain timeout expired with %d attempt(s) unreaped; leaving them to lease recovery",
+                        len(self._running),
+                        extra=self._event("drain_timeout", attempts=len(self._running)),
+                    )
+                    self._signal_running_attempts(signal.SIGKILL)
+                    return
+                if kill_at is not None and now >= kill_at:
+                    _LOGGER.warning(
+                        "drain grace expired: killing %d running attempt(s)",
+                        len(self._running),
+                        extra=self._event("drain_kill", attempts=len(self._running)),
+                    )
+                    self._signal_running_attempts(signal.SIGKILL)
+                    kill_at = None
+            time.sleep(min(poll_interval, 0.25) if self._draining else poll_interval)
+
+    def _signal_running_attempts(self, signal_number: int) -> int:
+        """Signal every local attempt process group and report how many."""
+
+        signalled = 0
+        for attempt in list(self._running.values()):
+            if attempt.process.poll() is not None:
+                continue
+            self._terminate_process(attempt.process.pid, signal_number)
+            signalled += 1
+            _LOGGER.info(
+                "sent signal %d to attempt %s process group %d",
+                signal_number,
+                attempt.attempt_id,
+                attempt.process.pid,
+                extra=self._event(
+                    "attempt_signalled",
+                    attempt.marker,
+                    attempt_id=attempt.attempt_id,
+                    signal=signal_number,
+                ),
+            )
+        return signalled
 
     def run_until_idle(self, *, timeout: float = 60.0, poll_interval: float = 0.02) -> None:
         """Run until no local process or immediately actionable marker remains."""
@@ -225,15 +462,39 @@ class TaskManager:
         for marker in self.workspace.scan_markers(("submitted", "ready", "committing")):
             try:
                 job = self.workspace.load_job(marker)
-            except WorkflowError:
+            except (WorkflowError, OSError):
                 # An invalid submission is actionable because registration will
-                # turn it into a protocol failure.
+                # turn it into a protocol failure. A job that is already
+                # registered and cannot be loaded is skipped, not waited for.
                 if marker.kind == "submitted":
                     return True
                 continue
             if self._backend_for(job) is not None:
                 return True
         return False
+
+    def _load_job_and_state(self, marker: Marker, pass_name: str) -> tuple[JobDefinition, dict[str, Any]] | None:
+        """Load one job and its state frame, skipping and reporting damage.
+
+        A job whose ``job.json`` or state frame cannot be read is a local
+        defect of that job. Reporting it and continuing keeps one damaged job
+        from stopping every other job in the workspace. Core-v1 leaves the
+        repair of such a payload to an operator, so nothing is moved: the
+        authoritative marker stays exactly where it is.
+        """
+
+        try:
+            job = self.workspace.load_job(marker)
+            state = self.workspace.read_state(marker)
+        except (WorkflowError, OSError) as exc:
+            self._report_anomaly(
+                f"{pass_name}:{marker.job_key}",
+                f"skipping {marker.kind} job {marker.job_key} during {pass_name}: {exc}",
+                self._event("job_unusable", marker, pass_name=pass_name),
+            )
+            return None
+        self._reported.pop(f"{pass_name}:{marker.job_key}", None)
+        return job, state
 
     def _register_submissions(self) -> bool:
         changed = False
@@ -242,6 +503,11 @@ class TaskManager:
                 job = self.workspace.validate_job_payload(marker)
                 backend = self._backend_for(job)
                 if backend is None:
+                    _LOGGER.debug(
+                        "skipping submitted job %s: runner backend %s is not served here",
+                        marker.job_key,
+                        job.runner_backend,
+                    )
                     continue
                 backend.validate(job, self.workspace.payload_path(marker.placement, marker.job_key))
                 ready = {
@@ -280,21 +546,46 @@ class TaskManager:
         for marker in self.workspace.scan_markers(("ready",)):
             try:
                 job = self.workspace.load_job(marker)
-            except WorkflowError:
+            except (WorkflowError, OSError) as exc:
+                self._report_anomaly(
+                    f"ready:{marker.job_key}",
+                    f"skipping ready job {marker.job_key}: {exc}",
+                    self._event("job_unusable", marker, pass_name="ready"),
+                )
                 continue
+            self._reported.pop(f"ready:{marker.job_key}", None)
             if self._backend_for(job) is None:
+                _LOGGER.debug(
+                    "skipping ready job %s: runner backend %s is not served here",
+                    marker.job_key,
+                    job.runner_backend,
+                )
                 continue
             if not self.accept_any_pool and job.claim_pool not in self.pools:
+                _LOGGER.debug(
+                    "skipping ready job %s: pool %s is not served here",
+                    marker.job_key,
+                    job.claim_pool,
+                )
                 continue
             if not job.required_capabilities <= self.capabilities:
+                _LOGGER.debug(
+                    "skipping ready job %s: missing capabilities %s",
+                    marker.job_key,
+                    ",".join(sorted(job.required_capabilities - self.capabilities)),
+                )
                 continue
             eligible.append(marker)
         eligible.sort(key=lambda item: (item.priority, item.path.as_posix()))
         return eligible
 
-    def _claim_and_launch(self, marker: Marker) -> None:
-        job = self.workspace.load_job(marker)
-        state = self.workspace.read_state(marker)
+    def _claim_and_launch(self, marker: Marker) -> bool:
+        """Claim one ready job and launch its attempt, reporting local faults."""
+
+        loaded = self._load_job_and_state(marker, "claim")
+        if loaded is None:
+            return False
+        job, state = loaded
         attempt_ordinal = self._state_int(state, "attempt_ordinal", default=0) + 1
         total_attempts = self._state_int(state, "total_attempts", default=0) + 1
         budget_failure = self._attempt_budget_failure(job, attempt_ordinal, total_attempts)
@@ -308,7 +599,7 @@ class TaskManager:
                     "reason": "budget_exhausted",
                 },
             )
-            return
+            return True
         attempt_id = str(uuid.uuid4())
         claimed = self._transition(
             marker,
@@ -328,11 +619,69 @@ class TaskManager:
                 "reason": state.get("reason", "claim"),
             },
         )
-        self._launch_claimed(claimed, job, state)
+        _LOGGER.info(
+            "claimed %s for attempt %s (ordinal %d, total %d, pool %s)",
+            claimed.job_key,
+            attempt_id,
+            attempt_ordinal,
+            total_attempts,
+            job.claim_pool,
+            extra=self._event("claim", claimed, attempt_id=attempt_id, pool=job.claim_pool),
+        )
+        if self._maintenance_paused():
+            # The lock appeared between eligibility and the claim. Releasing the
+            # claim keeps the job runnable instead of wedging it for this
+            # manager's lifetime.
+            self._release_claim(claimed, "maintenance_lock")
+            return True
+        try:
+            self._launch_claimed(claimed, job, state)
+        except TransitionLostError:
+            raise
+        except (WorkflowError, OSError) as exc:
+            self._fail_attempt_preparation(claimed, job, exc)
+        return True
+
+    def _release_claim(self, marker: Marker, reason: str, state: Mapping[str, Any] | None = None) -> None:
+        """Return one claimed job to ready without consuming its budget."""
+
+        if state is None:
+            try:
+                state = self.workspace.read_state(marker)
+            except (WorkflowError, OSError) as exc:
+                self._report_anomaly(
+                    f"release:{marker.job_key}",
+                    f"cannot release claim on {marker.job_key}: {exc}",
+                    self._event("release_error", marker, reason=reason),
+                )
+                return
+        try:
+            self._transition(
+                marker,
+                "ready",
+                {
+                    **self._state_progress(state),
+                    "reason": reason,
+                    "attempt_ordinal": max(0, self._state_int(state, "attempt_ordinal", default=1) - 1),
+                    "total_attempts": max(0, self._state_int(state, "total_attempts", default=1) - 1),
+                },
+            )
+        except TransitionLostError:
+            _LOGGER.debug("release of %s was lost to another actor", marker.job_key)
+
+    def _fail_attempt_preparation(self, marker: Marker, job: JobDefinition, exc: Exception) -> None:
+        """Fail one claimed job whose attempt could not be prepared."""
+
+        code = "protocol_error" if isinstance(exc, FormatError) else "process_failure"
+        _LOGGER.error(
+            "cannot prepare an attempt for %s: %s",
+            marker.job_key,
+            exc,
+            extra=self._event("launch_error", marker, failure_code=code),
+        )
+        self._handle_attempt_failure(marker, job, code, f"cannot prepare attempt: {exc}")
 
     def _launch_claimed(self, marker: Marker, job: JobDefinition, previous_state: Mapping[str, Any]) -> None:
-        if (self.workspace.control / "maintenance.lock").exists():
-            return
         claimed_state = self.workspace.read_state(marker)
         backend = self._backend_for(job)
         if backend is None:
@@ -466,31 +815,73 @@ class TaskManager:
             os.close(gate_write)
             stdout.close()
             stderr.close()
+            if process is not None:
+                # The gate is closed, so the launcher observes end-of-file and
+                # exits, but an unreaped launcher must never be left behind.
+                self._reap_launcher(process)
             if isinstance(exc, TransitionLostError):
                 raise
+            _LOGGER.error(
+                "cannot launch an attempt for %s: %s",
+                marker.job_key,
+                exc,
+                extra=self._event("launch_error", marker, attempt_id=attempt_id),
+            )
             self._handle_attempt_failure(running or marker, job, "process_failure", f"cannot launch runner: {exc}")
             return
         os.close(gate_write)
         assert process is not None
         assert running is not None
         self._running[attempt_id] = RunningAttempt(running, process, stdout, stderr, attempt_id)
+        _LOGGER.info(
+            "launched attempt %s for %s as pid %d in %s",
+            attempt_id,
+            running.job_key,
+            process.pid,
+            workdir,
+            extra=self._event("launch", running, attempt_id=attempt_id, pid=process.pid, step=context["step"]),
+        )
+
+    def _reap_launcher(self, process: subprocess.Popen[bytes], *, grace_seconds: float = 5.0) -> None:
+        """Terminate and reap a launcher whose attempt was never committed."""
+
+        if process.poll() is None:
+            self._terminate_process(process.pid)
+        try:
+            process.wait(timeout=grace_seconds)
+            return
+        except subprocess.TimeoutExpired:
+            self._terminate_process(process.pid, signal.SIGKILL)
+        try:
+            process.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            _LOGGER.warning("abandoned launcher pid %d could not be reaped", process.pid)
 
     def _poll_running(self) -> bool:
         changed = False
         current_by_attempt: dict[str, Marker] = {}
+        # Job keys whose running state could not be read this pass. Their local
+        # attempts must be preserved: an unreadable marker is not evidence that
+        # the attempt it describes has disappeared.
+        unreadable: set[str] = set()
         for marker in list(self.workspace.scan_markers(("running",))):
-            job = self.workspace.load_job(marker)
-            if self._backend_for(job) is None:
+            loaded = self._load_job_and_state(marker, "poll_running")
+            if loaded is None:
+                unreadable.add(marker.job_key)
                 continue
-            state = self.workspace.read_state(marker)
+            job, state = loaded
+            if self._backend_for(job) is None:
+                _LOGGER.debug(
+                    "skipping running job %s: runner backend %s is not served here",
+                    marker.job_key,
+                    job.runner_backend,
+                )
+                continue
             attempt_id = str(state.get("attempt_id", ""))
             current_by_attempt[attempt_id] = marker
             outcome_path = self._outcome_path(marker, state)
             if outcome_path.is_dir():
-                try:
-                    self._begin_commit(marker, state, outcome_path)
-                except TransitionLostError:
-                    pass
+                self._commit_published_outcome(marker, job, state, outcome_path)
                 changed = True
                 continue
             local = self._running.get(attempt_id)
@@ -500,17 +891,21 @@ class TaskManager:
                     continue
                 local.close_logs()
                 del self._running[attempt_id]
+                _LOGGER.info(
+                    "attempt %s of %s exited with status %d",
+                    attempt_id,
+                    marker.job_key,
+                    return_code,
+                    extra=self._event("attempt_exit", marker, attempt_id=attempt_id, exit_status=return_code),
+                )
                 if outcome_path.is_dir():
-                    try:
-                        self._begin_commit(marker, state, outcome_path)
-                    except TransitionLostError:
-                        pass
+                    self._commit_published_outcome(marker, job, state, outcome_path)
                 else:
-                    failure_class = "protocol_error" if return_code == 0 else "process_failure"
+                    code = "protocol_error" if return_code == 0 else "process_failure"
                     self._handle_attempt_failure(
                         marker,
                         job,
-                        failure_class,
+                        code,
                         f"runner exited with status {return_code} without an outcome",
                         exit_status=return_code,
                     )
@@ -524,8 +919,24 @@ class TaskManager:
             unsafe_takeover = False
             if job.workdir_mode == "persistent" and not self._persistent_writer_dead(marker, state):
                 if not self.unsafe_persistent_takeover:
+                    _LOGGER.debug(
+                        "leaving %s to its persistent writer: takeover is not proven safe",
+                        marker.job_key,
+                    )
                     continue
                 unsafe_takeover = True
+            _LOGGER.warning(
+                "taking over %s: the lease of manager %s expired%s",
+                marker.job_key,
+                state.get("manager_id", "-"),
+                " (unsafe persistent takeover)" if unsafe_takeover else "",
+                extra=self._event(
+                    "lease_takeover",
+                    marker,
+                    previous_manager=state.get("manager_id"),
+                    unsafe_takeover=unsafe_takeover,
+                ),
+            )
             self._handle_attempt_failure(
                 marker,
                 job,
@@ -536,12 +947,43 @@ class TaskManager:
             )
             changed = True
         for attempt_id, local in list(self._running.items()):
-            if attempt_id not in current_by_attempt:
-                if local.process.poll() is None:
-                    self._terminate_process(local.process.pid)
-                local.close_logs()
-                del self._running[attempt_id]
+            if attempt_id in current_by_attempt or local.marker.job_key in unreadable:
+                continue
+            _LOGGER.warning(
+                "attempt %s of %s no longer owns a running marker; terminating it",
+                attempt_id,
+                local.marker.job_key,
+                extra=self._event("attempt_orphaned", local.marker, attempt_id=attempt_id),
+            )
+            if local.process.poll() is None:
+                self._terminate_process(local.process.pid)
+            local.close_logs()
+            del self._running[attempt_id]
         return changed
+
+    def _commit_published_outcome(
+        self,
+        marker: Marker,
+        job: JobDefinition,
+        state: Mapping[str, Any],
+        outcome_path: Path,
+    ) -> None:
+        """Move one job with a published outcome into committing."""
+
+        try:
+            self._begin_commit(marker, state, outcome_path)
+        except TransitionLostError:
+            pass
+        except FormatError as exc:
+            # A malformed outcome is a protocol violation of the runner, never a
+            # reason to stop the manager.
+            self._handle_attempt_failure(marker, job, "protocol_error", f"published outcome is unusable: {exc}")
+        except (WorkflowError, OSError) as exc:
+            self._report_anomaly(
+                f"commit:{marker.job_key}",
+                f"cannot begin the commit of {marker.job_key}: {exc}",
+                self._event("commit_error", marker),
+            )
 
     def _outcome_path(self, marker: Marker, state: Mapping[str, Any]) -> Path:
         payload = self.workspace.payload_path(marker.placement, marker.job_key)
@@ -569,16 +1011,29 @@ class TaskManager:
     def _resume_committing(self) -> bool:
         changed = False
         for marker in list(self.workspace.scan_markers(("committing",))):
-            job = self.workspace.load_job(marker)
+            loaded = self._load_job_and_state(marker, "resume_committing")
+            if loaded is None:
+                continue
+            job, state = loaded
             if self._backend_for(job) is None:
+                _LOGGER.debug(
+                    "skipping committing job %s: runner backend %s is not served here",
+                    marker.job_key,
+                    job.runner_backend,
+                )
                 continue
             try:
                 self._process_committing(marker)
             except TransitionLostError:
                 pass
             except (FormatError, TransactionError) as exc:
+                _LOGGER.error(
+                    "commit of %s failed: %s",
+                    marker.job_key,
+                    exc,
+                    extra=self._event("commit_failed", marker),
+                )
                 try:
-                    state = self.workspace.read_state(marker)
                     self._transition(
                         marker,
                         "failed",
@@ -590,6 +1045,12 @@ class TaskManager:
                     )
                 except TransitionLostError:
                     pass
+            except (WorkflowError, OSError) as exc:
+                self._report_anomaly(
+                    f"resume_committing:{marker.job_key}",
+                    f"cannot resume the commit of {marker.job_key}: {exc}",
+                    self._event("commit_error", marker),
+                )
             changed = True
         return changed
 
@@ -664,13 +1125,20 @@ class TaskManager:
                 priority=next_priority,
             )
         elif action == "fail":
-            failure = outcome.get("failure")
-            if not isinstance(failure, Mapping):
-                raise FormatError("fail outcome requires a failure object")
+            # A runner-published failure is untrusted input. A malformed one is
+            # itself a protocol violation, recorded as such instead of being
+            # stored verbatim or discarded.
+            try:
+                failure = validate_failure(outcome.get("failure"))
+            except FormatError as exc:
+                failure = Failure("protocol_error", f"runner published a malformed failure object: {exc}")
+                reason = "protocol_error"
+            else:
+                reason = "declared_failure"
             self._transition(
                 marker,
                 "failed",
-                {**progress, "failure": dict(failure), "reason": "declared_failure"},
+                {**progress, "failure": failure.as_mapping(), "reason": reason},
                 priority=next_priority,
             )
         elif action == "pause":
@@ -827,61 +1295,87 @@ class TaskManager:
         self,
         marker: Marker,
         job: JobDefinition,
-        failure_class: str,
-        summary: str,
+        code: str,
+        message: str,
         *,
         exit_status: int | None = None,
         unclean: bool = True,
         unsafe_takeover: bool = False,
     ) -> None:
-        state = self.workspace.read_state(marker)
-        progress = self._state_progress(state)
-        if failure_class in job.retry_policy.retry_on:
-            self._retry(
-                marker,
-                job,
-                state,
-                progress,
-                failure_class,
-                unclean=unclean,
-                unsafe_takeover=unsafe_takeover,
-            )
-            return
-        self._transition(
-            marker,
-            "failed",
-            {
-                **progress,
-                "failure": self._failure(failure_class, summary, exit_status=exit_status),
-                "reason": failure_class,
-            },
+        """Record one attempt failure, retrying it when the policy allows.
+
+        Recording a failure is itself recovery, so a lost transition or an
+        unreadable state frame is reported and never raised at a caller that is
+        still processing other jobs.
+        """
+
+        _LOGGER.warning(
+            "attempt of %s failed with %s: %s",
+            marker.job_key,
+            code,
+            message,
+            extra=self._event("attempt_failure", marker, failure_code=code, exit_status=exit_status),
         )
+        try:
+            state = self.workspace.read_state(marker)
+            progress = self._state_progress(state)
+            # Retry policy is keyed on the failure code, which is exactly the
+            # string a job lists in retry_policy.retry_on.
+            if code in job.retry_policy.retry_on:
+                self._retry(
+                    marker,
+                    job,
+                    state,
+                    progress,
+                    code,
+                    unclean=unclean,
+                    unsafe_takeover=unsafe_takeover,
+                )
+                return
+            self._transition(
+                marker,
+                "failed",
+                {
+                    **progress,
+                    "failure": self._failure(code, message, exit_status=exit_status),
+                    "reason": code,
+                },
+            )
+        except TransitionLostError:
+            _LOGGER.debug("failure record for %s was lost to another actor", marker.job_key)
+        except (WorkflowError, OSError) as exc:
+            self._report_anomaly(
+                f"failure:{marker.job_key}",
+                f"cannot record the {code} failure of {marker.job_key}: {exc}",
+                self._event("failure_error", marker, failure_code=code),
+            )
 
     def _recover_abandoned_claims(self) -> bool:
         changed = False
         for marker in list(self.workspace.scan_markers(("claimed",))):
-            job = self.workspace.load_job(marker)
-            if self._backend_for(job) is None:
+            loaded = self._load_job_and_state(marker, "recover_claims")
+            if loaded is None:
                 continue
-            state = self.workspace.read_state(marker)
+            job, state = loaded
+            if self._backend_for(job) is None:
+                _LOGGER.debug(
+                    "skipping claimed job %s: runner backend %s is not served here",
+                    marker.job_key,
+                    job.runner_backend,
+                )
+                continue
             if self._manager_alive(
                 str(state.get("manager_id", "")),
                 lease_seconds=float(state.get("lease_seconds", self.lease_seconds)),
             ):
                 continue
-            try:
-                self._transition(
-                    marker,
-                    "ready",
-                    {
-                        **self._state_progress(state),
-                        "reason": "claim_abandoned",
-                        "attempt_ordinal": max(0, self._state_int(state, "attempt_ordinal", default=1) - 1),
-                        "total_attempts": max(0, self._state_int(state, "total_attempts", default=1) - 1),
-                    },
-                )
-            except TransitionLostError:
-                pass
+            _LOGGER.warning(
+                "recovering %s: the claim of manager %s was abandoned",
+                marker.job_key,
+                state.get("manager_id", "-"),
+                extra=self._event("claim_recovered", marker, previous_manager=state.get("manager_id")),
+            )
+            self._release_claim(marker, "claim_abandoned", state)
             changed = True
         return changed
 
@@ -913,92 +1407,181 @@ class TaskManager:
             return False
         return False
 
+    @staticmethod
+    def _join_children(join: Mapping[str, Any]) -> Sequence[object]:
+        children = join.get("children")
+        if not isinstance(children, Sequence) or isinstance(children, (str, bytes)) or not children:
+            raise FormatError("state.join.children must be a nonempty array")
+        return children
+
+    def _observe_join_children(self, children: Sequence[object]) -> tuple[list[dict[str, object]], str | None]:
+        """Observe every join child, reporting the first unresolvable child id."""
+
+        observations: list[dict[str, object]] = []
+        for child_ref in children:
+            reference = require_mapping(child_ref, "join child")
+            child_id = canonical_uuid(reference.get("job_id"), "join child job_id")
+            child_marker = None
+            placement_hint = reference.get("placement_hint")
+            job_key = reference.get("job_key")
+            if isinstance(placement_hint, str) and isinstance(job_key, str):
+                child_marker = self.workspace.find_marker_at(job_key, normalize_placement(placement_hint))
+                if child_marker is not None and child_marker.job_id != child_id:
+                    raise FormatError("join child identity disagrees with placement hint")
+            if child_marker is None:
+                child_marker = self.workspace.find_marker_by_id(child_id)
+            if child_marker is None:
+                return observations, child_id
+            observations.append(
+                {
+                    "workspace_id": self.workspace.workspace_id,
+                    "job_id": child_id,
+                    "job_key": child_marker.job_key,
+                    "placement": child_marker.placement.as_posix(),
+                    "kind": child_marker.kind,
+                    "state_generation": child_marker.generation,
+                    "record_ref": child_marker.record_ref,
+                }
+            )
+        return observations, None
+
+    def _join_child_grace_expired(self, marker: Marker, child_id: str) -> bool:
+        """Report whether one unresolvable join child has outlived its grace.
+
+        Children are registered before their parent leaves committing, and a
+        child named by an unresolved core-v1 join must not relocate, so the
+        complete workspace scan behind :meth:`_observe_join_children` is the
+        authoritative answer. A brief absence is therefore only explainable by
+        metadata visibility, which the protocol bounds with retries; a
+        persistent absence is a corrupt dependency rather than an impossible
+        join condition, and the parent must not wait for it forever. The
+        first-unresolved instant is kept in memory only: a restarted manager
+        restarts the grace, which is safe because the grace exists purely to
+        absorb transient nonvisibility.
+        """
+
+        now = time.monotonic()
+        recorded = self._join_unresolved.get(marker.job_key)
+        if recorded is None or recorded[0] != child_id:
+            recorded = (child_id, now)
+            self._join_unresolved[marker.job_key] = recorded
+        if now - recorded[1] < self.join_grace_seconds:
+            return False
+        del self._join_unresolved[marker.job_key]
+        return True
+
+    def _fail_waiting(
+        self,
+        marker: Marker,
+        state: Mapping[str, Any],
+        code: str,
+        message: str,
+        reason: str,
+    ) -> None:
+        self._join_unresolved.pop(marker.job_key, None)
+        try:
+            self._transition(
+                marker,
+                "failed",
+                {
+                    **self._state_progress(state),
+                    "failure": self._failure(code, message),
+                    "reason": reason,
+                },
+            )
+        except TransitionLostError:
+            _LOGGER.debug("join failure record for %s was lost to another actor", marker.job_key)
+
     def _evaluate_joins(self) -> bool:
         changed = False
         for marker in list(self.workspace.scan_markers(("waiting",))):
-            parent_job = self.workspace.load_job(marker)
+            loaded = self._load_job_and_state(marker, "evaluate_joins")
+            if loaded is None:
+                continue
+            parent_job, state = loaded
             if self._backend_for(parent_job) is None:
-                continue
-            state = self.workspace.read_state(marker)
-            join = state.get("join")
-            if not isinstance(join, Mapping):
-                continue
-            children = join.get("children")
-            if not isinstance(children, Sequence) or isinstance(children, (str, bytes)):
-                continue
-            observations: list[dict[str, object]] = []
-            missing = False
-            for child_ref in children:
-                if not isinstance(child_ref, Mapping):
-                    missing = True
-                    break
-                child_id = str(child_ref.get("job_id", ""))
-                child_marker = None
-                placement_hint = child_ref.get("placement_hint")
-                job_key = child_ref.get("job_key")
-                if isinstance(placement_hint, str) and isinstance(job_key, str):
-                    child_marker = self.workspace.find_marker_at(job_key, normalize_placement(placement_hint))
-                    if child_marker is not None and child_marker.job_id != child_id:
-                        raise FormatError("join child identity disagrees with placement hint")
-                if child_marker is None:
-                    child_marker = self.workspace.find_marker_by_id(child_id)
-                if child_marker is None:
-                    missing = True
-                    break
-                observations.append(
-                    {
-                        "workspace_id": self.workspace.workspace_id,
-                        "job_id": child_id,
-                        "job_key": child_marker.job_key,
-                        "placement": child_marker.placement.as_posix(),
-                        "kind": child_marker.kind,
-                        "state_generation": child_marker.generation,
-                        "record_ref": child_marker.record_ref,
-                    }
+                _LOGGER.debug(
+                    "skipping waiting job %s: runner backend %s is not served here",
+                    marker.job_key,
+                    parent_job.runner_backend,
                 )
-            if missing:
                 continue
-            condition = str(join.get("condition", ""))
-            kinds = [str(item["kind"]) for item in observations]
-            satisfied = self._join_satisfied(condition, join, kinds)
-            impossible = self._join_impossible(condition, join, kinds)
-            if not satisfied and not impossible:
-                continue
-            if satisfied:
-                self._advance(
-                    marker,
-                    parent_job,
-                    state,
-                    validate_step(state.get("next_step"), "next_step"),
-                    self._state_progress(state),
-                    reason="join_satisfied",
-                    join_summary=observations,
+            try:
+                changed |= self._evaluate_join(marker, parent_job, state)
+            except TransitionLostError:
+                pass
+            except FormatError as exc:
+                # A waiting job whose own join cannot be read would otherwise
+                # wait forever with no diagnostic.
+                self._fail_waiting(marker, state, "protocol_error", f"join is unusable: {exc}", "protocol_error")
+                changed = True
+            except (WorkflowError, OSError) as exc:
+                self._report_anomaly(
+                    f"join:{marker.job_key}",
+                    f"cannot evaluate the join of {marker.job_key}: {exc}",
+                    self._event("join_error", marker),
                 )
-            else:
-                on_impossible = join.get("on_impossible")
-                if isinstance(on_impossible, Mapping) and on_impossible.get("action") == "advance":
-                    self._advance(
-                        marker,
-                        parent_job,
-                        state,
-                        validate_step(on_impossible.get("next_step"), "on_impossible.next_step"),
-                        self._state_progress(state),
-                        reason="join_impossible",
-                        join_summary=observations,
-                    )
-                else:
-                    self._transition(
-                        marker,
-                        "failed",
-                        {
-                            **self._state_progress(state),
-                            "failure": self._failure("dependency_failure", "join condition became impossible"),
-                            "join_summary": observations,
-                            "reason": "join_impossible",
-                        },
-                    )
-            changed = True
         return changed
+
+    def _evaluate_join(self, marker: Marker, parent_job: JobDefinition, state: Mapping[str, Any]) -> bool:
+        """Observe one waiting job's join and act when it resolves."""
+
+        join = require_mapping(state.get("join"), "state.join")
+        observations, unresolved = self._observe_join_children(self._join_children(join))
+        if unresolved is not None:
+            if not self._join_child_grace_expired(marker, unresolved):
+                _LOGGER.debug("join child %s of %s is not yet visible", unresolved, marker.job_key)
+                return False
+            self._fail_waiting(
+                marker,
+                state,
+                "dependency_failure",
+                f"join child {unresolved} cannot be resolved in this workspace",
+                "join_unresolvable",
+            )
+            return True
+        self._join_unresolved.pop(marker.job_key, None)
+        condition = str(join.get("condition", ""))
+        kinds = [str(item["kind"]) for item in observations]
+        satisfied = self._join_satisfied(condition, join, kinds)
+        impossible = self._join_impossible(condition, join, kinds)
+        if not satisfied and not impossible:
+            _LOGGER.debug("join %s of %s is still pending: children are %s", condition, marker.job_key, kinds)
+            return False
+        if satisfied:
+            self._advance(
+                marker,
+                parent_job,
+                state,
+                validate_step(state.get("next_step"), "next_step"),
+                self._state_progress(state),
+                reason="join_satisfied",
+                join_summary=observations,
+            )
+            return True
+        on_impossible = join.get("on_impossible")
+        if isinstance(on_impossible, Mapping) and on_impossible.get("action") == "advance":
+            self._advance(
+                marker,
+                parent_job,
+                state,
+                validate_step(on_impossible.get("next_step"), "on_impossible.next_step"),
+                self._state_progress(state),
+                reason="join_impossible",
+                join_summary=observations,
+            )
+            return True
+        self._transition(
+            marker,
+            "failed",
+            {
+                **self._state_progress(state),
+                "failure": self._failure("dependency_failure", "join condition became impossible"),
+                "join_summary": observations,
+                "reason": "join_impossible",
+            },
+        )
+        return True
 
     @staticmethod
     def _join_satisfied(condition: str, join: Mapping[str, Any], kinds: Sequence[str]) -> bool:
@@ -1040,8 +1623,13 @@ class TaskManager:
                 if marker is not None:
                     job = self.workspace.load_job(marker)
                     if self._backend_for(job) is None:
+                        _LOGGER.debug(
+                            "leaving request %s: runner backend %s is not served here",
+                            request_path.name,
+                            job.runner_backend,
+                        )
                         continue
-            except WorkflowError:
+            except (WorkflowError, OSError):
                 # Claim malformed requests so one manager can quarantine them.
                 pass
             claimed_dir = self.workspace.control / "requests" / "claimed" / self.manager_id
@@ -1049,15 +1637,29 @@ class TaskManager:
             claimed_path = claimed_dir / request_path.name
             try:
                 os.rename(request_path, claimed_path)
-            except FileNotFoundError:
+            except OSError as exc:
+                _LOGGER.debug("request %s was claimed elsewhere: %s", request_path.name, exc)
                 continue
             try:
                 self._apply_request(read_json(claimed_path))
             except TransitionLostError:
+                _LOGGER.info("dropping request %s: the job moved first", claimed_path.name)
                 claimed_path.unlink(missing_ok=True)
             except (WorkflowError, OSError, ValueError) as exc:
-                self.workspace.quarantine(claimed_path, reason=f"invalid request: {exc}")
+                try:
+                    self.workspace.quarantine(claimed_path, reason=f"invalid request: {exc}")
+                except OSError as failure:
+                    self._report_anomaly(
+                        f"request:{claimed_path.name}",
+                        f"cannot quarantine the invalid request {claimed_path.name}: {failure}",
+                        self._event("request_error", request=claimed_path.name),
+                    )
             else:
+                _LOGGER.info(
+                    "handled request %s",
+                    claimed_path.name,
+                    extra=self._event("request_handled", request=claimed_path.name),
+                )
                 claimed_path.unlink(missing_ok=True)
             changed = True
         return changed
@@ -1092,10 +1694,16 @@ class TaskManager:
             return
         if action == "set_priority" and marker.kind in {"submitted", "ready", "waiting", "paused", "failed"}:
             priority = int(request.get("priority", -1))
+            # A repriced job keeps the same state kind, so the members that make
+            # that kind meaningful must survive the new frame. Dropping a join
+            # would leave a waiting job with an unusable dependency record.
+            preserved = {
+                name: state[name] for name in ("join", "join_summary", "next_step", "pause", "failure") if name in state
+            }
             self._transition(
                 marker,
                 marker.kind,
-                {**progress, **audit, "reason": "operator_priority"},
+                {**progress, **preserved, **audit, "reason": "operator_priority"},
                 priority=priority,
             )
             return
@@ -1139,11 +1747,13 @@ class TaskManager:
             return
 
     @staticmethod
-    def _terminate_process(process_group: int) -> None:
+    def _terminate_process(process_group: int, signal_number: int = signal.SIGTERM) -> None:
         try:
-            os.killpg(process_group, signal.SIGTERM)
+            os.killpg(process_group, signal_number)
         except ProcessLookupError:
             return
+        except PermissionError as exc:
+            _LOGGER.warning("cannot signal process group %d: %s", process_group, exc)
 
     @staticmethod
     def _state_int(state: Mapping[str, Any], name: str, *, default: int) -> int:
@@ -1165,15 +1775,15 @@ class TaskManager:
 
     @staticmethod
     def _failure(
-        failure_class: str,
-        summary: str,
+        code: str,
+        message: str,
         *,
         exit_status: int | None = None,
     ) -> dict[str, object]:
-        result: dict[str, object] = {"class": failure_class, "summary": summary}
-        if exit_status is not None:
-            result["exit_status"] = exit_status
-        return result
+        """Return one canonical manager failure object."""
+
+        details = None if exit_status is None else {"exit_status": exit_status}
+        return Failure(code, message, details=details).as_mapping()
 
     @staticmethod
     def _nested_reason(outcome: Mapping[str, Any], key: str) -> str:

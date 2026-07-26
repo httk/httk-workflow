@@ -2,15 +2,20 @@
 
 import argparse
 import json
+import logging
 import sys
 import uuid
 from collections.abc import Sequence
+from pathlib import Path
 
+from ._logging import LOG_LEVELS, add_log_file, configure_logging
 from ._util import utc_now
 from .errors import WorkflowError
 from .manager import TaskManager
 from .models import STATE_KINDS
 from .workspace import WorkflowWorkspace
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
@@ -44,6 +49,22 @@ def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
     run.add_argument("--until-idle", action="store_true")
     run.add_argument("--timeout", type=float, default=3600.0)
     run.add_argument("--unsafe-persistent-takeover", action="store_true")
+    run.add_argument(
+        "--drain-timeout",
+        type=float,
+        default=30.0,
+        help="seconds to keep committing outcomes after a stop signal",
+    )
+    run.add_argument(
+        "--log-level",
+        choices=LOG_LEVELS,
+        help="log level for the manager log file, and for the console when given (default: info)",
+    )
+    run.add_argument(
+        "--log-file",
+        help="manager log file (default: WORKSPACE/.httk-workflow/managers/MANAGER_ID/log)",
+    )
+    run.add_argument("--json-logs", action="store_true", help="log one JSON object per line")
 
     status = subparsers.add_parser("status", help="summarize authoritative markers")
     status.add_argument("workspace")
@@ -125,6 +146,36 @@ def _publish_request(workspace: WorkflowWorkspace, arguments: argparse.Namespace
     print(path)
 
 
+def _run(workspace: WorkflowWorkspace, arguments: argparse.Namespace) -> int:
+    """Run one task manager with its own log file."""
+
+    # Without an explicit level the console stays quiet about normal lifecycle
+    # events while the manager log file keeps the complete info-level record.
+    configure_logging(level=arguments.log_level or "warning", json_logs=arguments.json_logs)
+    with TaskManager(
+        workspace,
+        pools=arguments.pool or ["default"],
+        capabilities=arguments.capability,
+        maximum_workers=arguments.workers,
+        lease_seconds=arguments.lease_seconds,
+        heartbeat_interval=arguments.heartbeat_interval,
+        unsafe_persistent_takeover=arguments.unsafe_persistent_takeover,
+    ) as manager:
+        log_file = Path(arguments.log_file) if arguments.log_file else manager.manager_directory / "log"
+        add_log_file(log_file, level=arguments.log_level or "info", json_logs=arguments.json_logs)
+        _LOGGER.info(
+            "manager %s serving workspace %s; logging to %s",
+            manager.manager_id,
+            workspace.root,
+            log_file,
+        )
+        if arguments.until_idle:
+            manager.run_until_idle(timeout=arguments.timeout, poll_interval=arguments.poll_interval)
+        else:
+            manager.serve(poll_interval=arguments.poll_interval, drain_timeout=arguments.drain_timeout)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None, *, program: str = "httk-taskmanager") -> int:
     """Run the command-line interface."""
 
@@ -155,21 +206,7 @@ def main(argv: Sequence[str] | None = None, *, program: str = "httk-taskmanager"
             _publish_request(workspace, arguments)
             return 0
         if arguments.command == "run":
-            pools = arguments.pool or ["default"]
-            with TaskManager(
-                workspace,
-                pools=pools,
-                capabilities=arguments.capability,
-                maximum_workers=arguments.workers,
-                lease_seconds=arguments.lease_seconds,
-                heartbeat_interval=arguments.heartbeat_interval,
-                unsafe_persistent_takeover=arguments.unsafe_persistent_takeover,
-            ) as manager:
-                if arguments.until_idle:
-                    manager.run_until_idle(timeout=arguments.timeout, poll_interval=arguments.poll_interval)
-                else:
-                    manager.serve(poll_interval=arguments.poll_interval)
-            return 0
+            return _run(workspace, arguments)
     except (WorkflowError, OSError, ValueError) as exc:
         print(f"{program}: {exc}", file=sys.stderr)
         return 2

@@ -46,6 +46,9 @@ evaluate a command string.
   structured evidence. Ordinary stdout/stderr are retained by the manager too.
 - `httk_workflow_advance`, `wait`, `succeed`, `fail`, `retry`, and `pause`
   publish one outcome and exit the runner.
+  `httk_workflow_fail CODE MESSAGE [--details FILE.json]` publishes the one
+  canonical failure object, `{"code", "message", "details", "retryable"}`,
+  which is exactly what a Python runner and the manager itself publish.
 - `httk_workflow_outcome_begin` starts a composed draft.
   `transaction_mkdir`, `transaction_put_file`, `transaction_put_tree`,
   `transaction_replace_tree`, and `transaction_remove` add durable-data

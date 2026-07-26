@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +17,11 @@ from .adapters import (
     add_computer,
     import_v1_computer,
     list_computers,
+    queue_settings,
     resolve_computer,
     run_adapter,
+    split_settings,
+    store_credentials,
 )
 from .configuration import (
     import_v1_configuration,
@@ -27,7 +30,7 @@ from .configuration import (
     write_config,
 )
 from .errors import WorkflowError
-from .manifests import create_manifest, verify_manifest
+from .manifests import create_manifest, release_maintenance_lock, verify_manifest
 from .projects import import_v1_project, initialize_project, require_project
 from .workspace import WorkflowWorkspace
 
@@ -36,7 +39,7 @@ _HELP = """usage: {program} GROUP COMMAND [ARG ...]
 Filesystem-native workflow execution and project management.
 
 command groups:
-  workspace   init, status, upgrade
+  workspace   init, status, upgrade, unlock
   job         submit, request
   manager     run
   v1          prepare, submit, run
@@ -93,6 +96,17 @@ def _workspace_upgrade(argv: Sequence[str], program: str) -> int:
         return parsed
     workspace = WorkflowWorkspace(parsed.workspace)
     print("\n".join(sorted(workspace.upgrade(parsed.extension))))
+    return 0
+
+
+def _workspace_unlock(argv: Sequence[str], program: str) -> int:
+    parser = _parser(program, "Release a stale workspace maintenance lock")
+    parser.add_argument("workspace")
+    parser.add_argument("--force", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    print(release_maintenance_lock(WorkflowWorkspace(parsed.workspace), force=parsed.force))
     return 0
 
 
@@ -284,22 +298,33 @@ def _computer(argv: Sequence[str], program: str, context: CLIContext) -> int:
         if isinstance(parsed, int):
             return parsed
         target = resolve_computer(parsed.computer, project=context.cwd)
+        settings = _settings(parsed.set)
         result = run_adapter(
             target.bundle,
             action,
-            {"queue": target.queue, "settings": _settings(parsed.set)},
+            {"queue": target.queue, "settings": settings},
             timeout=parsed.timeout,
         )
-        if action == "configure" and parsed.set:
-            metadata = read_json(target.bundle / "computer.json")
-            queues = metadata.setdefault("queues", {})
-            if not isinstance(queues, dict):
-                raise ValueError("adapter queue configuration is not mutable JSON")
-            queue = queues.setdefault(target.queue, {})
-            if not isinstance(queue, dict):
-                raise ValueError("adapter queue configuration is not an object")
-            queue.update(_settings(parsed.set))
-            write_json_atomic(target.bundle / "computer.json", metadata)
+        if action == "configure" and settings:
+            persistable, credentials = split_settings(settings)
+            if persistable:
+                metadata = read_json(target.bundle / "computer.json")
+                queues = metadata.setdefault("queues", {})
+                if not isinstance(queues, dict):
+                    raise ValueError("adapter queue configuration is not mutable JSON")
+                queue = queues.setdefault(target.queue, {})
+                if not isinstance(queue, dict):
+                    raise ValueError("adapter queue configuration is not an object")
+                queue.update(persistable)
+                write_json_atomic(target.bundle / "computer.json", metadata)
+            if credentials:
+                path = store_credentials(target.bundle, target.queue, credentials)
+                names = ", ".join(sorted(credentials))
+                print(
+                    f"stored {names} for queue {target.queue} in {path}; "
+                    "values there are excluded from signed project manifests",
+                    file=sys.stderr,
+                )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     if action == "import-v1":
@@ -324,12 +349,9 @@ def _computer(argv: Sequence[str], program: str, context: CLIContext) -> int:
 def _destination_from_adapter(target: Any, supplied: str | None) -> str:
     if supplied:
         return supplied
-    metadata = read_json(target.bundle / "computer.json")
-    queues = metadata.get("queues", {})
-    if isinstance(queues, Mapping):
-        queue = queues.get(target.queue)
-        if isinstance(queue, Mapping) and isinstance(queue.get("workspace"), str):
-            return str(queue["workspace"])
+    workspace = queue_settings(target.bundle, target.queue).get("workspace")
+    if isinstance(workspace, str) and workspace:
+        return workspace
     raise ValueError("destination workspace is missing; use --destination-workspace or configure queue workspace=PATH")
 
 
@@ -510,13 +532,15 @@ def command(argv: Sequence[str], context: CLIContext) -> int:
     try:
         if group == "workspace":
             if not rest or rest[0] in {"-h", "--help"}:
-                print(f"usage: {program} workspace init|status|upgrade [ARG ...]")
+                print(f"usage: {program} workspace init|status|upgrade|unlock [ARG ...]")
                 return 0
             action, tail = rest[0], rest[1:]
             if action in {"init", "status"}:
                 return _delegate(native_cli.main, [action, *tail], f"{program} workspace")
             if action == "upgrade":
                 return _workspace_upgrade(tail, f"{program} workspace upgrade")
+            if action == "unlock":
+                return _workspace_unlock(tail, f"{program} workspace unlock")
         elif group == "job":
             if not rest or rest[0] in {"-h", "--help"}:
                 print(f"usage: {program} job submit|request [ARG ...]")
