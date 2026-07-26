@@ -1,5 +1,7 @@
 # Task-manager usage
 
+*For operators: initializing workspaces, submitting jobs, running managers, and inspecting or repairing what they leave behind.*
+
 Every command below is spelled the canonical way, `httk workflow …`. The
 `httk-taskmanager` executable installed beside it is an alias of the same tree
 (`init`, `submit`, `run`, `status`, and `request`); see
@@ -419,7 +421,9 @@ The runner executes in the selected persistent or isolated workdir. It reads
 the context named by `HTTK_WORKFLOW_CONTEXT` and publishes
 `outcome.tmp.<nonce>/` as `outcome.ready/` beneath
 `HTTK_WORKFLOW_CONTROL_DIR`. See the
-{doc}`workflow_filesystem_api` for the complete protocol.
+{doc}`workflow_filesystem_api` for the complete protocol, and
+{doc}`runtime_helpers`, {doc}`native_bash_api`, or the {doc}`sdk_parity` table
+for the two authoring SDKs that implement it.
 
 The local executor starts runners behind a one-byte launch gate. It records
 the process identity and commits the `running` marker before releasing that

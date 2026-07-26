@@ -1,5 +1,9 @@
 # Native Bash runner API
 
+*For authors writing a workflow runner in Bash.* The complete authoring surface,
+each function beside its Python equivalent, is the table in {doc}`sdk_parity`,
+which is normative and enforced by the test suite; this page teaches it.
+
 A native Bash runner is one script that implements the steps of one workflow, the
 same shape as a Python runner: `httk_workflow_runner` declares the workflow and
 its steps, one `step_<name>` function implements each of them, and

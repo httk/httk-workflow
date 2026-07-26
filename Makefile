@@ -34,14 +34,17 @@ clean: docs-clean dist-clean
 	find . -name "*~" -print0 | xargs -0 rm -f
 	find . -name "__pycache__" -print0 | xargs -0 rm -rf
 
+# black and isort walk the same three roots recursively, so a new subpackage
+# (runners/, integrations/, ...) is covered the day it is created rather than
+# the day someone remembers to extend a glob.
 format:
 	$(PYTHON) -m ruff check src examples tests --select F401 --fix
 	$(PYTHON) -m isort src examples tests
-	$(PYTHON) -m black --workers 1 src/httk/workflow/*.py examples/*.py tests/*.py
+	$(PYTHON) -m black --workers 1 src examples tests
 
 format-check: lint
 	$(PYTHON) -m isort --check-only src examples tests
-	$(PYTHON) -m black --workers 1 --check src/httk/workflow/*.py examples/*.py tests/*.py
+	$(PYTHON) -m black --workers 1 --check src examples tests
 
 lint:
 	$(PYTHON) -m ruff check src examples tests

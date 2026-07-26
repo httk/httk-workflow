@@ -1,5 +1,7 @@
 # Project and workflow command line
 
+*For operators and campaign owners: the whole command tree, including projects, configuration, signed manifests, computers, and remote work.*
+
 Installing *httk-workflow* registers the lazy `workflow` command with
 *httk-core*:
 
@@ -547,8 +549,10 @@ and `status` operations. Each receives one versioned JSON request filename and
 prints one JSON result; diagnostics belong on stderr. Commands and remote
 commands are always argument arrays. The maintained templates implement that
 protocol through {py:mod}`httk.workflow.adapter_protocol`, which is the public
-name of the packaged implementation and the module to read when writing an
-adapter of your own.
+name of the packaged implementation. {doc}`adapter_authoring` is the reference
+for writing one of your own: the bundle layout, the exact request and result
+document of each of the seven operations, and a worked skeleton for a cluster
+none of the maintained kinds covers.
 
 Maintained `local`, `local-slurm`, and `ssh-slurm` templates are packaged with
 the module. Project definitions shadow global definitions. `NAME:QUEUE`
