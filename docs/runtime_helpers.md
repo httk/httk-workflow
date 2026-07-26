@@ -302,7 +302,8 @@ from httk.workflow import (
 grid = automatic_kpoint_grid(40, poscar="POSCAR")
 write_automatic_kpoints(grid, "KPOINTS")
 update_incar({"ENCUT": 520, "ISPIN": 2}, "INCAR")
-assemble_potcar("/data/vasp/potpaw_PBE", poscar="POSCAR", output="POTCAR")
+assembled = assemble_potcar("/data/vasp/potpaw_PBE", poscar="POSCAR", output="POTCAR")
+print([(item.species, item.variant, item.source) for item in assembled.choices])
 ```
 
 The API also provides `read_poscar_header`, `suggested_magnetic_moments`,
@@ -310,9 +311,47 @@ The API also provides `read_poscar_header`, `suggested_magnetic_moments`,
 `plan_vasp_remedy`, `apply_vasp_remedy`, output extraction/cleaning, and
 `contcar_to_poscar`. `validate_vasp_workdir` checks VASP's conservative path
 limit and `clean_vasp_outputs` performs explicit pre-run cleanup while
-preserving requested files. Diagnosis never changes inputs. The bounded
-`reviewed-v1` policy must be planned and applied explicitly, and records every
-change in structured history.
+preserving requested files. Diagnosis never changes inputs. Whole workflows built
+from these helpers ship with the module: see {doc}`vasp_runners`.
+
+A few behaviors are worth stating explicitly, because they are what makes a run
+reproducible and a retry meaningful:
+
+- **One k-point default.** `write_automatic_kpoints`, `VaspPreparationOptions`, and
+  the Bash bridge all start at `DEFAULT_KPOINT_CENTERING`, which is
+  `Monkhorst-Pack`. The reviewed remedy ladder promotes `Gamma` as the fix for two
+  k-point failure classes, so a workflow that already started there would have no
+  such remedy left.
+- **Explicit tags win.** `VaspPreparationOptions.incar_tags` is written to the INCAR
+  before anything is derived, and no derived value overwrites a tag the caller set.
+- **Updates rewrite statements, not lines.** `update_incar` understands the
+  `;`-separated assignments `read_incar` reads, so updating one tag of
+  `ISPIN = 2 ; ISYM = 2` leaves no second, stale assignment behind.
+- **A rattle needs entropy.** `rattle_poscar` requires an explicit `seed` or an
+  `entropy` string that `derive_seed` turns into one — normally something
+  attempt-derived — because two retries that rattle identically are two identical
+  calculations.
+- **Cleanup keeps its own evidence.** `clean_vasp_outputs` preserves
+  `VASP_RESTART_ARTIFACTS`, that is `CONTCAR` and `vasp-run-report.json`, which are
+  what the remedy machinery and restart promotion read. Name them in `also_remove`
+  to delete them anyway.
+- **Provenance is recorded.** `assemble_potcar` returns a `PotcarAssembly` naming the
+  variant, source path, digest, and `TITEL` of every chosen potential, and writes the
+  same record next to the POTCAR as `POTCAR.provenance.json`.
+
+Remedies are bounded, planned, and applied explicitly. `plan_vasp_remedy` validates
+every rung of the ladder against the calculation directory it is given and skips one
+it cannot execute — a `bump_bands` for an INCAR without `NBANDS`, a KPOINTS change
+with no KPOINTS staged — so `apply_vasp_remedy` never receives a remedy it would
+have to refuse. Both resolve a relative history path against that same directory;
+`job_remedy_history_path(payload)` is where a runner should keep it, beside the job
+state, so an isolated workdir does not silently restart the escalation. The
+pre-0.2 workdir location is still read when the job-scoped file does not exist yet.
+
+Policies are a registry rather than module source: `register_remedy_policy(name,
+sequences, precedence)` adds one, `remedy_policy_names()` lists what is registered,
+and an unknown name is refused with the alternatives named. `reviewed-v1` is
+registered by the module itself and is the default.
 
 These functions are independent *httk₂* interfaces. They do not import the Python *httk* v1
 `httk.task.ht_tasks_api` or `httk.task.vasptools` implementations.

@@ -126,8 +126,9 @@ def test_data_oriented_vasp_helpers(tmp_path: Path) -> None:
     (library / "O").mkdir()
     (library / "Si_sv" / "POTCAR").write_bytes(b"silicon\n")
     (library / "O" / "POTCAR.bz2").write_bytes(bz2.compress(b"oxygen\n"))
-    output = assemble_potcar(library, poscar=poscar, output=tmp_path / "POTCAR")
-    assert output.read_bytes() == b"silicon\noxygen\n"
+    assembled = assemble_potcar(library, poscar=poscar, output=tmp_path / "POTCAR")
+    assert assembled.path.read_bytes() == b"silicon\noxygen\n"
+    assert [item.variant for item in assembled.choices] == ["Si_sv", "O"]
 
     oszicar = tmp_path / "OSZICAR"
     oszicar.write_text(" 1 F= -.1 E0= -1.25E+01 d E = 0\n", encoding="utf-8")

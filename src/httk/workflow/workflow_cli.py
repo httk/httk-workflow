@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +12,7 @@ from httk.core import CLIContext
 
 from . import cli as native_cli
 from . import v1_cli
+from ._logging import LOG_LEVELS, configure_logging
 from ._util import read_json, write_json_atomic
 from .adapters import (
     add_computer,
@@ -30,9 +31,34 @@ from .configuration import (
     write_config,
 )
 from .errors import WorkflowError
+from .harvest import DEFAULT_HARVEST_STATES, HARVESTABLE_KINDS, harvest
+from .introspection import (
+    JOB_HISTORY_FORMAT,
+    JOB_LIST_FORMAT,
+    debug_job,
+    describe_job,
+    explain_job,
+    job_frames,
+    list_jobs,
+    render_frames,
+    render_job,
+    render_rows,
+    resolve_job,
+)
 from .manifests import create_manifest, release_maintenance_lock, verify_manifest
-from .models import CORE_PROFILE
+from .models import CORE_PROFILE, STATE_KINDS
 from .projects import import_v1_project, initialize_project, require_project
+from .scaffold import (
+    DEFAULT_PLACEMENT,
+    PACKAGED_TEMPLATES,
+    STRUCTURE_PATTERNS,
+    JobItem,
+    ScaffoldedJob,
+    new_job,
+    new_jobs,
+    structure_files,
+    structure_tag,
+)
 from .workspace import WorkflowWorkspace
 
 _HELP = """usage: {program} GROUP COMMAND [ARG ...]
@@ -42,7 +68,8 @@ Filesystem-native workflow execution and project management.
 command groups:
   workspace   init, status, upgrade, unlock
   runner      publish
-  job         submit, request
+  job         new, submit, request, list, show, log, why, debug
+  harvest     stream the finished jobs of a workspace as records
   manager     run
   v1          prepare, submit, run
   config      init, show, set, import-v1
@@ -140,6 +167,291 @@ def _runner(argv: Sequence[str], program: str) -> int:
     )
     print(json.dumps(reference, indent=2, sort_keys=True))
     return 0
+
+
+def _json_value(text: str, label: str) -> object:
+    """Return the JSON value one command-line argument denotes.
+
+    The spelling is the one the Bash SDK's ``--input`` uses: ``@path`` is the JSON
+    content of a file, which is how a value too large or too quoted for a command
+    line is passed, and anything else is a JSON value when it parses as one and the
+    literal string when it does not, so ``k=42`` is a number and ``k=Si`` a string
+    without the author quoting either.
+    """
+
+    if text.startswith("@"):
+        path = Path(text[1:]).expanduser()
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{label} cannot be read as JSON from {path}: {exc}") from exc
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
+
+
+def _pairs(values: Sequence[str], label: str) -> list[tuple[str, str]]:
+    """Split ``NAME=VALUE`` arguments, keeping the order they were given in."""
+
+    result: list[tuple[str, str]] = []
+    for item in values:
+        name, separator, text = item.partition("=")
+        if not separator or not name:
+            raise ValueError(f"{label} must be spelled NAME=VALUE, not {item!r}")
+        result.append((name, text))
+    return result
+
+
+def _job_new(argv: Sequence[str], program: str) -> int:
+    """Scaffold and submit one job per template, structure, or both."""
+
+    parser = _parser(program, "Scaffold and submit jobs from a runner template")
+    parser.add_argument("workspace")
+    parser.add_argument(
+        "--template",
+        required=True,
+        help=f"a packaged template ({', '.join(PACKAGED_TEMPLATES)}) or the path of a runner file",
+    )
+    parser.add_argument(
+        "--input",
+        action="append",
+        default=[],
+        dest="inputs",
+        metavar="NAME=VALUE",
+        help="one job input; VALUE is JSON when it parses as JSON and a string otherwise, "
+        "and NAME=@FILE reads a JSON file (repeatable)",
+    )
+    parser.add_argument(
+        "--file",
+        action="append",
+        default=[],
+        dest="files",
+        metavar="NAME=PATH",
+        help="stage PATH in the payload as NAME; a bare NAME lands in files/ (repeatable)",
+    )
+    parser.add_argument(
+        "--from",
+        dest="structures",
+        metavar="PATH",
+        help="a structure file staged as files/POSCAR, or a directory of "
+        f"{' / '.join(STRUCTURE_PATTERNS)} files, one job each",
+    )
+    parser.add_argument("--tag", help="the readable half of the job key (default: derived from --from)")
+    parser.add_argument("--name", help="the human-readable job name")
+    parser.add_argument(
+        "--placement", default=DEFAULT_PLACEMENT, help=f"placement subtree (default: {DEFAULT_PLACEMENT})"
+    )
+    parser.add_argument("--priority", type=int)
+    parser.add_argument("--step", help="the step the job starts at (default: the template's own)")
+    parser.add_argument("--data-mode", choices=("none", "transactional"), help="default: what the template needs")
+    parser.add_argument("--workdir-mode", choices=("persistent", "isolated"), default="persistent")
+    parser.add_argument(
+        "--publish",
+        choices=("workspace", "installed"),
+        default="workspace",
+        help="publish the runner into the workspace store (default), or reference a packaged one where it is installed",
+    )
+    parser.add_argument("--json", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    workspace = WorkflowWorkspace(parsed.workspace)
+    inputs = {name: _json_value(text, f"job input {name!r}") for name, text in _pairs(parsed.inputs, "a job input")}
+    files: dict[str, str | Path] = {name: Path(text) for name, text in _pairs(parsed.files, "a staged file")}
+    shared: dict[str, Any] = {
+        "inputs": inputs,
+        "placement": parsed.placement,
+        "priority": parsed.priority,
+        "workdir_mode": parsed.workdir_mode,
+        "data_mode": parsed.data_mode,
+        "publish": parsed.publish,
+        "step": parsed.step,
+        "name": parsed.name,
+    }
+    structures = Path(parsed.structures).expanduser() if parsed.structures else None
+    if structures is not None and structures.is_dir():
+        found = structure_files(structures)
+        if not found:
+            raise ValueError(f"no {' or '.join(STRUCTURE_PATTERNS)} file in {structures}")
+        items: list[JobItem] = [
+            {"files": {**files, "POSCAR": path}, "tag": parsed.tag or structure_tag(path) or f"structure-{index:04d}"}
+            for index, path in enumerate(found)
+        ]
+        results: Iterator[ScaffoldedJob] = new_jobs(workspace, parsed.template, items, **shared)
+    else:
+        tag = parsed.tag
+        if structures is not None:
+            files["POSCAR"] = structures
+            tag = tag or structure_tag(structures)
+        results = iter([new_job(workspace, parsed.template, files=files, tag=tag, **shared)])
+    if parsed.json:
+        # One self-describing report per job, as an array, exactly as `harvest
+        # --json` prints one array of records.
+        print(json.dumps([job.as_mapping() for job in results], indent=2))
+        return 0
+    for job in results:
+        # One tab-separated line per job, so a shell reads the key of one job with
+        # cut and a campaign streams as it is submitted.
+        print(f"{job.job_key}\t{job.payload}")
+    return 0
+
+
+def _job_list(argv: Sequence[str], program: str) -> int:
+    """List the jobs of one workspace as a cheap table."""
+
+    parser = _parser(program, "List the jobs of one workflow workspace")
+    parser.add_argument("workspace")
+    parser.add_argument("--kind", action="append", choices=STATE_KINDS, help="state kind to list (repeatable)")
+    parser.add_argument("--placement", help="list only jobs at or below this placement")
+    parser.add_argument("--json", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    workspace = WorkflowWorkspace(parsed.workspace, mutable=False)
+    rows = list_jobs(workspace, kinds=parsed.kind, placement=parsed.placement)
+    if parsed.json:
+        print(json.dumps({"format": JOB_LIST_FORMAT, "format_version": 1, "jobs": rows}, indent=2))
+        return 0
+    print(render_rows(rows))
+    return 0
+
+
+def _job_show(argv: Sequence[str], program: str) -> int:
+    """Describe one job completely from its authoritative state."""
+
+    parser = _parser(program, "Describe one job from its authoritative state")
+    parser.add_argument("workspace")
+    parser.add_argument("job", help="job UUID, job key, or any unique prefix of either")
+    parser.add_argument("--json", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    workspace = WorkflowWorkspace(parsed.workspace, mutable=False)
+    report = describe_job(workspace, resolve_job(workspace, parsed.job))
+    print(json.dumps(report, indent=2, sort_keys=True) if parsed.json else render_job(report))
+    return 0
+
+
+def _job_log(argv: Sequence[str], program: str) -> int:
+    """Print the recorded transition history of one job, oldest first."""
+
+    parser = _parser(program, "Print the transition history of one job")
+    parser.add_argument("workspace")
+    parser.add_argument("job", help="job UUID, job key, or any unique prefix of either")
+    parser.add_argument("--limit", type=int, help="read at most this many frames, newest first")
+    parser.add_argument("--json", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    if parsed.limit is not None and parsed.limit < 1:
+        raise ValueError("--limit must be positive")
+    workspace = WorkflowWorkspace(parsed.workspace, mutable=False)
+    frames = job_frames(workspace, resolve_job(workspace, parsed.job), limit=parsed.limit)
+    if parsed.json:
+        print(json.dumps({"format": JOB_HISTORY_FORMAT, "format_version": 1, "frames": frames}, indent=2))
+        return 0
+    print(render_frames(frames))
+    return 0
+
+
+def _job_why(argv: Sequence[str], program: str) -> int:
+    """Explain why one job is, or is not, making progress."""
+
+    parser = _parser(program, "Explain why one job is not running")
+    parser.add_argument("workspace")
+    parser.add_argument("job", help="job UUID, job key, or any unique prefix of either")
+    parser.add_argument("--json", action="store_true")
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    workspace = WorkflowWorkspace(parsed.workspace, mutable=False)
+    diagnosis = explain_job(workspace, resolve_job(workspace, parsed.job))
+    print(json.dumps(diagnosis.as_mapping(), indent=2, sort_keys=True) if parsed.json else diagnosis.render())
+    return 0
+
+
+def _job_debug(argv: Sequence[str], program: str) -> int:
+    """Drive one job to a terminal state in the foreground."""
+
+    parser = _parser(program, "Drive one job to a terminal state in the foreground")
+    parser.add_argument("workspace")
+    parser.add_argument("job", help="a payload directory to submit, or a selector of an existing job")
+    parser.add_argument("--step", help="initial step of a freshly submitted payload")
+    parser.add_argument("--placement", default="debug", help="placement of a freshly submitted payload")
+    parser.add_argument("--follow-children", action="store_true", help="drive spawned children depth first")
+    parser.add_argument("--timeout", type=float, default=3600.0)
+    parser.add_argument(
+        "--log-level",
+        choices=LOG_LEVELS,
+        default="error",
+        help="log level of the private manager on the console (default: error)",
+    )
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    # The transitions of the debugged job are reported by the debug runner
+    # itself, so the private manager's own log stays quiet unless asked for.
+    configure_logging(level=parsed.log_level)
+    workspace = WorkflowWorkspace(parsed.workspace)
+    outcome = debug_job(
+        workspace,
+        parsed.job,
+        placement=parsed.placement,
+        step=parsed.step,
+        follow_children=parsed.follow_children,
+        timeout=parsed.timeout,
+    )
+    return outcome.exit_code
+
+
+def _harvest(argv: Sequence[str], program: str) -> int:
+    """Stream the finished jobs of one workspace as harvest records."""
+
+    parser = _parser(program, "Harvest the finished jobs of one workflow workspace")
+    parser.add_argument("workspace")
+    parser.add_argument(
+        "--state",
+        action="append",
+        choices=HARVESTABLE_KINDS,
+        help=f"state kind to harvest (repeatable, default: {', '.join(DEFAULT_HARVEST_STATES)})",
+    )
+    parser.add_argument("--placement", help="harvest only jobs at or below this placement")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument(
+        "--jsonl",
+        action="store_true",
+        help="print one record object per line, streaming (the default)",
+    )
+    output.add_argument(
+        "--json",
+        action="store_true",
+        help="print one JSON array of every record, which materializes the whole harvest",
+    )
+    parsed = _parse(parser, argv)
+    if isinstance(parsed, int):
+        return parsed
+    workspace = WorkflowWorkspace(parsed.workspace, mutable=False)
+    records = harvest(
+        workspace,
+        states=parsed.state or DEFAULT_HARVEST_STATES,
+        placement=parsed.placement,
+    )
+    if parsed.json:
+        print(json.dumps([record.as_mapping() for record in records], indent=2, sort_keys=True))
+        return 0
+    for record in records:
+        print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+_JOB_INSPECTION: dict[str, Callable[[Sequence[str], str], int]] = {
+    "list": _job_list,
+    "show": _job_show,
+    "log": _job_log,
+    "why": _job_why,
+    "debug": _job_debug,
+}
 
 
 def _config(argv: Sequence[str], program: str) -> int:
@@ -577,10 +889,17 @@ def command(argv: Sequence[str], context: CLIContext) -> int:
             return _runner(rest, f"{program} runner")
         elif group == "job":
             if not rest or rest[0] in {"-h", "--help"}:
-                print(f"usage: {program} job submit|request [ARG ...]")
+                print(f"usage: {program} job new|submit|request|list|show|log|why|debug [ARG ...]")
                 return 0
+            if rest[0] == "new":
+                return _job_new(rest[1:], f"{program} job new")
             if rest[0] in {"submit", "request"}:
                 return _delegate(native_cli.main, rest, f"{program} job")
+            inspection = _JOB_INSPECTION.get(rest[0])
+            if inspection is not None:
+                return inspection(rest[1:], f"{program} job {rest[0]}")
+        elif group == "harvest":
+            return _harvest(rest, f"{program} harvest")
         elif group == "manager":
             if not rest or rest[0] in {"-h", "--help"}:
                 return _delegate(native_cli.main, ["run", "--help"], f"{program} manager")

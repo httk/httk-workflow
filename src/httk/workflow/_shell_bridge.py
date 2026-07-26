@@ -62,6 +62,8 @@ from .runtime_utils import (
 from .sdk import RUNNER_ERROR_FORMAT, Attempt, ChildSpec, Runner, RunnerRef
 from .supervision import CheckerSpec, ProcessSupervisor
 from .vasp import (
+    DEFAULT_KPOINT_CENTERING,
+    DEFAULT_REMEDY_HISTORY,
     VaspPreparationOptions,
     VaspRemedyDecision,
     apply_vasp_remedy,
@@ -72,6 +74,7 @@ from .vasp import (
     clean_vasp_outputs,
     contcar_to_poscar,
     diagnose_vasp_files,
+    job_remedy_history_path,
     last_oszicar_energy,
     last_vasprun_volume,
     normalize_poscar_handedness,
@@ -239,6 +242,19 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _remedy_history_default() -> str:
+    """Return where a Bash runner records its remedy ladder by default.
+
+    Inside an attempt the ladder belongs to the job, not to the directory one
+    attempt ran in, so it defaults to the job-scoped file of
+    :func:`httk.workflow.vasp.job_remedy_history_path`. Outside an attempt — a
+    bridge call made by hand — the historic workdir-relative name is kept.
+    """
+
+    payload = os.environ.get("HTTK_WORKFLOW_JOB_DIR")
+    return str(job_remedy_history_path(payload)) if payload else DEFAULT_REMEDY_HISTORY
+
+
 def _add_vasp_commands(commands: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
     vasp_prepare = commands.add_parser("vasp-prepare")
     vasp_prepare.add_argument("--directory", default=".")
@@ -254,7 +270,7 @@ def _add_vasp_commands(commands: "argparse._SubParsersAction[argparse.ArgumentPa
     grid.add_argument("density", type=float)
     grid.add_argument("--poscar", default="POSCAR")
     grid.add_argument("--output", default="KPOINTS")
-    grid.add_argument("--centering", default="Gamma")
+    grid.add_argument("--centering", default=DEFAULT_KPOINT_CENTERING)
     grid.add_argument("--equal", action="store_true")
     grid.add_argument("--bump", type=int, default=0)
     potcar = commands.add_parser("vasp-potcar")
@@ -287,6 +303,8 @@ def _add_vasp_commands(commands: "argparse._SubParsersAction[argparse.ArgumentPa
     preclean = commands.add_parser("vasp-preclean")
     preclean.add_argument("--directory", default=".")
     preclean.add_argument("--keep", action="append", default=[])
+    # CONTCAR and vasp-run-report.json survive a preclean unless named here.
+    preclean.add_argument("--also-remove", action="append", default=[], dest="also_remove")
     normalize = commands.add_parser("vasp-normalize-poscar")
     normalize.add_argument("path", nargs="?", default="POSCAR")
     scale = commands.add_parser("vasp-scale-poscar")
@@ -295,7 +313,10 @@ def _add_vasp_commands(commands: "argparse._SubParsersAction[argparse.ArgumentPa
     rattle = commands.add_parser("vasp-rattle-poscar")
     rattle.add_argument("path", nargs="?", default="POSCAR")
     rattle.add_argument("--amplitude", type=float, default=0.01)
-    rattle.add_argument("--seed", type=int, default=0)
+    # A rattle needs caller-supplied entropy: two retries that rattle identically
+    # are two identical calculations, so neither default invents a stream.
+    rattle.add_argument("--seed", type=int)
+    rattle.add_argument("--entropy")
     vasp_run = commands.add_parser("vasp-run")
     vasp_run.add_argument("--directory", default=".")
     vasp_run.add_argument("--timeout", type=float)
@@ -307,12 +328,14 @@ def _add_vasp_commands(commands: "argparse._SubParsersAction[argparse.ArgumentPa
     diagnose.add_argument("--output", default="vasp-diagnostics.json")
     remedy_plan = commands.add_parser("vasp-remedy-plan")
     remedy_plan.add_argument("report")
-    remedy_plan.add_argument("--history", default=".httk-vasp/remedies.json")
+    remedy_plan.add_argument("--directory", default=".")
+    remedy_plan.add_argument("--history", default=_remedy_history_default())
     remedy_plan.add_argument("--output", default="vasp-remedy-decision.json")
+    remedy_plan.add_argument("--policy", default="reviewed-v1")
     remedy_apply = commands.add_parser("vasp-remedy-apply")
     remedy_apply.add_argument("decision")
     remedy_apply.add_argument("--directory", default=".")
-    remedy_apply.add_argument("--history", default=".httk-vasp/remedies.json")
+    remedy_apply.add_argument("--history", default=_remedy_history_default())
 
 
 def _declared(attempt: Attempt) -> None:
@@ -876,14 +899,21 @@ def _vasp_command(arguments: argparse.Namespace) -> int:
     elif command == "vasp-clean-outcar":
         clean_outcar(arguments.path, arguments.output)
     elif command == "vasp-preclean":
-        for removed in clean_vasp_outputs(arguments.directory, keep=arguments.keep):
+        for removed in clean_vasp_outputs(arguments.directory, keep=arguments.keep, also_remove=arguments.also_remove):
             print(removed)
     elif command == "vasp-normalize-poscar":
         normalize_poscar_handedness(arguments.path)
     elif command == "vasp-scale-poscar":
         scale_poscar_lattice(arguments.factor, arguments.path)
     elif command == "vasp-rattle-poscar":
-        rattle_poscar(arguments.path, amplitude=arguments.amplitude, seed=arguments.seed)
+        if arguments.seed is None and arguments.entropy is None:
+            raise _Refused("vasp-rattle-poscar needs --seed or --entropy: an unseeded retry rattles identically")
+        rattle_poscar(
+            arguments.path,
+            amplitude=arguments.amplitude,
+            seed=arguments.seed,
+            entropy=arguments.entropy,
+        )
     elif command == "vasp-run":
         argv = arguments.argv[1:] if arguments.argv[:1] == ["--"] else arguments.argv
         report = run_vasp(
@@ -912,8 +942,16 @@ def _vasp_command(arguments: argparse.Namespace) -> int:
         )
         return 0 if not diagnostics else 20
     elif command == "vasp-remedy-plan":
-        decision = plan_vasp_remedy(_diagnostics_from_report(Path(arguments.report)), history_path=arguments.history)
+        decision = plan_vasp_remedy(
+            _diagnostics_from_report(Path(arguments.report)),
+            directory=arguments.directory,
+            history_path=arguments.history,
+            policy=arguments.policy,
+        )
         write_json_atomic(Path(arguments.output), decision.as_mapping())
+        # The diagnosed problem is printed so a Bash runner can name it in the
+        # outcome it publishes without parsing the decision it just wrote.
+        print(decision.problem)
         return 3 if decision.give_up else 0
     elif command == "vasp-remedy-apply":
         apply_vasp_remedy(

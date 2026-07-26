@@ -7,6 +7,8 @@ in ``v1_runtime/NOTICE``.
 
 import bz2
 import gzip
+import hashlib
+import logging
 import lzma
 import math
 import os
@@ -16,10 +18,12 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from ._util import read_json, sha256_file, utc_now, write_json_atomic
+from .models import JOB_STATE_DIRECTORY
 from .runtime_builders import ReplayableWorkdirBatch
 from .supervision import (
     Diagnostic,
@@ -28,6 +32,27 @@ from .supervision import (
     ProcessSupervisor,
     SourceEvent,
 )
+
+_LOGGER = logging.getLogger(__name__)
+
+#: The k-point centering every entry point starts from. Monkhorst-Pack is the
+#: starting point rather than Gamma because the reviewed remedy ladder promotes
+#: ``("centering", "Gamma")`` as the *fix* for the ``kpoints_class`` and
+#: ``kpoint_shifts`` failure classes: a workflow that already starts at Gamma has
+#: no such remedy left to apply.
+DEFAULT_KPOINT_CENTERING = "Monkhorst-Pack"
+KPOINT_CENTERINGS = ("Gamma", "Monkhorst-Pack")
+
+#: Outputs :func:`clean_vasp_outputs` keeps unless they are named explicitly:
+#: the remedy machinery and restart promotion read exactly these two files.
+VASP_RESTART_ARTIFACTS: tuple[str, ...] = ("CONTCAR", "vasp-run-report.json")
+
+#: Where a remedy history lives when a caller names no other place. The
+#: job-scoped location of :func:`job_remedy_history_path` is what a runner
+#: should use; this workdir-relative name is the pre-0.2 location, still read for
+#: compatibility.
+DEFAULT_REMEDY_HISTORY = ".httk-vasp/remedies.json"
+REMEDY_HISTORY_NAME = "vasp-remedies.json"
 
 
 @dataclass(frozen=True)
@@ -67,7 +92,15 @@ def read_poscar_header(path: str | os.PathLike[str] = "POSCAR") -> PoscarHeader:
 
 
 def suggested_magnetic_moments(path: str | os.PathLike[str] = "POSCAR") -> str:
-    """Return the explicit comment override or a five-per-atom default."""
+    """Return the explicit comment override or a five-per-atom default.
+
+    The five Bohr magnetons per atom are a heuristic starting guess, not a
+    physical prediction: a deliberately high initial moment lets a spin-polarized
+    relaxation fall into a low-spin solution, whereas starting too low tends to keep
+    it there, so overestimating is the safer direction. The value of five is the
+    empirical default carried over from *httk* v1. Encode a per-structure choice in
+    the POSCAR comment as ``[MAGMOM=...]``.
+    """
 
     header = read_poscar_header(path)
     override = re.search(r"\[MAGMOM=([^\]]+)\]", header.comment)
@@ -128,14 +161,19 @@ def write_automatic_kpoints(
     grid: Sequence[int],
     path: str | os.PathLike[str] = "KPOINTS",
     *,
-    centering: str = "Gamma",
+    centering: str = DEFAULT_KPOINT_CENTERING,
 ) -> Path:
-    """Write a standard automatic KPOINTS file."""
+    """Write a standard automatic KPOINTS file.
+
+    The centering defaults to :data:`DEFAULT_KPOINT_CENTERING` here, in
+    :class:`VaspPreparationOptions`, and in the Bash bridge, so a workflow that
+    hits a k-point failure class still has the ``Gamma`` remedy available.
+    """
 
     values = tuple(grid)
     if len(values) != 3 or any(isinstance(value, bool) or value < 1 for value in values):
         raise ValueError("grid must contain three positive integers")
-    if centering not in {"Gamma", "Monkhorst-Pack"}:
+    if centering not in KPOINT_CENTERINGS:
         raise ValueError("centering must be 'Gamma' or 'Monkhorst-Pack'")
     destination = Path(path)
     destination.write_text(
@@ -159,23 +197,50 @@ def read_incar(path: str | os.PathLike[str] = "INCAR") -> dict[str, str]:
     return result
 
 
+def _incar_statement_tag(statement: str) -> str | None:
+    """Return the tag one ``NAME = VALUE`` statement assigns, if it assigns one."""
+
+    name, separator, _ = statement.partition("=")
+    key = name.strip().upper()
+    return key if separator and key else None
+
+
 def update_incar(
     values: Mapping[str, object],
     path: str | os.PathLike[str] = "INCAR",
 ) -> Path:
-    """Atomically replace selected INCAR tags while preserving other lines."""
+    """Atomically replace selected INCAR tags while preserving other lines.
+
+    VASP allows several ``;``-separated assignments per line, and
+    :func:`read_incar` reads them all, so an update has to rewrite the individual
+    statements of a line rather than drop or keep the whole line: updating
+    ``ISYM`` in ``ISPIN = 2 ; ISYM = 2`` leaves ``ISPIN = 2`` and appends the new
+    ``ISYM``, instead of leaving a line that still assigns the old value.
+    """
 
     destination = Path(path)
     normalized = {str(name).strip().upper(): str(value) for name, value in values.items()}
     if not normalized or any(not name or re.fullmatch(r"[A-Z][A-Z0-9_]*", name) is None for name in normalized):
         raise ValueError("INCAR updates require valid nonempty tag names")
     kept: list[str] = []
-    pattern = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*=")
     for line in destination.read_text(encoding="utf-8").splitlines():
-        match = pattern.match(line)
-        if match is None or match.group(1).upper() not in normalized:
+        comment_match = re.search(r"[#!]", line)
+        content = line if comment_match is None else line[: comment_match.start()]
+        comment = "" if comment_match is None else line[comment_match.start() :]
+        statements = content.split(";")
+        if not any(_incar_statement_tag(item) in normalized for item in statements):
+            # Nothing on this line is replaced, so it survives byte for byte.
             kept.append(line)
-    kept.extend(f"{name} = {value}" for name, value in normalized.items())
+            continue
+        surviving = [item.strip() for item in statements if _incar_statement_tag(item) not in normalized]
+        remainder = " ; ".join(item for item in surviving if item)
+        if remainder and comment:
+            kept.append(f"{remainder} {comment}")
+        elif remainder or comment:
+            kept.append(remainder or comment)
+    # Appended in tag order: the same set of updates then always produces the same
+    # file, whatever order the caller's mapping happened to have.
+    kept.extend(f"{name} = {value}" for name, value in sorted(normalized.items()))
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{destination.name}.", dir=destination.parent)
     temporary = Path(temporary_name)
     try:
@@ -212,36 +277,118 @@ def _read_potential(path: Path) -> bytes:
     raise ValueError(f"unsupported pseudopotential compression: {path}")
 
 
+@dataclass(frozen=True)
+class PotcarChoice:
+    """Which pseudopotential of a library one species was given.
+
+    The suffix policy of :func:`assemble_potcar` silently prefers one PAW variant
+    over another, and the choice changes the numbers a calculation produces, so
+    every choice is recorded: the variant directory, the suffix that selected it,
+    the full source path, its digest, and the ``TITEL`` the potential names
+    itself with.
+    """
+
+    species: str
+    variant: str
+    suffix: str
+    source: Path
+    sha256: str
+    titel: str | None
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "species": self.species,
+            "variant": self.variant,
+            "suffix": self.suffix,
+            "source": str(self.source),
+            "sha256": self.sha256,
+            "titel": self.titel,
+        }
+
+
+@dataclass(frozen=True)
+class PotcarAssembly:
+    """One assembled POTCAR and the provenance of every piece in it."""
+
+    path: Path
+    library: Path
+    choices: tuple[PotcarChoice, ...]
+    provenance: Path
+
+    def as_mapping(self) -> dict[str, object]:
+        return {
+            "format": "httk-vasp-potcar-provenance",
+            "format_version": 1,
+            "potcar": str(self.path),
+            "library": str(self.library),
+            "assembled_at": utc_now(),
+            "potentials": [item.as_mapping() for item in self.choices],
+        }
+
+
 def assemble_potcar(
     library: str | os.PathLike[str],
     *,
     poscar: str | os.PathLike[str] = "POSCAR",
     output: str | os.PathLike[str] = "POTCAR",
     suffix_preference: Iterable[str] = ("_3", "_2", "_d", "_sv", "_pv", "", "_h", "_s"),
-) -> Path:
-    """Assemble POTCAR from explicit species and a configurable suffix policy."""
+    provenance: str | os.PathLike[str] | None = None,
+) -> PotcarAssembly:
+    """Assemble POTCAR from explicit species and a configurable suffix policy.
+
+    The suffix policy decides which PAW variant each species gets, so the result
+    describes what it chose: the returned :class:`PotcarAssembly` names every
+    potential, and the same record is written next to the POTCAR as
+    ``<POTCAR>.provenance.json`` unless *provenance* names another file.
+    """
 
     root = Path(library).expanduser().resolve()
     header = read_poscar_header(poscar)
     suffixes = tuple(suffix_preference)
     pieces: list[bytes] = []
+    choices: list[PotcarChoice] = []
     for species in header.species:
         found: Path | None = None
+        variant = ""
         for suffix in suffixes:
             directory = root / f"{species}{suffix}"
             for filename in ("POTCAR", "POTCAR.gz", "POTCAR.bz2", "POTCAR.xz", "POTCAR.lzma", "POTCAR.Z"):
                 candidate = directory / filename
                 if candidate.is_file():
                     found = candidate
+                    variant = suffix
                     break
             if found is not None:
                 break
         if found is None:
             raise FileNotFoundError(f"no pseudopotential found for species {species!r} below {root}")
-        pieces.append(_read_potential(found))
+        content = _read_potential(found)
+        pieces.append(content)
+        titel = re.search(r"^\s*TITEL\s*=\s*(.+)$", content.decode("utf-8", errors="replace"), re.MULTILINE)
+        choices.append(
+            PotcarChoice(
+                species,
+                f"{species}{variant}",
+                variant,
+                found,
+                sha256_file(found),
+                None if titel is None else titel.group(1).strip(),
+            )
+        )
     destination = Path(output)
     destination.write_bytes(b"".join(pieces))
-    return destination
+    record = (
+        Path(provenance) if provenance is not None else destination.with_name(f"{destination.name}.provenance.json")
+    )
+    assembly = PotcarAssembly(destination, root, tuple(choices), record)
+    write_json_atomic(record, assembly.as_mapping())
+    _LOGGER.info(
+        "assembled %s from %s: %s",
+        destination,
+        root,
+        ", ".join(f"{item.species}->{item.variant}" for item in choices),
+    )
+    return assembly
 
 
 def last_oszicar_energy(path: str | os.PathLike[str] = "OSZICAR") -> float | None:
@@ -310,16 +457,47 @@ def scale_poscar_lattice(
     return destination
 
 
+def derive_seed(entropy: str) -> int:
+    """Derive one reproducible 63-bit seed from a caller-supplied string.
+
+    The string is the caller's own identity of the perturbation — an attempt
+    ordinal, a job key, a remedy step — so the same attempt always derives the
+    same seed and two different attempts derive different ones, without anything
+    reading a clock or a global random state.
+    """
+
+    if not isinstance(entropy, str) or not entropy:
+        raise ValueError("seed entropy must be a nonempty string")
+    return int.from_bytes(hashlib.sha256(entropy.encode("utf-8")).digest()[:8], "big") >> 1
+
+
 def rattle_poscar(
     path: str | os.PathLike[str] = "POSCAR",
     *,
     amplitude: float = 0.01,
-    seed: int = 0,
+    seed: int | None = None,
+    entropy: str | None = None,
 ) -> Path:
-    """Apply a deterministic bounded perturbation to POSCAR site coordinates."""
+    """Apply a deterministic bounded perturbation to POSCAR site coordinates.
+
+    A perturbation has to be reproducible *and* different between two attempts of
+    the same calculation, so this function never invents entropy of its own:
+    either *seed* names the stream explicitly, or *entropy* is a string
+    :func:`derive_seed` turns into one — typically something attempt-derived, such
+    as ``f"{job_key}:{attempt_ordinal}"``. Giving neither is refused rather than
+    silently repeated, because two retries that rattle identically are two
+    identical calculations.
+    """
 
     if not math.isfinite(amplitude) or amplitude < 0:
         raise ValueError("rattle amplitude must be finite and nonnegative")
+    if seed is None and entropy is None:
+        raise ValueError(
+            "rattle_poscar needs an explicit seed or an entropy string to derive one from; "
+            "pass entropy=f'{job_key}:{attempt_ordinal}' to make every retry differ reproducibly"
+        )
+    if entropy is not None:
+        seed = derive_seed(entropy if seed is None else f"{seed}:{entropy}")
     destination = Path(path)
     lines = destination.read_text(encoding="utf-8").splitlines()
     header = read_poscar_header(destination)
@@ -361,7 +539,19 @@ def calculate_nbands(
     incar: str | os.PathLike[str] = "INCAR",
     divisor: int | None = None,
 ) -> int:
-    """Calculate a conservative VASP band count from input metadata."""
+    """Calculate a conservative VASP band count from input metadata.
+
+    The count is a heuristic, deliberately generous margin over VASP's own
+    default of roughly half the valence electrons plus half the atom count: too
+    few bands is a run that stops with ``TOO FEW BANDS`` or converges to the wrong
+    state, while a handful of extra empty bands costs only time. The spin-polarized
+    branch adds ``0.6 * electrons`` plus a magnetization- or atom-count-derived
+    margin, and the maximum of the candidate formulas wins; the numbers themselves
+    are empirical defaults carried over from *httk* v1. The result is rounded up to
+    an even number, and to a multiple of *divisor* when a parallel band divisor
+    (``NPAR``) is in play, because VASP would otherwise round NBANDS up itself and
+    report a changed value.
+    """
 
     if divisor is not None and (isinstance(divisor, bool) or divisor < 1):
         raise ValueError("NBANDS divisor must be a positive integer")
@@ -509,11 +699,19 @@ def clean_vasp_outputs(
     directory: str | os.PathLike[str] = ".",
     *,
     keep: Iterable[str] = (),
+    also_remove: Iterable[str] = (),
 ) -> tuple[Path, ...]:
-    """Remove standard rerun outputs while preserving declared names."""
+    """Remove standard rerun outputs while preserving declared names.
+
+    The files in :data:`VASP_RESTART_ARTIFACTS` — ``CONTCAR`` and
+    ``vasp-run-report.json`` — are kept even without *keep*, because they are what
+    the remedy machinery and restart promotion read: a pre-run cleanup that
+    deletes them destroys the evidence of the run it is cleaning up after. Name
+    them in *also_remove* to delete them anyway.
+    """
 
     root = Path(directory)
-    retained = frozenset(keep)
+    retained = frozenset(keep) | (frozenset(VASP_RESTART_ARTIFACTS) - frozenset(also_remove))
     names = (
         "CHG",
         "CHGCAR",
@@ -547,16 +745,25 @@ def clean_vasp_outputs(
 
 @dataclass(frozen=True)
 class VaspPreparationOptions:
-    """Options for dependency-free VASP input preparation."""
+    """Options for dependency-free VASP input preparation.
+
+    ``accuracy_per_atom`` is the target total-energy accuracy in eV per atom:
+    ``EDIFFG`` is set to that budget for the whole cell and ``EDIFF`` to the same
+    budget divided by ``ediff_margin``, so the electronic loop converges roughly
+    one and a half orders of magnitude tighter than the ionic loop it feeds. The
+    margin of ``33`` is a heuristic, empirical default carried over from *httk*
+    v1, not a derived quantity.
+    """
 
     kpoint_density: float = 20.0
-    centering: str = "Monkhorst-Pack"
+    centering: str = DEFAULT_KPOINT_CENTERING
     accuracy_per_atom: float | None = 0.001
     ediff_margin: float = 33.0
     pseudopotential_library: str | os.PathLike[str] | None = None
     parallel_tag: str | None = None
     parallel_value: int | None = None
     normalize_handedness: bool = True
+    incar_tags: Mapping[str, object] = field(default_factory=dict)
 
 
 def prepare_vasp_inputs(
@@ -564,15 +771,29 @@ def prepare_vasp_inputs(
     *,
     directory: str | os.PathLike[str] = ".",
 ) -> dict[str, object]:
-    """Prepare POSCAR, POTCAR, KPOINTS, and INCAR with recorded choices."""
+    """Prepare POSCAR, POTCAR, KPOINTS, and INCAR with recorded choices.
+
+    ``incar_tags`` is applied to the INCAR first and wins over everything derived
+    afterwards: the derived values are defaults for what the caller did not say,
+    so an explicit ``EDIFF``, ``MAGMOM``, or ``NBANDS`` survives preparation, and
+    an explicit ``ISPIN`` is what the band-count heuristic reads.
+    """
 
     root = validate_vasp_workdir(directory)
     poscar = root / "POSCAR"
     incar = root / "INCAR"
     if options.normalize_handedness:
         normalize_poscar_handedness(poscar)
+    explicit = {str(name).strip().upper(): value for name, value in options.incar_tags.items()}
+    if explicit:
+        update_incar(explicit, incar)
+    potcar: dict[str, object] | None = None
     if options.pseudopotential_library is not None:
-        assemble_potcar(options.pseudopotential_library, poscar=poscar, output=root / "POTCAR")
+        potcar = assemble_potcar(
+            options.pseudopotential_library,
+            poscar=poscar,
+            output=root / "POTCAR",
+        ).as_mapping()
     grid = automatic_kpoint_grid(options.kpoint_density, poscar=poscar)
     write_automatic_kpoints(grid, root / "KPOINTS", centering=options.centering)
     updates: dict[str, object] = {}
@@ -593,9 +814,13 @@ def prepare_vasp_inputs(
         if options.parallel_value is None or options.parallel_value < 1:
             raise ValueError("parallel_value must be a positive integer")
         updates[options.parallel_tag] = options.parallel_value
+    updates = {name: value for name, value in updates.items() if name not in explicit}
     if updates:
         update_incar(updates, incar)
-    return {"kpoint_grid": grid, "incar_updates": updates}
+    result: dict[str, object] = {"kpoint_grid": grid, "incar_updates": updates, "incar_tags": explicit}
+    if potcar is not None:
+        result["potcar"] = potcar
+    return result
 
 
 _VASP_PATTERNS: tuple[tuple[re.Pattern[str], str, str, bool], ...] = (
@@ -789,7 +1014,10 @@ def _deduplicate(values: Sequence[Diagnostic]) -> tuple[Diagnostic, ...]:
     return tuple(result)
 
 
-_REMEDY_SEQUENCES: dict[str, tuple[tuple[tuple[str, object], ...], ...]] = {
+type RemedyChange = tuple[str, object]
+type RemedySequence = tuple[tuple[RemedyChange, ...], ...]
+
+_REVIEWED_SEQUENCES: dict[str, RemedySequence] = {
     "kpoints_class": (
         (("bump_kpoints", 1),),
         (("centering", "Gamma"),),
@@ -840,7 +1068,7 @@ _REMEDY_SEQUENCES: dict[str, tuple[tuple[tuple[str, object], ...], ...]] = {
     ),
     "ions_too_close": ((("scale_lattice", 1.05),),),
 }
-_REMEDY_PRECEDENCE = (
+_REVIEWED_PRECEDENCE = (
     "pricell",
     "zpotrf",
     "tetrahedron_kpoints",
@@ -858,6 +1086,115 @@ _REMEDY_PRECEDENCE = (
     "electronic_nonconvergence",
     "ionic_nonconvergence",
     "too_few_bands",
+)
+_REVIEWED_REFUSALS = {"nonlr_alloc": "memory allocation failure has no safe input remedy"}
+
+
+@dataclass(frozen=True)
+class RemedyPolicy:
+    """One named, ordered ladder of bounded remedies.
+
+    A policy is data, not code: *sequences* maps a diagnosed problem to the
+    escalating steps tried for it, *precedence* orders the problems so one
+    diagnosis is remedied at a time, and *refusals* names the problems this policy
+    deliberately has no input remedy for. A group with its own reviewed practice
+    registers its own policy with :func:`register_remedy_policy` instead of
+    editing this module.
+    """
+
+    name: str
+    sequences: Mapping[str, RemedySequence]
+    precedence: tuple[str, ...]
+    refusals: Mapping[str, str] = field(default_factory=dict)
+
+
+_REMEDY_POLICIES: dict[str, RemedyPolicy] = {}
+
+#: Every remedy operation :func:`apply_vasp_remedy` implements, besides the
+#: ``incar.<TAG>`` form that assigns one INCAR tag.
+REMEDY_OPERATIONS = (
+    "bump_bands",
+    "bump_kpoints",
+    "centering",
+    "contcar_to_poscar",
+    "equal_kpoints",
+    "scale_ediff",
+    "scale_lattice",
+)
+
+
+def register_remedy_policy(
+    name: str,
+    sequences: Mapping[str, Sequence[Sequence[tuple[str, object]]]],
+    precedence: Sequence[str],
+    *,
+    refusals: Mapping[str, str] | None = None,
+    replace: bool = False,
+) -> RemedyPolicy:
+    """Register one named remedy policy and return the normalized result.
+
+    Every problem named in *sequences* must also appear in *precedence*, which is
+    what decides which of several simultaneous diagnostics is acted on, and every
+    change must spell one supported remedy operation, so a policy that cannot be
+    executed is refused when it is registered rather than when a run needs it.
+    """
+
+    if not isinstance(name, str) or not name:
+        raise ValueError("a remedy policy name must be a nonempty string")
+    if name in _REMEDY_POLICIES and not replace:
+        raise ValueError(f"remedy policy {name!r} is already registered; pass replace to redefine it")
+    order = tuple(precedence)
+    if len(set(order)) != len(order):
+        raise ValueError(f"remedy policy {name!r} lists a problem twice in its precedence")
+    normalized: dict[str, RemedySequence] = {}
+    for problem, sequence in sequences.items():
+        if problem not in order:
+            raise ValueError(f"remedy policy {name!r} has a sequence for {problem!r}, which its precedence omits")
+        steps: list[tuple[RemedyChange, ...]] = []
+        for step in sequence:
+            changes = tuple((str(operation), value) for operation, value in step)
+            if not changes:
+                raise ValueError(f"remedy policy {name!r} has an empty remedy step for {problem!r}")
+            for operation, _ in changes:
+                if operation not in REMEDY_OPERATIONS and not operation.startswith("incar."):
+                    raise ValueError(
+                        f"remedy policy {name!r} uses unsupported remedy operation {operation!r}; "
+                        f"supported operations: {', '.join(REMEDY_OPERATIONS)}, or incar.<TAG>"
+                    )
+            steps.append(changes)
+        normalized[problem] = tuple(steps)
+    for problem in refusals or {}:
+        if problem not in order:
+            raise ValueError(f"remedy policy {name!r} refuses {problem!r}, which its precedence omits")
+        if problem in normalized:
+            raise ValueError(f"remedy policy {name!r} both refuses {problem!r} and has a remedy sequence for it")
+    policy = RemedyPolicy(name, normalized, order, dict(refusals or {}))
+    _REMEDY_POLICIES[name] = policy
+    return policy
+
+
+def remedy_policy_names() -> tuple[str, ...]:
+    """Return the names of every registered remedy policy, in registration order."""
+
+    return tuple(_REMEDY_POLICIES)
+
+
+def remedy_policy(name: str) -> RemedyPolicy:
+    """Return one registered remedy policy, naming the alternatives if absent."""
+
+    policy = _REMEDY_POLICIES.get(name)
+    if policy is None:
+        raise ValueError(
+            f"unknown VASP remedy policy {name!r}; registered policies: {', '.join(_REMEDY_POLICIES) or 'none'}"
+        )
+    return policy
+
+
+register_remedy_policy(
+    "reviewed-v1",
+    _REVIEWED_SEQUENCES,
+    _REVIEWED_PRECEDENCE,
+    refusals=_REVIEWED_REFUSALS,
 )
 
 
@@ -885,43 +1222,170 @@ class VaspRemedyDecision:
         }
 
 
+def job_remedy_history_path(payload: str | os.PathLike[str]) -> Path:
+    """Return the job-scoped remedy history file of one job payload.
+
+    The escalation ladder is a property of the *job*, not of the directory one
+    attempt happened to run in, so it lives beside the job state in
+    ``<payload>/.httk-job/`` rather than in the workdir. A job with an isolated
+    workdir therefore keeps escalating instead of silently starting the ladder
+    from the beginning on every attempt.
+    """
+
+    return Path(payload).resolve() / JOB_STATE_DIRECTORY / REMEDY_HISTORY_NAME
+
+
+def _remedy_history_file(root: Path, history_path: str | os.PathLike[str]) -> Path:
+    """Resolve one history location the same way in planning and in application.
+
+    A relative path is relative to the VASP directory in both, never to the
+    process working directory: a plan and the application of that plan must read
+    and write one file.
+    """
+
+    candidate = Path(history_path)
+    return candidate if candidate.is_absolute() else root / candidate
+
+
+def _empty_remedy_history() -> dict[str, Any]:
+    return {"format": "httk-vasp-remedy-history", "format_version": 1, "attempts": {}, "events": []}
+
+
+def _read_remedy_history(root: Path, history_path: str | os.PathLike[str]) -> dict[str, Any]:
+    """Read the remedy history, falling back to the pre-0.2 workdir location."""
+
+    history_file = _remedy_history_file(root, history_path)
+    if history_file.exists():
+        return read_json(history_file)
+    legacy = root / DEFAULT_REMEDY_HISTORY
+    if legacy != history_file and legacy.exists():
+        return read_json(legacy)
+    return _empty_remedy_history()
+
+
+def _remedy_obstacle(root: Path, changes: Sequence[RemedyChange]) -> str | None:
+    """Return why *changes* cannot be applied in *root*, or ``None`` when they can.
+
+    Planning and application ask exactly this question, so a planned remedy is by
+    construction one that can be executed: proposing ``bump_bands`` for a
+    calculation whose INCAR never set ``NBANDS`` would otherwise reach
+    :func:`apply_vasp_remedy` and kill the runner with an uncaught error.
+    """
+
+    tags: dict[str, str] | None = read_incar(root / "INCAR") if (root / "INCAR").is_file() else None
+    for operation, _ in changes:
+        if operation.startswith("incar."):
+            if tags is None:
+                return f"{operation} needs an INCAR in {root}"
+            continue
+        if operation in {"scale_ediff", "bump_bands"}:
+            name = "EDIFF" if operation == "scale_ediff" else "NBANDS"
+            if tags is None:
+                return f"{operation} needs an INCAR in {root}"
+            if name not in tags:
+                return f"{operation} needs {name} in INCAR, which does not set it"
+            try:
+                float(tags[name])
+            except ValueError:
+                return f"{operation} needs a numeric {name} in INCAR, which reads {tags[name]!r}"
+            continue
+        if operation in {"bump_kpoints", "equal_kpoints", "centering"}:
+            kpoints = root / "KPOINTS"
+            if not kpoints.is_file():
+                return f"{operation} needs a staged KPOINTS in {root}"
+            lines = kpoints.read_text(encoding="utf-8", errors="replace").splitlines()
+            if len(lines) < 4:
+                return f"{operation} needs a KPOINTS with at least four lines"
+            if operation != "centering":
+                grid = lines[3].split()[:3]
+                if len(grid) != 3 or any(re.fullmatch(r"[-+]?[0-9]+", item) is None for item in grid):
+                    return f"{operation} needs an explicit three-integer KPOINTS grid line"
+            continue
+        if operation == "scale_lattice":
+            poscar = root / "POSCAR"
+            if not poscar.is_file():
+                return f"{operation} needs a POSCAR in {root}"
+            lines = poscar.read_text(encoding="utf-8", errors="replace").splitlines()
+            if len(lines) < 2 or not lines[1].split():
+                return f"{operation} needs a POSCAR scale line"
+            try:
+                float(lines[1].split()[0])
+            except ValueError:
+                return f"{operation} needs a numeric POSCAR scale line"
+            continue
+        if operation == "contcar_to_poscar":
+            if not (root / "CONTCAR").is_file() or not (root / "CONTCAR").read_text(errors="replace").strip():
+                return "contcar_to_poscar needs a nonempty CONTCAR from the interrupted run"
+            if not (root / "POSCAR").is_file():
+                return "contcar_to_poscar needs the reference POSCAR"
+            continue
+        return f"unsupported remedy operation: {operation}"
+    return None
+
+
 def plan_vasp_remedy(
     diagnostics: Sequence[Diagnostic],
     *,
-    history_path: str | os.PathLike[str] = ".httk-vasp/remedies.json",
+    directory: str | os.PathLike[str] = ".",
+    history_path: str | os.PathLike[str] = DEFAULT_REMEDY_HISTORY,
     policy: str = "reviewed-v1",
 ) -> VaspRemedyDecision:
-    """Return, but do not apply, the next reviewed remedy."""
+    """Return, but do not apply, the next remedy of *policy*.
 
-    if policy != "reviewed-v1":
-        raise ValueError("the only implemented VASP remedy policy is reviewed-v1")
-    history_file = Path(history_path)
-    history = read_json(history_file) if history_file.exists() else {"attempts": {}}
+    The decision is validated against the real contents of *directory*: a ladder
+    step whose changes cannot be executed there is skipped, and the first
+    executable step wins. When nothing is left the decision gives up, so a runner
+    only ever hands :func:`apply_vasp_remedy` a remedy it can perform.
+    """
+
+    resolved = remedy_policy(policy)
+    root = Path(directory).resolve()
+    history = _read_remedy_history(root, history_path)
     attempts = history.get("attempts")
     if not isinstance(attempts, Mapping):
         raise ValueError("VASP remedy history has invalid attempts")
     codes = {item.code for item in diagnostics}
-    problem = next((item for item in _REMEDY_PRECEDENCE if item in codes), "unknown")
+    problem = next((item for item in resolved.precedence if item in codes), "unknown")
     step = int(attempts.get(problem, 0))
-    sequence = _REMEDY_SEQUENCES.get(problem, ())
-    if problem == "nonlr_alloc":
-        return VaspRemedyDecision(policy, problem, step, (), True, "memory allocation failure has no safe input remedy")
-    if step >= len(sequence):
-        return VaspRemedyDecision(policy, problem, step, (), True, "no further reviewed remedy is available")
-    return VaspRemedyDecision(policy, problem, step, sequence[step], False, "reviewed remedy available")
+    refusal = resolved.refusals.get(problem)
+    if refusal is not None:
+        return VaspRemedyDecision(policy, problem, step, (), True, refusal)
+    sequence = resolved.sequences.get(problem, ())
+    skipped: list[str] = []
+    while step < len(sequence):
+        obstacle = _remedy_obstacle(root, sequence[step])
+        if obstacle is None:
+            return VaspRemedyDecision(policy, problem, step, sequence[step], False, "reviewed remedy available")
+        _LOGGER.info("remedy step %d for %s is not applicable in %s: %s", step, problem, root, obstacle)
+        skipped.append(f"step {step}: {obstacle}")
+        step += 1
+    reason = f"no further {policy} remedy is available"
+    if skipped:
+        reason = f"{reason} ({'; '.join(skipped)})"
+    return VaspRemedyDecision(policy, problem, step, (), True, reason)
 
 
 def apply_vasp_remedy(
     decision: VaspRemedyDecision,
     *,
     directory: str | os.PathLike[str] = ".",
-    history_path: str | os.PathLike[str] = ".httk-vasp/remedies.json",
+    history_path: str | os.PathLike[str] = DEFAULT_REMEDY_HISTORY,
 ) -> Path:
-    """Explicitly apply a proposed remedy through a replayable workdir batch."""
+    """Explicitly apply a proposed remedy through a replayable workdir batch.
+
+    The history is recorded before the inputs change, so an application
+    interrupted halfway advances the ladder rather than repeating one remedy for
+    ever. A history file inside the VASP directory is written by the same
+    replayable batch as the inputs; a job-scoped one, which the batch cannot
+    reach, is written atomically just before the batch commits.
+    """
 
     if decision.give_up:
         raise ValueError(f"cannot apply give-up decision: {decision.reason}")
     root = Path(directory).resolve()
+    obstacle = _remedy_obstacle(root, decision.changes)
+    if obstacle is not None:
+        raise ValueError(f"cannot apply the {decision.policy} remedy for {decision.problem}: {obstacle}")
     staging = Path(tempfile.mkdtemp(prefix=".httk-vasp-remedy.", dir=root))
     try:
         changed: dict[str, Path] = {}
@@ -974,12 +1438,8 @@ def apply_vasp_remedy(
         if incar_updates:
             update_incar(incar_updates, staging / "INCAR")
             changed["INCAR"] = staging / "INCAR"
-        history_file = root / history_path
-        history = (
-            read_json(history_file)
-            if history_file.exists()
-            else {"format": "httk-vasp-remedy-history", "format_version": 1, "attempts": {}, "events": []}
-        )
+        history_file = _remedy_history_file(root, history_path)
+        history = _read_remedy_history(root, history_path)
         attempts = dict(history.get("attempts", {}))
         attempts[decision.problem] = decision.step + 1
         events = list(history.get("events", []))
@@ -999,12 +1459,15 @@ def apply_vasp_remedy(
             }
         )
         history.update({"attempts": attempts, "events": events})
-        staged_history = staging / "vasp-remedies.json"
-        write_json_atomic(staged_history, history)
         batch = ReplayableWorkdirBatch.create(root)
         for index, (name, source) in enumerate(sorted(changed.items())):
             batch.transaction.put_file(f"input-{index}", source, name)
-        batch.transaction.put_file("remedy-history", staged_history, Path(history_path).as_posix())
+        if history_file.is_relative_to(root):
+            staged_history = staging / REMEDY_HISTORY_NAME
+            write_json_atomic(staged_history, history)
+            batch.transaction.put_file("remedy-history", staged_history, history_file.relative_to(root).as_posix())
+        else:
+            write_json_atomic(history_file, history)
         return batch.commit()
     finally:
         shutil.rmtree(staging, ignore_errors=True)
