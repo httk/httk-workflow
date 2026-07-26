@@ -1,5 +1,8 @@
 # Workflow filesystem API
 
+*For implementers of this protocol, and for anyone who needs to know exactly what a
+workspace on disk means.*
+
 ## Status and scope
 
 This document specifies the filesystem protocol around which the

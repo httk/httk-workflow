@@ -1,5 +1,7 @@
 # Packaged VASP runners
 
+*For campaigns that want an ordinary VASP calculation without writing a runner at all.*
+
 *httk-workflow* ships complete VASP runners. A campaign that wants the ordinary
 thing — relax a structure, run a single point, or both in sequence — writes no
 runner at all: it submits jobs that name one of the installed files in

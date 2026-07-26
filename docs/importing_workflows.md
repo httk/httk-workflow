@@ -1,5 +1,7 @@
 # Importing workflows written elsewhere
 
+*For teams whose workflows are already written as PWD or CWL documents.*
+
 A workflow that already exists in another language does not have to be rewritten
 to run on *httk₂*. Two exchange formats are imported into ordinary jobs:
 

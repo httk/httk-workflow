@@ -1,5 +1,7 @@
 # *httk* v1 task compatibility
 
+*For operators running existing httk v1 task directories on the httk₂ engine, unchanged.*
+
 `httk workflow v1` is a specialized executor for instantiated *httk* v1 task
 directories containing an executable `ht_steps` or `ht_run`. It translates their
 filesystem decisions into the *httk₂* state protocol while leaving the legacy

@@ -1,5 +1,7 @@
 # Workflow declarations
 
+*For workflow authors and data-layer authors: what a workflow says about itself, carried verbatim beside the result.*
+
 A *workflow declaration* is a property-like document that says what a workflow
 **is** — the inputs it consumes, the method it applies, the outputs it produces —
 without describing a graph. It is what a data layer stores next to a result so

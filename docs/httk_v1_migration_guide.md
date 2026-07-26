@@ -1,5 +1,7 @@
 # Migrating an *httk* v1 workflow to *httk₂*
 
+*For maintainers of an httk v1 workflow, moving it to httk₂ at whatever pace suits.*
+
 This guide takes an existing `ht_steps` or `ht_run` workflow from *httk* v1 to
 *httk-workflow*. You can keep the workflow unchanged behind the compatibility
 runner, migrate one job type at a time, or replace the legacy API completely

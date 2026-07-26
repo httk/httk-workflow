@@ -1844,12 +1844,19 @@ class TaskManager:
                 published_here = True
             if not target.is_dir():
                 raise FormatError(f"registered child bundle does not match: {job_key}")
+            if self.workspace.find_markers(job_key):
+                # This child is already registered. Registration is the point of
+                # no return for a spawn set, so from the instant its marker
+                # exists the child is a job in its own right: another manager
+                # may already have claimed it, and its payload then holds a
+                # workdir the spawning outcome never published. The marker is
+                # the proof registration completed, and re-hashing a payload
+                # whose owner has moved on would fail a resumed commit for doing
+                # exactly what registration allows.
+                continue
             if not published_here and tree_digest(target, skip=is_payload_private) != expected_digest:
                 raise FormatError(f"registered child bundle does not match: {job_key}")
             child = JobDefinition.from_mapping(read_json(target / "job.json"))
-            existing = self.workspace.find_markers(job_key)
-            if existing:
-                continue
             temporary = self.workspace.control / "tmp" / f"child-marker.{uuid.uuid4()}"
             temporary.touch(exist_ok=False)
             destination = self.workspace.marker_path("submitted", placement, job_key, child.priority, 0, "init")
