@@ -14,8 +14,127 @@ initialization:
 ```console
 httk-taskmanager init WORKSPACE \
   --extension transactional-data-v1 \
-  --extension priority-bands-v1
+  --extension detached-transfer-v1
 ```
+
+Protocol publications are synchronized to storage by default. `--no-durable`
+turns that off for throwaway workspaces and makes submission and transitions
+faster at the price of correctness after a node crash: an unsynchronized
+journal frame can be lost while the marker naming it survives, which leaves a
+job whose state cannot be read until `workspace fsck --repair` restores it.
+`--durable` is still accepted and does nothing, since it is now the default.
+
+## Workspace policy
+
+Four tunables belong to the workspace rather than to any one process, so that
+every manager, CLI, and independent implementation attaching it agrees on them.
+They live in `.httk-workflow/format.json` and are read and written with:
+
+```console
+httk workflow workspace policy show WORKSPACE
+httk workflow workspace policy set WORKSPACE visibility_deadline_seconds 60
+httk workflow workspace policy set WORKSPACE retention.journal_days 90
+```
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `visibility_deadline_seconds` | `5.0` | How long a marker rename or a referenced journal frame may take to become visible before it is called damage. |
+| `lease_seconds` | `900.0` | The claim lease of a manager started without `--lease-seconds`. |
+| `journal_segment_bytes` | `67108864` | The size at which a journal writer rotates to its next segment. |
+| `retention` | `{}` | Optional `attempt_control_days`, `journal_days`, and `trash_days` collection limits. |
+
+Values are given as JSON and validated on write; an unknown key is refused
+rather than stored. A change reaches a manager when it attaches, so restart
+long-running managers after changing policy. Concurrent policy writers are not
+serialized: the write itself is atomic, but the last writer wins.
+
+## Freeing disk on a quota'd filesystem
+
+A manager frees nothing while it runs, by design: it is never required to
+execute cleanup code, so it can disappear between any two instructions. Over a
+long campaign the workspace therefore accumulates one control directory per
+attempt, one journal writer and manager directory per process start, a full
+copy of every tree a transaction replaced, and an intact bundle for every
+transfer already acknowledged. On a quota'd HPC filesystem that is what fails
+first.
+
+Collection is a separate, explicit operation. Configure the retention limits
+once, then run it from a maintenance job or by hand:
+
+```console
+httk workflow workspace policy set WORKSPACE retention.attempt_control_days 14
+httk workflow workspace policy set WORKSPACE retention.trash_days 14
+httk workflow workspace policy set WORKSPACE retention.journal_days 90
+httk workflow workspace gc WORKSPACE --dry-run
+httk workflow workspace gc WORKSPACE
+```
+
+It is safe to run against a live workspace: a manager that is still
+heartbeating keeps its own directory and every journal segment it wrote, no
+marker or payload is touched beyond the aged attempt-control directories of
+terminal jobs, and pruning an empty placement mirror that a transition is
+recreating underneath is an ordinary outcome rather than an error. A limit left
+unset means keep. See
+[the command guide](workflow_cli.md#freeing-disk) for the full category table
+and for what collecting journal history costs.
+
+A long-lived manager can also do this itself, which is convenient where no
+maintenance job exists:
+
+```console
+httk workflow manager run WORKSPACE --gc-interval 3600
+```
+
+The manager then collects at most once per interval, at the end of a tick and
+never between observing a marker and acting on it, obeying exactly the same
+`policy.retention` limits. It is off by default, and a failed collection is
+logged rather than allowed to disturb scheduling. Keep the interval long: a
+collection walks the state tree and the journal directory, which is work the
+scheduling passes do not need done often.
+
+## Shared filesystems
+
+A workspace is designed to be attached from several nodes at once, which makes
+the metadata behavior of the shared filesystem part of the configuration.
+
+**Mount options.** Renames and directory listings must be seen by other clients
+promptly, so an aggressively cached mount needs its attribute caching bounded:
+
+- NFS: `actimeo=5` (or the pair `acdirmin=1,acdirmax=5`) and
+  `lookupcache=positive` are a good starting point. The defaults —
+  `acdirmax=60` — mean another node may keep serving a stale directory listing
+  for up to a minute, which is legal and must simply be waited out. `noac`
+  removes the staleness entirely and is correct, but it disables attribute
+  caching and close-to-open optimization altogether and is usually far too
+  slow for a workspace with many jobs. `nolock` is fine: the protocol never
+  takes a POSIX lock. Use NFSv4.1 or newer where available.
+- Lustre and GPFS: no special options. Their metadata coherence is strong
+  enough that the local-filesystem defaults apply.
+- Anything backed by an object store or a FUSE cache without rename atomicity
+  is not a supported workspace filesystem at all: the protocol requires
+  `rename(2)` to be atomic and to fail rather than silently overwrite.
+
+**The visibility deadline.** Set it to comfortably exceed the worst-case
+staleness window of the mount:
+
+| Filesystem | Recommended `visibility_deadline_seconds` |
+| --- | --- |
+| Local disk, tmpfs, single node | `5` (the default) |
+| Lustre, GPFS, BeeGFS | `10` |
+| NFS with `actimeo=5` | `30` |
+| NFS with default caching (`acdirmax=60`) | `120` |
+
+The deadline costs nothing when nothing is wrong: the schedule starts at 10 ms
+and stops the moment the rename or frame becomes visible. It is only spent when
+the filesystem is actually lying to one client.
+
+**Clocks.** Leases are advisory evidence, not a fence. A manager decides that
+another manager's claim has expired by comparing its own wall clock with the
+heartbeat timestamp that manager wrote, so the nodes sharing a workspace should
+run NTP; skew larger than `lease_seconds` will cause premature or delayed
+recovery of abandoned claims. Safety does not rest on this: the actual fence is
+the marker rename, which exactly one actor can win, so a mistaken expiry
+decision costs a lost claim rather than two runners in one job.
 
 ## Submit a job
 
@@ -72,10 +191,31 @@ httk-taskmanager run WORKSPACE \
   --workers 4
 ```
 
-`--until-idle` is useful for batch invocations and tests. Persistent-workdir
-takeover requires proof that an old writer has stopped; the explicitly unsafe
-`--unsafe-persistent-takeover` option relaxes that rule and is recorded in
-attempt state.
+A manager claims work under the workspace's `lease_seconds` unless
+`--lease-seconds` overrides it for that manager alone.
+
+`--until-idle` is useful for batch invocations and tests.
+
+**Taking over another manager's attempt.** An expired lease says that a manager
+stopped heartbeating, which is not the same as its attempt having stopped, so
+neither workdir mode relaunches on lease expiry alone:
+
+| Workdir mode | What admits a takeover | Relaxed by |
+| --- | --- | --- |
+| `persistent` | The recorded process is provably gone on this host. A second writer would corrupt the shared directory. | `--unsafe-persistent-takeover` |
+| `isolated` | The recorded process is provably gone, *or* the heartbeat has been silent for `--takeover-grace-factor` leases (default `2.0`). A second attempt corrupts nothing but costs a second allocation. | `--unsafe-isolated-takeover` |
+
+Both unsafe options and the evidence of every takeover — which rule admitted
+it and how old the heartbeat was — are recorded in the new attempt's state
+frame, so `job log` shows exactly why a job was relaunched.
+
+**Long scans.** A manager heartbeats between its scheduling passes and inside
+long ones, and bounds how many markers of one kind it processes per pass,
+resuming the rest on the next pass in a stable order. A workspace too large to
+scan inside one lease is therefore served round-robin instead of making the
+manager look abandoned to its peers. A pass that still consumes half of the
+lease is logged as a warning, and nine tenths of it as an error: raise
+`lease_seconds`, split the workspace, or reduce what the manager scans.
 
 Every claim, launch, transition, recovery decision, and refused request is
 logged. The console reports warnings and errors, while the complete info-level
@@ -103,7 +243,75 @@ httk-taskmanager request WORKSPACE JOB_UUID continue \
 ```
 
 Requests capture the exact current marker generation and record reference.
-A delayed request therefore cannot mutate a newer job state.
+A delayed request therefore cannot mutate a newer job state. One that can never
+apply again — because the job has moved on — is moved to
+`.httk-workflow/requests/retired/` with the reason recorded beside it instead
+of being reread on every pass; a request for a runner backend this manager does
+not serve is left alone for a manager that does.
+
+**Cancelling a running job** is fenced and verified, not a single signal:
+
+```console
+httk-taskmanager request WORKSPACE JOB_UUID cancel \
+  --operator "$USER" --reason "wrong inputs"
+```
+
+The manager first renames the marker `running` → `cancelling`, which fences the
+attempt so it can no longer commit an outcome. Only then does it `SIGTERM` the
+process group, `SIGKILL` it if it has not exited within the grace period, and
+verify that it is actually gone; only a verified exit moves the job to
+`cancelled`, and how it was verified is recorded in the terminal frame. A
+manager that dies mid-cancellation leaves a `cancelling` marker, and the next
+manager finishes exactly the same procedure. A process recorded on another host
+cannot be proven stopped here: the job stays `cancelling`, the reason is
+journaled, and a warning is logged on every retry — which is the safe answer,
+because `cancelled` asserts that nothing is still writing the workdir.
+
+## Checking and repairing a workspace
+
+`workspace fsck` verifies the one thing a manager cannot route around: that
+every state marker still resolves to its journal frame.
+
+```console
+httk workflow workspace fsck WORKSPACE
+httk workflow workspace fsck WORKSPACE --json
+httk workflow workspace fsck WORKSPACE --repair
+httk workflow workspace fsck WORKSPACE --repair --quarantine-unrepairable
+```
+
+It reads every marker of every state kind and checks that its record reference
+resolves — within the configured visibility deadline, so a merely slow network
+filesystem is never mistaken for damage — to a readable frame whose checksum
+verifies and whose job, kind, and generation agree with the marker name. Each
+problem is reported with a stable code: `missing_segment`, `short_read`,
+`checksum_mismatch`, `reference_mismatch`, `identity_mismatch`,
+`unparseable_name`, and their siblings. Without `--repair` nothing is written.
+The command exits `0` when the workspace is clean or everything found was
+repaired, and `1` when something is left for an operator.
+
+`--repair` re-points a damaged marker at the last good frame of its job. Since
+the frame holding the backward link is the unreadable one, the repair scans the
+journal for readable frames naming that job and adopts the newest one *older*
+than the marker's own generation — never a newer one, which would be either the
+damaged frame itself or a transition no marker ever committed. It then writes
+one `fsck_repair` state frame, chained to the recovered frame and carrying its
+step, activation, and attempt counters forward, and renames the marker onto it
+at the next generation. History is added, never rewritten, and the job is
+schedulable again.
+
+Two things are deliberately never repaired:
+
+- a `claimed`, `running`, or `committing` marker whose manager is still
+  heartbeating within its lease is reported and left exactly as it is, because
+  that manager owns the transition that comes next. Stop the manager, or wait
+  for its lease to expire, and run the repair again;
+- a marker with no readable older frame — typically a job damaged before its
+  second transition — cannot be restored at all. It is reported, and moved into
+  `.httk-workflow/quarantine/` with an audit record only if
+  `--quarantine-unrepairable` is also given.
+
+Run it when a node crashed while writing, when a filesystem was restored from a
+snapshot, or whenever `job show` reports that a state frame is not readable.
 
 ## Inspecting jobs
 

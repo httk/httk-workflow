@@ -1,6 +1,10 @@
 PYTHON ?= python3
 DIST_DIR ?= dist
 
+# black's default process pool can hang in constrained sandboxes; keep it
+# single-worker everywhere (equivalent to passing --workers 1).
+export BLACK_NUM_WORKERS = 1
+
 # Base URL of the published httk documentation site, used for cross-linking docs
 # between httk repositories (read by docs/conf.py via HTTK_DOCS_BASE_URL).
 DOCS_BASE_URL ?= https://docs.httk.org

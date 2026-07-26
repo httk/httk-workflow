@@ -5,11 +5,23 @@ import json
 import os
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 from .errors import FormatError
+
+#: The visibility deadline used by a caller that has no workspace policy to
+#: read. It is a local-filesystem value: a shared filesystem needs the far
+#: larger deadline its workspace policy configures.
+DEFAULT_VISIBILITY_DEADLINE_SECONDS = 5.0
+#: The first backoff step of every visibility retry schedule. The first probes
+#: stay short so a local rename or read that is simply not yet settled costs
+#: milliseconds rather than the whole deadline.
+FIRST_RETRY_DELAY_SECONDS = 0.01
+#: The longest single sleep in a visibility retry schedule, so that even a
+#: minute-long deadline keeps re-probing instead of blocking on one long sleep.
+MAXIMUM_RETRY_DELAY_SECONDS = 5.0
 
 
 def utc_now() -> str:
@@ -138,17 +150,68 @@ def require_int(value: object, name: str, *, minimum: int = 0, maximum: int | No
     return value
 
 
+def require_number(value: object, name: str, *, minimum: float = 0.0, maximum: float | None = None) -> float:
+    """Validate one JSON number, accepting an integer as the float it denotes."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise FormatError(f"{name} must be a number")
+    number = float(value)
+    if number != number or number in (float("inf"), float("-inf")):
+        raise FormatError(f"{name} must be a finite number")
+    if number < minimum or (maximum is not None and number > maximum):
+        limit = f"..{maximum}" if maximum is not None else " or greater"
+        raise FormatError(f"{name} must be {minimum}{limit}")
+    return number
+
+
 def retry_delay(attempt: int) -> float:
     """Small bounded delay for metadata visibility retries."""
 
     return min(0.01 * (2**attempt), 0.25)
 
 
-def wait_for_path(path: Path, *, attempts: int = 6) -> bool:
-    """Reopen and retry a path lookup."""
+def visibility_schedule(deadline_seconds: float | None = None) -> tuple[float, ...]:
+    """Return the backoff delays that spend one visibility deadline.
 
-    for attempt in range(attempts):
+    The schedule doubles from :data:`FIRST_RETRY_DELAY_SECONDS` and is clipped
+    so the delays sum to exactly the deadline: fast first probes for the
+    ordinary local case, then longer ones for a network filesystem whose
+    attribute cache may hold a stale answer for tens of seconds. The returned
+    tuple holds the waits *between* attempts, so a caller performs one more
+    attempt than there are delays.
+    """
+
+    deadline = DEFAULT_VISIBILITY_DEADLINE_SECONDS if deadline_seconds is None else max(0.0, deadline_seconds)
+    delays: list[float] = []
+    remaining = deadline
+    delay = FIRST_RETRY_DELAY_SECONDS
+    while remaining > 0.0:
+        step = min(delay, remaining)
+        delays.append(step)
+        remaining -= step
+        delay = min(delay * 2.0, MAXIMUM_RETRY_DELAY_SECONDS)
+    return tuple(delays)
+
+
+def visibility_attempts(deadline_seconds: float | None = None) -> Iterator[int]:
+    """Yield attempt ordinals, sleeping the visibility backoff between them.
+
+    Leaving the loop early — by returning the value that finally became
+    visible — skips the remaining sleeps, so a schedule sized for a network
+    filesystem costs nothing when the first probe already succeeds.
+    """
+
+    schedule = visibility_schedule(deadline_seconds)
+    for index, delay in enumerate(schedule):
+        yield index
+        time.sleep(delay)
+    yield len(schedule)
+
+
+def wait_for_path(path: Path, *, deadline_seconds: float | None = None) -> bool:
+    """Reopen and retry a path lookup until the visibility deadline expires."""
+
+    for _ in visibility_attempts(deadline_seconds):
         if path.exists():
             return True
-        time.sleep(retry_delay(attempt))
     return path.exists()

@@ -11,7 +11,7 @@ from pathlib import Path
 from ._logging import LOG_LEVELS, add_log_file, configure_logging
 from ._util import utc_now
 from .errors import WorkflowError
-from .manager import TaskManager
+from .manager import DEFAULT_TAKEOVER_GRACE_FACTOR, TaskManager
 from .models import STATE_KINDS
 from .workspace import WorkflowWorkspace
 
@@ -20,7 +20,16 @@ _LOGGER = logging.getLogger(__name__)
 
 def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=program, description="Manage httk filesystem workflows")
-    parser.add_argument("--durable", action="store_true", help="fsync protocol publications")
+    parser.add_argument(
+        "--durable",
+        action="store_true",
+        help="fsync protocol publications (the default; accepted for compatibility)",
+    )
+    parser.add_argument(
+        "--no-durable",
+        action="store_true",
+        help="do not fsync protocol publications; a crashed node may then strand markers",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     initialize = subparsers.add_parser("init", help="initialize a workflow workspace")
@@ -29,7 +38,7 @@ def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
         "--extension",
         action="append",
         default=[],
-        choices=("transactional-data-v1", "priority-bands-v1", "detached-transfer-v1"),
+        choices=("transactional-data-v1", "detached-transfer-v1"),
     )
 
     submit = subparsers.add_parser("submit", help="submit a complete payload directory")
@@ -43,12 +52,32 @@ def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
     run.add_argument("--pool", action="append", default=[])
     run.add_argument("--capability", action="append", default=[])
     run.add_argument("--workers", type=int, default=1)
-    run.add_argument("--lease-seconds", type=float, default=900.0)
+    run.add_argument(
+        "--lease-seconds",
+        type=float,
+        help="lease length for this manager (default: the workspace policy's lease_seconds)",
+    )
     run.add_argument("--heartbeat-interval", type=float, default=30.0)
     run.add_argument("--poll-interval", type=float, default=1.0)
     run.add_argument("--until-idle", action="store_true")
     run.add_argument("--timeout", type=float, default=3600.0)
-    run.add_argument("--unsafe-persistent-takeover", action="store_true")
+    run.add_argument(
+        "--unsafe-persistent-takeover",
+        action="store_true",
+        help="take over a persistent workdir on lease expiry alone, without proving the old writer stopped",
+    )
+    run.add_argument(
+        "--unsafe-isolated-takeover",
+        action="store_true",
+        help="relaunch an isolated-workdir attempt on lease expiry alone, without waiting out the takeover grace",
+    )
+    run.add_argument(
+        "--takeover-grace-factor",
+        type=float,
+        default=DEFAULT_TAKEOVER_GRACE_FACTOR,
+        metavar="FACTOR",
+        help="multiples of the lease a silent attempt is left alone before it may be taken over (default: 2.0)",
+    )
     run.add_argument(
         "--runner-search-path",
         action="append",
@@ -61,6 +90,15 @@ def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
         type=float,
         default=30.0,
         help="seconds to keep committing outcomes after a stop signal",
+    )
+    run.add_argument(
+        "--gc-interval",
+        type=float,
+        metavar="SECONDS",
+        help=(
+            "also collect garbage from this manager, at most once per SECONDS "
+            "(default: no background collection; use 'httk workflow workspace gc' instead)"
+        ),
     )
     run.add_argument(
         "--log-level",
@@ -88,6 +126,14 @@ def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
     request.add_argument("--reason", required=True)
     request.add_argument("--priority", type=int)
     request.add_argument("--step")
+    request.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "accept the hazard of reviving a job a decided join already consumed; "
+            "the hazard is journalled in the resulting state frame"
+        ),
+    )
     return parser
 
 
@@ -149,6 +195,8 @@ def _publish_request(workspace: WorkflowWorkspace, arguments: argparse.Namespace
         request["priority"] = arguments.priority
     if arguments.step is not None:
         request["step"] = arguments.step
+    if arguments.force:
+        request["force"] = True
     path = workspace.publish_request(request)
     print(path)
 
@@ -167,7 +215,10 @@ def _run(workspace: WorkflowWorkspace, arguments: argparse.Namespace) -> int:
         lease_seconds=arguments.lease_seconds,
         heartbeat_interval=arguments.heartbeat_interval,
         unsafe_persistent_takeover=arguments.unsafe_persistent_takeover,
+        unsafe_isolated_takeover=arguments.unsafe_isolated_takeover,
+        takeover_grace_factor=arguments.takeover_grace_factor,
         runner_search_paths=arguments.runner_search_path,
+        gc_interval=arguments.gc_interval,
     ) as manager:
         log_file = Path(arguments.log_file) if arguments.log_file else manager.manager_directory / "log"
         add_log_file(log_file, level=arguments.log_level or "info", json_logs=arguments.json_logs)
@@ -189,19 +240,22 @@ def main(argv: Sequence[str] | None = None, *, program: str = "httk-taskmanager"
 
     parser = _parser(program)
     arguments = parser.parse_args(argv)
+    # Durability is the default: a manager that survives a node crash must not
+    # be left holding markers that reference journal frames the page cache lost.
+    durable = not arguments.no_durable
     try:
         if arguments.command == "init":
             workspace = WorkflowWorkspace.initialize(
                 arguments.workspace,
                 extensions=arguments.extension,
-                durable=arguments.durable,
+                durable=durable,
             )
             print(workspace.root)
             return 0
         workspace = WorkflowWorkspace(
             arguments.workspace,
             mutable=arguments.command != "status",
-            durable=arguments.durable,
+            durable=durable,
         )
         if arguments.command == "submit":
             marker = workspace.submit(arguments.source, arguments.placement, move=arguments.move)

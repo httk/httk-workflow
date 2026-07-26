@@ -10,15 +10,15 @@ import uuid
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._util import (
     fsync_directory,
     read_json,
-    retry_delay,
     sha256_file,
     tree_digest,
     utc_now,
+    visibility_attempts,
     write_json_atomic,
 )
 from .errors import (
@@ -36,13 +36,20 @@ from .models import (
     READABLE_CORE_PROFILES,
     STATE_KINDS,
     SUPPORTED_EXTENSIONS,
+    WITHDRAWN_EXTENSIONS,
     JobDefinition,
     Marker,
+    WorkspacePolicy,
     is_payload_private,
     marker_basename,
     normalize_placement,
+    parse_job_key,
     validate_runner_path,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - imported for typing only
+    from .fsck import FsckReport
+    from .gc import GcReport
 
 _LOGGER = logging.getLogger(__name__)
 # Anything below state/ that cannot possibly be a marker basename is ignored
@@ -59,6 +66,20 @@ class MarkerFault:
     reason: str
 
 
+@dataclass(frozen=True)
+class _IndexEntry:
+    """Where one job's marker was last observed, as a cache of the state tree.
+
+    The three members are exactly what rebuilds the marker path, and every one
+    of them is derived: nothing here is authoritative, and a hit is confirmed
+    against the filesystem before it is used.
+    """
+
+    kind: str
+    placement: PurePosixPath
+    basename: str
+
+
 def _marker_shaped(name: str) -> bool:
     """Report whether *name* is shaped enough like a marker to be validated."""
 
@@ -68,13 +89,16 @@ def _marker_shaped(name: str) -> bool:
 class WorkflowWorkspace:
     """One self-contained httk workflow filesystem workspace."""
 
-    def __init__(self, root: str | os.PathLike[str], *, mutable: bool = True, durable: bool = False) -> None:
+    def __init__(self, root: str | os.PathLike[str], *, mutable: bool = True, durable: bool = True) -> None:
         self.root = Path(root).resolve()
         self.control = self.root / ".httk-workflow"
         self.runners = self.control / "runners"
         self.durable = durable
         self._reported_faults: set[Path] = set()
         self.format = read_json(self.control / "format.json")
+        # A workspace written before the policy section existed reads as the
+        # defaults, so an old workspace attaches without migration.
+        self._policy = WorkspacePolicy.from_mapping(self.format.get("policy", {}))
         if self.format.get("format") != "httk-workflow-filesystem" or self.format.get("format_version") != 1:
             raise FormatError("workspace must use httk-workflow-filesystem format version 1")
         self.core_profile = self.format.get("core_profile")
@@ -92,6 +116,17 @@ class WorkflowWorkspace:
         if not isinstance(extensions_raw, list) or not all(isinstance(item, str) for item in extensions_raw):
             raise FormatError("workspace extensions must be an array of strings")
         self.extensions = frozenset(extensions_raw)
+        withdrawn = self.extensions & WITHDRAWN_EXTENSIONS
+        if withdrawn:
+            # A withdrawn extension changed the on-disk shapes this
+            # implementation reads, so even a read-only attach would misparse
+            # the workspace. There is no migration: the state tree would have to
+            # be rewritten marker by marker.
+            raise UnsupportedExtensionError(
+                f"workspace declares withdrawn extensions: {', '.join(sorted(withdrawn))}; "
+                "this implementation no longer reads that layout, so the workspace must be "
+                "re-initialized (httk workflow workspace init) and its jobs resubmitted"
+            )
         unsupported = self.extensions - SUPPORTED_EXTENSIONS
         if mutable and unsupported:
             raise UnsupportedExtensionError(f"unsupported enabled extensions: {', '.join(sorted(unsupported))}")
@@ -103,7 +138,14 @@ class WorkflowWorkspace:
                 raise ValueError
         except ValueError as exc:
             raise FormatError("workspace_id must be a canonical UUID") from exc
-        self.priority_bands = "priority-bands-v1" in self.extensions
+        # Job id -> where this instance last saw that job's marker. It is a pure
+        # cache of the state tree, built lazily from one scan and maintained by
+        # every rename this instance performs; see :meth:`find_marker_by_id`.
+        self._marker_index: dict[str, _IndexEntry] | None = None
+        # Job ids the last complete scan found more than one marker for. That is
+        # workspace corruption, and the lookup that meets one must say so rather
+        # than pick a winner.
+        self._marker_duplicates: frozenset[str] = frozenset()
 
     @classmethod
     def initialize(
@@ -111,13 +153,21 @@ class WorkflowWorkspace:
         root: str | os.PathLike[str],
         *,
         extensions: Iterable[str] = (),
-        durable: bool = False,
+        durable: bool = True,
+        policy: Mapping[str, object] | None = None,
     ) -> "WorkflowWorkspace":
         """Create and return a new workspace."""
 
         root_path = Path(root).resolve()
         root_path.mkdir(parents=True, exist_ok=True)
+        initial_policy = WorkspacePolicy.from_mapping({} if policy is None else policy)
         extension_set = frozenset(extensions)
+        withdrawn = extension_set & WITHDRAWN_EXTENSIONS
+        if withdrawn:
+            raise UnsupportedExtensionError(
+                f"withdrawn extensions cannot be enabled: {', '.join(sorted(withdrawn))}; "
+                "priority is encoded in every marker basename and needs no directory layer"
+            )
         unsupported = extension_set - SUPPORTED_EXTENSIONS
         if unsupported:
             raise UnsupportedExtensionError(f"unsupported extensions: {', '.join(sorted(unsupported))}")
@@ -151,10 +201,75 @@ class WorkflowWorkspace:
                 "record_ref_encoding": "hwref-v1",
                 "workspace_id": str(uuid.uuid4()),
                 "created_at": utc_now(),
+                "policy": initial_policy.as_mapping(),
             },
             durable=durable,
         )
         return cls(root_path, durable=durable)
+
+    @property
+    def policy(self) -> WorkspacePolicy:
+        """Return the shared tunables this workspace publishes to every attacher."""
+
+        return self._policy
+
+    @property
+    def visibility_deadline(self) -> float:
+        """Return how long a metadata visibility retry may keep probing."""
+
+        return self._policy.visibility_deadline_seconds
+
+    def set_policy(self, changes: Mapping[str, object]) -> WorkspacePolicy:
+        """Validate *changes*, merge them into the stored policy, and publish it.
+
+        The write is an ordinary read-modify-write of ``format.json`` through an
+        exclusively created temporary file and a rename, so a reader never sees
+        a torn object. It is deliberately not serialized against another writer:
+        policy is administrative, changes are rare, and last writer wins.
+        """
+
+        stored = read_json(self.control / "format.json")
+        merged = WorkspacePolicy.from_mapping(stored.get("policy", {})).updated(changes)
+        stored["policy"] = merged.as_mapping()
+        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
+        self.format = stored
+        self._policy = merged
+        _LOGGER.info(
+            "workspace %s policy updated: %s",
+            self.workspace_id,
+            ", ".join(f"{key}={value!r}" for key, value in sorted(changes.items())),
+            extra={"event": "policy_updated", "workspace_id": self.workspace_id},
+        )
+        return merged
+
+    def open_journal_writer(self, *, writer_id: str | None = None) -> JournalWriter:
+        """Open one exclusive journal writer configured by workspace policy."""
+
+        return JournalWriter(
+            self.control,
+            writer_id=writer_id,
+            durable=self.durable,
+            maximum_segment_bytes=self._policy.journal_segment_bytes,
+        )
+
+    def check(
+        self,
+        *,
+        repair: bool = False,
+        quarantine_unrepairable: bool = False,
+    ) -> "FsckReport":
+        """Verify that every marker resolves to its journal frame."""
+
+        from .fsck import check_workspace
+
+        return check_workspace(self, repair=repair, quarantine_unrepairable=quarantine_unrepairable)
+
+    def collect_garbage(self, *, dry_run: bool = False, now: float | None = None) -> "GcReport":
+        """Collect the disk this workspace's retention policy permits freeing."""
+
+        from .gc import collect_garbage
+
+        return collect_garbage(self, dry_run=dry_run, now=now)
 
     def upgrade(self, extensions: Iterable[str]) -> frozenset[str]:
         """Enable extensions that have an implemented in-place migration."""
@@ -293,13 +408,10 @@ class WorkflowWorkspace:
 
         return recover_transfers(self)
 
-    def state_directory(self, kind: str, placement: PurePosixPath, *, priority: int) -> Path:
+    def state_directory(self, kind: str, placement: PurePosixPath) -> Path:
         if kind not in STATE_KINDS:
             raise ValueError(f"unknown state kind: {kind}")
-        result = self.control / "state" / kind
-        if self.priority_bands and kind == "ready":
-            result = result / f"p{priority // 100}xx"
-        return result.joinpath(*placement.parts)
+        return (self.control / "state" / kind).joinpath(*placement.parts)
 
     def marker_path(
         self,
@@ -310,9 +422,7 @@ class WorkflowWorkspace:
         generation: int,
         record_ref: str,
     ) -> Path:
-        return self.state_directory(kind, placement, priority=priority) / marker_basename(
-            job_key, priority, generation, record_ref
-        )
+        return self.state_directory(kind, placement) / marker_basename(job_key, priority, generation, record_ref)
 
     def payload_path(self, placement: PurePosixPath, job_key: str) -> Path:
         return self.root.joinpath(*placement.parts, job_key)
@@ -338,7 +448,7 @@ class WorkflowWorkspace:
                     _LOGGER.debug("ignoring foreign file below state: %s", path)
                     continue
                 try:
-                    yield Marker.from_path(state_root, path, priority_bands=self.priority_bands)
+                    yield Marker.from_path(state_root, path)
                 except (WorkflowError, ValueError) as exc:
                     yield MarkerFault(path=path, reason=str(exc))
 
@@ -365,39 +475,224 @@ class WorkflowWorkspace:
         self._reported_faults.add(fault.path)
         _LOGGER.error(message, fault.path, fault.reason, extra={"event": "marker_fault", "entry": str(fault.path)})
 
+    # -- the derived job-id index -------------------------------------------
+    #
+    # ``find_marker_by_id`` and ``find_markers`` are asked one question — where
+    # is this job right now — by join evaluation, by every operator request, by
+    # ``job show``/``job why``, and by transfers. Answering it by walking the
+    # whole state tree costs one rglob per state kind per question, which is what
+    # made a waiting parent's per-tick cost grow with its number of children.
+    #
+    # The answer is cached per workspace instance in memory only. There is
+    # deliberately no on-disk index: two managers write one workspace, and a
+    # shared file would need a durability and invalidation story that the
+    # authoritative state tree already provides for free. The cache is therefore
+    # never trusted negatively — a miss rescans before absence is declared — and
+    # a hit is confirmed against the filesystem before it is returned, so a
+    # marker another manager moved is detected rather than reported stale.
+    #
+    # It costs a few hundred bytes per job of this workspace, which is the price
+    # the specification's "keep an in-memory job-key-to-marker map" advice always
+    # implied; a process that must not pay it can drop the whole index at any
+    # moment with :meth:`invalidate_marker_index`, at the cost of one rescan.
+
+    def _index_note(self, marker: Marker) -> None:
+        """Record where this instance just observed one job's marker.
+
+        The index covers exactly the kinds a lookup answers for, so a job that
+        moves into ``relocating`` or ``transferring`` is dropped rather than
+        recorded: a lookup must report it as absent from the schedulable tree.
+        """
+
+        if self._marker_index is None:
+            return
+        if marker.kind not in CORE_STATE_KINDS:
+            self._marker_index.pop(marker.job_id, None)
+            return
+        self._marker_index[marker.job_id] = _IndexEntry(
+            kind=marker.kind,
+            placement=marker.placement,
+            basename=marker.path.name,
+        )
+
+    def _index_note_path(self, path: Path) -> None:
+        """Record one marker this instance published or moved by raw path.
+
+        Marker publication that does not go through :meth:`transition` — a
+        submission, a registered child, an imported transfer bundle — still
+        renames into ``state/``, so the index is refreshed from the destination
+        path rather than from a parsed marker the caller may not have built.
+        """
+
+        state_root = self.control / "state"
+        try:
+            relative = path.relative_to(state_root)
+        except ValueError:
+            return
+        if len(relative.parts) < 3:
+            return
+        try:
+            self._index_note(Marker.from_path(state_root, path))
+        except (WorkflowError, ValueError):
+            _LOGGER.debug("not indexing an uninterpretable marker publication: %s", path)
+
+    def _index_forget(self, job_id: str) -> None:
+        """Drop one job from the index, for instance when it is quarantined."""
+
+        if self._marker_index is not None:
+            self._marker_index.pop(job_id, None)
+
+    def invalidate_marker_index(self) -> None:
+        """Drop the cached job-id index, so the next lookup rebuilds it."""
+
+        self._marker_index = None
+        self._marker_duplicates = frozenset()
+
+    def _rebuild_marker_index(self) -> dict[str, _IndexEntry]:
+        """Rebuild the whole index from one complete scan of ``state/``.
+
+        The scan is deliberately the base-class one: a subclass may narrow what
+        a manager *scans* for scheduling, but never what the workspace may look
+        up, and an index built from a narrowed scan would answer "absent" for a
+        job that is plainly there.
+        """
+
+        index: dict[str, _IndexEntry] = {}
+        duplicates: set[str] = set()
+        for entry in WorkflowWorkspace.scan_marker_entries(self, CORE_STATE_KINDS):
+            if isinstance(entry, MarkerFault):
+                self.report_marker_fault(entry)
+                continue
+            if entry.job_id in index:
+                duplicates.add(entry.job_id)
+            index[entry.job_id] = _IndexEntry(
+                kind=entry.kind,
+                placement=entry.placement,
+                basename=entry.path.name,
+            )
+        self._marker_index = index
+        self._marker_duplicates = frozenset(duplicates)
+        _LOGGER.debug("rebuilt the marker index of workspace %s with %d jobs", self.workspace_id, len(index))
+        return index
+
+    def _index_marker(self, job_id: str, entry: "_IndexEntry") -> Marker | None:
+        """Return the marker one index entry names, if it is still there."""
+
+        path = self.state_directory(entry.kind, entry.placement) / entry.basename
+        if not path.is_file():
+            return None
+        try:
+            marker = Marker.from_path(self.control / "state", path)
+        except (WorkflowError, ValueError):
+            return None
+        return marker if marker.job_id == job_id else None
+
     def find_markers(self, job_key: str, kinds: Iterable[str] | None = None) -> list[Marker]:
-        return [marker for marker in self.scan_markers(kinds) if marker.job_key == job_key]
+        selected = tuple(kinds or CORE_STATE_KINDS)
+        if set(selected) <= set(CORE_STATE_KINDS):
+            try:
+                job_id = parse_job_key(job_key)[1]
+            except FormatError:
+                job_id = None
+            if job_id is not None:
+                marker = self.find_marker_by_id(job_id)
+                if marker is None or marker.job_key != job_key:
+                    return []
+                return [marker] if marker.kind in selected else []
+        return [marker for marker in self.scan_markers(selected) if marker.job_key == job_key]
 
     def find_marker_by_id(self, job_id: str) -> Marker | None:
-        matches = [marker for marker in self.scan_markers() if marker.job_id == job_id]
+        """Return the one current marker of *job_id*, or ``None`` if it has none.
+
+        Resolution follows the specified ladder: the in-memory index, then a
+        targeted probe of the finite state set at the placement the index last
+        saw, then one complete rescan. Absence is only ever reported after that
+        rescan, so a job another actor has just created or moved is never
+        mistaken for a job that does not exist.
+        """
+
+        index = self._marker_index
+        if index is not None:
+            entry = index.get(job_id)
+            if entry is not None and job_id not in self._marker_duplicates:
+                marker = self._index_marker(job_id, entry)
+                if marker is not None:
+                    return marker
+                # The cached location is stale. The job most likely only changed
+                # kind, and ordinary transitions never change placement, so the
+                # finite state set at that placement is the cheap next probe.
+                index.pop(job_id, None)
+                probed = self._probe_placement(job_id, entry.placement)
+                if probed is not None:
+                    self._index_note(probed)
+                    return probed
+        index = self._rebuild_marker_index()
+        if job_id in self._marker_duplicates:
+            raise WorkspaceCorruptionError(f"job {job_id} has more than one state marker")
+        entry = index.get(job_id)
+        return None if entry is None else self._index_marker(job_id, entry)
+
+    def _probe_placement(self, job_id: str, placement: PurePosixPath) -> Marker | None:
+        """Find one job id by checking every state kind at one placement."""
+
+        state_root = self.control / "state"
+        matches: list[Marker] = []
+        for kind in CORE_STATE_KINDS:
+            directory = self.state_directory(kind, placement)
+            if not directory.is_dir():
+                continue
+            for path in directory.glob(f"*{job_id}.p???.g*.*"):
+                if not path.is_file():
+                    continue
+                try:
+                    marker = Marker.from_path(state_root, path)
+                except (WorkflowError, ValueError) as exc:
+                    self.report_marker_fault(MarkerFault(path=path, reason=str(exc)))
+                    continue
+                if marker.job_id == job_id:
+                    matches.append(marker)
         if len(matches) > 1:
             raise WorkspaceCorruptionError(f"job {job_id} has more than one state marker")
         return matches[0] if matches else None
 
     def find_marker_at(self, job_key: str, placement: PurePosixPath) -> Marker | None:
-        """Find *job_key* by checking the finite state set at a placement."""
+        """Find *job_key* by checking the finite state set at a placement.
 
+        This is the first rung of the resolution ladder: a join child carrying a
+        placement hint is resolved here, without the index and without a scan.
+        The index is used only as a shortcut when it already names this job at
+        exactly this placement, which turns the bounded directory sweep below
+        into one confirmed lookup.
+        """
+
+        index = self._marker_index
+        if index is not None:
+            try:
+                job_id = parse_job_key(job_key)[1]
+            except FormatError:
+                job_id = None
+            entry = None if job_id is None else index.get(job_id)
+            if job_id is not None and entry is not None and entry.placement == placement:
+                marker = self._index_marker(job_id, entry)
+                if marker is not None and marker.job_key == job_key:
+                    return marker
         matches: list[Marker] = []
         state_root = self.control / "state"
         for kind in CORE_STATE_KINDS:
-            directory = self.state_directory(kind, placement, priority=0)
-            directories = [directory]
-            if self.priority_bands and kind == "ready":
-                directories = [
-                    self.control / "state" / "ready" / f"p{band}xx" / Path(*placement.parts) for band in range(10)
-                ]
-            for candidate_dir in directories:
-                if not candidate_dir.is_dir():
+            directory = self.state_directory(kind, placement)
+            if not directory.is_dir():
+                continue
+            for path in directory.glob(f"{job_key}.p???.g*.*"):
+                if not path.is_file():
                     continue
-                for path in candidate_dir.glob(f"{job_key}.p???.g*.*"):
-                    if not path.is_file():
-                        continue
-                    try:
-                        matches.append(Marker.from_path(state_root, path, priority_bands=self.priority_bands))
-                    except (WorkflowError, ValueError) as exc:
-                        self.report_marker_fault(MarkerFault(path=path, reason=str(exc)))
+                try:
+                    matches.append(Marker.from_path(state_root, path))
+                except (WorkflowError, ValueError) as exc:
+                    self.report_marker_fault(MarkerFault(path=path, reason=str(exc)))
         if len(matches) > 1:
             raise WorkspaceCorruptionError(f"job {job_key} has multiple markers at {placement}")
+        if matches:
+            self._index_note(matches[0])
         return matches[0] if matches else None
 
     def load_job(self, marker: Marker) -> JobDefinition:
@@ -424,7 +719,7 @@ class WorkflowWorkspace:
                 "created_at": None,
                 "priority": marker.priority,
             }
-        frame = read_record(self.control, marker.record_ref)
+        frame = read_record(self.control, marker.record_ref, deadline_seconds=self.visibility_deadline)
         if (
             frame.get("format") != "httk-workflow-state"
             or frame.get("format_version") != 1
@@ -477,11 +772,39 @@ class WorkflowWorkspace:
         )
         return self._verified_marker_rename(marker, destination)
 
-    def _verified_marker_rename(self, marker: Marker, destination: Path, *, attempts: int = 7) -> Marker:
+    def repoint_marker(self, writer: JournalWriter, marker: Marker, frame: Mapping[str, object]) -> Marker:
+        """Publish a repair frame for *marker* and move the marker onto it.
+
+        This is the repair counterpart of :meth:`transition`. The caller supplies
+        the complete frame because what needs repairing is precisely the frame
+        the marker references now, which cannot be read and therefore cannot be
+        carried forward automatically. The frame must still name this marker's
+        job and kind at the next generation, so a repair can never disguise a
+        state change as a repair.
+        """
+
+        generation = marker.generation + 1
+        expected: Mapping[str, object] = {
+            "workspace_id": self.workspace_id,
+            "job_id": marker.job_id,
+            "job_key": marker.job_key,
+            "kind": marker.kind,
+            "state_generation": generation,
+        }
+        for name, value in expected.items():
+            if frame.get(name) != value:
+                raise FormatError(f"a repair frame must keep {name} at {value!r}, not {frame.get(name)!r}")
+        record_ref = writer.append(frame)
+        destination = self.marker_path(
+            marker.kind, marker.placement, marker.job_key, marker.priority, generation, record_ref
+        )
+        return self._verified_marker_rename(marker, destination)
+
+    def _verified_marker_rename(self, marker: Marker, destination: Path) -> Marker:
         source = marker.path
         state_root = self.control / "state"
         last_error: OSError | None = None
-        for attempt in range(attempts):
+        for attempt in visibility_attempts(self.visibility_deadline):
             try:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 os.rename(source, destination)
@@ -495,23 +818,23 @@ class WorkflowWorkspace:
                     attempt + 1,
                 )
             if destination.is_file():
-                return Marker.from_path(state_root, destination, priority_bands=self.priority_bands)
+                moved = Marker.from_path(state_root, destination)
+                self._index_note(moved)
+                return moved
             if source.is_file():
                 _LOGGER.debug("marker %s is not yet visible at %s; retrying", source, destination)
-                time.sleep(retry_delay(attempt))
                 continue
             current = self.find_markers(marker.job_key)
             if len(current) == 1:
                 raise TransitionLostError(f"another transition moved {source} to {current[0].path}")
             if len(current) > 1:
                 raise WorkspaceCorruptionError(f"job {marker.job_key} has multiple markers")
-            time.sleep(retry_delay(attempt))
         detail = f": {last_error}" if last_error is not None else ""
         raise WorkspaceUnavailableError(f"cannot resolve marker rename {source} -> {destination}{detail}")
 
-    def _publish_path(self, source: Path, destination: Path, *, attempts: int = 7) -> None:
+    def _publish_path(self, source: Path, destination: Path) -> None:
         last_error: OSError | None = None
-        for attempt in range(attempts):
+        for attempt in visibility_attempts(self.visibility_deadline):
             try:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 os.rename(source, destination)
@@ -526,18 +849,18 @@ class WorkflowWorkspace:
                 )
             if destination.exists():
                 if not source.exists():
+                    # Every marker publication that does not go through a
+                    # transition — submission, child registration, transfer
+                    # import — lands here, so this is where the index learns
+                    # about it.
+                    self._index_note_path(destination)
                     return
                 try:
                     if source.samefile(destination):
-                        time.sleep(retry_delay(attempt))
                         continue
                 except OSError:
                     pass
                 raise FileExistsError(f"publication destination already exists: {destination}")
-            if source.exists():
-                time.sleep(retry_delay(attempt))
-                continue
-            time.sleep(retry_delay(attempt))
         detail = f": {last_error}" if last_error else ""
         raise WorkspaceUnavailableError(f"cannot resolve publication {source} -> {destination}{detail}")
 
@@ -576,7 +899,7 @@ class WorkflowWorkspace:
             fsync_directory(temporary_marker.parent)
         destination = self.marker_path("submitted", normalized_placement, job.job_key, job.priority, 0, "init")
         self._publish_path(temporary_marker, destination)
-        return Marker.from_path(self.control / "state", destination, priority_bands=self.priority_bands)
+        return Marker.from_path(self.control / "state", destination)
 
     def validate_job_payload(self, marker: Marker) -> JobDefinition:
         """Perform manager-side immutable submission validation."""
@@ -594,6 +917,12 @@ class WorkflowWorkspace:
         destination.mkdir(parents=True)
         moved = destination / "entry"
         os.rename(path, moved)
+        # A quarantined marker leaves the state tree, so a cached location for it
+        # would be a hit that resolves to nothing on every later lookup.
+        try:
+            self._index_forget(Marker.from_path(self.control / "state", path).job_id)
+        except (WorkflowError, ValueError):
+            pass
         write_json_atomic(
             destination / "report.json",
             {"original_path": str(path), "reason": reason, "quarantined_at": utc_now()},

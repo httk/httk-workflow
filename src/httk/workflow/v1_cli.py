@@ -24,7 +24,16 @@ def _parser(program: str = "httk-v1-taskmanager") -> argparse.ArgumentParser:
         prog=program,
         description="Prepare and execute httk v1 task templates through the v2 workflow engine",
     )
-    parser.add_argument("--durable", action="store_true", help="fsync protocol publications")
+    parser.add_argument(
+        "--durable",
+        action="store_true",
+        help="fsync protocol publications (the default; accepted for compatibility)",
+    )
+    parser.add_argument(
+        "--no-durable",
+        action="store_true",
+        help="do not fsync protocol publications; a crashed node may then strand markers",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     prepare = subparsers.add_parser("prepare", help="turn an instantiated v1 task directory into a v2 payload")
@@ -45,7 +54,11 @@ def _parser(program: str = "httk-v1-taskmanager") -> argparse.ArgumentParser:
     run.add_argument("--task-timeout", "-t", type=float, default=21600.0)
     run.add_argument("--attempts", "-a", type=int, default=10)
     run.add_argument("--workers", type=int, default=1)
-    run.add_argument("--lease-seconds", type=float, default=900.0)
+    run.add_argument(
+        "--lease-seconds",
+        type=float,
+        help="lease length for this manager (default: the workspace policy's lease_seconds)",
+    )
     run.add_argument("--heartbeat-interval", type=float, default=30.0)
     run.add_argument("--poll-interval", type=float, default=1.0)
     run.add_argument("--until-idle", action="store_true")
@@ -78,7 +91,7 @@ def main(argv: Sequence[str] | None = None, *, program: str = "httk-v1-taskmanag
             )
             print(job.job_key)
             return 0
-        workspace = WorkflowWorkspace(arguments.workspace, durable=arguments.durable)
+        workspace = WorkflowWorkspace(arguments.workspace, durable=not arguments.no_durable)
         if arguments.command == "submit":
             marker = submit_v1_task(
                 workspace,

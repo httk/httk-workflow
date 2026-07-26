@@ -37,6 +37,8 @@ from .manager import TaskManager
 from .manifests import read_maintenance_lock
 from .models import (
     CORE_PROFILE,
+    CORE_STATE_KINDS,
+    DEFAULT_LEASE_SECONDS,
     QUIESCENT_KINDS,
     STATE_KINDS,
     TERMINAL_KINDS,
@@ -47,10 +49,6 @@ from .models import (
 )
 from .workspace import MarkerFault, WorkflowWorkspace
 
-# The lease a manager advertises when nothing else is known. It mirrors the
-# :class:`~httk.workflow.manager.TaskManager` default; the authoritative lease of
-# a claimed or running job is recorded in that job's own state frame.
-DEFAULT_LEASE_SECONDS = 900.0
 JOB_REPORT_FORMAT = "httk-workflow-job-report"
 JOB_HISTORY_FORMAT = "httk-workflow-job-history"
 JOB_DIAGNOSIS_FORMAT = "httk-workflow-job-diagnosis"
@@ -59,10 +57,10 @@ JOB_LIST_FORMAT = "httk-workflow-job-list"
 DEBUG_EXIT_SUCCEEDED = 0
 DEBUG_EXIT_FAILED = 3
 DEBUG_EXIT_UNFINISHED = 4
-# Journal frames a history walk reads before it gives up on visibility. The
-# retries of a state read are generous because a state read must succeed; a
-# history walk is diagnostic, so it reports damage quickly instead.
-_HISTORY_READ_ATTEMPTS = 3
+# How long a history walk waits for one frame to become visible. The budget of
+# a state read is the workspace's full visibility deadline because a state read
+# must succeed; a history walk is diagnostic, so it reports damage quickly.
+_HISTORY_READ_DEADLINE_SECONDS = 0.1
 
 
 def resolve_job(workspace: WorkflowWorkspace, selector: str) -> Marker:
@@ -153,7 +151,12 @@ class ManagerRecord:
     heartbeat_age_seconds: float | None
 
     def alive(self, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> bool:
-        """Whether this manager's heartbeat is still inside *lease_seconds*."""
+        """Whether this manager's heartbeat is still inside *lease_seconds*.
+
+        The default is the protocol default rather than any one workspace's
+        policy, because a record can be rendered without its workspace at hand;
+        a caller that has the workspace passes its ``policy.lease_seconds``.
+        """
 
         age = self.heartbeat_age_seconds
         return age is not None and age <= lease_seconds
@@ -696,7 +699,7 @@ def job_frames(workspace: WorkflowWorkspace, marker: Marker, *, limit: int | Non
             break
         seen.add(record_ref)
         try:
-            frame = read_record(workspace.control, record_ref, attempts=_HISTORY_READ_ATTEMPTS)
+            frame = read_record(workspace.control, record_ref, deadline_seconds=_HISTORY_READ_DEADLINE_SECONDS)
         except (WorkflowError, ValueError) as exc:
             frames.append({"record_ref": record_ref, "error": str(exc)})
             break
@@ -996,7 +999,7 @@ def _owner_checks(workspace: WorkflowWorkspace, state: Mapping[str, Any], report
     # A recorded lease of zero is a real lease, so the default only applies when
     # the frame records nothing usable at all.
     recorded_lease = _optional_float(state.get("lease_seconds"))
-    lease_seconds = DEFAULT_LEASE_SECONDS if recorded_lease is None else recorded_lease
+    lease_seconds = workspace.policy.lease_seconds if recorded_lease is None else recorded_lease
     if manager_id is None:
         report.check("owning manager", False, "the state frame records no owning manager")
         return False
@@ -1166,6 +1169,43 @@ def explain_job(workspace: WorkflowWorkspace, marker: Marker) -> Diagnosis:
             report.check("pause", None, json.dumps(pause, sort_keys=True))
         _breadcrumb_check(control, report)
         _continue_checks(job, state, report)
+    elif kind == "cancelling":
+        # Cancelling is neither stuck nor finished: the fence is already in
+        # place, and what remains is proving that the fenced process stopped.
+        summary = (
+            "this job is being cancelled: its attempt is already fenced, so nothing it does can commit, "
+            "and the marker moves to cancelled only once a manager verifies that the process ended"
+        )
+        report.check("operator", None, f"{state.get('operator') or '-'}: {state.get('operator_reason') or '-'}")
+        report.check(
+            "fencing",
+            True,
+            "the marker was renamed out of running before anything was signalled, so a late outcome "
+            "from that attempt can no longer be applied",
+        )
+        alive = _owner_checks(workspace, state, report)
+        cancellation = state.get("cancellation")
+        if isinstance(cancellation, Mapping) and cancellation:
+            report.check("termination evidence", None, json.dumps(cancellation, sort_keys=True))
+        else:
+            report.check(
+                "termination evidence",
+                None,
+                "no exit has been verified yet; acceptable evidence is process_exited, "
+                "process_group_absent, no_launched_process, or no_live_attempt",
+            )
+        if control is not None:
+            report.check("attempt logs", None, f"the fenced attempt wrote {control / 'stdout.log'}")
+        if job is not None:
+            _manager_checks(workspace, claim_requirements(job), report, backend_only=True)
+        if alive:
+            blocked = False
+            report.hint("no operator action is needed; the owning manager terminates and verifies the attempt")
+        else:
+            report.hint(
+                "a cancellation that stays here is usually an attempt on another host: run a manager on "
+                "the host named in the frame, or confirm with the batch system that the allocation ended"
+            )
     elif kind == "succeeded":
         summary = "this job succeeded; nothing is left to run"
         blocked = False
@@ -1209,7 +1249,7 @@ class ScopedWorkspace(WorkflowWorkspace):
         root: str | Path,
         scope: Iterable[str],
         *,
-        durable: bool = False,
+        durable: bool = True,
     ) -> None:
         super().__init__(root, durable=durable)
         self.scope = frozenset(scope)
@@ -1222,24 +1262,26 @@ class ScopedWorkspace(WorkflowWorkspace):
                 yield entry
 
     def _unscoped_markers(self, kinds: Iterable[str] | None = None) -> Iterator[Marker]:
-        for entry in super().scan_marker_entries(kinds):
+        for entry in WorkflowWorkspace.scan_marker_entries(self, kinds):
             if isinstance(entry, Marker):
                 yield entry
             else:
                 self.report_marker_fault(entry)
 
     def find_markers(self, job_key: str, kinds: Iterable[str] | None = None) -> list[Marker]:
-        """Find one job key anywhere in the workspace, ignoring the scope."""
+        """Find one job key anywhere in the workspace, ignoring the scope.
 
-        return [marker for marker in self._unscoped_markers(kinds) if marker.job_key == job_key]
+        The base implementation resolves through the workspace's own job-id
+        index, which is built from the unscoped scan precisely so that a lookup
+        is never narrowed by what a private manager is allowed to schedule.
+        Only a lookup that must consider a non-core kind falls back to a scan
+        here, and that scan is the unscoped one.
+        """
 
-    def find_marker_by_id(self, job_id: str) -> Marker | None:
-        """Find one job id anywhere in the workspace, ignoring the scope."""
-
-        matches = [marker for marker in self._unscoped_markers() if marker.job_id == job_id]
-        if len(matches) > 1:
-            raise WorkspaceCorruptionError(f"job {job_id} has more than one state marker")
-        return matches[0] if matches else None
+        selected = tuple(kinds or CORE_STATE_KINDS)
+        if set(selected) <= set(CORE_STATE_KINDS):
+            return super().find_markers(job_key, selected)
+        return [marker for marker in self._unscoped_markers(selected) if marker.job_key == job_key]
 
 
 @dataclass(frozen=True)
