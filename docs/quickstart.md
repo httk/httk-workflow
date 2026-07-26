@@ -1,5 +1,7 @@
 # Quickstart
 
+*For anyone meeting httk-workflow for the first time; no runner, no graph, and no VASP required.*
+
 Five commands from an empty directory to a finished VASP relaxation whose results
 you can read back. Nothing here needs a runner to be written, a graph to be
 declared, or a database to exist.

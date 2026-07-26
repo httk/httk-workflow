@@ -22,13 +22,20 @@ keywords = [
 ]
 classifiers = [
   "Development Status :: 3 - Alpha",
+  "Environment :: Console",
   "Intended Audience :: Science/Research",
-  "Operating System :: OS Independent",
+  # POSIX rather than OS Independent: the engine reaps process groups with
+  # os.killpg, relies on POSIX rename and symlink semantics for its protocol,
+  # and ships Bash authoring libraries it executes.
+  "Operating System :: POSIX",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Unix Shell",
   "Topic :: Scientific/Engineering :: Chemistry",
   "Topic :: Scientific/Engineering :: Physics",
+  "Topic :: System :: Distributed Computing",
+  "Typing :: Typed",
 ]
 
 [project.urls]
@@ -114,6 +121,11 @@ namespaces = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The default run includes everything; `-m "not slow"` deselects the handful of
+# tests that drive real subprocesses through timing-tolerant waits.
+markers = [
+  "slow: drives real processes and waits on them; deselect with -m 'not slow'",
+]
 
 [tool.isort]
 profile = "black"

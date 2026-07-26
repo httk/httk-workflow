@@ -31,7 +31,7 @@ Update `project.version` in `pyproject.toml`. From a Python 3.12 environment,
 install the development tools and run the complete local check:
 
 ```console
-python -m pip install -e ".[dev,docs,release]"
+python -m pip install -e ".[dev,docs,release,cwl]"
 make release-check
 ```
 
@@ -39,9 +39,42 @@ This runs formatting, static analysis, tests, strict documentation, an isolated
 sdist/wheel build, and strict package-metadata checks. The resulting files are
 written to `dist/`.
 
+The `cwl` extra is optional for a release check: the CWL importer tests skip
+themselves without a CWL parser, and every other test runs regardless. Install
+it to exercise them.
+
 Versions on package indexes are immutable. Use a new development or release
 candidate version when repeating an upload, for example `2.0.0rc1` followed by
 `2.0.0`.
+
+## Data that must be in the wheel
+
+This package is not Python modules alone. Several things it ships are *data*,
+declared in `[tool.setuptools.package-data]`, and a wheel that silently lost one
+of them installs and imports cleanly while failing at run time:
+
+- `shell/*.sh` — the native Bash authoring libraries, whose absolute paths the
+  manager exports to every Bash runner;
+- `adapter_templates/*/…` — the `computer.json` of each maintained computer
+  adapter **and its seven executable operations**, which must arrive executable
+  or `httk workflow computer add` refuses the bundle it just copied;
+- `v1_runtime/…` — the *httk* v1 task templates and compatibility shell;
+- `runners/*.sh` — the packaged Bash VASP runner beside its Python siblings.
+  The Python runners and everything under `integrations/` are modules of their
+  packages and need no entry.
+
+After a build, confirm they are there rather than assuming:
+
+```console
+python -m zipfile -l dist/httk_workflow-*.whl | grep -E 'shell/|adapter_templates/|runners/.*\.sh|v1_runtime/'
+```
+
+A fresh install is the stronger check, because it also proves the executable bit
+survived:
+
+```console
+/tmp/httk-workflow-test/bin/httk workflow computer add probe --template local --global
+```
 
 ## TestPyPI
 

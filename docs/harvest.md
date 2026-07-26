@@ -1,5 +1,7 @@
 # Harvesting results
 
+*For data-layer authors and anyone reading finished jobs back out of a workspace.*
+
 A harvest is the read-only counterpart of running work: it iterates the jobs of
 one workspace that stopped and yields, per job, everything a data layer needs to
 store the result — where the files are, what produced them, and what happened on

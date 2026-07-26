@@ -12,18 +12,30 @@ applications use `httk.workflow`; installations register the canonical
 ```{admonition} Quick links
 :class: tip
 
-- **Start here**: {doc}`quickstart` — five commands to a finished relaxation
-- **API reference**: {doc}`reference/index`
-- **Task-manager usage**: {doc}`taskmanager`
-- **Native runner helpers**: {doc}`runtime_helpers`
-- **Native Bash API**: {doc}`native_bash_api`
-- **Packaged VASP runners**: {doc}`vasp_runners`
-- **Harvesting results**: {doc}`harvest`
-- **Importing PWD and CWL workflows**: {doc}`importing_workflows`
-- **Workflow declarations**: {doc}`declarations`
-- **Project and workflow CLI**: {doc}`workflow_cli`
-- **Workflow filesystem API**: {doc}`workflow_filesystem_api`
-- **Examples notebook**: {doc}`notebooks/examples`
+**New here** — start with {doc}`quickstart`: five commands from an empty
+directory to a finished relaxation, no runner written and no VASP required.
+
+**Writing workflows**
+
+- {doc}`runtime_helpers` — the Python authoring SDK: `Runner`, `Attempt`, steps
+- {doc}`native_bash_api` — the same surface in Bash
+- {doc}`sdk_parity` — the normative table both of the above must agree with
+- {doc}`vasp_runners` — the packaged runners, for campaigns that write none
+- {doc}`declarations` — saying what a workflow *is*, for a data layer
+- {doc}`importing_workflows` — running PWD and CWL documents as ordinary jobs
+- {doc}`reference/index` — the generated API reference
+- {doc}`notebooks/examples` — worked examples as a notebook
+
+**Running them**
+
+- {doc}`taskmanager` — workspaces, submission, managers, inspection, repair
+- {doc}`workflow_cli` — the whole `httk workflow` tree: projects, config, remotes
+- {doc}`harvest` — reading finished jobs back out as records
+- {doc}`adapter_authoring` — reaching a machine the packaged adapters do not cover
+
+**Specification and migration**
+
+- {doc}`workflow_filesystem_api` — the normative on-disk protocol
 - [*httk* v1 migration guide](httk_v1_migration_guide.md)
 - [*httk* v1 compatibility](v1_compatibility.md)
 ```
@@ -62,17 +74,19 @@ httk workflow job submit workflow-workspace prepared-job --placement project/00
 :caption: Documentation
 
 quickstart
-reference/index
-taskmanager
 runtime_helpers
 native_bash_api
+sdk_parity
 vasp_runners
-harvest
 declarations
 importing_workflows
+taskmanager
 workflow_cli
-workflow_filesystem_api
+harvest
+adapter_authoring
+reference/index
 notebooks/examples
+workflow_filesystem_api
 httk_v1_migration_guide
 v1_compatibility
 ```

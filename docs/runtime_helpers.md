@@ -1,5 +1,9 @@
 # Native runner helpers
 
+*For authors writing a workflow runner in Python.* The complete authoring
+surface, Python beside its Bash equivalent, is the table in {doc}`sdk_parity`,
+which is normative and enforced by the test suite; this page teaches it.
+
 A native *httk₂* runner is one program that implements the steps of one workflow.
 The manager launches it once per attempt, tells it which step to run, and reads
 exactly one published outcome back. `Runner` registers the steps, and

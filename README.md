@@ -25,16 +25,49 @@ httk workflow harvest workflow-workspace
 `examples/quickstart.sh` runs the whole sequence — with the mock VASP above
 standing in for VASP on a machine that has none.
 
-The unified CLI also manages XDG configuration, signed projects, versioned
-computer adapters, and crash-recoverable detached transfer:
+## Install
+
+```console
+python -m pip install httk-workflow
+```
+
+One optional extra exists. `httk-workflow[cwl]` adds the CWL *parser* needed to
+run `httk workflow import cwl`; executing what was imported needs nothing extra,
+so the extra belongs only on the machine that does the importing. Importing
+Python Workflow Definition documents needs no extra at all.
+
+## What it does
+
+- **Runs workflows without a graph.** A step decides at run time which children
+  to spawn and which step runs next, so a two-step relaxation and a
+  thousand-child campaign are the same engine —
+  [runners in Python](docs/runtime_helpers.md) or
+  [in Bash](docs/native_bash_api.md), with a
+  [normative parity table](docs/sdk_parity.md) between the two.
+- **Recovers instead of cleaning up.** One atomically renamed state marker per
+  job is the source of truth, so an interrupted manager, node, or calculation is
+  resumed from what is on disk. The protocol is specified in
+  [`docs/workflow_filesystem_api.md`](docs/workflow_filesystem_api.md).
+- **Ships complete VASP runners**, so an ordinary relaxation or single point
+  needs no runner written at all — see [`docs/vasp_runners.md`](docs/vasp_runners.md).
+- **Runs workflows written elsewhere.** Python Workflow Definition and CWL
+  documents become ordinary jobs; see
+  [`docs/importing_workflows.md`](docs/importing_workflows.md).
+- **Reaches other machines.** Versioned [computer adapters](docs/adapter_authoring.md)
+  send work to a cluster, start managers there, and fetch results back through
+  crash-recoverable detached transfer.
+- **Manages projects and identity**: XDG configuration, signed project
+  manifests, and workspace policy — see
+  [`docs/workflow_cli.md`](docs/workflow_cli.md).
+- **Hands results to a data layer.** [`harvest`](docs/harvest.md) yields one
+  record per stopped job; *httk-workflow* itself has no database dependency.
+- **Keeps *httk* v1 workflows running.** `ht_steps`/`ht_run` task directories
+  execute unchanged on this engine — see
+  [`docs/v1_compatibility.md`](docs/v1_compatibility.md) and the
+  [migration guide](docs/httk_v1_migration_guide.md).
 
 ```console
 httk workflow project init . --name example
 httk workflow project manifest create
 httk workflow workspace status .
 ```
-
-The precise on-disk protocol is documented in
-[`docs/workflow_filesystem_api.md`](docs/workflow_filesystem_api.md). See
-[`docs/v1_compatibility.md`](docs/v1_compatibility.md) for the compatibility
-executor and its deliberate boundary.
