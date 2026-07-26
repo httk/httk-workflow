@@ -142,6 +142,9 @@ marker.
   Two complete campaign runners are in `examples/defect_campaign.py` and
   `examples/defect_campaign.sh`.
 - {doc}`native_bash_api` — the same runner protocol from Bash.
+- {doc}`importing_workflows` — a Python Workflow Definition or CWL workflow you
+  already have becomes one job with `httk workflow import pwd` or
+  `httk workflow import cwl`, without being rewritten and without a runner file.
 - {doc}`harvest` — turning finished jobs into stored results.
 - Running on a cluster — `remote send` puts jobs on a computer, `remote
   start-manager` runs them there, and `remote fetch` brings the finished ones

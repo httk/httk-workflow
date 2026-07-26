@@ -218,6 +218,18 @@ httk_workflow_state_merge() {
     _httk_workflow_bridge state-merge "$@"
 }
 
+# Record the observed workflow declaration NAME from a JSON document file, and
+# read one back. The document is carried verbatim; reading prints the observed
+# document when the job wrote one, the declared one from job.json otherwise, and
+# returns 1 when there is neither.
+httk_workflow_declare() {
+    _httk_workflow_bridge declare "$1" "$2"
+}
+
+httk_workflow_declaration() {
+    _httk_workflow_bridge declaration "$1"
+}
+
 httk_workflow_log() {
     local level=$1
     shift

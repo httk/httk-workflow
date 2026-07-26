@@ -57,6 +57,8 @@ from .hygiene import (
     project_doctor,
     remove_computer,
 )
+from .integrations.cwl import import_cwl
+from .integrations.pwd import import_pwd
 from .introspection import (
     JOB_HISTORY_FORMAT,
     JOB_LIST_FORMAT,
@@ -1078,6 +1080,169 @@ def build_job_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentPa
         default="error",
         help="log level of the private manager on the console (default: error)",
     )
+
+
+# ---------------------------------------------------------------------------
+# import
+# ---------------------------------------------------------------------------
+
+
+def _print_imported(job: ScaffoldedJob, *, as_json: bool) -> int:
+    """Report one imported job the way ``job new`` reports a scaffolded one."""
+
+    if as_json:
+        print(json.dumps(job.as_mapping(), indent=2))
+    else:
+        print(f"{job.job_key}\t{job.payload}")
+    return 0
+
+
+def handle_import_pwd(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Import one Python Workflow Definition document as one job."""
+
+    workspace = WorkflowWorkspace(arguments.workspace)
+    overrides = {
+        name: _json_value(text, f"workflow input {name!r}")
+        for name, text in _pairs(arguments.inputs, "a workflow input")
+    }
+    job = import_pwd(
+        workspace,
+        arguments.document,
+        placement=arguments.placement,
+        tag=arguments.tag,
+        name=arguments.name,
+        priority=arguments.priority,
+        modules=arguments.modules,
+        module_path=arguments.module_path,
+        workflow_inputs=overrides,
+        allowed_modules=arguments.allow_module,
+        data_mode=arguments.data_mode,
+        maximum_attempts=arguments.attempts,
+        allow_unknown_version=arguments.allow_unknown_version,
+    )
+    return _print_imported(job, as_json=arguments.json)
+
+
+def handle_import_cwl(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Import one CWL workflow or command-line tool as one job."""
+
+    workspace = WorkflowWorkspace(arguments.workspace)
+    job = import_cwl(
+        workspace,
+        arguments.workflow,
+        arguments.inputs,
+        placement=arguments.placement,
+        tag=arguments.tag,
+        name=arguments.name,
+        priority=arguments.priority,
+        data_mode=arguments.data_mode,
+    )
+    for warning in job.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    return _print_imported(job.job, as_json=arguments.json)
+
+
+def build_import_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    """Declare the ``import`` group: workflows written in another language."""
+
+    _, group = _group(
+        subparsers,
+        "import",
+        summary="import a workflow written in another language as one job",
+        description=(
+            "Import a workflow written in another language as one httk job. Importing is one way: "
+            "the imported job carries the document it came from, and nothing translates a job back"
+        ),
+    )
+
+    pwd = _leaf(
+        group,
+        "pwd",
+        summary="import one Python Workflow Definition document",
+        description="Import one Python Workflow Definition (PWD) JSON document as one job",
+        handler=handle_import_pwd,
+    )
+    pwd.add_argument("workspace", metavar="WORKSPACE", help="the workspace to submit into")
+    pwd.add_argument("document", metavar="DOCUMENT", help="the PWD JSON document to import")
+    pwd.add_argument(
+        "--module",
+        dest="modules",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="a Python file staged into the payload and put first on the runner's import path (repeatable)",
+    )
+    pwd.add_argument(
+        "--module-path",
+        action="append",
+        default=[],
+        metavar="DIRECTORY",
+        help="a further import root, as it will exist on the machine that runs the job (repeatable)",
+    )
+    pwd.add_argument(
+        "--input",
+        dest="inputs",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="override one input node by name; @FILE reads a JSON value from a file (repeatable)",
+    )
+    pwd.add_argument(
+        "--allow-module",
+        action="append",
+        default=[],
+        metavar="PREFIX",
+        help="restrict the function nodes to modules at or below this prefix (repeatable)",
+    )
+    pwd.add_argument(
+        "--attempts",
+        type=int,
+        default=3,
+        metavar="COUNT",
+        help="how many attempts one activation may take before the job fails (default: 3)",
+    )
+    pwd.add_argument(
+        "--allow-unknown-version",
+        action="store_true",
+        help="import a document declaring a format version this importer was not written against",
+    )
+    _add_import_arguments(pwd)
+
+    cwl = _leaf(
+        group,
+        "cwl",
+        summary="import one CWL workflow or command-line tool",
+        description=(
+            "Import one Common Workflow Language document as one job. CWL is supported as a workflow "
+            "language: the document is executed on httk's own runner and manager, never by cwltool"
+        ),
+        handler=handle_import_cwl,
+    )
+    cwl.add_argument("workspace", metavar="WORKSPACE", help="the workspace to submit into")
+    cwl.add_argument("workflow", metavar="WORKFLOW", help="the .cwl workflow or command-line tool to import")
+    cwl.add_argument("inputs", metavar="INPUTS", help="the CWL input object, as YAML or JSON")
+    _add_import_arguments(cwl)
+
+
+def _add_import_arguments(parser: argparse.ArgumentParser) -> None:
+    """Declare what every import command shares with every other one."""
+
+    parser.add_argument(
+        "--placement",
+        metavar="PLACEMENT",
+        default=DEFAULT_PLACEMENT,
+        help=f"where the job lands in the tree (default: {DEFAULT_PLACEMENT})",
+    )
+    parser.add_argument("--tag", metavar="TAG", help="the job tag, which prefixes its job key")
+    parser.add_argument("--name", metavar="NAME", help="the human-readable job name")
+    parser.add_argument("--priority", type=int, metavar="PRIORITY", help="the job priority (default: 500)")
+    parser.add_argument(
+        "--data-mode",
+        choices=("none", "transactional"),
+        default="none",
+        help="publish the workflow outputs as transactional data (default: none)",
+    )
+    parser.add_argument("--json", action="store_true", help="print the submitted job as one JSON report")
 
 
 # ---------------------------------------------------------------------------
@@ -2677,6 +2842,7 @@ def build_parser(program: str, context: CLIContext) -> argparse.ArgumentParser:
     build_workspace_parser(groups)
     build_runner_parser(groups)
     build_job_parser(groups)
+    build_import_parser(groups)
     build_harvest_parser(groups)
     build_manager_parser(groups)
     build_v1_parser(groups)

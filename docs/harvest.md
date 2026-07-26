@@ -60,7 +60,7 @@ harvested by iterating it, never by materializing it.
 | `runner_steps` | the step set the runner declared, when one was ever recorded |
 | `runner_description` | reserved: a runner's own `--describe` output attaches here in a later phase, `null` today |
 | `children` | the labeled children this job spawned, keyed by spawn label |
-| `declarations` | reserved: verbatim OPTIMADE property declarations of a job attach here once `job.json` carries them, `{}` today |
+| `declarations` | the workflow declarations of this job, keyed by name: `{"declared": ..., "observed": ...}` per name, both carried verbatim |
 
 On the dataclass the paths appear twice on purpose: `payload_path`,
 `workdir_path`, and `data_path` are workspace relative, which is what a *stored*
@@ -78,6 +78,16 @@ the recorded `claimed_at`, `started_at`, and `finished_at` timestamps, the
 `children` maps each spawn label to `job_id`, `job_key`, and the child's `kind`
 when the parent's own frames recorded it. A campaign therefore harvests as a
 tree: each named child is a job a consumer harvests in its own right.
+
+`declarations` reports every declaration name either source knows. `declared` is
+the document `job.json` carried, pinned by the immutable job digest; `observed`
+is the runtime-refined document the job wrote below
+`.httk-job/declarations/`; either is `null` when that source has nothing. The two
+are reported side by side and never merged, because reconciling them requires
+understanding the vocabulary the document names itself — which is the consumer's
+job, not this module's. An observed document that cannot be read is reported as
+`null` and sets `provenance.gaps`. The declared documents are not repeated inside
+`job`; `declarations` is where they are read. See {doc}`declarations`.
 
 ## Selecting what to harvest
 

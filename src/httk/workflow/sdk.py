@@ -46,6 +46,8 @@ from .models import (
     JOB_STATE_DIRECTORY,
     Failure,
     JobDefinition,
+    validate_declaration_name,
+    validate_declarations,
     validate_failure,
     validate_label,
     validate_sha256,
@@ -156,6 +158,10 @@ class ChildSpec:
 
     step: str
     inputs: Mapping[str, object] = field(default_factory=dict)
+    #: The child's own workflow declarations. A declaration describes the job it
+    #: belongs to, so nothing is inherited: a child that declares carries what it
+    #: was given here, and a child that declares nothing carries nothing.
+    declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     runner: RunnerRef = field(default_factory=RunnerRef.inherit)
     name: str | None = None
     workflow: str | None = None
@@ -198,6 +204,7 @@ class ChildSpec:
             retry_on=self.retry_on,
             resources=dict(parent.resources) if self.resources is None else dict(self.resources),
             inputs=dict(self.inputs),
+            declarations=validate_declarations(self.declarations, "child declarations"),
         )
 
 
@@ -425,6 +432,48 @@ class Attempt:
             available = ", ".join(sorted(inputs)) or "none"
             raise KeyError(f"job input {name!r} is not defined; defined inputs: {available}")
         return default
+
+    def declare(self, name: str, document: Mapping[str, object]) -> Path:
+        """Record the observed workflow declaration *name* of this job.
+
+        The static declarations of a job are the ones ``job.json`` carried at
+        submission, and they cannot change. A dynamic campaign nevertheless only
+        learns at run time what it actually consumed and produced, so a step
+        writes the refined document here and it is stored beside the job state as
+        ``.httk-job/declarations/<name>.json``, atomically. The bytes are carried
+        verbatim: nothing here interprets the document, whose own members say
+        which vocabulary and version it follows.
+
+        The write is runner-private, so it never disturbs the payload digest, and
+        repeating it overwrites: what a job observed is whatever its last word on
+        the subject was. A harvest reports the observed document beside the
+        declared one and never merges the two.
+        """
+
+        declaration = validate_declaration_name(name, "declaration name")
+        validated = validate_declarations({declaration: document}, "declaration")[declaration]
+        path = self._declaration_path(declaration)
+        write_json_atomic(path, validated)
+        _LOGGER.debug("declared %s for job %s", declaration, self.context.job_key)
+        return path
+
+    def declaration(self, name: str) -> Mapping[str, object] | None:
+        """Return the workflow declaration *name*, observed first.
+
+        The document this job observed is returned when one was written,
+        otherwise the one ``job.json`` declared, otherwise ``None``.
+        """
+
+        declaration = validate_declaration_name(name, "declaration name")
+        path = self._declaration_path(declaration)
+        if path.is_file():
+            return read_json(path)
+        return self.job.declarations.get(declaration)
+
+    def _declaration_path(self, declaration: str) -> Path:
+        """Return where the observed document of one declaration is stored."""
+
+        return self.payload / JOB_STATE_DIRECTORY / "declarations" / f"{declaration}.json"
 
     def run(
         self,

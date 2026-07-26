@@ -140,6 +140,11 @@ def _parser() -> argparse.ArgumentParser:
     state_delete.add_argument("name")
     state_merge = commands.add_parser("state-merge")
     state_merge.add_argument("assignments", nargs="+")
+    declare = commands.add_parser("declare")
+    declare.add_argument("name")
+    declare.add_argument("document")
+    declaration = commands.add_parser("declaration")
+    declaration.add_argument("name")
     runlog = commands.add_parser("runlog")
     runlog.add_argument("kind")
     runlog.add_argument("message")
@@ -758,6 +763,15 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
             raise _Absent()
     elif command == "state-merge":
         _attempt().state.merge(_assignments(arguments.assignments, "a state assignment"))
+    elif command == "declare":
+        # The document is a file because a declaration is a whole JSON object,
+        # which is exactly what a shell cannot quote on a command line.
+        _attempt().declare(arguments.name, read_json(Path(str(arguments.document).removeprefix("@"))))
+    elif command == "declaration":
+        document = _attempt().declaration(arguments.name)
+        if document is None:
+            raise _Absent()
+        _print(document)
     elif command == "runlog":
         _attempt().log.append(arguments.kind, arguments.message, files=arguments.files)
     elif command == "put":
