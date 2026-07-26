@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "httk-workflow"
-version = "0.1.0"
+version = "0.2.0"
 description = "Filesystem-native workflow execution for httk₂."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -12,7 +12,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 authors = [{ name = "Rickard Armiento", email = "gitcommits@armiento.net" }]
 dependencies = [
-  "httk-core>=2.0.0,<3",
+  "httk-core>=2.0.2,<3",
 ]
 keywords = [
   "Materials Discovery",
