@@ -35,13 +35,19 @@ CREDENTIALS_FILE = "credentials.json"
 PERSISTABLE_QUEUE_SETTINGS = frozenset(
     {
         "account",
+        "bootstrap",
+        "check_connectivity",
+        "cpus_per_task",
         "host",
+        "httk_command",
         "legacy_settings",
+        "nodes",
         "partition",
         "port",
         "reservation",
         "time_limit",
         "username",
+        "workers",
         "workspace",
     }
 )

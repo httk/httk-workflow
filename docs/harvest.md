@@ -124,6 +124,12 @@ $ httk workflow harvest workflow-workspace | head -1
  "workspace":"/…/workflow-workspace","workspace_id":"a2d1…"}
 ```
 
+Jobs that ran on another computer are harvested the same way once they are
+home: `httk workflow tasks fetch --computer NAME --workspace WORKSPACE` imports
+them into this workspace in the terminal state they stopped in, and the harvest
+that follows cannot tell them from jobs that ran locally. See
+{doc}`workflow_cli`.
+
 Each line is exactly `HarvestRecord.as_mapping()`, and
 `HarvestRecord.from_mapping()` rebuilds the record from it, so a harvest survives
 being written to a file, shipped, and read back by the process that stores it.

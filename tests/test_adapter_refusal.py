@@ -17,35 +17,45 @@ def _request(operation: str, root: Path) -> dict[str, object]:
     return {}
 
 
-def test_every_remote_adapter_operation_refuses_to_run_locally(tmp_path: Path) -> None:
+def _unrecognized(project: Path, name: str = "elsewhere") -> Path:
+    """Return a bundle whose kind no maintained implementation claims."""
+
+    bundle = add_computer(name, template="local", project=project)
+    metadata = json.loads((bundle / "computer.json").read_text(encoding="utf-8"))
+    metadata["kind"] = "torque"
+    (bundle / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
+    return bundle
+
+
+def test_every_operation_of_an_unrecognized_kind_refuses_to_run_locally(tmp_path: Path) -> None:
     project = tmp_path / "project"
-    initialize_project(project, name="remote-refusal")
-    bundle = add_computer("remote", template="ssh-slurm", project=project)
+    initialize_project(project, name="unrecognized-refusal")
+    bundle = _unrecognized(project)
     (tmp_path / "source").mkdir()
     for operation in ADAPTER_OPERATIONS:
-        with pytest.raises(RuntimeError, match="is not implemented yet"):
+        with pytest.raises(RuntimeError, match="'torque' is not implemented"):
             run_adapter(bundle, operation, _request(operation, tmp_path))
     assert not (tmp_path / "destination").exists()
 
 
-def test_local_slurm_adapter_also_refuses(tmp_path: Path) -> None:
+def test_the_refusal_names_the_kinds_that_are_implemented(tmp_path: Path) -> None:
     project = tmp_path / "project"
-    initialize_project(project, name="local-slurm-refusal")
-    bundle = add_computer("batch", template="local-slurm", project=project)
-    with pytest.raises(RuntimeError, match="'local-slurm' is not implemented yet"):
+    initialize_project(project, name="named-kinds")
+    bundle = _unrecognized(project, "batch")
+    with pytest.raises(RuntimeError, match="local, local-slurm, ssh-slurm"):
         run_adapter(bundle, "status", {"argv": ["true"]})
 
 
-def test_remote_refusal_reaches_the_cli_without_a_traceback(tmp_path: Path, capsys) -> None:
+def test_refusal_reaches_the_cli_without_a_traceback(tmp_path: Path, capsys) -> None:
     project = tmp_path / "project"
-    initialize_project(project, name="remote-cli")
-    bundle = add_computer("remote", template="ssh-slurm", project=project)
+    initialize_project(project, name="refusal-cli")
+    bundle = _unrecognized(project, "remote")
     metadata = json.loads((bundle / "computer.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = "/remote/runs"
     (bundle / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
     assert command(["tasks", "status", "remote"], CLIContext("httk", project)) == 2
     captured = capsys.readouterr()
-    assert "is not implemented yet" in captured.err
+    assert "is not implemented" in captured.err
     assert "Traceback" not in captured.err
     assert captured.out == ""
 

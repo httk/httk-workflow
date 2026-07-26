@@ -1,11 +1,12 @@
 """Crash-recoverable detached job transfer."""
 
 import hashlib
+import logging
 import os
 import shutil
 import stat
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -25,9 +26,26 @@ from .models import (
 )
 from .workspace import WorkflowWorkspace
 
+_LOGGER = logging.getLogger(__name__)
+
 TRANSFER_DIRECTORY = ".httk-transfer"
 TRANSFER_MANIFEST = "manifest.json"
 TRANSFER_RUNNERS = "runners"
+
+TRANSFER_FORMAT = "httk-workflow-detached-transfer"
+#: Version 2 widened the payload digest: it now also pins the executable bit of
+#: every regular file and the target of every symlink. A version 1 bundle is
+#: refused by name rather than silently reported as a digest mismatch.
+TRANSFER_FORMAT_VERSION = 2
+#: Domain separation of the payload digest, so a digest computed by an older
+#: rule can never collide with one computed by the current rule.
+_PAYLOAD_DIGEST_DOMAIN = b"httk-workflow-transfer-payload-v2\0"
+
+#: The format of what ``tasks offer`` prints and ``tasks fetch`` consumes.
+TRANSFER_OFFER_FORMAT = "httk-workflow-transfer-offer"
+TRANSFER_RETIREMENT_FORMAT = "httk-workflow-transfer-retirement"
+#: The terminal states a results fetch collects unless told otherwise.
+DEFAULT_OFFER_STATES = ("succeeded", "failed")
 
 
 def _excluded_from_bundle(name: str) -> bool:
@@ -42,8 +60,51 @@ def _excluded_from_bundle(name: str) -> bool:
     return name == TRANSFER_DIRECTORY or is_payload_private(name)
 
 
+def _contained_symlink_target(payload: Path, entry: Path) -> str:
+    """Return the target of one payload symlink, refusing any that escapes.
+
+    A symlink is transferred as its literal target string, exactly as a signed
+    project manifest records one, because that is what makes the link mean the
+    same thing at the destination. That only holds for a link that stays inside
+    the payload: an absolute target names a path of the source machine, and a
+    relative target climbing out of the payload resolves against whatever
+    happens to sit beside the payload at the destination. Both are refused by
+    name rather than transferred into a different meaning.
+    """
+
+    target = os.readlink(entry)
+    if PurePosixPath(target).is_absolute():
+        raise FormatError(
+            f"transfer payload rejects the absolute symlink {entry.name} -> {target}: "
+            f"an absolute target names a path of the source machine ({entry})"
+        )
+    parts = list(entry.parent.relative_to(payload).parts)
+    for part in PurePosixPath(target).parts:
+        if part in {"", "."}:
+            continue
+        if part != "..":
+            parts.append(part)
+            continue
+        if not parts:
+            raise FormatError(
+                f"transfer payload rejects the escaping symlink {entry.name} -> {target}: "
+                f"the target resolves outside the payload ({entry})"
+            )
+        parts.pop()
+    return target
+
+
 def _payload_digest(payload: Path) -> str:
+    """Digest one payload tree: names, kinds, content, exec bits, and link targets.
+
+    The executable bit is part of the digest because it is part of what a
+    payload *is*: a runner or helper script that arrives without it does not
+    run, so a transfer that dropped it would be a silent corruption rather than
+    a detected one.
+    """
+
     digest = hashlib.sha256()
+    digest.update(_PAYLOAD_DIGEST_DOMAIN)
     entries = [
         item
         for item in payload.rglob("*")
@@ -52,12 +113,16 @@ def _payload_digest(payload: Path) -> str:
     for entry in sorted(entries, key=lambda item: item.relative_to(payload).as_posix()):
         relative = entry.relative_to(payload).as_posix().encode("utf-8")
         mode = entry.lstat().st_mode
-        if stat.S_ISDIR(mode):
+        if stat.S_ISLNK(mode):
+            target = _contained_symlink_target(payload, entry).encode("utf-8")
+            digest.update(b"L\0" + relative + b"\0" + target + b"\0")
+        elif stat.S_ISDIR(mode):
             digest.update(b"D\0" + relative + b"\0")
         elif stat.S_ISREG(mode):
-            digest.update(b"F\0" + relative + b"\0" + sha256_file(entry).encode("ascii") + b"\0")
+            executable = b"x" if mode & 0o111 else b"-"
+            digest.update(b"F\0" + relative + b"\0" + executable + b"\0" + sha256_file(entry).encode("ascii") + b"\0")
         else:
-            raise FormatError(f"transfer payload rejects symlink or special entry: {entry}")
+            raise FormatError(f"transfer payload rejects special entry: {entry}")
     return digest.hexdigest()
 
 
@@ -170,8 +235,8 @@ def _seal_transferring(workspace: WorkflowWorkspace, marker: Marker, state: Mapp
     prior_kind = str(state.get("prior_kind"))
     runners = _bundled_runners(workspace, payload, transfer_dir)
     manifest = {
-        "format": "httk-workflow-detached-transfer",
-        "format_version": 1,
+        "format": TRANSFER_FORMAT,
+        "format_version": TRANSFER_FORMAT_VERSION,
         "extension": "detached-transfer-v1",
         "transfer_id": transfer_id,
         "source_workspace_id": workspace.workspace_id,
@@ -263,12 +328,17 @@ def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
 
     payload = Path(bundle).expanduser().resolve()
     manifest = read_json(payload / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
-    if (
-        manifest.get("format") != "httk-workflow-detached-transfer"
-        or manifest.get("format_version") != 1
-        or manifest.get("extension") != "detached-transfer-v1"
-    ):
+    if manifest.get("format") != TRANSFER_FORMAT or manifest.get("extension") != "detached-transfer-v1":
         raise FormatError("unsupported detached transfer manifest")
+    if manifest.get("format_version") != TRANSFER_FORMAT_VERSION:
+        # Naming the version keeps an older bundle from being reported as the
+        # digest mismatch it would otherwise look like: version 2 widened the
+        # payload digest to cover executable bits and symlink targets.
+        raise FormatError(
+            f"detached transfer manifest version {manifest.get('format_version')!r} is not "
+            f"{TRANSFER_FORMAT_VERSION}; the payload digest now pins executable bits and symlink "
+            f"targets, so re-seal this bundle at its source: {payload}"
+        )
     canonical_uuid(manifest.get("transfer_id"), "transfer_id")
     canonical_uuid(manifest.get("source_workspace_id"), "source_workspace_id")
     canonical_uuid(manifest.get("destination_workspace_id"), "destination_workspace_id")
@@ -420,7 +490,11 @@ def import_bundle(workspace: WorkflowWorkspace, bundle: str | os.PathLike[str]) 
     )
     imported = workspace._verified_marker_rename(embedded_marker, destination)
     imported_record = {**manifest, "status": "imported", "marker": str(imported.path), "imported_at": utc_now()}
-    write_json_atomic(workspace.control / "transfers" / "imported" / f"{transfer_id}.json", imported_record)
+    write_json_atomic(
+        workspace.control / "transfers" / "imported" / f"{transfer_id}.json",
+        imported_record,
+        durable=workspace.durable,
+    )
     shutil.rmtree(transfer_dir)
     acknowledgement: dict[str, object] = {
         "format": "httk-workflow-transfer-acknowledgement",
@@ -439,38 +513,50 @@ def import_bundle(workspace: WorkflowWorkspace, bundle: str | os.PathLike[str]) 
     return acknowledgement
 
 
+def _retire_sealed_bundle(
+    workspace: WorkflowWorkspace,
+    transfer_id: str,
+    *,
+    provenance: Mapping[str, object],
+) -> Path:
+    """Move one sealed source bundle aside and record the move in its ledger.
+
+    Retirement is a rename and never a delete: the whole bundle lands under
+    ``transfers/retired/`` intact, so a source is only ever fully retired or
+    fully live and no interrupted retirement can leave a half-removed payload
+    behind. Recognizing an already-moved bundle before validating one makes the
+    step resumable across a crash between the rename and the ledger write.
+    """
+
+    ledger_path = _ledger_path(workspace, transfer_id)
+    ledger = read_json(ledger_path)
+    if ledger.get("status") == "retired":
+        return Path(str(ledger["retired_bundle"]))
+    bundle = Path(str(ledger["bundle"]))
+    retired = workspace.control / "transfers" / "retired" / transfer_id / "bundle"
+    if retired.exists():
+        if bundle.exists():
+            raise WorkspaceCorruptionError("both active and retired source bundles exist")
+    else:
+        validate_bundle(bundle)
+        retired.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(bundle, retired)
+    ledger.update({"status": "retired", "retired_bundle": str(retired), "updated_at": utc_now(), **provenance})
+    write_json_atomic(ledger_path, ledger, durable=workspace.durable)
+    return retired
+
+
 def acknowledge_transfer(workspace: WorkflowWorkspace, acknowledgement: Mapping[str, object]) -> Path:
     """Validate an acknowledgement and retire the sealed source bundle."""
 
     if acknowledgement.get("format") != "httk-workflow-transfer-acknowledgement":
         raise FormatError("invalid transfer acknowledgement format")
     transfer_id = canonical_uuid(acknowledgement.get("transfer_id"), "transfer_id")
-    ledger_path = _ledger_path(workspace, transfer_id)
-    ledger = read_json(ledger_path)
+    ledger = read_json(_ledger_path(workspace, transfer_id))
     for name in ("source_workspace_id", "destination_workspace_id", "payload_sha256", "job_id", "job_key"):
         if acknowledgement.get(name) != ledger.get(name):
             raise FormatError(f"transfer acknowledgement disagrees on {name}")
-    if ledger.get("status") == "retired":
-        return Path(str(ledger["retired_bundle"]))
-    bundle = Path(str(ledger["bundle"]))
-    validate_bundle(bundle)
-    retired = workspace.control / "transfers" / "retired" / transfer_id / "bundle"
-    retired.parent.mkdir(parents=True, exist_ok=True)
-    if retired.exists():
-        if bundle.exists():
-            raise WorkspaceCorruptionError("both active and retired source bundles exist")
-    else:
-        os.rename(bundle, retired)
-    ledger.update(
-        {
-            "status": "retired",
-            "retired_bundle": str(retired),
-            "acknowledgement": dict(acknowledgement),
-            "updated_at": utc_now(),
-        }
-    )
-    write_json_atomic(ledger_path, ledger, durable=workspace.durable)
-    return retired
+    return _retire_sealed_bundle(workspace, transfer_id, provenance={"acknowledgement": dict(acknowledgement)})
 
 
 def recover_transfers(workspace: WorkflowWorkspace) -> list[dict[str, object]]:
@@ -496,3 +582,163 @@ def recover_transfers(workspace: WorkflowWorkspace) -> list[dict[str, object]]:
         results.append({"transfer_id": manifest["transfer_id"], "status": "sealed", "bundle": str(bundle)})
     unique = {(str(item["transfer_id"]), str(item["status"])): item for item in results}
     return list(unique.values())
+
+
+# ---------------------------------------------------------------------------
+# Offering finished work back to whoever sent it
+# ---------------------------------------------------------------------------
+
+
+def _ledgers(workspace: WorkflowWorkspace) -> list[dict[str, Any]]:
+    """Read every transfer ledger of *workspace*, in a stable order."""
+
+    directory = workspace.control / "transfers"
+    return [read_json(path) for path in sorted(directory.glob("*.json"))] if directory.is_dir() else []
+
+
+def _offer_record(ledger: Mapping[str, Any], bundle: Path) -> dict[str, object]:
+    """Describe one sealed bundle the way ``tasks offer`` reports it."""
+
+    return {
+        "transfer_id": str(ledger["transfer_id"]),
+        "job_id": str(ledger["job_id"]),
+        "job_key": str(ledger["job_key"]),
+        "state": str(ledger["prior_kind"]),
+        "placement": str(ledger["destination_placement"]),
+        "source_placement": str(ledger["source_placement"]),
+        "payload_sha256": str(ledger["payload_sha256"]),
+        "bundle_path": str(bundle),
+    }
+
+
+def offer_transfers(
+    workspace: WorkflowWorkspace,
+    *,
+    destination_workspace_id: str,
+    states: Iterable[str] = DEFAULT_OFFER_STATES,
+    placement: str | PurePosixPath | None = None,
+) -> list[dict[str, object]]:
+    """Seal every finished job of *workspace* into a bundle for one destination.
+
+    This is the far side of a results fetch: the computer that ran the work
+    offers what stopped there, and the workspace that asked pulls each bundle
+    and imports it. Offering is idempotent because a sealed bundle is reported
+    from its ledger rather than sealed again, so the jobs a first call detached
+    — which no longer have a schedulable marker — are exactly the jobs a second
+    call re-offers, and an interrupted fetch resumes by simply asking again.
+
+    A job that cannot leave right now is skipped rather than fatal: one still
+    referenced by an unresolved join keeps the campaign it belongs to
+    consistent, and reporting the rest lets the fetch make progress.
+    """
+
+    destination_id = canonical_uuid(destination_workspace_id, "destination_workspace_id")
+    kinds = tuple(dict.fromkeys(states))
+    if not kinds:
+        raise ValueError("an offer needs at least one state kind")
+    unusable = [kind for kind in kinds if kind not in QUIESCENT_KINDS]
+    if unusable:
+        raise ValueError(f"only a quiescent job can be offered, so {', '.join(unusable)} cannot be")
+    prefix = None if placement is None else normalize_placement(placement).parts
+    recover_transfers(workspace)
+    offers: dict[str, dict[str, object]] = {}
+    offered_jobs: set[str] = set()
+    for ledger in _ledgers(workspace):
+        if ledger.get("status") != "sealed" or ledger.get("destination_workspace_id") != destination_id:
+            continue
+        if ledger.get("prior_kind") not in kinds:
+            continue
+        source_placement = normalize_placement(str(ledger["source_placement"])).parts
+        if prefix is not None and source_placement[: len(prefix)] != prefix:
+            continue
+        bundle = Path(str(ledger["bundle"]))
+        if not bundle.is_dir():
+            continue
+        offers[str(ledger["transfer_id"])] = _offer_record(ledger, bundle)
+        offered_jobs.add(str(ledger["job_id"]))
+    for marker in list(workspace.scan_markers(kinds)):
+        if prefix is not None and marker.placement.parts[: len(prefix)] != prefix:
+            continue
+        if marker.job_id in offered_jobs:
+            continue
+        try:
+            bundle = detach_job(workspace, marker.job_id, destination_workspace_id=destination_id)
+        except ValueError as exc:
+            _LOGGER.warning(
+                "not offering %s: %s",
+                marker.job_key,
+                exc,
+                extra={"event": "transfer_offer_skipped", "job_key": marker.job_key},
+            )
+            continue
+        manifest = read_json(bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
+        offers[str(manifest["transfer_id"])] = _offer_record(manifest, bundle)
+        offered_jobs.add(str(manifest["job_id"]))
+    return sorted(offers.values(), key=lambda item: (str(item["placement"]), str(item["job_key"])))
+
+
+def retire_transfers(
+    workspace: WorkflowWorkspace,
+    job_ids: Sequence[str],
+    *,
+    destination_workspace_id: str | None = None,
+) -> list[dict[str, object]]:
+    """Retire the sealed source bundle of every named job.
+
+    A fetch retires at the source only once the destination holds an
+    acknowledgement, so the identity of the job is all this side needs; naming
+    the destination as well refuses to retire a bundle that was sealed for
+    somebody else. Retirement moves the bundle rather than deleting it, and a
+    bundle already retired is reported as such, so calling this twice is the
+    same as calling it once.
+    """
+
+    destination_id = (
+        None if destination_workspace_id is None else canonical_uuid(destination_workspace_id, "workspace_id")
+    )
+    ledgers = _ledgers(workspace)
+    results: list[dict[str, object]] = []
+    for job_id in job_ids:
+        identifier = canonical_uuid(job_id, "job_id")
+        matches = [
+            ledger
+            for ledger in ledgers
+            if ledger.get("job_id") == identifier
+            and (destination_id is None or ledger.get("destination_workspace_id") == destination_id)
+        ]
+        if not matches:
+            raise ValueError(f"no detached transfer of this workspace names job: {identifier}")
+        live = [ledger for ledger in matches if ledger.get("status") != "retired"]
+        if len(live) > 1:
+            raise WorkspaceCorruptionError(f"job {identifier} has several sealed transfers to retire")
+        ledger = live[0] if live else matches[-1]
+        transfer_id = str(ledger["transfer_id"])
+        retired = _retire_sealed_bundle(workspace, transfer_id, provenance={"retired_by": "fetch"})
+        results.append(
+            {
+                "transfer_id": transfer_id,
+                "job_id": identifier,
+                "job_key": str(ledger["job_key"]),
+                "status": "retired",
+                "retired_bundle": str(retired),
+            }
+        )
+    return results
+
+
+def discard_staged_bundle(workspace: WorkflowWorkspace, staging: Path) -> None:
+    """Drop a staged incoming bundle whose payload the workspace now owns.
+
+    The staging tree is renamed out of the incoming directory before it is
+    removed, so an interrupted removal can never leave a partial bundle where a
+    resumed fetch would find one and mistake it for the real thing.
+    """
+
+    if not staging.exists():
+        return
+    consumed = workspace.control / "tmp" / f"consumed.{staging.name}"
+    consumed.parent.mkdir(parents=True, exist_ok=True)
+    if consumed.exists():
+        shutil.rmtree(consumed)
+    os.rename(staging, consumed)
+    shutil.rmtree(consumed)
