@@ -23,6 +23,36 @@ def _result(operation: str, **values: object) -> None:
     )
 
 
+def _refusal(operation: str, message: str) -> None:
+    print(
+        json.dumps(
+            {
+                "error": message,
+                "format": "httk-computer-result",
+                "format_version": 1,
+                "operation": operation,
+                "ok": False,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
+def _adapter_kind(request: dict[str, object]) -> str | None:
+    adapter_dir = request.get("adapter_dir")
+    if not isinstance(adapter_dir, str) or not adapter_dir:
+        return None
+    metadata_path = Path(adapter_dir).expanduser() / "computer.json"
+    if not metadata_path.is_file():
+        return None
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if not isinstance(metadata, dict):
+        raise ValueError(f"adapter JSON must be an object: {metadata_path}")
+    kind = metadata.get("kind")
+    return kind if isinstance(kind, str) and kind else None
+
+
 def _copy(source: Path, destination: Path) -> None:
     if source.is_dir():
         if destination.exists():
@@ -59,6 +89,14 @@ def main(argv: list[str] | None = None) -> int:
         request = json.loads(Path(request_name).read_text(encoding="utf-8"))
         if not isinstance(request, dict) or request.get("operation") != operation:
             raise ValueError("request operation mismatch")
+        kind = _adapter_kind(request)
+        if kind is not None and kind != "local":
+            _refusal(
+                operation,
+                f"adapter kind {kind!r} is not implemented yet; "
+                "the packaged operations would run locally instead of remotely - refusing",
+            )
+            return 0
         if operation in {"configure", "install"}:
             _result(operation, configured=True)
         elif operation in {"push", "pull"}:

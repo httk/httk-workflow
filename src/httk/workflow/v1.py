@@ -469,10 +469,10 @@ def _legacy_status(marker: Marker, state: Mapping[str, object]) -> str:
         return "finished"
     if marker.kind == "failed":
         failure = state.get("failure")
-        failure_class = failure.get("class") if isinstance(failure, Mapping) else None
-        if failure_class == "timeout":
+        failure_code = failure.get("code") if isinstance(failure, Mapping) else None
+        if failure_code == "timeout":
             return "timeout"
-        if failure_class in {"process_failure", "retry_exhausted"}:
+        if failure_code in {"process_failure", "retry_exhausted"}:
             return "stopped"
         return "broken"
     return "stopped"

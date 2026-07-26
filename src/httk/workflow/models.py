@@ -35,6 +35,7 @@ _MARKER_PATTERN = re.compile(
     r"(?P<job_key>.+)\.p(?P<priority>[0-9]{3})\.g(?P<generation>[0-9a-z]+)\.(?P<record_ref>init|w[0-9a-f]{32}-s[0-9a-z]+-o[0-9a-z]+-l[0-9a-z]+-h[0-9a-f]{32})"
 )
 _LABEL_PATTERN = _TAG_PATTERN
+_FAILURE_MEMBERS = frozenset({"code", "message", "details", "retryable"})
 
 
 def canonical_uuid(value: object, name: str = "id") -> str:
@@ -116,6 +117,57 @@ class RetryPolicy:
             maximum_activations=optional_limit("maximum_activations"),
             retry_on=retry_on,
         )
+
+
+@dataclass(frozen=True)
+class Failure:
+    """One canonical structured failure record.
+
+    Every failure published by a runner, a bridge, or the manager itself uses
+    exactly this shape: a stable machine ``code``, one human ``message``,
+    optional structured ``details``, and the advisory ``retryable`` flag. Retry
+    policy is keyed on ``code`` alone; ``retryable`` is recorded evidence and
+    never a manager decision.
+    """
+
+    code: str
+    message: str
+    details: Mapping[str, object] | None = None
+    retryable: bool = False
+
+    def as_mapping(self) -> dict[str, object]:
+        """Return the canonical JSON representation of this failure."""
+
+        result: dict[str, object] = {"code": self.code, "message": self.message}
+        if self.details is not None:
+            result["details"] = dict(self.details)
+        if self.retryable:
+            result["retryable"] = True
+        return result
+
+
+def validate_failure(value: object, name: str = "failure") -> Failure:
+    """Validate one published failure object."""
+
+    mapping = require_mapping(value, name)
+    unsupported = sorted(set(mapping) - _FAILURE_MEMBERS)
+    if unsupported:
+        raise FormatError(f"{name} has unsupported members: {', '.join(unsupported)}")
+    code = require_string(mapping.get("code"), f"{name}.code")
+    if len(code.encode("utf-8")) > 128 or "\x00" in code or any(character.isspace() for character in code):
+        raise FormatError(f"{name}.code must be one short token without whitespace")
+    message = require_string(mapping.get("message"), f"{name}.message")
+    details_raw = mapping.get("details")
+    details = None if details_raw is None else require_mapping(details_raw, f"{name}.details")
+    retryable = mapping.get("retryable", False)
+    if not isinstance(retryable, bool):
+        raise FormatError(f"{name}.retryable must be a boolean")
+    return Failure(
+        code=code,
+        message=message,
+        details=None if details is None else dict(details),
+        retryable=retryable,
+    )
 
 
 @dataclass(frozen=True)

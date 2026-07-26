@@ -1467,7 +1467,14 @@ relocation/transfer forwarding record and finally falls back to a complete
 marker scan of the named workspace. A cache is never the only recovery path.
 Failure to find the child after bounded workspace visibility retries is an
 unavailable/corrupt dependency, not evidence that a join condition is
-impossible.
+impossible. Such a join is nevertheless never allowed to wait forever: because
+children are registered before their parent leaves committing, a child that
+stays unresolvable past a bounded grace is corrupt evidence, and the manager
+MUST fail the parent with `dependency_failure` and a message naming the missing
+child. This implementation records the first unresolved observation in memory
+and fails the parent after `join_grace_seconds`, one hour by default; a
+restarted manager restarts that grace, which is safe because the grace exists
+only to absorb transient nonvisibility.
 
 In `core-v1`, a child named by an unresolved join MUST NOT relocate, so its
 placement hint remains valid. Extension implementations MAY relocate it only
@@ -1516,36 +1523,57 @@ A step declares itself broken with a `fail` outcome:
   "action": "fail",
   "failure": {
     "code": "vasp.nonconvergent",
-    "summary": "electronic minimization did not converge",
-    "details_path": "vasp/convergence.log",
+    "message": "electronic minimization did not converge",
+    "details": {"iterations": 61, "log": "vasp/convergence.log"},
     "retryable": false
   }
 }
 ```
+
+There is exactly one failure object shape, used identically by application
+runners, by every language binding, and by the manager itself:
+
+| Member | Type | Required | Meaning |
+| --- | --- | --- | --- |
+| `code` | string | yes | Stable machine identity, one token without whitespace, at most 128 bytes. Matched against `retry_policy.retry_on`. |
+| `message` | string | yes | One nonempty human sentence. |
+| `details` | object | no | Structured evidence, such as `exit_status` or application counters. |
+| `retryable` | boolean | no, default `false` | Advisory operator evidence. It never overrides `retry_on`. |
+
+No other member is permitted. A manager MUST validate a runner-published
+failure before recording it and MUST NOT store an unvalidated object. A
+malformed failure is itself a protocol violation: the job enters failed with
+the manager's own `protocol_error` code and a message naming the defect, so a
+broken runner can never make a failure invisible to a consumer.
 
 The manager embeds the structured failure in the failed state frame and moves
 the one marker to `state/failed/<placement>/`. No `failure.json`,
 `ht.reason`, per-job event directory, or second failure index marker is
 created.
 
-Manager failure classes include:
+Codes emitted by this manager itself are reserved. Those currently in use are:
 
-- `protocol_error`;
-- `process_failure`;
-- `timeout`;
-- `lease_lost`;
-- `retry_exhausted`;
-- `budget_exhausted`;
-- `dependency_failure`;
-- `resource_unsatisfiable`;
-- `transaction_corruption`;
-- `manager_error`;
-- `cancelled`.
+- `protocol_error` — invalid submission, an outcome the protocol forbids, a
+  malformed published failure, an unusable join, or a runner that exited
+  successfully without publishing an outcome;
+- `process_failure` — a runner that could not be launched, or that exited
+  nonzero without publishing an outcome;
+- `lease_lost` — the owning manager's heartbeat expired;
+- `retry_exhausted` — `maximum_attempts_per_activation` reached during retry;
+- `budget_exhausted` — an attempt or activation budget exceeded;
+- `dependency_failure` — a join became impossible, or a named join child stayed
+  unresolvable past the manager's bounded grace;
+- `transaction_corruption` — a published transaction could not be replayed.
 
-The failure frame contains job, step, activation, and attempt IDs; class;
-application code and summary; exit status or signal; retry history; manager ID;
-relevant retained log paths; and data generation. For a job with `data.mode`
-equal to `none`, data generation is `null`.
+`timeout`, `resource_unsatisfiable`, `manager_error`, and `cancelled` remain
+reserved for manager use but are not currently emitted by this implementation.
+Application codes SHOULD be namespaced, as in `vasp.nonconvergent`, to keep
+them distinct from the reserved set.
+
+The failure frame contains job, step, activation, and attempt IDs; the failure
+object with its code, message, and details such as exit status or signal; retry
+history; manager ID; relevant retained log paths; and data generation. For a job
+with `data.mode` equal to `none`, data generation is `null`.
 
 Current broken jobs are exactly the markers below `state/failed/`. This
 directory tree is authoritative and requires no reconciliation.

@@ -22,6 +22,12 @@ else:
     runtime.advance("collect")
 ```
 
+`fail(code, message, details=..., retryable=...)` publishes the one canonical
+failure object, `{"code", "message", "details", "retryable"}`, which is also
+what the Bash bridge and the manager itself publish. `code` is the string a job
+lists in `retry_on`; `retryable` is advisory evidence and never overrides retry
+policy. A malformed failure is recorded by the manager as `protocol_error`.
+
 Other convenience outcomes are `succeed()` and `pause(reason)`. The API uses
 argv arrays and structured *httk₂* outcomes; it deliberately does not reproduce
 the *httk* v1 exit-code and `ht.nextstep` interface.
@@ -44,12 +50,20 @@ transaction = outcome.transaction()
 transaction.make_dir("results-dir", "results")
 transaction.put_file("energy", "energy.json", "results/energy.json")
 child = outcome.add_child("prepared-child", "branches/01")
-outcome.publish("wait", next_step="aggregate")
+runtime.wait("aggregate", outcome)
 ```
 
-The default wait condition is `all_succeeded`. Use `JoinSpec` to select
-`all_terminal`, `any_succeeded`, or `at_least`. `prepare_job_payload` and
-`JobSpec` create validated native payloads for submission or dynamic children.
+A join is resolvable only for children the manager registers, and children are
+registered from the same published bundle that names them. Both `runtime.wait`
+and `outcome.publish("wait", ...)` therefore publish through the builder holding
+the children; a childless builder cannot publish a wait.
+
+The default wait condition is `all_succeeded` over exactly `outcome.children`.
+Pass `join=JoinSpec(outcome.children, condition=...)` to select `all_terminal`,
+`any_succeeded`, or `at_least`. `prepare_job_payload` and `JobSpec` create
+validated native payloads for submission or dynamic children. A named child that
+the manager cannot resolve fails the parent with `dependency_failure` once its
+grace expires rather than waiting forever.
 
 `ProcessSupervisor` adds streamed stdout/stderr and followed-file monitoring,
 process-group timeout handling, and versioned executable checkers. A checker

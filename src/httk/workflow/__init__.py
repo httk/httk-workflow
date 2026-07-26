@@ -11,7 +11,7 @@ from .errors import (
     WorkspaceUnavailableError,
 )
 from .manager import TaskManager
-from .models import JobDefinition, Marker, RetryPolicy
+from .models import Failure, JobDefinition, Marker, RetryPolicy, validate_failure
 from .runtime import AttemptContext, AttemptRuntime, CommandResult, run_command
 from .runtime_builders import (
     ChildReference,
@@ -84,7 +84,7 @@ from .vasp import (
     validate_vasp_workdir,
     write_automatic_kpoints,
 )
-from .workspace import WorkflowWorkspace
+from .workspace import MarkerFault, WorkflowWorkspace
 
 __all__ = [
     "AttemptContext",
@@ -94,11 +94,13 @@ __all__ = [
     "CheckerSpec",
     "ChildReference",
     "Diagnostic",
+    "Failure",
     "FormatError",
     "JobDefinition",
     "JobSpec",
     "JoinSpec",
     "Marker",
+    "MarkerFault",
     "OutcomeCommit",
     "OutcomeBuilder",
     "PathRunnerBackend",
@@ -133,6 +135,7 @@ __all__ = [
     "acknowledge_transfer",
     "recover_transfers",
     "run_command",
+    "validate_failure",
     "prepare_job_payload",
     "evaluate_expression",
     "render_template",

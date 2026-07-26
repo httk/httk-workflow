@@ -50,6 +50,18 @@ takeover requires proof that an old writer has stopped; the explicitly unsafe
 `--unsafe-persistent-takeover` option relaxes that rule and is recorded in
 attempt state.
 
+Every claim, launch, transition, recovery decision, and refused request is
+logged. The console reports warnings and errors, while the complete info-level
+record is rotated into `.httk-workflow/managers/MANAGER_ID/log`. `--log-level`
+raises or lowers both, `--log-file` moves the file, and `--json-logs` emits one
+JSON object per line for ingestion.
+
+A manager drains on `SIGTERM` or `SIGINT`, which is what a batch system sends
+at walltime. The first signal stops claiming, terminates the running attempts,
+and keeps committing their outcomes for `--drain-timeout` seconds before
+exiting successfully; a second signal exits immediately. Anything left behind
+is recovered from its expired lease by the next manager.
+
 ## Inspect and control
 
 ```console

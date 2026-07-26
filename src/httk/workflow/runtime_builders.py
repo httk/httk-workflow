@@ -21,7 +21,13 @@ from ._util import (
     utc_now,
     write_json_atomic,
 )
-from .models import JobDefinition, normalize_placement, validate_label, validate_step
+from .models import (
+    JobDefinition,
+    normalize_placement,
+    validate_failure,
+    validate_label,
+    validate_step,
+)
 from .transactions import replay_transaction
 
 if TYPE_CHECKING:
@@ -382,8 +388,13 @@ class OutcomeBuilder:
             raise ValueError(f"{action} does not accept next_step")
         if action == "wait" and join is None:
             join = JoinSpec(self.children)
-        if action == "fail" and failure is None:
-            raise ValueError("fail requires failure details")
+        if action == "fail":
+            if failure is None:
+                raise ValueError("fail requires failure details")
+            # Normalize here so every publication path—native Python, the Bash
+            # bridge, and application code composing a builder directly—emits
+            # exactly the canonical failure shape.
+            failure = validate_failure(failure).as_mapping()
         if action == "retry" and retry is None:
             raise ValueError("retry requires a reason")
         if action == "pause" and pause is None:

@@ -1,11 +1,14 @@
 """Workflow workspace creation, submission, marker discovery, and transitions."""
 
 import errno
+import logging
 import os
+import re
 import shutil
 import time
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -21,6 +24,7 @@ from .errors import (
     FormatError,
     TransitionLostError,
     UnsupportedExtensionError,
+    WorkflowError,
     WorkspaceCorruptionError,
     WorkspaceUnavailableError,
 )
@@ -36,6 +40,26 @@ from .models import (
     normalize_placement,
 )
 
+_LOGGER = logging.getLogger(__name__)
+# Anything below state/ that cannot possibly be a marker basename is ignored
+# silently: NFS silly-renames, editor droppings, and other foreign files are
+# not protocol entries and must never stop a scan or reach quarantine.
+_MARKER_SHAPE_PATTERN = re.compile(r"\.p[0-9]{3}\.g[0-9a-z]+\.")
+
+
+@dataclass(frozen=True)
+class MarkerFault:
+    """One state entry shaped like a marker that cannot be interpreted."""
+
+    path: Path
+    reason: str
+
+
+def _marker_shaped(name: str) -> bool:
+    """Report whether *name* is shaped enough like a marker to be validated."""
+
+    return not name.startswith(".") and _MARKER_SHAPE_PATTERN.search(name) is not None
+
 
 class WorkflowWorkspace:
     """One self-contained httk workflow filesystem workspace."""
@@ -44,6 +68,7 @@ class WorkflowWorkspace:
         self.root = Path(root).resolve()
         self.control = self.root / ".httk-workflow"
         self.durable = durable
+        self._reported_faults: set[Path] = set()
         self.format = read_json(self.control / "format.json")
         if self.format.get("format") != "httk-workflow-filesystem" or self.format.get("format_version") != 1:
             raise FormatError("workspace must use httk-workflow-filesystem format version 1")
@@ -205,7 +230,14 @@ class WorkflowWorkspace:
     def payload_path(self, placement: PurePosixPath, job_key: str) -> Path:
         return self.root.joinpath(*placement.parts, job_key)
 
-    def scan_markers(self, kinds: Iterable[str] | None = None) -> Iterable[Marker]:
+    def scan_marker_entries(self, kinds: Iterable[str] | None = None) -> Iterator[Marker | MarkerFault]:
+        """Yield every marker below ``state/``, reporting damage per entry.
+
+        One unusable entry must never hide the rest of the workspace, so a
+        marker-shaped basename that fails validation is reported as a
+        :class:`MarkerFault` instead of aborting the scan.
+        """
+
         selected = tuple(kinds or CORE_STATE_KINDS)
         state_root = self.control / "state"
         for kind in selected:
@@ -213,8 +245,38 @@ class WorkflowWorkspace:
             if not directory.exists():
                 continue
             for path in directory.rglob("*"):
-                if path.is_file():
+                if not path.is_file():
+                    continue
+                if not _marker_shaped(path.name):
+                    _LOGGER.debug("ignoring foreign file below state: %s", path)
+                    continue
+                try:
                     yield Marker.from_path(state_root, path, priority_bands=self.priority_bands)
+                except (WorkflowError, ValueError) as exc:
+                    yield MarkerFault(path=path, reason=str(exc))
+
+    def scan_markers(self, kinds: Iterable[str] | None = None) -> Iterable[Marker]:
+        for entry in self.scan_marker_entries(kinds):
+            if isinstance(entry, Marker):
+                yield entry
+            else:
+                self.report_marker_fault(entry)
+
+    def report_marker_fault(self, fault: MarkerFault) -> None:
+        """Report an uninterpretable state entry loudly once, then quietly.
+
+        A marker whose basename or placement cannot be parsed is workspace
+        corruption rather than a job state: core-v1 leaves its repair to an
+        explicit workspace tool, so a manager only reports it and never
+        schedules or relocates it.
+        """
+
+        message = "unusable state entry %s: %s (repair it with a workspace tool)"
+        if fault.path in self._reported_faults:
+            _LOGGER.debug(message, fault.path, fault.reason)
+            return
+        self._reported_faults.add(fault.path)
+        _LOGGER.error(message, fault.path, fault.reason, extra={"event": "marker_fault", "entry": str(fault.path)})
 
     def find_markers(self, job_key: str, kinds: Iterable[str] | None = None) -> list[Marker]:
         return [marker for marker in self.scan_markers(kinds) if marker.job_key == job_key]
@@ -241,8 +303,12 @@ class WorkflowWorkspace:
                 if not candidate_dir.is_dir():
                     continue
                 for path in candidate_dir.glob(f"{job_key}.p???.g*.*"):
-                    if path.is_file():
+                    if not path.is_file():
+                        continue
+                    try:
                         matches.append(Marker.from_path(state_root, path, priority_bands=self.priority_bands))
+                    except (WorkflowError, ValueError) as exc:
+                        self.report_marker_fault(MarkerFault(path=path, reason=str(exc)))
         if len(matches) > 1:
             raise WorkspaceCorruptionError(f"job {job_key} has multiple markers at {placement}")
         return matches[0] if matches else None
@@ -315,6 +381,13 @@ class WorkflowWorkspace:
         record_ref = writer.append(frame)
         destination = self.marker_path(kind, marker.placement, marker.job_key, next_priority, generation, record_ref)
         destination.parent.mkdir(parents=True, exist_ok=True)
+        _LOGGER.debug(
+            "moving marker %s from %s to %s at generation %d",
+            marker.job_key,
+            marker.kind,
+            kind,
+            generation,
+        )
         return self._verified_marker_rename(marker, destination)
 
     def _verified_marker_rename(self, marker: Marker, destination: Path, *, attempts: int = 7) -> Marker:
@@ -327,9 +400,17 @@ class WorkflowWorkspace:
                 os.rename(source, destination)
             except OSError as exc:
                 last_error = exc
+                _LOGGER.warning(
+                    "marker rename %s -> %s reported %s on attempt %d; verifying the destination",
+                    source,
+                    destination,
+                    exc,
+                    attempt + 1,
+                )
             if destination.is_file():
                 return Marker.from_path(state_root, destination, priority_bands=self.priority_bands)
             if source.is_file():
+                _LOGGER.debug("marker %s is not yet visible at %s; retrying", source, destination)
                 time.sleep(retry_delay(attempt))
                 continue
             current = self.find_markers(marker.job_key)
@@ -349,6 +430,13 @@ class WorkflowWorkspace:
                 os.rename(source, destination)
             except OSError as exc:
                 last_error = exc
+                _LOGGER.warning(
+                    "publication %s -> %s reported %s on attempt %d; verifying the destination",
+                    source,
+                    destination,
+                    exc,
+                    attempt + 1,
+                )
             if destination.exists():
                 if not source.exists():
                     return
@@ -423,6 +511,13 @@ class WorkflowWorkspace:
             destination / "report.json",
             {"original_path": str(path), "reason": reason, "quarantined_at": utc_now()},
             durable=self.durable,
+        )
+        _LOGGER.warning(
+            "quarantined %s as %s: %s",
+            path,
+            destination,
+            reason,
+            extra={"event": "quarantine", "entry": str(path), "quarantine": str(destination)},
         )
         return destination
 
