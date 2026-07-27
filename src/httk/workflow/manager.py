@@ -1113,6 +1113,10 @@ class TaskManager:
             "workdir_reused": workdir_reused,
             "unsafe_persistent_takeover": previous_state.unsafe_persistent_takeover,
             "data_generation": claimed_state.data_generation,
+            # The workspace durability mode, so every artifact the runner
+            # publishes is synchronized to the same standard as the marker and
+            # journal that will reference it.
+            "durable": self.workspace.durable,
             "resources": dict(job.resources),
             "join": claimed_state.join_summary,
             # The enriched, labeled observations of this activation's join, or an
@@ -1132,6 +1136,7 @@ class TaskManager:
                 "HTTK_WORKFLOW_WORKDIR": str(workdir),
                 "HTTK_WORKFLOW_IS_RESTART": "1" if context["is_restart"] else "0",
                 "HTTK_WORKFLOW_UNCLEAN_RESTART": "1" if context["is_unclean_restart"] else "0",
+                "HTTK_WORKFLOW_DURABLE": "1" if self.workspace.durable else "0",
                 "HTTK_WORKFLOW_ATTEMPT_REASON": str(context["attempt_reason"]),
                 "HTTK_WORKFLOW_STEP": str(context["step"]),
                 "HTTK_WORKFLOW_PYTHON": sys.executable,
@@ -1588,10 +1593,15 @@ class TaskManager:
                 raise TransactionError("transaction published by a nontransactional job")
             if outcome.get("expected_data_generation") != data_generation:
                 raise TransactionError("outcome expected_data_generation is stale")
+            # A durable workspace synchronizes every replayed destination and
+            # the directories that name it here, before the destination frame is
+            # appended and the marker is renamed out of committing below, so the
+            # committed data is on storage before the marker that claims it is.
             changed_data = replay_transaction(
                 transaction_path,
                 self.workspace.payload_path(marker.placement, marker.job_key) / "data",
                 expected_generation=data_generation,
+                durable=self.workspace.durable,
             )
             if changed_data:
                 data_generation += 1

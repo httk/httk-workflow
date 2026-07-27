@@ -711,12 +711,41 @@ the storage-durable profile, synchronize the segment. A marker can therefore
 never legally reference a torn tail. An unreferenced partial final frame is
 ignored and may be truncated during journal repair.
 
-This implementation runs the storage-durable profile by default: every journal
-frame, every protocol JSON publication, and the directory entries that carry
-them are synchronized before the rename that makes them authoritative. The
-opt-out (`--no-durable`) exists for throwaway and test workspaces only. Without
-it, a node that loses power can leave a marker naming a frame its storage never
-received, which is exactly the damage `workspace fsck` below has to repair.
+This implementation runs the storage-durable profile by default. Durability is
+not only a manager-side property of journals and markers: the runner-side
+artifacts that publish work are synchronized to the same standard, because a
+marker or journal frame that claims a committed outcome is worthless if the
+outcome its storage should hold was never flushed. In the durable profile, each
+of the following is synchronized — its file contents, then the directory entries
+that name it — before the rename that makes it authoritative:
+
+| Artifact | Synchronized before |
+| --- | --- |
+| Journal frame | the state-marker rename that references it |
+| State marker / request / submitted payload | it becomes visible in `state/` (its parent directory is flushed) |
+| Attempt `context.json`, `process.json` | the runner is launched against it |
+| Outcome bundle (`outcome.json`, `runner_steps`, failure detail, its sealed transaction manifest and staged payload, its child `job.json` bundles) | the `outcome.tmp.<nonce>` → `outcome.ready` rename; the whole draft tree is flushed in one batch, then the attempt-control directory after the rename |
+| Committed transaction data (`data/`) | the manager appends the destination state frame and renames the marker out of `committing`; every replayed destination and each parent directory it touched, including the trash a removal moved into, is flushed first |
+| Registered child payloads and their submitted markers | the parent's marker leaves `committing` |
+| Job state (`.httk-job/state.json`), observed declarations, `runner-steps.json` | each atomic replace returns |
+| Sealed replayable workdir batch (`.httk-runner/workdir-ready/`) and its replay into the workdir | the batch is published, then retired as applied |
+
+Two runner-side artifacts keep only process-interruption safety even in the
+durable profile, because per-line synchronization would dominate their cost and
+neither is authoritative workflow state: the append-only run log
+(`.httk-runner/runlog.jsonl`) and the runner's captured `stdout.log` and
+`stderr.log`. They are evidence for an operator, not markers or committed data;
+losing their tail to a power cut costs a diagnostic line, never a lost outcome
+or a half-applied transaction.
+
+In the non-durable profile every one of these keeps process-interruption safety
+only: a torn write or an interrupted rename is still never observed, but a node
+that loses power may lose any of the above — a journal frame, a marker, a
+published outcome, half of a "committed" transaction, or a registered child. The
+opt-out (`--no-durable`) exists for throwaway and test workspaces where that
+trade buys speed. Without it, a node that loses power can leave a marker naming
+a frame or an outcome its storage never received, which is exactly the damage
+`workspace fsck` below has to repair.
 
 On a network filesystem, visibility of a marker and visibility of the newly
 extended journal segment may reach different clients at different times. A
@@ -1341,6 +1370,7 @@ HTTK_WORKFLOW_JOB_DIR=<absolute current payload path>
 HTTK_WORKFLOW_WORKDIR=<absolute selected workdir path>
 HTTK_WORKFLOW_IS_RESTART=0|1
 HTTK_WORKFLOW_UNCLEAN_RESTART=0|1
+HTTK_WORKFLOW_DURABLE=0|1
 HTTK_WORKFLOW_ATTEMPT_REASON=<reason>
 HTTK_WORKFLOW_STEP=<current step>
 HTTK_WORKFLOW_PYTHON=<manager Python interpreter>
@@ -1350,6 +1380,14 @@ HTTK_WORKFLOW_BASH_API=<absolute native workflow Bash library>
 `HTTK_WORKFLOW_DATA_DIR` is additionally set only for transactional-data jobs.
 The JSON file is the source of truth; scalar environment variables are
 language-neutral conveniences.
+
+`HTTK_WORKFLOW_DURABLE`, and the `durable` member of the attempt context, carry
+the workspace's durability mode to the runner. A runner that publishes an
+outcome, a transaction, or a child bundle synchronizes it before the rename that
+makes it authoritative exactly when this is `1`. A runner that does not compose
+outcomes on storage itself may ignore it; the packaged Python and Bash SDKs
+honour it automatically, and a context written before the member existed reads
+as `0`.
 
 A manager MAY export further variables that belong to the runner libraries it
 ships rather than to this protocol. They are SDK or application conveniences: a
@@ -1382,6 +1420,7 @@ An unclean persistent retry context is:
   "workdir_mode": "persistent",
   "workdir_reused": true,
   "data_generation": null,
+  "durable": true,
   "resources": {},
   "join": null,
   "children": []
@@ -1410,13 +1449,20 @@ attempt-control directory named by `HTTK_WORKFLOW_CONTROL_DIR`:
 
 1. Create `outcome.tmp.<nonce>/`.
 2. Write `outcome.json` and any transaction or child bundles inside it.
-3. Close all files.
-4. Atomically rename the directory to `outcome.ready/`.
+3. Close all files, and in the storage-durable profile synchronize the whole
+   draft tree — the outcome, its transaction manifest and staged payload, and
+   its child bundles — in one batch.
+4. Atomically rename the directory to `outcome.ready/`, and in the durable
+   profile synchronize the attempt-control directory so the new name survives a
+   crash.
 5. Exit.
 
 The directory rename is the **outcome publication point**. Temporary outcomes
 are ignored. The fixed destination is nonempty, so a second publication MUST
-fail rather than replace the first.
+fail rather than replace the first. The draft is unreferenced until step 4, so a
+crash before it discards a partial outcome whole; the single batched
+synchronization at step 3 is why a published outcome can never name staged data
+the storage never received.
 
 A minimal outcome is:
 
@@ -2138,12 +2184,19 @@ For a valid current outcome, a manager:
    transaction is present;
 2. appends a committing frame;
 3. renames the exact running marker to committing, fencing the attempt;
-4. applies or verifies the transaction, if present;
-5. registers or verifies every child;
+4. applies or verifies the transaction, if present, and in the durable profile
+   synchronizes every replayed destination and the directories it touched;
+5. registers or verifies every child, synchronizing each published payload and
+   marker's directory in the durable profile;
 6. computes failure or join information;
 7. appends and synchronizes the destination state frame;
 8. renames the exact committing marker to the destination;
 9. performs optional cleanup later.
+
+Steps 4 and 5 synchronize before steps 7 and 8, so a durable workspace has the
+committed data and the registered children on storage before the marker rename
+that claims them: a power cut can never leave a marker out of `committing` that
+names a transaction its storage only half received.
 
 Interruption recovery follows directly:
 
