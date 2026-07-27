@@ -503,6 +503,7 @@ def test_an_operator_request_is_applied_by_exactly_one_manager(
                         "request_id": str(uuid.uuid4()),
                         "job_id": marker.job_id,
                         "job_key": marker.job_key,
+                        "placement": marker.placement.as_posix(),
                         "expected_generation": marker.generation,
                         "expected_record_ref": marker.record_ref,
                         "action": "pause",

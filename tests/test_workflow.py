@@ -408,6 +408,7 @@ def test_priority_request_renames_authoritative_marker(tmp_path: Path) -> None:
                 "format_version": 1,
                 "job_id": job_id,
                 "job_key": ready.job_key,
+                "placement": ready.placement.as_posix(),
                 "expected_generation": ready.generation,
                 "expected_record_ref": ready.record_ref,
                 "action": "set_priority",
