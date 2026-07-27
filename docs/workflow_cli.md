@@ -148,6 +148,17 @@ named `any`.
 
 ### `project` — the directory a campaign lives in
 
+The project *anchor* — the `.httk-project` directory, discovery, keys, and pins —
+belongs to *httk-core*, which owns the umbrella `httk project` command.
+*httk-workflow* registers its manifest, doctor, and `show` extensions into it, so
+`httk project manifest verify` and `httk workflow project manifest verify` drive
+exactly the same code. Prefer the umbrella spelling `httk project ...`; the
+`httk workflow project ...` group below is kept working as an equivalent.
+
+The anchor's own leaves — `httk project init` and `httk project show` — are
+provided by *httk-core*. `httk project init` creates only the anchor, whereas
+`httk workflow project init` also creates the workflow workspace:
+
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `project init [PATH]` | create a project, its key, and its workspace | `--name`, `--description`, `--default-queue`, `--exclude`, `--non-interactive` |
@@ -347,6 +358,14 @@ httk workflow config unset email
 httk workflow project init . --name example --default-queue default
 ```
 
+The project *anchor* is owned by *httk-core*, which provides the umbrella
+`httk project` command. `httk project init` creates the anchor alone;
+`httk workflow project init` above additionally creates the workflow workspace
+(that the two are born together is revisited in a later phase). The manifest,
+doctor, and `show` extensions below are registered into `httk project` by
+*httk-workflow*, so `httk project ...` and `httk workflow project ...` reach the
+same code — prefer the umbrella spelling.
+
 `config set` accepts only the keys the configuration actually has — `name` and
 `email` — and names them when it refuses another, so a typo cannot become a
 member that nothing ever reads. `format` and `format_version` describe the
@@ -363,11 +382,14 @@ working directory's parent chain.
 ### Describing and checking a project
 
 ```console
-httk workflow project show
-httk workflow project show --json
-httk workflow project doctor
-httk workflow project doctor --repair
+httk project show
+httk project show --json
+httk project doctor
+httk project doctor --repair
 ```
+
+(`httk workflow project show`, `httk workflow project doctor`, and so on remain
+equivalent.)
 
 `project show` reports the project's metadata, whether it pins a key and which,
 its workspace and job counts, and what its manifest currently verifies as;

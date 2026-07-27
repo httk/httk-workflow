@@ -1949,6 +1949,76 @@ def handle_project_manifest_verify(arguments: argparse.Namespace, context: CLICo
     return verification.exit_code
 
 
+def add_project_doctor_arguments(parser: argparse.ArgumentParser) -> None:
+    """Declare :command:`project doctor`, shared with ``httk project doctor``."""
+
+    parser.add_argument(
+        "path",
+        metavar="PATH",
+        nargs="?",
+        help="the project to check (default: the nearest project of the working directory)",
+    )
+    parser.add_argument("--repair", action="store_true", help="also fix every finding that can be fixed automatically")
+    parser.add_argument("--json", action="store_true", help="print the report as one JSON document")
+
+
+def add_project_manifest_create_arguments(parser: argparse.ArgumentParser) -> None:
+    """Declare :command:`project manifest create`, shared with the umbrella command."""
+
+    parser.add_argument("project", metavar="PROJECT", nargs="?", help="the project (default: the nearest one)")
+    parser.add_argument("--manifest", metavar="PATH", help="write the manifest here rather than in the project")
+
+
+def add_project_manifest_verify_arguments(parser: argparse.ArgumentParser) -> None:
+    """Declare :command:`project manifest verify`, shared with the umbrella command."""
+
+    parser.add_argument("project", metavar="PROJECT", nargs="?", help="the project (default: the nearest one)")
+    parser.add_argument("--manifest", metavar="PATH", help="verify this manifest rather than the project's")
+    parser.add_argument(
+        "--trusted-key",
+        action="append",
+        default=[],
+        metavar="PATH_OR_VALUE",
+        help=(
+            "trust this Ed25519 public key as well: an ed25519:BASE64 value or the path of a "
+            "*.pub file (repeatable). The project's pinned key is always trusted"
+        ),
+    )
+
+
+def build_umbrella_doctor_parser(parser: argparse.ArgumentParser) -> None:
+    """Declare ``httk project doctor`` on the umbrella command's own parser.
+
+    Registered into the core ``httk project`` command, so ``httk project doctor``
+    and ``httk workflow project doctor`` drive the very same handler.
+    """
+
+    add_project_doctor_arguments(parser)
+
+
+def build_umbrella_manifest_parser(parser: argparse.ArgumentParser) -> None:
+    """Declare ``httk project manifest create|verify`` on the umbrella parser."""
+
+    parser.set_defaults(handler=None, help_parser=parser)
+    actions = parser.add_subparsers(metavar="COMMAND")
+    create = actions.add_parser(
+        "create",
+        help="write the signed manifest",
+        description="Write the deterministic signed manifest of one project",
+        formatter_class=HelpFormatter,
+    )
+    create.set_defaults(handler=handle_project_manifest_create, help_parser=create)
+    add_project_manifest_create_arguments(create)
+    verify = actions.add_parser(
+        "verify",
+        help="verify the manifest against the tree",
+        description="Verify one project manifest against the tree and this project's trust anchors",
+        formatter_class=HelpFormatter,
+    )
+    verify.set_defaults(handler=handle_project_manifest_verify, help_parser=verify)
+    add_project_manifest_verify_arguments(verify)
+
+
 def build_project_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
     context: CLIContext,
@@ -2025,21 +2095,15 @@ def build_project_parser(
     )
     show.add_argument("--json", action="store_true", help="print the description as one JSON document")
 
-    doctor = _leaf(
-        group,
-        "doctor",
-        summary="check, and optionally repair, this project",
-        description="Check one project for the conditions that quietly break it later",
-        handler=handle_project_doctor,
+    add_project_doctor_arguments(
+        _leaf(
+            group,
+            "doctor",
+            summary="check, and optionally repair, this project",
+            description="Check one project for the conditions that quietly break it later",
+            handler=handle_project_doctor,
+        )
     )
-    doctor.add_argument(
-        "path",
-        metavar="PATH",
-        nargs="?",
-        help="the project to check (default: the nearest project of the working directory)",
-    )
-    doctor.add_argument("--repair", action="store_true", help="also fix every finding that can be fixed automatically")
-    doctor.add_argument("--json", action="store_true", help="print the report as one JSON document")
 
     _, manifest_actions = _group(
         group,
@@ -2047,34 +2111,23 @@ def build_project_parser(
         summary="create and verify the signed project manifest",
         description="Create and verify the deterministic signed manifest of one project",
     )
-    create = _leaf(
-        manifest_actions,
-        "create",
-        summary="write the signed manifest",
-        description="Write the deterministic signed manifest of one project",
-        handler=handle_project_manifest_create,
+    add_project_manifest_create_arguments(
+        _leaf(
+            manifest_actions,
+            "create",
+            summary="write the signed manifest",
+            description="Write the deterministic signed manifest of one project",
+            handler=handle_project_manifest_create,
+        )
     )
-    create.add_argument("project", metavar="PROJECT", nargs="?", help="the project (default: the nearest one)")
-    create.add_argument("--manifest", metavar="PATH", help="write the manifest here rather than in the project")
-
-    verify = _leaf(
-        manifest_actions,
-        "verify",
-        summary="verify the manifest against the tree",
-        description="Verify one project manifest against the tree and this project's trust anchors",
-        handler=handle_project_manifest_verify,
-    )
-    verify.add_argument("project", metavar="PROJECT", nargs="?", help="the project (default: the nearest one)")
-    verify.add_argument("--manifest", metavar="PATH", help="verify this manifest rather than the project's")
-    verify.add_argument(
-        "--trusted-key",
-        action="append",
-        default=[],
-        metavar="PATH_OR_VALUE",
-        help=(
-            "trust this Ed25519 public key as well: an ed25519:BASE64 value or the path of a "
-            "*.pub file (repeatable). The project's pinned key is always trusted"
-        ),
+    add_project_manifest_verify_arguments(
+        _leaf(
+            manifest_actions,
+            "verify",
+            summary="verify the manifest against the tree",
+            description="Verify one project manifest against the tree and this project's trust anchors",
+            handler=handle_project_manifest_verify,
+        )
     )
 
 
