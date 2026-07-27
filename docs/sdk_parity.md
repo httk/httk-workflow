@@ -22,10 +22,12 @@ language, and compares everything both left behind.
 
 ## How to read the table
 
-- **Python** names a member of `Runner`, `Attempt`, or a type exported from
-  `httk.workflow`. `—` means the operation has no Python member of its own,
-  because Python reaches it some other way (an attribute, an exception, the
-  standard library).
+- **Python** names a member of `Runner`, `Attempt`, or a type reached from
+  `httk.workflow` — either exported at its root or from one of its named
+  submodules, in which case the cell spells the submodule (for example
+  `protocol.JobSpec` or `runtime_utils.render_template`). `—` means the operation
+  has no Python member of its own, because Python reaches it some other way (an
+  attribute, an exception, the standard library).
 - **Bash** names a function of the packaged `shell/httk-workflow.sh`, sometimes
   with the option that selects the behaviour of the row; only the function name
   is normative. `—` means the operation has no Bash function, because Bash
@@ -64,14 +66,14 @@ language, and compares everything both left behind.
 | `JobState.delete` | `httk_workflow_state_delete` | Remove one key, reporting whether it was present. | `.httk-job/state.json` |
 | `JobState.merge` | `httk_workflow_state_merge` | Write several keys in one atomic replace. | `.httk-job/state.json` |
 | `Attempt.log` | — | The append-only structured run log of this workdir. | `.httk-runner/runlog.jsonl` |
-| `RunLog.append` | `httk_workflow_runlog_note` | Append one ordinary evidence event. | one `httk-workflow-runlog-event` line, kind `note` |
-| `RunLog.append` | `httk_workflow_runlog_headline` | Append one event meant to be read first when the job is inspected. | one `httk-workflow-runlog-event` line, kind `headline` |
-| `RunLog.append` | `httk_workflow_runlog_append` | Append one event with whole files attached by content and digest. | one `httk-workflow-runlog-event` line, kind `files` |
+| `protocol.RunLog.append` | `httk_workflow_runlog_note` | Append one ordinary evidence event. | one `httk-workflow-runlog-event` line, kind `note` |
+| `protocol.RunLog.append` | `httk_workflow_runlog_headline` | Append one event meant to be read first when the job is inspected. | one `httk-workflow-runlog-event` line, kind `headline` |
+| `protocol.RunLog.append` | `httk_workflow_runlog_append` | Append one event with whole files attached by content and digest. | one `httk-workflow-runlog-event` line, kind `files` |
 | — | `httk_workflow_log` | Write one timestamped `LEVEL MESSAGE` line to stderr, which the manager retains with the attempt. The Python side uses `logging`. | the attempt's captured stderr |
 | `Attempt.declare` | `httk_workflow_declare` | Record the workflow declaration this job *observed*, carried verbatim; repeating it overwrites. | `.httk-job/declarations/<name>.json` |
 | `Attempt.declaration` | `httk_workflow_declaration` | Read one declaration back: observed first, then the one `job.json` declared, else absent. | `.httk-job/declarations/<name>.json`, or `job.json` → `declarations` |
 | `Attempt.run` | — | Run an argv array in the workdir and terminate its whole process group on timeout, returning a `CommandResult`. | none; the result is in memory |
-| `ProcessSupervisor` | `httk_workflow_run` | Run an argv array under checkers and inactivity watches, writing the authoritative report of what it did. | `process-report.json` (`httk-workflow-process-report` version 1) |
+| `supervision.ProcessSupervisor` | `httk_workflow_run` | Run an argv array under checkers and inactivity watches, writing the authoritative report of what it did. | `process-report.json` (`httk-workflow-process-report` version 1) |
 | `Attempt.put` | `httk_workflow_put` | Stage one file or tree into the job's transactional data; the manager applies it exactly once when the outcome commits. | an operation of `outcome.tmp.<uuid>/transaction/` |
 | `Attempt.remove` | `httk_workflow_remove` | Stage one removal from the job's transactional data. | an operation of `outcome.tmp.<uuid>/transaction/` |
 | `Attempt.workdir_batch` | `httk_workflow_workdir_apply` | Group workdir changes so that an interrupted apply is replayed on the next attempt instead of being left half-done. | `.httk-runner/workdir-ready/<uuid>/`, then `workdir-applied/` |
@@ -87,13 +89,13 @@ language, and compares everything both left behind.
 | `Attempt.retry` | `httk_workflow_retry` | Ask for another attempt of this same activation. | outcome action `retry` |
 | `Attempt.pause` | `httk_workflow_pause` | Pause this job until an operator resumes it. | outcome action `pause` |
 | `Attempt.published` | — | Whether this attempt already published; a second outcome is refused before anything of the first is disturbed. | the existence of `outcome.ready/` |
-| `JobSpec` | `httk_workflow_job_prepare` | The complete member set of a job definition, including the runner reference and the inputs. | `job.json` |
-| `prepare_job_payload` | `httk_workflow_job_prepare` | Write `job.json` into a prepared payload directory from that specification. | `job.json` of a new payload |
+| `protocol.JobSpec` | `httk_workflow_job_prepare` | The complete member set of a job definition, including the runner reference and the inputs. | `job.json` |
+| `protocol.prepare_job_payload` | `httk_workflow_job_prepare` | Write `job.json` into a prepared payload directory from that specification. | `job.json` of a new payload |
 | — | `httk_workflow_batch` | Run several bridge commands, one per line, in one interpreter start; a batch stops at its first failing line. | none |
-| `evaluate_expression` | `httk_calc` | Evaluate one arithmetic expression without a shell. | none |
-| `render_template` | `httk_template_render` | Render one template file with one JSON value document. | the named output file |
-| `compress_files` | `httk_compress` | Compress named files with `bz2`, `gz`, or `xz`, optionally removing the sources. | the compressed files |
-| `decompress_files` | `httk_decompress` | Decompress named files, optionally removing the sources. | the decompressed files |
+| `runtime_utils.evaluate_expression` | `httk_calc` | Evaluate one arithmetic expression without a shell. | none |
+| `runtime_utils.render_template` | `httk_template_render` | Render one template file with one JSON value document. | the named output file |
+| `runtime_utils.compress_files` | `httk_compress` | Compress named files with `bz2`, `gz`, or `xz`, optionally removing the sources. | the compressed files |
+| `runtime_utils.decompress_files` | `httk_decompress` | Decompress named files, optionally removing the sources. | the decompressed files |
 
 ## Exit-code discipline
 

@@ -28,6 +28,25 @@ from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 
+__all__ = [
+    "TRANSFER_DIRECTORY",
+    "TRANSFER_MANIFEST",
+    "TRANSFER_RUNNERS",
+    "TRANSFER_FORMAT",
+    "TRANSFER_FORMAT_VERSION",
+    "TRANSFER_OFFER_FORMAT",
+    "TRANSFER_RETIREMENT_FORMAT",
+    "DEFAULT_OFFER_STATES",
+    "detach_job",
+    "validate_bundle",
+    "import_bundle",
+    "acknowledge_transfer",
+    "recover_transfers",
+    "offer_transfers",
+    "retire_transfers",
+    "discard_staged_bundle",
+]
+
 TRANSFER_DIRECTORY = ".httk-transfer"
 TRANSFER_MANIFEST = "manifest.json"
 TRANSFER_RUNNERS = "runners"

@@ -20,6 +20,31 @@ from .projects import discover_project, read_project
 
 _LOGGER = logging.getLogger(__name__)
 
+__all__ = [
+    "ADAPTER_OPERATIONS",
+    "CREDENTIALS_FILE",
+    "METADATA_FILE",
+    "ADAPTER_FORMAT",
+    "REQUEST_FORMAT",
+    "RESULT_FORMAT",
+    "PERSISTABLE_QUEUE_SETTINGS",
+    "RemoteTarget",
+    "metadata_path",
+    "read_metadata",
+    "validate_adapter_bundle",
+    "split_remote",
+    "resolve_remote",
+    "project_remote_roots",
+    "list_remotes",
+    "add_remote",
+    "split_settings",
+    "read_credentials",
+    "store_credentials",
+    "queue_settings",
+    "import_v1_remote",
+    "run_adapter",
+]
+
 ADAPTER_OPERATIONS = (
     "configure",
     "install",
@@ -34,11 +59,6 @@ CREDENTIALS_FILE = "credentials.json"
 
 #: The metadata file of one adapter bundle.
 METADATA_FILE = "remote.json"
-#: What the same file was called before remotes were called remotes. A bundle
-#: that still carries only the old name is read, so an installation does not
-#: have to be migrated to keep working; everything written is written as
-#: :data:`METADATA_FILE`.
-LEGACY_METADATA_FILE = "computer.json"
 
 #: The format of the metadata file, and of the request and result documents that
 #: cross the adapter boundary. These three names are *protocol* and deliberately
@@ -83,32 +103,10 @@ class RemoteTarget:
     project_local: bool
 
 
-#: Deprecated spelling of :class:`RemoteTarget`.
-ComputerTarget = RemoteTarget
-
-
 def metadata_path(bundle: str | os.PathLike[str]) -> Path:
-    """Return the metadata file of one adapter bundle, new name preferred.
+    """Return the metadata file of one adapter bundle."""
 
-    A bundle written by this release carries ``remote.json``. One written before
-    the rename carries ``computer.json`` and is read where it lies, which is
-    what keeps an existing definition usable without being touched.
-    """
-
-    root = Path(bundle).expanduser()
-    current = root / METADATA_FILE
-    if current.exists():
-        return current
-    legacy = root / LEGACY_METADATA_FILE
-    if legacy.exists():
-        _LOGGER.debug(
-            "reading legacy adapter metadata %s; %s is the current name",
-            legacy,
-            METADATA_FILE,
-            extra={"event": "adapter_metadata_legacy", "path": str(legacy)},
-        )
-        return legacy
-    return current
+    return Path(bundle).expanduser() / METADATA_FILE
 
 
 def _read_object(path: Path) -> dict[str, Any]:
@@ -122,7 +120,7 @@ def _read_object(path: Path) -> dict[str, Any]:
 
 
 def read_metadata(bundle: str | os.PathLike[str]) -> dict[str, Any]:
-    """Read the metadata of one adapter bundle, under either of its names."""
+    """Read the metadata of one adapter bundle."""
 
     return _read_object(metadata_path(bundle))
 
@@ -208,14 +206,9 @@ def resolve_remote(
 
 
 def project_remote_roots(project_root: Path) -> tuple[Path, ...]:
-    """Return where one project keeps its remotes, current name first.
+    """Return where one project keeps its remotes."""
 
-    A project initialized before the rename holds them below ``computers/``, and
-    that directory is still read so an existing project keeps working.
-    """
-
-    control = project_root / ".httk-project"
-    return (control / "remotes", control / "computers")
+    return (project_root / ".httk-project" / "remotes",)
 
 
 def list_remotes(project: str | os.PathLike[str] | None = None) -> list[dict[str, object]]:
@@ -482,12 +475,3 @@ def run_adapter(
     if completed.stderr:
         result["diagnostics"] = completed.stderr
     return result
-
-
-#: Deprecated spellings of the functions above, kept for one release. A remote
-#: was called a computer before this package borrowed git's word for it.
-add_computer = add_remote
-import_v1_computer = import_v1_remote
-list_computers = list_remotes
-resolve_computer = resolve_remote
-split_computer = split_remote

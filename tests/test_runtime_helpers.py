@@ -7,16 +7,16 @@ from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
 
-from httk.workflow import (
-    Attempt,
+from httk.workflow import Attempt
+from httk.workflow.runtime import run_command
+from httk.workflow.v1 import bundled_v1_root
+from httk.workflow.vasp import (
     assemble_potcar,
     automatic_kpoint_grid,
-    bundled_v1_root,
     contcar_to_poscar,
     last_oszicar_energy,
     read_incar,
     read_poscar_header,
-    run_command,
     suggested_magnetic_moments,
     update_incar,
     write_automatic_kpoints,

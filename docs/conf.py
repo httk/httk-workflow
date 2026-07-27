@@ -1,3 +1,4 @@
+import importlib
 import os
 import warnings
 from datetime import date
@@ -94,11 +95,11 @@ autoapi_options = [
        "imported-members",
 ]
 autoapi_root = "reference/autoapi"
-autoapi_ignore = []  # include everything
+autoapi_ignore = []  # scan everything; the reference is curated by skip_member below
 
 autoapi_type = "python"
 autoapi_dirs = ["../src/httk"]
-autoapi_add_toctree_entry = True
+autoapi_add_toctree_entry = False
 autoapi_keep_files = True
 autoapi_member_order = "bysource"
 autoapi_python_class_content = "module"  # docstring under class, not merged from __init__
@@ -115,53 +116,120 @@ nitpick_ignore = [
     # a private stdlib class the Python documentation has no page for.
     ("py:class", "argparse._SubParsersAction"),
 ]
+
+# A documented public signature routinely annotates a type whose *definition*
+# lives in a module that is deliberately not part of the reference (the protocol
+# implementation, the manager, the runtime builders, the CLI). The type is
+# documented at its public home, but AutoAPI resolves the annotation against the
+# defining module, so those cross-references cannot land and are ignored here
+# rather than pulling the internal modules back into the reference. The private
+# type aliases the same signatures mention are ignored for the same reason.
+_INTERNAL_MODULES = (
+    "models",
+    "journal",
+    "transactions",
+    "runtime_builders",
+    "workspace",
+    "manager",
+    "introspection",
+    "gc",
+    "fsck",
+    "adapter_runtime",
+    "cli",
+    "workflow_cli",
+    "v1_cli",
+)
+nitpick_ignore_regex = [
+    (r"py:.*", r"httk\.workflow\.(" + "|".join(_INTERNAL_MODULES) + r")(\..+)?"),
+    (r"py:.*", r"httk\.workflow\.vasp\.runners(\..+)?"),
+    (
+        r"py:.*",
+        r"(DataMode|WorkdirMode|PublishMode|RunnerSource|StepHandler|JoinCondition"
+        r"|DiagnosticSeverity|EventMonitor|RemedyChange|RemedySequence|MarkerFault|V1Materializer)",
+    ),
+]
 copybutton_prompt_text = r">>> |\.\.\. |\$ "
 copybutton_prompt_is_regexp = True
 
 suppress_warnings = ["myst.xref_missing", "autoapi.python_import_resolution"]
 
-# Names that a submodule and a re-export of the package share. The Python domain
-# holds one object per fully qualified name, so documenting both
-# ``httk.workflow.harvest`` the module and ``httk.workflow.harvest`` the function
-# the package re-exports is a duplicate. The module page documents the function
-# in full, so the re-export is what gets dropped from the package page.
-shadowed_by_module = {"httk.workflow.harvest"}
+# The API reference documents a deliberate public surface, not every source
+# object. Two rules, applied by ``skip_member`` below, decide what appears:
+#
+# 1. Only the modules named here get a reference page. Everything else — manager
+#    internals, the CLI, the subprocess bridges, and the implementation modules
+#    behind :mod:`httk.workflow.protocol` — is still scanned (so a public page
+#    can document a name it re-exports) but produces no page of its own. This is
+#    the "three levels" of the package: the filesystem protocol, the execution
+#    and authoring surface, and orchestration plus management.
+# 2. Within a documented module, only the names it lists in ``__all__`` appear.
+#    A module without ``__all__`` (the two namespace packages) is documented by
+#    the underscore rule alone. This is what drops the helpers a package merely
+#    imports (for example the supervision types :mod:`httk.workflow.vasp` uses)
+#    without any per-name suppression list.
+PUBLIC_MODULES = frozenset(
+    {
+        "httk.workflow",
+        # Filesystem protocol.
+        "httk.workflow.protocol",
+        "httk.workflow.errors",
+        # Execution / authoring.
+        "httk.workflow.sdk",
+        "httk.workflow.runtime",
+        "httk.workflow.runtime_utils",
+        "httk.workflow.scaffold",
+        "httk.workflow.backends",
+        "httk.workflow.shell_bridge",
+        # Orchestration and management.
+        "httk.workflow.harvesting",
+        "httk.workflow.supervision",
+        "httk.workflow.transfers",
+        "httk.workflow.manifests",
+        "httk.workflow.hygiene",
+        "httk.workflow.adapters",
+        "httk.workflow.adapter_protocol",
+        "httk.workflow.configuration",
+        "httk.workflow.projects",
+        # Compatibility and integrations.
+        "httk.workflow.v1",
+        "httk.workflow.vasp",
+        "httk.workflow.integrations",
+        "httk.workflow.integrations.cwl",
+        "httk.workflow.integrations.pwd",
+    }
+)
 
-# Members that reach a package page only because its ``__init__`` imports them.
-# ``imported-members`` is what documents a package's deliberate re-exports, and
-# for ``httk.workflow`` that is exactly the point. A subpackage whose ``__init__``
-# is one module of implementation is the other case: documenting the helpers it
-# merely uses would repeat pages that already carry them, on a page whose
-# namespace does not contain the names those signatures reference.
-borrowed_by_package = {
-    "httk.workflow.vasp": frozenset(
-        {
-            "JOB_STATE_DIRECTORY",
-            "Diagnostic",
-            "FollowSource",
-            "ProcessReport",
-            "ProcessSupervisor",
-            "ReplayableWorkdirBatch",
-            "SourceEvent",
-            "read_json",
-            "sha256_file",
-            "utc_now",
-            "write_json_atomic",
-        }
-    ),
-}
+_exports_cache: dict[str, frozenset[str] | None] = {}
+
+
+def _module_exports(module_name):
+    """Return the ``__all__`` of one module, or ``None`` when it declares none."""
+
+    if module_name not in _exports_cache:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:  # pragma: no cover - a module that will not import
+            _exports_cache[module_name] = None
+        else:
+            names = getattr(module, "__all__", None)
+            _exports_cache[module_name] = None if names is None else frozenset(names)
+    return _exports_cache[module_name]
 
 
 def skip_member(app, what, name, obj, skip, options):
-    # Skip private members (those starting with _)
-    if name.startswith('_'):
+    obj_id = str(getattr(obj, "id", None) or name)
+    if what in {"module", "package"}:
+        # Only the deliberate public modules get a page; the rest stay scanned
+        # (so re-exports resolve) but unrendered.
+        return obj_id not in PUBLIC_MODULES
+    if name.startswith("_"):
         return True
-    if what != "module" and name in shadowed_by_module:
-        return True
-    owner, _, short = str(getattr(obj, "id", None) or name).rpartition(".")
-    if short in borrowed_by_package.get(owner, frozenset()):
+    owner, _, short = obj_id.rpartition(".")
+    exports = _module_exports(owner)
+    if exports is not None and short not in exports:
         return True
     return skip
+
 
 def setup(sphinx):
     sphinx.connect('autoapi-skip-member', skip_member)

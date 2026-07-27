@@ -4,12 +4,11 @@ import json
 from pathlib import Path
 
 from httk.workflow import (
-    JobSpec,
     JobState,
     TaskManager,
     Workspace,
-    prepare_job_payload,
 )
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.transfers import _payload_digest
 
 _SRC = str(Path(__file__).parents[1] / "src")

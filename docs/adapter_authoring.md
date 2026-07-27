@@ -38,9 +38,8 @@ global one of the same name:
 | project | `PROJECT/.httk-project/remotes/NAME/` |
 | global | `$XDG_CONFIG_HOME/httk/remotes/NAME/` |
 
-A bundle written before the rename carries `computer.json` instead, below a
-`computers/` directory, and both are still read where they lie. Everything
-written is written under the current names.
+The metadata file is `remote.json`, below a `remotes/` directory; those are the
+only spellings a bundle is read under.
 
 ### Historical protocol names
 

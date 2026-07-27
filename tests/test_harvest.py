@@ -19,14 +19,13 @@ from httk.core import CLIContext
 from httk.workflow import (
     FormatError,
     HarvestRecord,
-    JobSpec,
     TaskManager,
     Workspace,
     harvest,
-    prepare_job_payload,
 )
 from httk.workflow._util import sha256_file
-from httk.workflow.harvest import HARVEST_FORMAT, module_distribution
+from httk.workflow.harvesting import HARVEST_FORMAT, module_distribution
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.runners import runner_path, runner_reference
 from httk.workflow.vasp.runners import PACKAGE
 from httk.workflow.workflow_cli import command

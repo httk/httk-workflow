@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from httk.workflow import (
+from httk.workflow.supervision import (
     CheckerSpec,
     Diagnostic,
     FollowSource,

@@ -25,6 +25,20 @@ from ._util import utc_now, write_json_atomic
 
 _LOGGER = logging.getLogger(__name__)
 
+__all__ = [
+    "DEFAULT_TICK_INTERVAL",
+    "DEFAULT_FOLLOW_INTERVAL",
+    "DEFAULT_CAPTURE_LIMIT",
+    "DEFAULT_TAIL_LIMIT",
+    "DEFAULT_DIAGNOSTIC_LIMIT",
+    "SourceEvent",
+    "Diagnostic",
+    "FollowSource",
+    "CheckerSpec",
+    "ProcessReport",
+    "ProcessSupervisor",
+]
+
 type DiagnosticSeverity = Literal["info", "warning", "error", "fatal"]
 
 DEFAULT_TICK_INTERVAL = 1.0

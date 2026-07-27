@@ -30,9 +30,8 @@ from dataclasses import replace
 from pathlib import Path
 
 try:
-    from httk.workflow import (
-        Attempt,
-        Runner,
+    from httk.workflow import Attempt, Runner
+    from httk.workflow.vasp import (
         VaspPreparationOptions,
         apply_vasp_remedy,
         clean_vasp_outputs,

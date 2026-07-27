@@ -11,14 +11,12 @@ from httk.workflow import (
     Attempt,
     ChildSpec,
     FormatError,
-    JobDefinition,
-    JobSpec,
     Runner,
     RunnerRef,
     TaskManager,
     Workspace,
-    prepare_job_payload,
 )
+from httk.workflow.protocol import JobDefinition, JobSpec, prepare_job_payload
 
 _SRC = str(Path(__file__).parents[1] / "src")
 
@@ -650,27 +648,3 @@ def test_job_state_is_a_dict_like_mapping(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="nonempty strings"):
         attempt.state[""] = 1
     assert dict(attempt.state) == {"energy": -12.5, "steps": [1, 2]}
-
-
-def test_the_superseded_runtime_api_warns_but_still_works(tmp_path: Path) -> None:
-    from httk.workflow import AttemptRuntime, ChildReference, JoinSpec, OutcomeBuilder
-
-    attempt = _attempt(tmp_path, step="relax")
-    environment = {
-        "HTTK_WORKFLOW_CONTEXT": str(attempt.control / "context.json"),
-        "HTTK_WORKFLOW_CONTROL_DIR": str(attempt.control),
-        "HTTK_WORKFLOW_JOB_DIR": str(attempt.payload),
-        "HTTK_WORKFLOW_WORKDIR": str(attempt.workdir),
-        "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
-    }
-    with pytest.warns(DeprecationWarning, match="AttemptRuntime"):
-        runtime = AttemptRuntime.initialize(environment)
-    with pytest.warns(DeprecationWarning, match="JoinSpec"):
-        join = JoinSpec((ChildReference("w", "j", "j", "project/children"),))
-    assert join.as_mapping()["condition"] == "all_succeeded"
-    with pytest.warns(DeprecationWarning, match="OutcomeBuilder"):
-        builder = OutcomeBuilder(runtime)
-    ready = builder.publish("advance", next_step="collect", priority=700)
-    outcome = json.loads((ready / "outcome.json").read_text(encoding="utf-8"))
-    assert outcome["action"] == "advance" and outcome["next_step"] == "collect" and outcome["priority"] == 700
-    assert "runner_steps" not in outcome

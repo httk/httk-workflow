@@ -75,6 +75,22 @@ from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 
+__all__ = [
+    "HARVEST_FORMAT",
+    "HARVEST_FORMAT_VERSION",
+    "HARVESTABLE_KINDS",
+    "DEFAULT_HARVEST_STATES",
+    "module_distribution",
+    "runner_provenance",
+    "timeline",
+    "children_of",
+    "HarvestRecord",
+    "declarations_of",
+    "record_of",
+    "harvest_kinds",
+    "harvest",
+]
+
 HARVEST_FORMAT = "httk-workflow-harvest"
 HARVEST_FORMAT_VERSION = 1
 #: The state kinds a harvest may read: a job that stopped. The terminal kinds are
@@ -223,7 +239,7 @@ def _activation(frame: Mapping[str, Any]) -> dict[str, object]:
 def timeline(frames: Sequence[Mapping[str, Any]]) -> dict[str, object]:
     """Return the activation and attempt timeline of one job, oldest first.
 
-    The frames are exactly what :func:`~httk.workflow.introspection.job_frames`
+    The frames are exactly the ones the workspace's ``job_frames`` reader
     walked, so this is a pure regrouping of recorded history: an activation is
     every consecutive frame sharing one ``activation_id``, and an attempt is
     opened by the ``claimed`` frame that consumed a budget and closed by the

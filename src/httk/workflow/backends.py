@@ -11,6 +11,13 @@ from .models import JobDefinition, Marker
 if TYPE_CHECKING:
     from .workspace import Workspace
 
+__all__ = [
+    "AttemptLaunch",
+    "OutcomeCommit",
+    "RunnerBackend",
+    "PathRunnerBackend",
+]
+
 
 @dataclass(frozen=True)
 class AttemptLaunch:

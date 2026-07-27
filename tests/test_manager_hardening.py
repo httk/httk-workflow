@@ -278,7 +278,7 @@ def test_json_log_records_carry_structured_fields(tmp_path: Path) -> None:
             "--until-idle",
             "--poll-interval",
             "0.02",
-            "--timeout",
+            "--idle-timeout",
             "30",
             "--json-logs",
         ]

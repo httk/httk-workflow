@@ -3,8 +3,12 @@
 *httk-workflow* is the filesystem-native workflow engine for
 [*httk₂*](https://github.com/httk/httk2).
 
-It provides the `httk.workflow` Python API and registers `httk workflow`, the
-canonical command tree for everything below. The `httk-taskmanager` and
+It provides the `httk.workflow` Python API in three layers — the language-neutral
+filesystem protocol (`httk.workflow.protocol`), the execution and authoring
+surface (`httk.workflow` — `Runner`, `Attempt`), and orchestration and management
+(`Workspace`, `TaskManager`, `harvest`, and named submodules) — and registers
+`httk workflow`, the canonical command tree for everything below. The
+`httk-taskmanager` and
 `httk-v1-taskmanager` executables remain installed as aliases of that tree; the
 second one prepares and executes legacy `ht_steps`/`ht_run` task templates
 through the same *httk₂* workspace. Jobs communicate through atomically

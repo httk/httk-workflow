@@ -209,37 +209,31 @@ Every workspace option says which side of the transfer it names. `send` leaves
 `start-manager` and `status` only ever mean the far side, and say so with
 `--remote-workspace`.
 
-## Migrating from the old spellings
+## Renamed and removed spellings
 
-Every spelling below still parses, and none of them appears in `--help` any
-more. They are kept for one release; move to the canonical column.
+These superseded spellings are **gone** — they no longer parse. Move to the
+canonical column:
 
-| Deprecated | Canonical | Note |
+| Removed | Canonical | Note |
 | --- | --- | --- |
 | `httk workflow computer …` | `httk workflow remote …` | the group borrowed git's word for the same idea |
 | `httk workflow tasks …` | `httk workflow transfer …` | the whole group was renamed |
 | `transfer fetch --computer` | `transfer fetch --remote` | it names a remote |
 | `transfer send --workspace` | `transfer send --source-workspace` | it names the local side |
-| `transfer start-manager --workspace` | `transfer start-manager --remote-workspace` | it names the far side |
-| `transfer status --workspace` | `transfer status --remote-workspace` | it names the far side |
-| `transfer … --timeout` | `transfer … --adapter-timeout` | it bounds adapter calls, not the work |
-| `remote configure/install --timeout` | `--adapter-timeout` | as above |
+| `transfer start-manager/status --workspace` | `--remote-workspace` | it names the far side |
+| `transfer/remote … --timeout` | `--adapter-timeout` | it bounds adapter calls, not the work |
 | `manager run --timeout` | `manager run --idle-timeout` | it is the `--until-idle` wait |
 | `v1 prepare/submit/run --set` | `--taskset` | `--set` now means `KEY=VALUE` only, on `remote configure` |
-| `tasks receive` | `internal receive` | see below; the invoked spelling is protocol |
 
-`transfer fetch --workspace` is **not** deprecated: on `fetch` that option has
-always named the local destination, which is what it still means.
+`transfer fetch --workspace` is unaffected: on `fetch` that option has always
+named the local destination, which is what it still means.
 
 ### Two hard breaks, and what they were
 
 `httk workflow remote send|fetch|offer|retire|start-manager|status` — the
-spelling of the transfer group in the previous release — is now
+spelling of the transfer group in an early release — is now
 `httk workflow transfer …`, because `remote` came to mean *the machine*, as it
-does in git. There is no alias for the old reading of `remote`: the same words
-would otherwise mean two different groups. `httk workflow tasks …` still reaches
-the transfer group, so a script written against the release before that keeps
-working.
+does in git.
 
 A job whose `runner.path` pins the old `pkg:httk.workflow.runners/vasp_*` form
 also breaks: the packaged VASP runners are now modules of
@@ -247,28 +241,25 @@ also breaks: the packaged VASP runners are now modules of
 `runner_unavailable` naming exactly the module it could not resolve; scaffold the
 job again, or edit the one `runner.path` member.
 
-### The one spelling that is protocol, not interface
+### The spellings that are protocol, not interface
 
 `transfer send` finishes by asking the far side to import the bundle it pushed,
 and `transfer fetch` asks the far side to offer and then retire. Those argument
 vectors run on a machine whose *httk* may be older or newer than yours, so their
-spelling is frozen:
+spelling is frozen — this is the frozen protocol spelling from now on:
 
 ```text
-httk workflow tasks receive --workspace WORKSPACE --bundle BUNDLE
-httk workflow tasks offer WORKSPACE --destination-workspace-id UUID --json
-httk workflow tasks retire WORKSPACE JOB_ID … --destination-workspace-id UUID --json
+httk workflow transfer receive --workspace WORKSPACE --bundle BUNDLE
+httk workflow transfer offer WORKSPACE --destination-workspace-id UUID --json
+httk workflow transfer retire WORKSPACE JOB_ID … --destination-workspace-id UUID --json
 httk workflow workspace status WORKSPACE --json
 httk workflow manager run WORKSPACE
 ```
 
-They are listed once, as module constants, in
-{py:mod}`httk.workflow.workflow_cli`. `receive` is an import half rather than an
-operator command, so its canonical home is the unadvertised
-`httk workflow internal receive`; `transfer receive` and `tasks receive` both
-still work, and the *invoked* spelling will not change until every supported
-release understands the new one — which is why the hidden `tasks` group is not
-merely tolerated but load-bearing.
+They are listed once, as the `REMOTE_*_COMMAND` module constants in the CLI
+implementation. `receive` is an import half rather than an operator command, so
+it is not advertised in `--help`, but `httk workflow transfer receive` is its
+frozen, invocable spelling.
 
 ## Creating jobs
 
@@ -615,9 +606,7 @@ selects an explicit queue; otherwise the project default and then `default`
 are tried. `remote import-v1` maps recognized legacy *httk* v1 computer bundles
 by reading assignment-only configuration; legacy shell executables are never
 copied or run. Any other `kind` in a `remote.json` is refused rather than
-executed in the wrong place. A definition written before the rename carries
-`computer.json`, below `computers/` rather than `remotes/`, and is still read
-where it lies.
+executed in the wrong place.
 
 `remote configure --set KEY=VALUE` persists only the non-secret keys
 `account`, `bootstrap`, `check_connectivity`, `cpus_per_task`, `host`,
@@ -730,7 +719,7 @@ on the remote. `--source-workspace` names the local workspace when it is not the
 project's, `--destination-workspace` overrides the queue's `workspace=PATH`, and
 `--destination-placement` puts the arriving jobs somewhere other than the
 placement they had here. `transfer status` reports the remote workspace status
-through the adapter, and `internal receive` is the far-side half `send` invokes.
+through the adapter, and `transfer receive` is the far-side half `send` invokes.
 
 `transfer start-manager` starts managers on the remote: `--count N` submits the
 generated batch script `N` times, `--workers N` fixes the workers per manager,

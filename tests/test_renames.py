@@ -1,48 +1,44 @@
-"""What the renames of this release promise, held to by test rather than by note.
+"""What the renames of the project promise, held to by test rather than by note.
 
-Four things were renamed at once, and each one has a way of going wrong that no
-other test in this suite would notice:
+Several things were renamed as the package settled, and each has a way of going
+wrong no other test would notice:
 
 * *computer* became *remote*, git's word for the same idea, everywhere — the CLI
   group, the Python API, the bundle metadata file, and the directory the
   definitions live in;
 * the group that *was* called ``remote`` — send, fetch, offer, retire — became
-  ``transfer``, and the spellings that cross an ssh connection did **not** move
-  with it;
+  ``transfer``;
 * the per-user remote definitions and identity keys moved from the data home to
   the configuration home, with a one-time migration of whatever is still there;
 * ``WorkflowWorkspace`` became ``Workspace``, and the packaged VASP runners moved
   into :mod:`httk.workflow.vasp.runners`.
 
-Every superseded spelling that is documented as still working is exercised here,
-so that removing one becomes a failing test rather than somebody's surprise.
+The superseded spellings are now **removed**, not merely hidden. This module
+asserts both halves: the canonical spellings work, and the old ones are gone —
+so restoring a superseded name by accident becomes a failing test.
 """
 
 import json
 import logging
 import os
-import shutil
-import warnings
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
 from httk.core import CLIContext
 
 import httk.workflow
-from httk.workflow import JobSpec, TaskManager, Workspace, prepare_job_payload
+from httk.workflow import TaskManager, Workspace
 from httk.workflow import workflow_cli as cli
 from httk.workflow.adapters import (
-    LEGACY_METADATA_FILE,
     METADATA_FILE,
     add_remote,
     list_remotes,
     metadata_path,
-    queue_settings,
     resolve_remote,
 )
 from httk.workflow.configuration import config_home, data_home, keys_home, remotes_home
-from httk.workflow.hygiene import describe_remote
 from httk.workflow.projects import initialize_project
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.runners import RUNNERS, runner_package, runner_path, runner_reference
 from httk.workflow.scaffold import PACKAGED_TEMPLATES, new_job
 from httk.workflow.workflow_cli import command
@@ -66,23 +62,13 @@ def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def test_the_remote_group_is_the_former_computer_group(isolated: Path) -> None:
-    """Every leaf of the old group is a leaf of the new one, doing the same work."""
+def test_the_computer_group_is_gone(isolated: Path) -> None:
+    """``remote`` is the only spelling; the old ``computer`` group no longer parses."""
 
     parser = cli.build_parser("httk workflow", CLIContext("httk", isolated))
-    for action, arguments in (
-        ("list", []),
-        ("add", ["NAME"]),
-        ("configure", ["NAME"]),
-        ("install", ["NAME"]),
-        ("import-v1", ["SOURCE"]),
-        ("show", ["NAME"]),
-        ("remove", ["NAME"]),
-    ):
-        assert (
-            parser.parse_args(["remote", action, *arguments]).handler
-            is parser.parse_args(["computer", action, *arguments]).handler
-        )
+    assert parser.parse_args(["remote", "list"]).handler is cli.handle_remote_list
+    with pytest.raises(SystemExit):
+        parser.parse_args(["computer", "list"])
 
 
 def test_adding_a_remote_writes_remote_json_below_remotes(isolated: Path) -> None:
@@ -91,7 +77,7 @@ def test_adding_a_remote_writes_remote_json_below_remotes(isolated: Path) -> Non
 
     bundle = isolated / ".httk-project" / "remotes" / "cluster"
     assert (bundle / METADATA_FILE).is_file()
-    assert not (bundle / LEGACY_METADATA_FILE).exists()
+    assert not (bundle / "computer.json").exists()
     assert metadata_path(bundle).name == METADATA_FILE
     assert resolve_remote("cluster", project=isolated).bundle == bundle
     assert [row["name"] for row in list_remotes(isolated)] == ["cluster"]
@@ -103,45 +89,16 @@ def test_a_global_remote_lands_in_the_configuration_home(isolated: Path) -> None
     assert not (data_home() / "computers").exists()
 
 
-def test_a_legacy_computer_json_bundle_still_resolves(isolated: Path, caplog) -> None:
-    """A definition written before the rename is read where it lies."""
+def test_a_legacy_computer_json_bundle_is_no_longer_read(isolated: Path) -> None:
+    """``remote.json`` below ``remotes/`` is the only spelling a bundle is read under."""
 
     bundle = add_remote("legacy", template="local", project=isolated)
-    legacy_root = isolated / ".httk-project" / "computers" / "legacy"
-    legacy_root.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(bundle), str(legacy_root))
-    metadata = json.loads((legacy_root / METADATA_FILE).read_text(encoding="utf-8"))
-    metadata["queues"]["default"] = {"workspace": "/scratch/legacy"}
-    (legacy_root / LEGACY_METADATA_FILE).write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
-    (legacy_root / METADATA_FILE).unlink()
+    # Rename the metadata file to the superseded name it once fell back to.
+    (bundle / METADATA_FILE).rename(bundle / "computer.json")
 
-    with caplog.at_level(logging.DEBUG, logger="httk.workflow.adapters"):
-        target = resolve_remote("legacy", project=isolated)
-    assert target.bundle == legacy_root and target.project_local is True
-    assert metadata_path(legacy_root).name == LEGACY_METADATA_FILE
-    assert "legacy adapter metadata" in caplog.text
-    assert queue_settings(legacy_root, "default") == {"workspace": "/scratch/legacy"}
-
-    # It is listed, described, and reported under the file it really has.
-    assert [row["name"] for row in list_remotes(isolated)] == ["legacy"]
-    description = describe_remote("legacy", project=isolated)
-    assert description["format"] == "httk-remote-description"
-    queues = description["queues"]
-    assert isinstance(queues, dict)
-    assert queues["default"]["settings_source"] == {"workspace": LEGACY_METADATA_FILE}
-
-
-def test_configuring_a_legacy_bundle_rewrites_the_file_it_has(isolated: Path) -> None:
-    """Nothing leaves two metadata files behind in one bundle."""
-
-    bundle = add_remote("legacy", template="local", project=isolated)
-    shutil.move(str(bundle / METADATA_FILE), str(bundle / LEGACY_METADATA_FILE))
-
-    context = CLIContext("httk", isolated)
-    assert command(["remote", "configure", "legacy", "--set", "workspace=/scratch/x"], context) == 0
-    assert not (bundle / METADATA_FILE).exists()
-    stored = json.loads((bundle / LEGACY_METADATA_FILE).read_text(encoding="utf-8"))
-    assert stored["queues"]["default"] == {"workspace": "/scratch/x"}
+    assert metadata_path(bundle).name == METADATA_FILE
+    with pytest.raises(ValueError):
+        resolve_remote("legacy", project=isolated)
 
 
 def test_the_wire_format_names_keep_their_historical_spelling() -> None:
@@ -159,37 +116,19 @@ def test_the_wire_format_names_keep_their_historical_spelling() -> None:
         assert json.loads((packaged / METADATA_FILE).read_text(encoding="utf-8"))["format"] == adapters.ADAPTER_FORMAT
 
 
-def test_the_deprecated_python_spellings_still_reach_the_same_functions() -> None:
+def test_the_deprecated_python_spellings_are_gone() -> None:
     from httk.workflow import adapters
 
-    assert adapters.add_computer is adapters.add_remote
-    assert adapters.list_computers is adapters.list_remotes
-    assert adapters.resolve_computer is adapters.resolve_remote
-    assert adapters.split_computer is adapters.split_remote
-    assert adapters.import_v1_computer is adapters.import_v1_remote
-    assert adapters.ComputerTarget is adapters.RemoteTarget
+    for name in ("add_computer", "list_computers", "resolve_computer", "split_computer", "import_v1_computer"):
+        assert not hasattr(adapters, name), f"adapters still exposes the removed alias {name!r}"
+    assert not hasattr(adapters, "ComputerTarget")
+    # The canonical spellings are what remains.
+    assert callable(adapters.add_remote) and callable(adapters.resolve_remote)
 
 
 # ---------------------------------------------------------------------------
-# the transfer group, and the spellings that stayed
+# the transfer group, and the frozen protocol spellings
 # ---------------------------------------------------------------------------
-
-
-def test_the_transfer_group_is_the_former_remote_group(tmp_path: Path) -> None:
-    parser = cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
-    expected = {
-        "send": cli.handle_transfer_send,
-        "fetch": cli.handle_transfer_fetch,
-        "offer": cli.handle_transfer_offer,
-        "retire": cli.handle_transfer_retire,
-        "start-manager": cli.handle_transfer_operation,
-        "status": cli.handle_transfer_operation,
-        "receive": cli.handle_transfer_receive,
-    }
-    for action, handler in expected.items():
-        assert parser.parse_args(["transfer", action, *_sample(action)]).handler is handler
-        # And the hidden spelling the protocol itself sends still parses.
-        assert parser.parse_args(["tasks", action, *_sample(action)]).handler is handler
 
 
 def _sample(action: str) -> list[str]:
@@ -208,6 +147,24 @@ def _sample(action: str) -> list[str]:
     return ["cluster"]
 
 
+def test_the_transfer_group_is_the_former_remote_group(tmp_path: Path) -> None:
+    parser = cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
+    expected = {
+        "send": cli.handle_transfer_send,
+        "fetch": cli.handle_transfer_fetch,
+        "offer": cli.handle_transfer_offer,
+        "retire": cli.handle_transfer_retire,
+        "start-manager": cli.handle_transfer_operation,
+        "status": cli.handle_transfer_operation,
+        "receive": cli.handle_transfer_receive,
+    }
+    for action, handler in expected.items():
+        assert parser.parse_args(["transfer", action, *_sample(action)]).handler is handler
+    # The superseded ``tasks`` group is gone entirely.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["tasks", "offer", "WS", "--destination-workspace-id", "UUID"])
+
+
 def test_the_transfer_commands_name_a_remote(tmp_path: Path) -> None:
     """``REMOTE`` is what the argument is, on both the positional and the option."""
 
@@ -215,27 +172,37 @@ def test_the_transfer_commands_name_a_remote(tmp_path: Path) -> None:
     assert parser.parse_args(["transfer", "send", "cluster", "JOB"]).remote == "cluster"
     assert parser.parse_args(["transfer", "status", "cluster"]).remote == "cluster"
     assert parser.parse_args(["transfer", "fetch", "--remote", "cluster"]).remote == "cluster"
-    # The superseded option spelling still names the same value.
-    assert parser.parse_args(["transfer", "fetch", "--computer", "cluster"]).remote == "cluster"
+    # The superseded ``--computer`` option is gone.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["transfer", "fetch", "--computer", "cluster"])
 
 
-def test_neither_hidden_alias_is_advertised(tmp_path: Path, capsys) -> None:
+def test_neither_removed_alias_is_advertised_or_parses(tmp_path: Path, capsys) -> None:
     assert command(["--help"], CLIContext("httk", tmp_path)) == 0
     printed = capsys.readouterr().out
     assert "remote" in printed and "transfer" in printed
     assert "computer" not in printed and "tasks" not in printed
+    parser = cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
+    for group in ("computer", "tasks", "internal"):
+        with pytest.raises(SystemExit):
+            parser.parse_args([group, "--help"])
 
 
-def test_the_protocol_vectors_still_send_the_frozen_spellings() -> None:
-    """The rename must not reach an installation on the far side of an adapter."""
+def test_the_protocol_vectors_send_the_frozen_transfer_spellings() -> None:
+    """The frozen protocol spelling is the ``transfer`` group from now on."""
 
-    assert cli.REMOTE_RECEIVE_COMMAND == ("httk", "workflow", "tasks", "receive")
-    assert cli.REMOTE_OFFER_COMMAND == ("httk", "workflow", "tasks", "offer")
-    assert cli.REMOTE_RETIRE_COMMAND == ("httk", "workflow", "tasks", "retire")
+    assert cli.REMOTE_RECEIVE_COMMAND == ("httk", "workflow", "transfer", "receive")
+    assert cli.REMOTE_OFFER_COMMAND == ("httk", "workflow", "transfer", "offer")
+    assert cli.REMOTE_RETIRE_COMMAND == ("httk", "workflow", "transfer", "retire")
+    # And the frozen spelling really resolves to its handler.
+    parser = cli.build_parser("httk workflow", CLIContext("httk", Path.cwd()))
+    assert parser.parse_args(["transfer", "receive", "--workspace", "/w", "--bundle", "/b"]).handler is (
+        cli.handle_transfer_receive
+    )
 
 
 # ---------------------------------------------------------------------------
-# the XDG move
+# the XDG move (retained one-time migration)
 # ---------------------------------------------------------------------------
 
 
@@ -312,27 +279,15 @@ def test_both_roots_present_prefers_the_new_one_and_reports_the_stale_copy(
 # ---------------------------------------------------------------------------
 
 
-def test_the_workflow_workspace_alias_warns_and_works(tmp_path: Path) -> None:
-    with pytest.warns(DeprecationWarning, match="WorkflowWorkspace"):
-        legacy = httk.workflow.WorkflowWorkspace
-    assert legacy is Workspace
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", DeprecationWarning)
-        from httk.workflow.workspace import WorkflowWorkspace as from_module
-    assert from_module is Workspace
-
-    # The alias is the class, so it really does the work under either name.
-    workspace = legacy.initialize(tmp_path / "workspace")
-    assert isinstance(workspace, Workspace)
-    assert Workspace(workspace.root).workspace_id == workspace.workspace_id
-
-
-def test_the_canonical_name_comes_first_and_both_are_exported() -> None:
-    exported = httk.workflow.__all__
-    assert exported.index("Workspace") < exported.index("WorkflowWorkspace")
+def test_the_workflow_workspace_alias_is_gone() -> None:
+    assert "WorkflowWorkspace" not in httk.workflow.__all__
+    assert "Workspace" in httk.workflow.__all__
     with pytest.raises(AttributeError):
-        httk.workflow.NoSuchName  # pyright: ignore[reportAttributeAccessIssue]
+        httk.workflow.WorkflowWorkspace  # pyright: ignore[reportAttributeAccessIssue]
+    from httk.workflow import workspace
+
+    with pytest.raises(AttributeError):
+        workspace.WorkflowWorkspace  # pyright: ignore[reportAttributeAccessIssue]
 
 
 # ---------------------------------------------------------------------------
@@ -340,14 +295,13 @@ def test_the_canonical_name_comes_first_and_both_are_exported() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_the_vasp_package_keeps_the_module_api_it_had() -> None:
-    from httk.workflow.vasp import prepare_vasp_inputs, read_poscar_header, run_vasp
-
-    assert prepare_vasp_inputs is httk.workflow.prepare_vasp_inputs
-    assert read_poscar_header is httk.workflow.read_poscar_header
-    assert run_vasp is httk.workflow.run_vasp
+def test_the_vasp_helpers_live_only_in_the_vasp_package() -> None:
     import httk.workflow.vasp as vasp
 
+    for name in ("prepare_vasp_inputs", "read_poscar_header", "run_vasp"):
+        assert callable(getattr(vasp, name))
+        # They were subtracted from the package root.
+        assert not hasattr(httk.workflow, name), f"httk.workflow still re-exports vasp.{name}"
     assert vasp.__doc__ is not None and vasp.__doc__.startswith("Small, dependency-free VASP runner helpers")
 
 

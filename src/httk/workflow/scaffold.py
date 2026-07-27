@@ -55,6 +55,25 @@ from .runners import runner_path, runner_reference
 from .runtime_builders import JobSpec, prepare_job_payload
 from .workspace import Workspace
 
+__all__ = [
+    "JOB_SCAFFOLD_FORMAT",
+    "DEFAULT_PLACEMENT",
+    "FILES_DIRECTORY",
+    "STRUCTURE_PATTERNS",
+    "PACKAGED_TEMPLATES",
+    "JobItem",
+    "JobTemplate",
+    "ScaffoldedJob",
+    "describe_runner",
+    "packaged_template",
+    "resolve_template",
+    "structure_files",
+    "structure_tag",
+    "new_job",
+    "new_jobs",
+    "payload_relative",
+]
+
 #: The format of the machine-readable report :meth:`ScaffoldedJob.as_mapping` returns.
 JOB_SCAFFOLD_FORMAT = "httk-workflow-job-scaffold"
 #: Where a scaffolded job is placed when nothing else is asked for.

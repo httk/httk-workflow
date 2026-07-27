@@ -290,26 +290,6 @@ JSON lines and emits `httk-workflow-checker-result` version 1 JSON lines.
 Commands and checker commands are always argument arrays: this API deliberately
 does not reproduce the *httk* v1 exit-code and `ht.nextstep` interface.
 
-## Superseded interfaces
-
-`AttemptRuntime`, `OutcomeBuilder`, `JoinSpec`, `WorkdirState`, and the name
-`WorkflowWorkspace` still work in this release and emit a
-`DeprecationWarning`. Their replacements:
-
-| Superseded | Replacement |
-| --- | --- |
-| `AttemptRuntime.initialize()` | `Runner.main()`, or `Attempt.initialize()` for a single-step runner |
-| `AttemptRuntime.from_environment()` | `Attempt.initialize()`, which always recovers an interrupted attempt |
-| `AttemptRuntime.wait(step, outcome)` (removed) | `Attempt.gather(step, ...)` |
-| `runtime.outcome()` with `OutcomeBuilder` | the one implicit draft of an `Attempt` |
-| `JoinSpec(children, condition, ...)` | `Attempt.gather(step, when=..., count=...)` |
-| `WorkdirState` | `Attempt.state`, which is per job rather than per workdir |
-| `WorkflowWorkspace` | `Workspace`, the same class under a shorter name |
-
-`WorkflowWorkspace` is an alias of `Workspace` rather than a subclass of it, so
-every `isinstance` check and every annotation keeps meaning what it meant; only
-naming the old spelling is deprecated.
-
 Native Bash runners use the same protocol through {doc}`native_bash_api`.
 
 ## VASP files
