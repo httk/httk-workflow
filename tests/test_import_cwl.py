@@ -21,9 +21,10 @@ import pytest
 from httk.core import CLIContext
 
 from httk.workflow import TaskManager, Workspace
-from httk.workflow.integrations import PACKAGE, runner_path
-from httk.workflow.integrations.cwl import (
+from httk.workflow.compat._integration import runner_path
+from httk.workflow.compat.cwl import (
     DOCKER_CAPABILITY,
+    PACKAGE,
     CwlImportError,
     UnsupportedCwlError,
     import_cwl,
@@ -175,14 +176,14 @@ def _drive(workspace: Workspace) -> None:
 def test_the_packaged_runner_describes_its_dispatch_vocabulary() -> None:
     """The runner needs no CWL library, so it describes itself without the extra."""
 
-    described = describe_runner(runner_path("cwl_runner.py"))
+    described = describe_runner(runner_path(PACKAGE, "cwl_runner.py"))
     assert described == {"workflow": "cwl.workflow", "steps": ["advance", "collect", "enter", "start"]}
 
 
 def test_importing_without_the_extra_says_exactly_what_to_install(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from httk.workflow.integrations import cwl as importer
+    from httk.workflow.compat import cwl as importer
 
     monkeypatch.setattr(importer, "find_spec", lambda name: None)
     document = tmp_path / "flow.cwl"

@@ -20,6 +20,7 @@ from httk.project.cli import ProjectShowSection
 
 from ._util import read_json, utc_now, write_json_atomic
 from .adapters import (
+    ADAPTER_EXECUTABLE,
     CREDENTIALS_FILE,
     metadata_path,
     project_remote_roots,
@@ -292,7 +293,6 @@ def describe_remote(
             },
             "credential_keys": credentials,
         }
-    operations = metadata.get("operations", {})
     return {
         "format": REMOTE_DESCRIPTION_FORMAT,
         "format_version": 1,
@@ -305,11 +305,9 @@ def describe_remote(
         "adapter_version": metadata.get("adapter_version"),
         "timeout_seconds": metadata.get("timeout_seconds", 60.0),
         "required_binaries": list(metadata.get("required_binaries", [])),
-        "operations": (
-            {operation: str(bundle / str(relative)) for operation, relative in sorted(operations.items())}
-            if isinstance(operations, Mapping)
-            else {}
-        ),
+        # One dispatcher serves every operation; the operation name travels in
+        # the request JSON, so a single executable path is all there is to report.
+        "adapter": str(bundle / ADAPTER_EXECUTABLE),
         "queues": queues,
         "credentials_file": str(bundle / CREDENTIALS_FILE) if (bundle / CREDENTIALS_FILE).is_file() else None,
         "default_queue": default_queue or "default",

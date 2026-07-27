@@ -1,2 +1,0 @@
-#!/bin/sh
-exec python3 -m httk.workflow.adapter_runtime start-manager "$@"

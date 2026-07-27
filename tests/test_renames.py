@@ -40,7 +40,7 @@ from httk.workflow.configuration import config_home, data_home, keys_home, remot
 from httk.workflow.projects import initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.runners import RUNNERS, runner_package, runner_path, runner_reference
-from httk.workflow.scaffold import PACKAGED_TEMPLATES, new_job
+from httk.workflow.scaffold import new_job, registered_templates
 from httk.workflow.workflow_cli import command
 
 
@@ -317,7 +317,7 @@ def test_the_packaged_runners_moved_with_the_science_they_implement() -> None:
 
 
 def test_the_scaffold_template_names_are_unchanged(tmp_path: Path) -> None:
-    assert PACKAGED_TEMPLATES == ("vasp-relax", "vasp-relax-bash", "vasp-static", "vasp-relax-static")
+    assert registered_templates() == ("vasp-relax", "vasp-relax-bash", "vasp-static", "vasp-relax-static")
     workspace = Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
     job = new_job(workspace, "vasp-relax", publish="installed", tag="silicon")
     assert job.runner["path"] == "pkg:httk.workflow.vasp.runners/vasp_relax.py"

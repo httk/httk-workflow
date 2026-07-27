@@ -14,10 +14,12 @@ import pytest
 from httk.core import CLIContext
 
 from httk.workflow import TaskManager, Workspace
-from httk.workflow.integrations import PACKAGE, RUNNERS, runner_path, runner_reference
-from httk.workflow.integrations.pwd import (
+from httk.workflow.compat._integration import runner_path, runner_reference
+from httk.workflow.compat.pwd import (
     DEFAULT_MAXIMUM_EMBEDDED_BYTES,
     DOCUMENT_FILE,
+    PACKAGE,
+    RUNNER,
     PwdFormatError,
     import_pwd,
     load_pwd_document,
@@ -228,9 +230,9 @@ def test_the_packaged_runner_describes_itself_as_one_step() -> None:
     the graph in the job state instead.
     """
 
-    described = describe_runner(runner_path("pwd_runner.py"))
+    described = describe_runner(runner_path(PACKAGE, "pwd_runner.py"))
     assert described == {"workflow": "pwd.workflow", "steps": ["execute"]}
-    assert set(RUNNERS) == {"cwl_runner.py", "pwd_runner.py"}
+    assert (PACKAGE, RUNNER) == ("httk.workflow.compat.pwd", "pwd_runner.py")
 
 
 def test_an_imported_job_references_the_packaged_runner_and_writes_no_runner_file(
@@ -241,7 +243,7 @@ def test_an_imported_job_references_the_packaged_runner_and_writes_no_runner_fil
     definition = JobDefinition.from_path(job.payload / "job.json")
     assert definition.runner_source == "installed"
     assert definition.runner_path.as_posix() == f"pkg:{PACKAGE}/pwd_runner.py"
-    assert definition.runner_sha256 == runner_reference("pwd_runner.py")["sha256"]
+    assert definition.runner_sha256 == runner_reference(PACKAGE, "pwd_runner.py")["sha256"]
     assert definition.initial_step == "execute"
     # Nothing but the staged module and the job definition: no generated runner.
     staged = sorted(path.relative_to(job.payload).as_posix() for path in job.payload.rglob("*") if path.is_file())

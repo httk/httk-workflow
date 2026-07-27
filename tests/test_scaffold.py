@@ -22,13 +22,13 @@ from httk.workflow.models import JobDefinition, validate_label
 from httk.workflow.runners import RUNNERS, runner_path
 from httk.workflow.scaffold import (
     JOB_SCAFFOLD_FORMAT,
-    PACKAGED_TEMPLATES,
     JobItem,
     describe_runner,
     new_job,
     new_jobs,
     packaged_template,
     payload_relative,
+    registered_templates,
     resolve_template,
     structure_files,
     structure_tag,
@@ -92,7 +92,7 @@ def test_every_packaged_runner_has_a_template_that_says_what_it_implements() -> 
     answer is what the table must contain.
     """
 
-    templates = [packaged_template(name) for name in PACKAGED_TEMPLATES]
+    templates = [packaged_template(name) for name in registered_templates()]
     assert {template.packaged for template in templates if template} == set(RUNNERS)
     for template in templates:
         assert template is not None

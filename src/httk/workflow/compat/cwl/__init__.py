@@ -12,7 +12,7 @@ never invoked.**
 .. code-block:: python
 
     from httk.workflow import Workspace
-    from httk.workflow.integrations.cwl import import_cwl
+    from httk.workflow.compat.cwl import import_cwl
 
     workspace = Workspace.initialize("workflow-workspace")
     imported = import_cwl(workspace, "flow.cwl", "job.yml", tag="echo")
@@ -72,8 +72,14 @@ from tempfile import TemporaryDirectory
 from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
-from ..workspace import Workspace
-from . import DEFAULT_PLACEMENT, FILES_DIRECTORY, ScaffoldedJob, submit_integration_job
+from httk.workflow import Workspace
+
+from .._integration import (
+    DEFAULT_PLACEMENT,
+    FILES_DIRECTORY,
+    ScaffoldedJob,
+    submit_integration_job,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -81,6 +87,8 @@ _LOGGER = logging.getLogger(__name__)
 WORKFLOW = "cwl.workflow"
 #: The step an imported CWL job starts at.
 INITIAL_STEP = "start"
+#: The package the packaged runner is resolved and digest-pinned within.
+PACKAGE = __name__
 #: The packaged runner an imported CWL job runs.
 RUNNER = "cwl_runner.py"
 #: Where the normalized plan and the input object are staged in the payload.
@@ -874,6 +882,7 @@ def import_cwl(
         inputs["cwl_timeout"] = float(timeout)
     job = submit_integration_job(
         workspace,
+        runner_package=PACKAGE,
         runner=RUNNER,
         workflow=WORKFLOW,
         initial_step=INITIAL_STEP,

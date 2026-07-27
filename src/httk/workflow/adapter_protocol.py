@@ -1,16 +1,18 @@
 """The public name of the remote-adapter protocol implementation.
 
-A remote adapter is a versioned directory whose executable ``configure``,
-``install``, ``invoke``, ``push``, ``pull``, ``start-manager`` and ``status``
-operations each read one JSON request file and print one JSON result. The
-maintained ``local``, ``local-slurm`` and ``ssh-slurm`` templates implement that
-protocol by executing this module, which selects its behaviour from the ``kind``
-recorded in the bundle's ``remote.json`` and refuses any other kind rather
-than running it in the wrong place.
+A remote adapter is a versioned directory with one executable ``adapter``
+program. Every operation -- ``configure``, ``install``, ``invoke``, ``push``,
+``pull``, ``start-manager`` and ``status`` -- runs that one program, which reads
+one JSON request file, learns which operation to perform from the request's
+``operation`` member, and prints one JSON result. The maintained ``local``,
+``local-slurm`` and ``ssh-slurm`` templates implement that protocol by executing
+this module, which selects its behaviour from the ``kind`` recorded in the
+bundle's ``remote.json`` and refuses any other kind rather than running it in
+the wrong place.
 
 This module is the documented surface of that contract. The implementation
 lives in :mod:`httk.workflow.adapter_runtime`, which is what the packaged
-wrappers execute; both names refer to the same objects. See
+``adapter`` dispatcher executes; both names refer to the same objects. See
 :doc:`/workflow_cli` for the operations and the settings each one uses.
 
 Every subprocess started by the implementation is an argument vector, so no

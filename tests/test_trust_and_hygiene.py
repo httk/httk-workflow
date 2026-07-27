@@ -491,7 +491,7 @@ def test_describe_remote_never_reports_a_credential_value(tmp_path: Path, monkey
     assert description["format"] == "httk-remote-description"
     assert description["scope"] == "project" and description["kind"] == "local"
     assert description["valid"] is True
-    assert set(description["operations"]) >= {"configure", "install", "invoke", "status"}
+    assert description["adapter"] == str(bundle / "adapter")
     queue = description["queues"]["default"]
     assert queue["settings"] == {"workspace": str(tmp_path / "remote")}
     assert queue["credential_keys"] == ["password", "token"]

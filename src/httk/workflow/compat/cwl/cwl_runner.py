@@ -2,7 +2,7 @@
 """Execute one imported CWL workflow natively on *httk₂*.
 
 The job this runner executes carries the normalized plan
-:mod:`httk.workflow.integrations.cwl` produced: one self-contained JSON document
+:mod:`httk.workflow.compat.cwl` produced: one self-contained JSON document
 with every ``run:`` reference inlined, every type reduced to the supported set,
 and every expression already refused or accepted at import time. Nothing here
 imports a CWL library — the plan is plain JSON — and **cwltool is never

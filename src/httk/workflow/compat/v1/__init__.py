@@ -10,12 +10,17 @@ from collections.abc import Callable, Mapping, Sequence
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 
-from ._util import read_json, require_int, write_json_atomic
-from .backends import AttemptLaunch, OutcomeCommit
-from .errors import FormatError, WorkflowError
-from .manager import TaskManager
-from .models import JobDefinition, Marker, normalize_placement, validate_label
-from .workspace import Workspace
+from httk.workflow import TaskManager, Workspace
+from httk.workflow._util import read_json, require_int, write_json_atomic
+from httk.workflow.backends import AttemptLaunch, OutcomeCommit
+from httk.workflow.protocol import (
+    FormatError,
+    JobDefinition,
+    Marker,
+    WorkflowError,
+    normalize_placement,
+    validate_label,
+)
 
 __all__ = [
     "V1_BACKEND",
@@ -50,7 +55,7 @@ type V1Materializer = Callable[[pathlib.Path], None]
 def bundled_v1_root() -> Path:
     """Return the packaged compatibility ``HTTK_DIR`` root."""
 
-    return Path(str(files("httk.workflow").joinpath("v1_runtime")))
+    return Path(str(files("httk.workflow.compat.v1").joinpath("v1_runtime")))
 
 
 def legacy_priority(value: int) -> int:
@@ -345,7 +350,7 @@ class V1RunnerBackend:
         command = [
             sys.executable,
             "-m",
-            "httk.workflow._v1_runner",
+            "httk.workflow.compat.v1._runner",
             "--runtime-root",
             str(self.runtime_root),
             "--timeout",
@@ -370,13 +375,17 @@ class V1RunnerBackend:
         for entry in entries:
             if not isinstance(entry, Mapping):
                 raise FormatError("spawn child must be an object")
-            compatibility = entry.get("compatibility")
-            if not isinstance(compatibility, Mapping):
-                continue
-            legacy_path = _relative_legacy_path(compatibility.get("legacy_path"))
             job_key = str(entry.get("job_key", ""))
             placement = normalize_placement(str(entry.get("placement", "")))
             target = commit.payload.parents[len(commit.marker.placement.parts)].joinpath(*placement.parts, job_key)
+            # The canonical spawn set the common layer writes carries no v1
+            # concepts, so the legacy directory this child replaces is recovered
+            # from the child's own compatibility metadata, which the registered
+            # payload preserves verbatim.
+            link = _child_legacy_link(target)
+            if link is None:
+                continue
+            legacy_path = _relative_legacy_path(_legacy_link_path(link))
             _replace_with_relative_symlink(commit.payload / legacy_path, target)
 
     def reconcile(self, workspace: Workspace) -> None:
@@ -447,6 +456,39 @@ def _relative_legacy_path(value: object) -> Path:
     return Path(*relative.parts)
 
 
+def _v1_task_basename(fields: Mapping[str, object]) -> str:
+    """Return the ``ht.task.*`` directory name one legacy field set spells."""
+
+    return (
+        f"ht.task.{fields['taskset']}.{fields['task_id']}.{fields['step']}."
+        f"{fields['restarts']}.{fields['owner']}.{fields['priority']}.{fields['status']}"
+    )
+
+
+def _legacy_link_path(link: Mapping[str, object]) -> str:
+    """Return the parent-relative path of the directory a ``legacy_link`` names."""
+
+    fields = link.get("fields")
+    if not isinstance(fields, Mapping):
+        raise FormatError("legacy_link.fields must be an object")
+    basename = _v1_task_basename(fields)
+    directory = str(link.get("directory", ""))
+    return basename if directory in {"", "."} else f"{directory}/{basename}"
+
+
+def _child_legacy_link(target: Path) -> Mapping[str, object] | None:
+    """Return the ``legacy_link`` a registered child payload carries, if any."""
+
+    job_path = target / "job.json"
+    if not job_path.is_file():
+        return None
+    compatibility = read_json(job_path).get("compatibility")
+    if not isinstance(compatibility, Mapping):
+        return None
+    link = compatibility.get("legacy_link")
+    return link if isinstance(link, Mapping) else None
+
+
 def _replace_with_relative_symlink(source: Path, target: Path) -> None:
     source.parent.mkdir(parents=True, exist_ok=True)
     for candidate in source.parent.iterdir():
@@ -507,11 +549,7 @@ def _reconcile_legacy_link(workspace: Workspace, marker: Marker, link: Mapping[s
         name: str(fields.get(name, ""))
         for name in ("taskset", "task_id", "step", "restarts", "owner", "priority", "status")
     }
-    original_name = (
-        f"ht.task.{field_values['taskset']}.{field_values['task_id']}.{field_values['step']}."
-        f"{field_values['restarts']}.{field_values['owner']}.{field_values['priority']}."
-        f"{field_values['status']}"
-    )
+    original_name = _v1_task_basename(field_values)
     if parse_v1_task_name(original_name) != field_values:
         raise FormatError("legacy_link.fields do not form a valid v1 task name")
     state = workspace.read_state(marker)

@@ -3,9 +3,17 @@
 A job is a payload directory plus a ``job.json`` that names the runner to execute,
 and building one by hand means knowing the runner's workflow name, its initial
 step, its digest, and where its inputs live in the payload. This module is the
-short way: :func:`new_job` takes a *template* — a packaged runner such as
-``vasp-relax`` or the path of a runner file of your own — stages the files the
-runner reads, writes the ``job.json``, and submits the result, all in one call.
+short way: :func:`new_job` takes a *template* — a packaged runner a domain
+registered by name, or the path of a runner file of your own — stages the files
+the runner reads, writes the ``job.json``, and submits the result, all in one
+call.
+
+Packaged templates are not known to this module. A domain or compat engine
+registers each one it ships with :func:`~httk.workflow.scaffold.register_template`, supplying only the
+generic description of a starting point — its name, the runner it starts from,
+the workflow and steps that runner declares, the modes a job of it defaults to,
+and what it does — so the scaffold resolves and pins a template without ever
+importing the science that owns it.
 
 .. code-block:: python
 
@@ -13,7 +21,7 @@ runner reads, writes the ``job.json``, and submits the result, all in one call.
     from httk.workflow.scaffold import new_job
 
     workspace = Workspace.initialize("workflow-workspace", extensions=["transactional-data-v1"])
-    job = new_job(workspace, "vasp-relax", files={"POSCAR": "POSCAR"}, tag="silicon")
+    job = new_job(workspace, "some-template", files={"input": "input"}, tag="example")
     print(job.job_key, job.payload)
 
 By default the runner file is *published into the workspace runner store*, and the
@@ -32,6 +40,7 @@ generating a hundred million jobs costs one payload and one marker each and neve
 materializes a list of them.
 """
 
+import importlib
 import json
 import os
 import shutil
@@ -51,7 +60,6 @@ from .models import (
     normalize_placement,
     validate_inputs,
 )
-from .runners import runner_path, runner_reference
 from .runtime_builders import JobSpec, prepare_job_payload
 from .workspace import Workspace
 
@@ -60,11 +68,14 @@ __all__ = [
     "DEFAULT_PLACEMENT",
     "FILES_DIRECTORY",
     "STRUCTURE_PATTERNS",
-    "PACKAGED_TEMPLATES",
     "JobItem",
     "JobTemplate",
+    "TemplateProvider",
     "ScaffoldedJob",
     "describe_runner",
+    "register_template",
+    "registered_templates",
+    "template_provider",
     "packaged_template",
     "resolve_template",
     "structure_files",
@@ -92,45 +103,65 @@ type DataMode = Literal["none", "transactional"]
 type WorkdirMode = Literal["persistent", "isolated"]
 type PublishMode = Literal["workspace", "installed"]
 
-# One packaged template: its name, the packaged runner file it starts from, the
-# workflow and the steps that file declares, and what it does. Declaring the steps
-# here rather than running every packaged runner to ask keeps scaffolding cheap;
-# the test suite holds the table to what the runners really describe. The initial
-# step and the data mode are the same for every packaged VASP runner, so they are
-# not repeated per entry.
-_PACKAGED: tuple[tuple[str, str, str, tuple[str, ...], str], ...] = (
-    (
-        "vasp-relax",
-        "vasp_relax.py",
-        "httk.vasp.relax",
-        ("collect", "prepare", "run"),
-        "relax one structure with the reviewed remedy ladder",
-    ),
-    (
-        "vasp-relax-bash",
-        "vasp_relax.sh",
-        "httk.vasp.relax",
-        ("collect", "prepare", "run"),
-        "the same relaxation, authored in Bash",
-    ),
-    (
-        "vasp-static",
-        "vasp_static.py",
-        "httk.vasp.static",
-        ("collect", "prepare", "run"),
-        "one single-point calculation of one structure",
-    ),
-    (
-        "vasp-relax-static",
-        "vasp_relax_static.py",
-        "httk.vasp.relax-static",
-        ("collect", "prepare", "promote", "run", "static"),
-        "relax, promote the relaxed structure, then run it statically",
-    ),
-)
-_VASP_INITIAL_STEP = "prepare"
-#: The names of every packaged template, in the order they are documented.
-PACKAGED_TEMPLATES = tuple(name for name, _, _, _, _ in _PACKAGED)
+
+@dataclass(frozen=True)
+class TemplateProvider:
+    """One packaged template a domain or compat engine offers by name.
+
+    A provider is the generic description of a starting point. It names the
+    packaged runner it starts from by the package the runner file is a module of
+    and the file beside that module — so the reserved ``pkg:`` form and the
+    digest are resolved from the provider alone — and it declares the runner's
+    workflow, its steps, the modes a job of it defaults to, and what it does.
+    Declaring the steps here rather than running the runner to ask keeps
+    scaffolding cheap; the owning domain's tests hold the declaration to what the
+    runner really describes.
+    """
+
+    name: str
+    runner_package: str
+    runner_file: str
+    workflow: str
+    initial_step: str
+    steps: tuple[str, ...] = ()
+    data_mode: DataMode = "none"
+    workdir_mode: WorkdirMode = "persistent"
+    summary: str = ""
+
+
+#: Every registered template, keyed by name in registration order. The scaffold
+#: ships this empty: a domain populates it as an import side effect, so the
+#: generic layer resolves a domain template without importing the domain.
+_TEMPLATE_PROVIDERS: dict[str, TemplateProvider] = {}
+
+
+def register_template(provider: TemplateProvider) -> None:
+    """Register one packaged template, replacing any registered under its name.
+
+    A domain calls this once per template it ships when its package is imported,
+    which is how ``httk workflow job new --template NAME`` resolves a packaged
+    runner the generic scaffold never names.
+    """
+
+    _TEMPLATE_PROVIDERS[provider.name] = provider
+
+
+def registered_templates() -> tuple[str, ...]:
+    """Return the name of every registered template, in registration order."""
+
+    return tuple(_TEMPLATE_PROVIDERS)
+
+
+def template_provider(name: str) -> TemplateProvider | None:
+    """Return the provider *name* names, by template name or runner file."""
+
+    provider = _TEMPLATE_PROVIDERS.get(name)
+    if provider is not None:
+        return provider
+    for candidate in _TEMPLATE_PROVIDERS.values():
+        if candidate.runner_file == name:
+            return candidate
+    return None
 
 
 class JobItem(TypedDict, total=False):
@@ -153,10 +184,10 @@ class JobItem(TypedDict, total=False):
 class JobTemplate:
     """One resolved starting point for a job: a runner file and how to run it.
 
-    A template is either one of the packaged runners named by
-    :data:`~httk.workflow.scaffold.PACKAGED_TEMPLATES` or a runner file of your own, which is described by
-    running it — every native runner answers ``--describe`` with its workflow and
-    its steps — so a scaffolded job never guesses either.
+    A template is either one of the runners a domain registered by name — see
+    :func:`~httk.workflow.scaffold.registered_templates` — or a runner file of your own, which is
+    described by running it — every native runner answers ``--describe`` with its
+    workflow and its steps — so a scaffolded job never guesses either.
     """
 
     name: str
@@ -319,22 +350,51 @@ def _parse_description(text: str, path: Path) -> dict[str, object]:
     return {"workflow": described["workflow"], "steps": [str(step) for step in steps]}
 
 
-def packaged_template(name: str) -> JobTemplate | None:
-    """Return the packaged template *name* names, or ``None``."""
+def _packaged_runner_path(provider: TemplateProvider) -> Path:
+    """Return the installed runner file one provider names, without importing it.
 
-    for template_name, runner, workflow, steps, summary in _PACKAGED:
-        if name in {template_name, runner}:
-            return JobTemplate(
-                name=template_name,
-                source=runner_path(runner),
-                workflow=workflow,
-                initial_step=_VASP_INITIAL_STEP,
-                steps=steps,
-                data_mode="transactional",
-                packaged=runner,
-                summary=summary,
-            )
-    return None
+    The runner package is imported by name so resolving one template never drags
+    another domain's helpers into the process, and the file is taken from beside
+    that package's module.
+    """
+
+    module = importlib.import_module(provider.runner_package)
+    location = getattr(module, "__file__", None)
+    if location is None:  # pragma: no cover - only a namespace package has none
+        raise ValueError(f"runner package {provider.runner_package} has no installed location")
+    return Path(location).with_name(provider.runner_file)
+
+
+def _packaged_runner_reference(provider: TemplateProvider) -> dict[str, object]:
+    """Return the installed ``runner`` member a provider's ``pkg:`` form pins."""
+
+    path = _packaged_runner_path(provider)
+    return {
+        "backend": "path",
+        "source": "installed",
+        "path": f"pkg:{provider.runner_package}/{PurePosixPath(provider.runner_file)}",
+        "sha256": sha256_file(path),
+        "arguments": [],
+    }
+
+
+def packaged_template(name: str) -> JobTemplate | None:
+    """Return the registered template *name* names, or ``None``."""
+
+    provider = template_provider(name)
+    if provider is None:
+        return None
+    return JobTemplate(
+        name=provider.name,
+        source=_packaged_runner_path(provider),
+        workflow=provider.workflow,
+        initial_step=provider.initial_step,
+        steps=provider.steps,
+        data_mode=provider.data_mode,
+        workdir_mode=provider.workdir_mode,
+        packaged=provider.runner_file,
+        summary=provider.summary,
+    )
 
 
 def resolve_template(
@@ -358,9 +418,10 @@ def resolve_template(
     if resolved is None:
         path = Path(text).expanduser()
         if not path.is_file():
+            known = ", ".join(registered_templates()) or "none registered"
             raise ValueError(
-                f"unknown template {text!r}: it is neither a packaged template "
-                f"({', '.join(PACKAGED_TEMPLATES)}) nor an existing runner file"
+                f"unknown template {text!r}: it is neither a registered template "
+                f"({known}) nor an existing runner file"
             )
         described = describe_runner(path)
         steps = tuple(cast(list[str], described["steps"]))
@@ -470,16 +531,16 @@ def new_job(
 ) -> ScaffoldedJob:
     """Scaffold, submit, and describe one job of *template*.
 
-    *template* is a packaged template name — one of :data:`~httk.workflow.scaffold.PACKAGED_TEMPLATES` —
+    *template* is a registered template name — see :func:`~httk.workflow.scaffold.registered_templates` —
     or the path of a runner file. *files* maps payload names to the files to stage
     there: a bare name lands in the payload's :data:`~httk.workflow.scaffold.FILES_DIRECTORY`, which is
-    where every packaged runner reads its inputs, and a name with a directory in
+    where a packaged runner reads its inputs, and a name with a directory in
     it is used verbatim. *inputs* becomes the job's ``inputs`` object, whose
     members are documented per runner.
 
-    *data_mode* defaults to what the template needs — ``transactional`` for the
-    packaged VASP runners, which publish their collected results, and ``none``
-    for a runner that said nothing. *publish* ``workspace`` publishes the runner
+    *data_mode* defaults to what the template needs — ``transactional`` for a
+    template whose runner publishes collected results, and ``none`` for a runner
+    that said nothing. *publish* ``workspace`` publishes the runner
     file into the workspace runner store and pins its digest; ``installed``
     references a packaged runner through the reserved ``pkg:`` form instead and
     copies nothing.
@@ -536,7 +597,7 @@ def new_jobs(
             for path in sorted(Path("structures").glob("POSCAR.*")):
                 yield {"files": {"POSCAR": path}, "tag": structure_tag(path)}
 
-        for job in new_jobs(workspace, "vasp-relax", structures(), inputs={"kpoint_density": 30.0}):
+        for job in new_jobs(workspace, "some-template", structures(), inputs={"kpoint_density": 30.0}):
             print(job.job_key)
     """
 
@@ -575,13 +636,14 @@ def _prepare(
             "results in the job's workdir"
         )
     if publish == "installed":
-        if resolved.packaged is None:
+        provider = template_provider(resolved.name)
+        if resolved.packaged is None or provider is None:
             raise ValueError(
                 f"publish='installed' references a packaged template, but {resolved.source} is a runner "
                 "file of your own; publish it into the workspace instead (the default), or install it on "
                 "a runner search path and write its job.json yourself"
             )
-        reference = runner_reference(resolved.packaged)
+        reference = _packaged_runner_reference(provider)
     else:
         reference = workspace.publish_runner(resolved.source, name=resolved.store_name)
     return _Prepared(
