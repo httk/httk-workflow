@@ -111,9 +111,9 @@ def test_manifest_refuses_active_workspace(tmp_path: Path) -> None:
 
 
 def test_adapter_json_contract_and_no_shell_interpolation(tmp_path: Path) -> None:
-    bundle = tmp_path / "adapter"
+    bundle = tmp_path / "adapter-bundle"
     bundle.mkdir()
-    executable = bundle / "operation"
+    executable = bundle / "adapter"
     executable.write_text(
         """#!/usr/bin/env python3
 import json, sys
@@ -124,16 +124,12 @@ print(json.dumps({"format":"httk-computer-result","format_version":1,
         encoding="utf-8",
     )
     executable.chmod(0o755)
-    operations = {
-        name: "operation" for name in ("configure", "install", "invoke", "push", "pull", "start-manager", "status")
-    }
     (bundle / "remote.json").write_text(
         json.dumps(
             {
                 "format": "httk-computer-adapter",
                 "format_version": 1,
                 "adapter_version": 1,
-                "operations": operations,
                 "queues": {"default": {}},
             }
         ),
@@ -162,7 +158,7 @@ def test_safe_v1_remote_import_uses_maintained_adapter(tmp_path: Path) -> None:
     assert metadata["kind"] == "local"
     assert metadata["legacy_import"]["legacy_executables_copied"] is False
     assert metadata["queues"]["default"]["legacy_settings"]["VASP_COMMAND"] == "value; touch should-not-run"
-    assert (imported / "invoke").is_file()
+    assert (imported / "adapter").is_file()
     assert not (imported / "command").exists()
 
 

@@ -15,7 +15,8 @@ import pytest  # pyright: ignore[reportMissingImports]
 from httk.core import CLIContext
 
 from httk.workflow import cli as native_cli
-from httk.workflow import v1_cli, workflow_cli
+from httk.workflow import workflow_cli
+from httk.workflow.compat.v1 import cli as v1_cli
 from httk.workflow.workflow_cli import command
 
 #: Every group of the canonical tree, with the subcommands its help must name.

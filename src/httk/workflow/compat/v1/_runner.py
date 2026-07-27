@@ -1,6 +1,6 @@
 """Internal process adapter for an httk v1 ``ht_steps`` or ``ht_run``.
 
-The module is executed as ``python -m httk.workflow._v1_runner``, so it is
+The module is executed as ``python -m httk.workflow.compat.v1._runner``, so it is
 imported through the same package the manager itself was imported from and
 needs no path manipulation of its own.
 """
@@ -16,14 +16,20 @@ import sys
 import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Any
 
 from httk.workflow._util import read_json, write_json_atomic
-from httk.workflow.models import JobDefinition, normalize_placement
-from httk.workflow.v1 import (
+from httk.workflow.compat.v1 import (
     V1_PRIORITY_MAP,
     _job_mapping,
     parse_v1_task_name,
+)
+from httk.workflow.protocol import (
+    AttemptContext,
+    ChildReference,
+    JobDefinition,
+    OutcomeAction,
+    OutcomeDraft,
+    normalize_placement,
 )
 
 _active_process: subprocess.Popen[bytes] | None = None
@@ -207,7 +213,7 @@ def _legacy_environment(
     arguments: argparse.Namespace,
     *,
     job: JobDefinition,
-    context: Mapping[str, Any],
+    context: AttemptContext,
     payload: Path,
     current: Path,
     program_name: str,
@@ -220,7 +226,7 @@ def _legacy_environment(
             "HT_TASK_CURRENT_DIR": str(current),
             "HT_TASK_RUN_NAME": "ht.run.current" if program_name == "ht_steps" else ".",
             "HT_TASK_REL_TOP_DIR": os.path.relpath(payload, current),
-            "HT_TASK_STEP": str(context["step"]),
+            "HT_TASK_STEP": str(context.step),
             "HT_TASKMGR_TIMEOUT": str(int(arguments.timeout)),
             "HT_TASKMGR_SET": job.claim_pool,
             "HT_TASKMGR_ROOTDIR": str(Path(os.environ["HTTK_WORKFLOW_WORKSPACE_DIR"])),
@@ -279,109 +285,104 @@ def _child_label(task_id: str, used: set[str]) -> str:
     return label
 
 
-def _prepare_children(
-    outcome_temporary: Path,
+def _spawn_children(
+    draft: OutcomeDraft,
     *,
     payload: Path,
     job: JobDefinition,
-    context: Mapping[str, Any],
+    context: AttemptContext,
     attempts: int,
-) -> list[dict[str, object]]:
+) -> list[tuple[ChildReference, str]]:
+    """Register every abandoned legacy task directory as a child of ``draft``.
+
+    Each ``ht.task.*.waitstart``/``waitstep`` directory becomes one prepared
+    payload with a deterministic identity, staged beside the attempt and handed
+    to :meth:`OutcomeDraft.add_child`, which copies it into the draft and writes
+    the canonical spawn set. The legacy directory the parent still owns is left
+    in place; :meth:`V1RunnerBackend.commit_outcome` replaces it with a symlink
+    to the registered child once the spawn is committed.
+    """
+
     sources = _task_directories(payload)
     if not sources:
         return []
     compatibility = job.raw.get("compatibility")
     if not isinstance(compatibility, Mapping):
         raise RuntimeError("v1 compatibility metadata is missing")
-    root_text = compatibility.get("root_placement", context.get("placement"))
+    root_text = compatibility.get("root_placement", context.placement)
     root = normalize_placement(str(root_text))
-    children_root = outcome_temporary / "children"
-    jobs_root = children_root / "jobs"
-    jobs_root.mkdir(parents=True)
-    entries: list[dict[str, object]] = []
+    staging = draft.control / f"v1-spawn.tmp.{uuid.uuid4()}"
+    staging.mkdir()
+    results: list[tuple[ChildReference, str]] = []
     labels: set[str] = set()
-    for source in sources:
-        fields = parse_v1_task_name(source.name)
-        if fields is None:
-            continue
-        relative = source.relative_to(payload)
-        identity = f"{relative.as_posix()}|{fields['taskset']}|{fields['task_id']}"
-        child_id = str(uuid.uuid5(uuid.UUID(job.id), identity))
-        tag = f"{fields['taskset']}-{fields['task_id']}"
-        child_payload = jobs_root / child_id
-        legacy_link = {
-            "parent_job_id": job.id,
-            "parent_job_key": job.job_key,
-            "parent_placement": str(context["placement"]),
-            "directory": relative.parent.as_posix(),
-            "fields": fields,
-        }
-        parent = {
-            "workspace_id": context["workspace_id"],
-            "job_id": job.id,
-            "job_key": job.job_key,
-        }
-        shutil.copytree(source, child_payload)
-        mapping = _job_mapping(
-            child_payload,
-            job_id=child_id,
-            tag=tag,
-            name=f"httk v1 subtask {fields['task_id']}",
-            initial_step=fields["step"],
-            pool="default" if fields["taskset"] == "any" else fields["taskset"],
-            priority=int(fields["priority"]),
-            attempts=attempts,
-            parent=parent,
-            root_placement=root.as_posix(),
-            legacy_link=legacy_link,
-        )
-        write_json_atomic(child_payload / "job.json", mapping)
-        child_job = JobDefinition.from_mapping(mapping)
-        placement = _child_placement(root, job.id, child_id)
-        entries.append(
-            {
-                "workspace_id": context["workspace_id"],
-                "job_id": child_id,
-                "job_key": child_job.job_key,
-                "label": _child_label(str(fields["task_id"]), labels),
-                "placement": placement.as_posix(),
-                "compatibility": {"legacy_path": relative.as_posix()},
+    try:
+        for source in sources:
+            fields = parse_v1_task_name(source.name)
+            if fields is None:
+                continue
+            relative = source.relative_to(payload)
+            identity = f"{relative.as_posix()}|{fields['taskset']}|{fields['task_id']}"
+            child_id = str(uuid.uuid5(uuid.UUID(job.id), identity))
+            legacy_link = {
+                "parent_job_id": job.id,
+                "parent_job_key": job.job_key,
+                "parent_placement": context.placement,
+                "directory": relative.parent.as_posix(),
+                "fields": fields,
             }
-        )
-        child_payload.rename(jobs_root / child_job.job_key)
-    write_json_atomic(
-        children_root / "spawn.json",
-        {
-            "format": "httk-workflow-spawn",
-            "format_version": 1,
-            "children": entries,
-        },
-    )
-    return entries
+            prepared = staging / child_id
+            shutil.copytree(source, prepared)
+            mapping = _job_mapping(
+                prepared,
+                job_id=child_id,
+                tag=f"{fields['taskset']}-{fields['task_id']}",
+                name=f"httk v1 subtask {fields['task_id']}",
+                initial_step=fields["step"],
+                pool="default" if fields["taskset"] == "any" else fields["taskset"],
+                priority=int(fields["priority"]),
+                attempts=attempts,
+                root_placement=root.as_posix(),
+                legacy_link=legacy_link,
+            )
+            write_json_atomic(prepared / "job.json", mapping)
+            label = _child_label(str(fields["task_id"]), labels)
+            placement = _child_placement(root, job.id, child_id)
+            # The draft owns the copy into ``children/jobs`` and the spawn set,
+            # and stamps the parent identity on the child; the deterministic
+            # ``child_id`` and placement keep the spawn stable across replays.
+            reference = draft.add_child(prepared, placement, label=label)
+            results.append((reference, label))
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    return results
 
 
 def _publish_outcome(
     control: Path,
-    context: Mapping[str, Any],
+    context: AttemptContext,
     job: JobDefinition,
     *,
-    action: str,
+    action: OutcomeAction,
     next_step: str | None = None,
     failure: Mapping[str, object] | None = None,
     priority: int | None = None,
     wait_for_children: bool = False,
     attempts: int,
 ) -> None:
-    temporary = control / f"outcome.tmp.{uuid.uuid4()}"
-    temporary.mkdir()
-    # Only a job that continues can have children. A legacy task that succeeded
-    # or failed may still have unconsumed `ht.task.*.waitstart` directories in
-    # its payload — a task set it prepared and then abandoned, or one whose
-    # symlinks were never rewritten — and publishing those as spawned jobs would
-    # leave real, schedulable jobs behind a parent that nothing will ever join.
+    """Publish one v2 outcome through the canonical :class:`OutcomeDraft`.
+
+    The draft is the single implementation of the on-disk outcome shape and its
+    atomic publication, so a v1 attempt writes exactly the bytes a native runner
+    would. Only a job that continues can have children: a legacy task that
+    succeeded or failed may still have unconsumed ``ht.task.*.waitstart``
+    directories — a task set it prepared and then abandoned — and publishing
+    those as spawned jobs would strand real jobs behind a parent nothing joins.
+    """
+
+    draft = OutcomeDraft(context, control)
     children = (
-        _prepare_children(
-            temporary,
+        _spawn_children(
+            draft,
             payload=Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]),
             job=job,
             context=context,
@@ -390,40 +391,32 @@ def _publish_outcome(
         if action in {"advance", "wait"} or wait_for_children
         else []
     )
-    body: dict[str, object] = {
-        "format": "httk-workflow-outcome",
-        "format_version": 1,
-        "job_id": context["job_id"],
-        "activation_id": context["activation_id"],
-        "attempt_id": context["attempt_id"],
-        "action": action,
-    }
-    if next_step is not None:
-        body["next_step"] = next_step
-    if failure is not None:
-        body["failure"] = dict(failure)
-    if priority is not None:
-        body["priority"] = priority
+    published_action: OutcomeAction = "wait" if wait_for_children else action
+    join: dict[str, object] | None = None
     if wait_for_children:
-        body["action"] = "wait"
-        body["join"] = {
+        join = {
             # v1 waitsubtasks resumed after every descendant left an active
             # state, including children which ended broken or stopped.
             "condition": "all_terminal",
             "children": [
                 {
-                    "workspace_id": entry["workspace_id"],
-                    "job_id": entry["job_id"],
-                    "job_key": entry["job_key"],
-                    "label": entry["label"],
-                    "placement_hint": entry["placement"],
+                    "workspace_id": reference.workspace_id,
+                    "job_id": reference.job_id,
+                    "job_key": reference.job_key,
+                    "label": label,
+                    "placement_hint": reference.placement_hint,
                 }
-                for entry in children
+                for reference, label in children
             ],
             "on_impossible": {"action": "fail"},
         }
-    write_json_atomic(temporary / "outcome.json", body)
-    os.rename(temporary, control / "outcome.ready")
+    draft.publish(
+        published_action,
+        next_step=next_step,
+        priority=priority,
+        failure=failure,
+        join=join,
+    )
 
 
 def _archive_log(payload: Path, workdir: Path, compression: str) -> None:
@@ -456,7 +449,7 @@ def main() -> int:
     control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
     payload = Path(os.environ["HTTK_WORKFLOW_JOB_DIR"])
     workdir = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
-    context = read_json(context_path)
+    context = AttemptContext.read(context_path)
     job = JobDefinition.from_mapping(read_json(payload / "job.json"))
     compatibility = job.raw.get("compatibility")
     if not isinstance(compatibility, Mapping):
@@ -511,7 +504,7 @@ def main() -> int:
             attempts=arguments.attempts,
         )
         return 0
-    if pending_step is not None and pending_step != context["step"]:
+    if pending_step is not None and pending_step != context.step:
         children = bool(_task_directories(payload))
         _publish_outcome(
             control,
@@ -524,7 +517,7 @@ def main() -> int:
             attempts=arguments.attempts,
         )
         return 0
-    if int(context["attempt_ordinal"]) > arguments.attempts + 1:
+    if context.attempt_ordinal is not None and context.attempt_ordinal > arguments.attempts + 1:
         _freeze(
             program_path,
             cwd=current,
@@ -546,7 +539,7 @@ def main() -> int:
         )
         return 0
 
-    command = [str(program_path), str(context["step"])]
+    command = [str(program_path), str(context.step)]
     if arguments.wrapper is not None:
         command.insert(0, arguments.wrapper)
     log_path = payload / "ht.taskmgr.stdout"

@@ -28,6 +28,10 @@ from typing import Any
 
 from httk.core import CLIContext
 
+# The packaged domains register their templates as an import side effect, so the
+# CLI resolves `job new --template NAME` against a populated registry. The generic
+# execution layer never imports a domain; the CLI does, exactly here.
+from . import vasp as _vasp  # noqa: F401
 from ._logging import LOG_LEVELS, add_log_file, configure_logging
 from ._util import read_json, sha256_file, utc_now, write_json_atomic
 from .adapters import (
@@ -42,6 +46,9 @@ from .adapters import (
     split_settings,
     store_credentials,
 )
+from .compat.cwl import import_cwl
+from .compat.pwd import import_pwd
+from .compat.v1 import V1TaskManager, prepare_v1_payload, submit_v1_task
 from .configuration import (
     import_v1_configuration,
     initialize_config,
@@ -59,8 +66,6 @@ from .hygiene import (
     project_doctor,
     remove_remote,
 )
-from .integrations.cwl import import_cwl
-from .integrations.pwd import import_pwd
 from .introspection import (
     JOB_HISTORY_FORMAT,
     JOB_LIST_FORMAT,
@@ -80,12 +85,12 @@ from .models import CORE_PROFILE, POLICY_KEYS, STATE_KINDS, canonical_uuid
 from .projects import import_v1_project, initialize_project, require_project
 from .scaffold import (
     DEFAULT_PLACEMENT,
-    PACKAGED_TEMPLATES,
     STRUCTURE_PATTERNS,
     JobItem,
     ScaffoldedJob,
     new_job,
     new_jobs,
+    registered_templates,
     structure_files,
     structure_tag,
 )
@@ -97,7 +102,6 @@ from .transfers import (
     offer_transfers,
     retire_transfers,
 )
-from .v1 import V1TaskManager, prepare_v1_payload, submit_v1_task
 from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -911,7 +915,7 @@ def build_job_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentPa
         "--template",
         metavar="TEMPLATE",
         required=True,
-        help=f"a packaged template ({', '.join(PACKAGED_TEMPLATES)}) or the path of a runner file",
+        help=f"a registered template ({', '.join(registered_templates())}) or the path of a runner file",
     )
     new.add_argument(
         "--input",

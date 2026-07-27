@@ -18,8 +18,8 @@ that changes afterwards is picked up by importing it again, which submits a new
 job; the old one keeps running exactly the bytes it was submitted with.
 
 **No runner file is written per workflow.** Both formats are executed by a
-*packaged* runner — `pkg:httk.workflow.integrations/pwd_runner.py` and
-`pkg:httk.workflow.integrations/cwl_runner.py` — referenced through the reserved
+*packaged* runner — `pkg:httk.workflow.compat.pwd/pwd_runner.py` and
+`pkg:httk.workflow.compat.cwl/cwl_runner.py` — referenced through the reserved
 installed form the manager resolves inside its own module allowlist. The document
 is data in the payload; the program that executes it is the same installed bytes
 for every imported job, so a campaign of ten thousand imported workflows copies
@@ -52,7 +52,7 @@ From Python:
 
 ```python
 from httk.workflow import Workspace
-from httk.workflow.integrations.pwd import import_pwd
+from httk.workflow.compat.pwd import import_pwd
 
 workspace = Workspace("workflow-workspace")
 job = import_pwd(workspace, "workflow.json", modules=["workflow.py"], workflow_inputs={"x": 3})
@@ -216,7 +216,7 @@ process — is handled by the manager without any failure being published at all
 
 ```python
 from httk.workflow import Workspace
-from httk.workflow.integrations.cwl import import_cwl
+from httk.workflow.compat.cwl import import_cwl
 
 workspace = Workspace("workflow-workspace")
 imported = import_cwl(workspace, "flow.cwl", "job.yml", tag="echo", data_mode="transactional")
@@ -225,6 +225,6 @@ for warning in imported.warnings:
 print(imported.job.job_key, imported.document["class"])
 ```
 
-{py:func}`~httk.workflow.integrations.cwl.load_cwl_plan` does the parsing and the
+{py:func}`~httk.workflow.compat.cwl.load_cwl_plan` does the parsing and the
 subset check alone, without submitting anything, which is the cheap way to find
 out whether a document can be imported at all.

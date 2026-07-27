@@ -137,7 +137,19 @@ _INTERNAL_MODULES = (
     "adapter_runtime",
     "cli",
     "workflow_cli",
-    "v1_cli",
+    # Compatibility internals: the engines are public, their runners and the
+    # v1 CLI alias and shared import tail are not.
+    "compat._integration",
+    "compat.cwl.cwl_runner",
+    "compat.pwd.pwd_runner",
+    "compat.v1._runner",
+    "compat.v1.cli",
+    # The VASP facade is public; the cohesive modules it re-exports are not.
+    "vasp.inputs",
+    "vasp.diagnostics",
+    "vasp.remedies",
+    "vasp.reports",
+    "vasp.templates",
 )
 nitpick_ignore_regex = [
     (r"py:.*", r"httk\.workflow\.(" + "|".join(_INTERNAL_MODULES) + r")(\..+)?"),
@@ -190,12 +202,12 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.adapter_protocol",
         "httk.workflow.configuration",
         "httk.workflow.projects",
-        # Compatibility and integrations.
-        "httk.workflow.v1",
+        # Domain and compatibility consumers.
         "httk.workflow.vasp",
-        "httk.workflow.integrations",
-        "httk.workflow.integrations.cwl",
-        "httk.workflow.integrations.pwd",
+        "httk.workflow.compat",
+        "httk.workflow.compat.v1",
+        "httk.workflow.compat.cwl",
+        "httk.workflow.compat.pwd",
     }
 )
 

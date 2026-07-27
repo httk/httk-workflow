@@ -179,17 +179,18 @@ def test_secret_setting_remains_visible_to_the_adapter(tmp_path: Path, monkeypat
         "password": "hunter2",
     }
     echo = tmp_path / "request.json"
-    operation = remote / "invoke"
-    operation.write_text(
+    adapter = remote / "adapter"
+    adapter.write_text(
         f"""#!/usr/bin/env python3
 import json, shutil, sys
+request = json.load(open(sys.argv[1]))
 shutil.copyfile(sys.argv[1], {str(echo)!r})
 print(json.dumps({{"format":"httk-computer-result","format_version":1,
-                  "operation":"invoke","ok":True}}))
+                  "operation":request["operation"],"ok":True}}))
 """,
         encoding="utf-8",
     )
-    operation.chmod(0o755)
+    adapter.chmod(0o755)
     run_adapter(remote, "invoke", {"queue": "default", "argv": ["true"]})
     assert json.loads(echo.read_text(encoding="utf-8"))["queue_settings"]["password"] == "hunter2"
 

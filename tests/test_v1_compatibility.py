@@ -2,8 +2,8 @@ import sys
 from pathlib import Path
 
 from httk.workflow import TaskManager, Workspace
-from httk.workflow._v1_runner import replay_v1_atomic
-from httk.workflow.v1 import V1RunnerBackend, V1TaskManager, submit_v1_task
+from httk.workflow.compat.v1 import V1RunnerBackend, V1TaskManager, submit_v1_task
+from httk.workflow.compat.v1._runner import replay_v1_atomic
 
 
 def _legacy_source(root: Path, source: str, *, program: str = "ht_steps") -> Path:
@@ -272,9 +272,9 @@ HT_TASK_FINISHED
             )
         )
     )
-    assert command[:3] == [sys.executable, "-m", "httk.workflow._v1_runner"]
-    assert not any(item.endswith("_v1_runner.py") for item in command)
-    assert "sys.path.insert" not in (Path(__file__).parents[1] / "src/httk/workflow/_v1_runner.py").read_text()
+    assert command[:3] == [sys.executable, "-m", "httk.workflow.compat.v1._runner"]
+    assert not any(item.endswith("_runner.py") for item in command)
+    assert "sys.path.insert" not in (Path(__file__).parents[1] / "src/httk/workflow/compat/v1/_runner.py").read_text()
 
 
 def test_v1_terminal_outcome_does_not_publish_leftover_subtasks(tmp_path: Path) -> None:

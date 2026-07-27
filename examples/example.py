@@ -4,6 +4,9 @@
 The same path as ``docs/quickstart.md``, one call per command:
 
 * :meth:`httk.workflow.Workspace.initialize` creates the workspace;
+* importing :mod:`httk.workflow.vasp` registers its packaged templates, which is
+  what lets :func:`~httk.workflow.scaffold.new_job` resolve ``vasp-relax`` by
+  name — the generic scaffold never names a domain itself;
 * :func:`httk.workflow.scaffold.new_job` builds and submits one job of the
   packaged ``vasp-relax`` template;
 * :class:`httk.workflow.TaskManager` runs everything that is ready;
@@ -23,6 +26,7 @@ to use the real thing.
 import os
 from pathlib import Path
 
+import httk.workflow.vasp  # noqa: F401 - registers the packaged vasp-relax template used below
 from httk.workflow import TaskManager, Workspace, harvest
 from httk.workflow.scaffold import new_job
 

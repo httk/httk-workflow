@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest  # pyright: ignore[reportMissingImports]
 
 from httk.workflow import Attempt
+from httk.workflow.compat.v1 import bundled_v1_root
 from httk.workflow.runtime import run_command
-from httk.workflow.v1 import bundled_v1_root
 from httk.workflow.vasp import (
     assemble_potcar,
     automatic_kpoint_grid,

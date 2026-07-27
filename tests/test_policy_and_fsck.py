@@ -311,7 +311,7 @@ def test_the_default_write_path_synchronizes_and_no_durable_does_not(tmp_path: P
 
 def test_both_command_line_interfaces_default_to_durable(tmp_path: Path) -> None:
     from httk.workflow import cli as native_cli
-    from httk.workflow import v1_cli
+    from httk.workflow.compat.v1 import cli as v1_cli
 
     assert native_cli._parser().parse_args(["init", "x"]).no_durable is False
     assert native_cli._parser().parse_args(["--durable", "init", "x"]).no_durable is False

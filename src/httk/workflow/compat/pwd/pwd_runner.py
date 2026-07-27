@@ -74,7 +74,7 @@ from pathlib import Path
 
 try:
     from httk.workflow import Attempt, Runner
-    from httk.workflow.integrations.pwd import PwdDocument, validate_pwd_document
+    from httk.workflow.compat.pwd import PwdDocument, validate_pwd_document
 except ModuleNotFoundError:  # pragma: no cover - interpreter bootstrap
     # The manager launches this file directly, so the interpreter is whatever the
     # shebang found on PATH, which on a cluster is not necessarily the one httk is

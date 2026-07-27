@@ -52,7 +52,7 @@ sealed:
 from pathlib import Path
 
 from httk.workflow import Workspace
-from httk.workflow.v1 import submit_v1_task
+from httk.workflow.compat.v1 import submit_v1_task
 
 
 def materialize(payload: Path) -> None:

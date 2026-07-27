@@ -22,7 +22,7 @@ from pathlib import Path
 
 from httk.core import CLIContext
 
-from .workflow_cli import (
+from httk.workflow.workflow_cli import (
     V1_TASKMANAGER_EPILOG,
     HelpFormatter,
     add_v1_prepare_arguments,

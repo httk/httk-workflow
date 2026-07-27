@@ -1,7 +1,8 @@
-"""Packaged implementations used by the maintained adapter wrappers.
+"""Packaged implementations used by the maintained adapter dispatcher.
 
-Every wrapper in ``adapter_templates`` executes this module with one operation
-name and one versioned JSON request file. The implementation that runs is
+The single ``adapter`` executable in each ``adapter_templates`` bundle executes
+this module with one versioned JSON request file. The operation to run is read
+from that request's ``operation`` member; the implementation that runs is
 selected by the ``kind`` recorded in the bundle's ``remote.json``:
 
 ``local``
@@ -666,14 +667,20 @@ def _start_manager(kind: str, request: Mapping[str, object]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
-    if len(arguments) != 2:
-        print("adapter operation expects OPERATION REQUEST.json", file=sys.stderr)
+    if len(arguments) != 1:
+        print("adapter dispatcher expects one REQUEST.json path", file=sys.stderr)
         return 2
-    operation, request_name = arguments
+    (request_name,) = arguments
     try:
         request = json.loads(Path(request_name).read_text(encoding="utf-8"))
-        if not isinstance(request, dict) or request.get("operation") != operation:
-            raise ValueError("request operation mismatch")
+    except (OSError, ValueError) as exc:
+        print(f"adapter dispatcher: {exc}", file=sys.stderr)
+        return 2
+    operation = request.get("operation") if isinstance(request, dict) else None
+    if not isinstance(operation, str) or not operation:
+        print("adapter request must carry a nonempty string operation", file=sys.stderr)
+        return 2
+    try:
         kind = _adapter_kind(request) or "local"
         if kind not in SUPPORTED_KINDS:
             _refusal(
