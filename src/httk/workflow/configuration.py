@@ -6,6 +6,8 @@ import hashlib
 import json
 import logging
 import os
+import shutil
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,13 +73,88 @@ def config_home() -> Path:
 
 
 def data_home() -> Path:
-    """Return the httk data directory."""
+    """Return the httk data directory.
+
+    Nothing httk-workflow keeps per user lives here any more: remote
+    definitions and identity keys are *configuration*, and moved to
+    :func:`config_home`. The function stays because the directory is still the
+    right answer for genuine data, and because :func:`adopt_legacy_data_home` has
+    to know where to look for what was left there.
+    """
 
     override = os.environ.get("HTTK_DATA_HOME")
     if override:
         return Path(override).expanduser().resolve()
     base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
     return (base / "httk").resolve()
+
+
+#: The two directories that moved out of the data home, as
+#: ``(legacy name, current name)``. The remote definitions were renamed in the
+#: same release, so the pair differs for them and not for the keys.
+_MIGRATED_DIRECTORIES = (("computers", "remotes"), ("keys", "keys"))
+
+
+def _adopt(legacy: Path, current: Path) -> Path:
+    """Move one legacy data-home directory to its configuration home, once.
+
+    The move is idempotent and never merges: with both roots present the new one
+    is authoritative and the stale copy is only reported, because guessing which
+    of two definitions of the same remote is meant would be worse than saying so.
+    """
+
+    if not legacy.is_dir():
+        return current
+    if current.exists():
+        _LOGGER.warning(
+            "ignoring the stale legacy directory %s; %s is authoritative and can be removed by hand",
+            legacy,
+            current,
+            extra={"event": "legacy_home_stale", "legacy": str(legacy), "current": str(current)},
+        )
+        return current
+    current.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.rename(legacy, current)
+    except OSError:
+        # A different filesystem, so copy the modes with the content and only
+        # then drop the source: an interrupted copy leaves the legacy tree.
+        shutil.copytree(legacy, current, symlinks=True)
+        shutil.rmtree(legacy)
+    message = f"httk: moved {legacy} to {current}"
+    _LOGGER.info(
+        "moved %s to %s",
+        legacy,
+        current,
+        extra={"event": "legacy_home_migrated", "legacy": str(legacy), "current": str(current)},
+    )
+    print(message, file=sys.stderr)
+    return current
+
+
+def adopt_legacy_data_home() -> None:
+    """Adopt whatever an earlier release left in the data home, once."""
+
+    legacy_root = data_home()
+    config_root = config_home()
+    if legacy_root == config_root:  # pragma: no cover - only a deployment override does this
+        return
+    for legacy_name, current_name in _MIGRATED_DIRECTORIES:
+        _adopt(legacy_root / legacy_name, config_root / current_name)
+
+
+def remotes_home() -> Path:
+    """Return where this user's remote definitions live."""
+
+    adopt_legacy_data_home()
+    return config_home() / "remotes"
+
+
+def keys_home() -> Path:
+    """Return where this user's identity keys live."""
+
+    adopt_legacy_data_home()
+    return config_home() / "keys"
 
 
 def config_path() -> Path:
@@ -183,7 +260,7 @@ def initialize_config(*, name: str, email: str) -> dict[str, object]:
 
 
 def identity_key_paths() -> tuple[Path, Path]:
-    root = data_home() / "keys"
+    root = keys_home()
     return root / "identity.seed", root / "identity.pub"
 
 
@@ -201,7 +278,7 @@ def ensure_identity_key() -> tuple[Path, Path]:
             )
     else:
         seed = ed25519_generate_seed()
-        private_path.parent.mkdir(parents=True, exist_ok=True)
+        private_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         descriptor = os.open(private_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w", encoding="ascii") as stream:
             stream.write(base64.b64encode(seed).decode("ascii") + "\n")
@@ -327,8 +404,8 @@ def import_v1_configuration(source: str | os.PathLike[str] | None = None) -> dic
     )
     legacy_public = root / "keys" / "key1.pub"
     if legacy_public.is_file():
-        public_target = data_home() / "keys" / "legacy-identity.pub"
-        public_target.parent.mkdir(parents=True, exist_ok=True)
+        public_target = keys_home() / "legacy-identity.pub"
+        public_target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         public_target.write_bytes(legacy_public.read_bytes())
         current["legacy_public_key"] = str(public_target)
     write_config(current)

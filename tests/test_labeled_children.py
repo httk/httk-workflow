@@ -4,7 +4,7 @@ import json
 import uuid
 from pathlib import Path
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 
 _CHILD_RUNNER = """#!/usr/bin/env python3
 import json
@@ -194,13 +194,13 @@ def _payload(
     return payload, job_id
 
 
-def _run(workspace: WorkflowWorkspace) -> None:
+def _run(workspace: Workspace) -> None:
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=60.0)
 
 
 def test_a_spawn_child_without_a_label_is_a_protocol_error(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _parent_runner([("", "succeed")]))
     workspace.submit(payload, "project/unlabeled")
     _run(workspace)
@@ -214,7 +214,7 @@ def test_a_spawn_child_without_a_label_is_a_protocol_error(tmp_path: Path) -> No
 
 
 def test_duplicate_spawn_labels_are_a_protocol_error(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _parent_runner([("alpha", "succeed"), ("alpha", "fail")]))
     workspace.submit(payload, "project/duplicated")
     _run(workspace)
@@ -226,7 +226,7 @@ def test_duplicate_spawn_labels_are_a_protocol_error(tmp_path: Path) -> None:
 
 
 def test_gather_step_reads_labeled_child_observations_from_its_context(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _parent_runner([("alpha", "succeed"), ("beta", "fail")]))
     workspace.submit(payload, "project/gathering")
     _run(workspace)
@@ -257,7 +257,7 @@ def test_gather_step_reads_labeled_child_observations_from_its_context(tmp_path:
 
 
 def test_a_retryable_declared_failure_retries_until_the_budget_is_exhausted(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(
         tmp_path / "source",
         _RETRYABLE_RUNNER,
@@ -284,7 +284,7 @@ def test_a_retryable_declared_failure_retries_until_the_budget_is_exhausted(tmp_
 
 
 def test_a_retryable_failure_is_not_retried_without_a_remaining_attempt(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(
         tmp_path / "source",
         _RETRYABLE_RUNNER,

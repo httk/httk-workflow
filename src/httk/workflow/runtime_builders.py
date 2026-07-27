@@ -13,13 +13,13 @@ import json
 import os
 import shutil
 import uuid
-import warnings
 from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, Self
 
 from ._util import (
+    _warn_deprecated,
     json_bytes,
     read_json,
     sha256_file,
@@ -45,16 +45,6 @@ if TYPE_CHECKING:
 
 type OutcomeAction = Literal["advance", "retry", "wait", "succeed", "fail", "pause"]
 type JoinCondition = Literal["all_succeeded", "all_terminal", "any_succeeded", "at_least"]
-
-
-def _warn_deprecated(name: str, replacement: str) -> None:
-    """Announce one superseded interface that still works this release."""
-
-    warnings.warn(
-        f"{name} is deprecated and will be removed in a later release; use {replacement} instead",
-        DeprecationWarning,
-        stacklevel=3,
-    )
 
 
 def _relative(value: str | os.PathLike[str], name: str) -> PurePosixPath:

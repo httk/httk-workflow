@@ -9,10 +9,10 @@ engines read and write it — and this module is *httk₂* reading it.
 
 .. code-block:: python
 
-    from httk.workflow import WorkflowWorkspace
+    from httk.workflow import Workspace
     from httk.workflow.integrations.pwd import import_pwd
 
-    workspace = WorkflowWorkspace.initialize("workflow-workspace")
+    workspace = Workspace.initialize("workflow-workspace")
     job = import_pwd(workspace, "workflow.json", modules=["workflow.py"], tag="arithmetic")
 
 The import is one way and produces exactly one job. The whole graph runs inside
@@ -47,7 +47,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from ..models import MAXIMUM_INPUTS_BYTES
-from ..workspace import WorkflowWorkspace
+from ..workspace import Workspace
 from . import DEFAULT_PLACEMENT, FILES_DIRECTORY, ScaffoldedJob, submit_integration_job
 
 _LOGGER = logging.getLogger(__name__)
@@ -300,7 +300,7 @@ def _validate_with_package(raw: Mapping[str, object], source: str) -> None:
 
 
 def import_pwd(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     document_path: str | os.PathLike[str],
     *,
     placement: str | PurePosixPath = DEFAULT_PLACEMENT,

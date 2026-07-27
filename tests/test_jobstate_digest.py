@@ -7,7 +7,7 @@ from httk.workflow import (
     JobSpec,
     JobState,
     TaskManager,
-    WorkflowWorkspace,
+    Workspace,
     prepare_job_payload,
 )
 from httk.workflow.transfers import _payload_digest
@@ -36,7 +36,7 @@ raise SystemExit(run.main())
 """
 
 
-def _submit(workspace: WorkflowWorkspace, root: Path, placement: str = "project/stateful") -> str:
+def _submit(workspace: Workspace, root: Path, placement: str = "project/stateful") -> str:
     payload = root / "payload"
     files = payload / "files"
     files.mkdir(parents=True)
@@ -59,7 +59,7 @@ def _submit(workspace: WorkflowWorkspace, root: Path, placement: str = "project/
 
 
 def test_job_state_and_attempt_control_do_not_change_the_payload_digest(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     job_id = _submit(workspace, tmp_path / "source")
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
@@ -81,8 +81,8 @@ def test_job_state_and_attempt_control_do_not_change_the_payload_digest(tmp_path
 
 
 def test_a_job_that_wrote_state_still_transfers_and_verifies(tmp_path: Path) -> None:
-    source = WorkflowWorkspace.initialize(tmp_path / "source-workspace", extensions=["detached-transfer-v1"])
-    destination = WorkflowWorkspace.initialize(
+    source = Workspace.initialize(tmp_path / "source-workspace", extensions=["detached-transfer-v1"])
+    destination = Workspace.initialize(
         tmp_path / "destination-workspace",
         extensions=["detached-transfer-v1"],
     )

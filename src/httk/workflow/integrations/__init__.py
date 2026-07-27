@@ -54,7 +54,7 @@ from ..scaffold import (
     ScaffoldedJob,
     payload_relative,
 )
-from ..workspace import WorkflowWorkspace
+from ..workspace import Workspace
 
 #: The module the reserved ``pkg:`` runner form names for these runners.
 PACKAGE = "httk.workflow.integrations"
@@ -103,7 +103,7 @@ def runner_reference(name: str) -> dict[str, object]:
 
 
 def submit_integration_job(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     *,
     runner: str,
     workflow: str,

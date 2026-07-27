@@ -1,4 +1,4 @@
-# Writing a computer adapter
+# Writing a remote adapter
 
 *For operators and integrators who need to reach a machine the packaged
 `local`, `local-slurm`, and `ssh-slurm` templates do not cover.* This page is the
@@ -9,7 +9,7 @@ operator-facing description of the same adapters — what each maintained kind
 does, and which command-line options drive it — is in
 {doc}`workflow_cli`.
 
-A *computer adapter* is a versioned directory of executables. Everything
+A *remote adapter* is a versioned directory of executables. Everything
 *httk-workflow* does on another machine — push a job bundle, run a command,
 submit a manager, pull results back — goes through one of them. The engine never
 opens an ssh connection, never spells out a scheduler command, and never parses
@@ -19,7 +19,7 @@ anything but the one JSON document an operation prints.
 
 ```text
 my-cluster/
-├── computer.json        # the only member the engine reads directly
+├── remote.json          # the only member the engine reads directly
 ├── configure
 ├── install
 ├── invoke
@@ -35,10 +35,24 @@ global one of the same name:
 
 | Scope | Location |
 | --- | --- |
-| project | `PROJECT/.httk-project/computers/NAME/` |
-| global | `$XDG_DATA_HOME/httk/computers/NAME/` |
+| project | `PROJECT/.httk-project/remotes/NAME/` |
+| global | `$XDG_CONFIG_HOME/httk/remotes/NAME/` |
 
-### `computer.json`
+A bundle written before the rename carries `computer.json` instead, below a
+`computers/` directory, and both are still read where they lie. Everything
+written is written under the current names.
+
+### Historical protocol names
+
+The file was renamed; the *format identifiers* inside it and in every request and
+result document were not. `httk-computer-adapter`, `httk-computer-request`, and
+`httk-computer-result` are protocol: an adapter written against an earlier
+release, or a bundle authored elsewhere, must keep validating and keep being
+understood, and renaming an identifier would refuse it for no reason at all.
+Read them as historical spellings of *remote*; every side already agrees on
+them, and nothing new should be added under the older word.
+
+### `remote.json`
 
 The document is validated by
 {py:func}`httk.workflow.adapters.validate_adapter_bundle` every single time the
@@ -71,7 +85,7 @@ satisfying it stops being usable, which is the point.
 
 | Member | Required | Meaning |
 | --- | --- | --- |
-| `format` | yes | must be `httk-computer-adapter` |
+| `format` | yes | must be `httk-computer-adapter` (the historical spelling; see above) |
 | `format_version` | yes | must be `1` |
 | `adapter_version` | yes | must be `1`; the version of the operation contract below |
 | `operations` | yes | one bundle-relative path per operation in {py:data}`httk.workflow.adapters.ADAPTER_OPERATIONS`. All seven must be present, none may be absolute or contain `..`, and each must exist and be executable |
@@ -135,7 +149,7 @@ envelope is always present:
   "format": "httk-computer-request",
   "format_version": 1,
   "operation": "invoke",
-  "adapter_dir": "/home/me/project/.httk-project/computers/my-cluster",
+  "adapter_dir": "/home/me/project/.httk-project/remotes/my-cluster",
   "queue": "default",
   "queue_settings": {"host": "login.example.org", "workspace": "/scratch/me/runs"}
 }
@@ -182,7 +196,7 @@ validate the first configuration of a host. Merge `settings` over
 
 ```json
 {"format": "httk-computer-request", "format_version": 1, "operation": "configure",
- "adapter_dir": "/home/me/.local/share/httk/computers/my-cluster", "queue": "default",
+ "adapter_dir": "/home/me/.config/httk/remotes/my-cluster", "queue": "default",
  "queue_settings": {"workspace": "/scratch/me/runs"},
  "settings": {"host": "login.example.org", "username": "me"}}
 ```
@@ -205,7 +219,7 @@ No request members beyond the envelope.
 
 ```json
 {"format": "httk-computer-request", "format_version": 1, "operation": "install",
- "adapter_dir": "/home/me/.local/share/httk/computers/my-cluster", "queue": "default",
+ "adapter_dir": "/home/me/.config/httk/remotes/my-cluster", "queue": "default",
  "queue_settings": {"host": "login.example.org", "username": "me",
                     "workspace": "/scratch/me/runs", "bootstrap": "pip"}}
 ```
@@ -245,7 +259,7 @@ did.
 ```json
 {"argv": ["httk", "workflow", "workspace", "status", "/scratch/me/runs", "--json"],
  "cwd": "/scratch/me", "format": "httk-computer-request", "format_version": 1,
- "operation": "invoke", "adapter_dir": "/home/me/.local/share/httk/computers/my-cluster",
+ "operation": "invoke", "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
  "queue": "default", "queue_settings": {"host": "login.example.org"}}
 ```
 
@@ -257,7 +271,7 @@ did.
 **A nonzero `returncode` is still `ok: true`.** The operation succeeded — it ran
 the command and is reporting the outcome. `ok: false` means the adapter could not
 run it at all. Callers check `returncode` themselves; every remote command in
-`httk workflow remote …` does exactly that and raises on the value.
+`httk workflow transfer …` does exactly that and raises on the value.
 
 If `argv[0]` is the literal `httk`, an adapter is expected to honour the queue's
 `httk_command` setting by replacing that one element with the parsed vector; see
@@ -268,13 +282,13 @@ If `argv[0]` is the literal `httk`, an adapter is expected to honour the queue's
 Byte-for-byte the same contract as `invoke`, except that `cwd` is ignored. It
 exists as a separate operation so that a health probe can be given a different
 implementation, a different timeout, or different credentials from arbitrary
-command execution. `httk workflow remote fetch` uses it to check that the far
+command execution. `httk workflow transfer fetch` uses it to check that the far
 side is a compatible workspace before anything moves.
 
 ```json
 {"argv": ["httk", "workflow", "workspace", "status", "/scratch/me/runs", "--json"],
  "format": "httk-computer-request", "format_version": 1, "operation": "status",
- "adapter_dir": "/home/me/.local/share/httk/computers/my-cluster", "queue": "default",
+ "adapter_dir": "/home/me/.config/httk/remotes/my-cluster", "queue": "default",
  "queue_settings": {"host": "login.example.org"}}
 ```
 
@@ -302,7 +316,7 @@ manifest must not be able to name anything outside the workspace it came from.
 {"destination": "/scratch/me/runs/.httk-workflow/transfers/incoming/6f1c…",
  "format": "httk-computer-request", "format_version": 1, "operation": "push",
  "source": "/home/me/ws/.httk-workflow/transfers/outgoing/6f1c…",
- "adapter_dir": "/home/me/.local/share/httk/computers/my-cluster", "queue": "default",
+ "adapter_dir": "/home/me/.config/httk/remotes/my-cluster", "queue": "default",
  "queue_settings": {"host": "login.example.org"}}
 ```
 
@@ -341,7 +355,7 @@ not the normal path.
 {"argv": ["httk", "workflow", "manager", "run", "/scratch/me/runs"], "count": 2,
  "format": "httk-computer-request", "format_version": 1, "operation": "start-manager",
  "workspace": "/scratch/me/runs",
- "adapter_dir": "/home/me/.local/share/httk/computers/my-cluster", "queue": "large",
+ "adapter_dir": "/home/me/.config/httk/remotes/my-cluster", "queue": "large",
  "queue_settings": {"account": "snic2026-1-1", "host": "login.example.org",
                     "nodes": "16", "partition": "main", "time_limit": "24:00:00",
                     "workers": "4"}}
@@ -370,28 +384,28 @@ command line always wins over the queue's default.
 
 ## Settings and credentials
 
-`httk workflow computer configure NAME --set KEY=VALUE` splits every assignment
+`httk workflow remote configure NAME --set KEY=VALUE` splits every assignment
 in two, by name:
 
 - keys in {py:data}`httk.workflow.adapters.PERSISTABLE_QUEUE_SETTINGS` —
   `account`, `bootstrap`, `check_connectivity`, `cpus_per_task`, `host`,
   `httk_command`, `legacy_settings`, `nodes`, `partition`, `port`,
   `reservation`, `time_limit`, `username`, `workers`, `workspace` — are written
-  into `queues.<QUEUE>` of the shareable, signable `computer.json`;
+  into `queues.<QUEUE>` of the shareable, signable `remote.json`;
 - **every other key** is a credential. It is written per queue into
   `credentials.json` beside it, with mode `0600`, and project manifests exclude
   that file.
 
 {py:func}`httk.workflow.adapters.queue_settings` merges the two back together —
-`computer.json` first, `credentials.json` over it — and that single object is what
+`remote.json` first, `credentials.json` over it — and that single object is what
 arrives as the request's `queue_settings`. **An adapter never sees the split.**
 It reads one flat settings object and cannot tell, and must not care, which file
-a value came from. `httk workflow computer show NAME` reports which file each
+a value came from. `httk workflow remote show NAME` reports which file each
 setting came from, and the *name* only — never the value — of every credential.
 
 Two consequences worth stating:
 
-- A credential is never a member of `computer.json`, so a signed project manifest
+- A credential is never a member of `remote.json`, so a signed project manifest
   covering the bundle covers no secret.
 - Adding a persistable key means adding it to `PERSISTABLE_QUEUE_SETTINGS`. A key
   an adapter invents and the engine does not know about is treated as a secret,
@@ -457,7 +471,7 @@ Prefer refusals. An operator reading `cannot reach me@login.example.org:
 Permission denied; set check_connectivity=no to configure the queue anyway` is
 being told what to do next; an operator reading a traceback is not.
 
-The timeout is `timeout_seconds` from `computer.json`, overridable per call by
+The timeout is `timeout_seconds` from `remote.json`, overridable per call by
 `--adapter-timeout` on the command line. It is enforced by the *caller*, which
 kills the operation; an adapter that may legitimately take minutes — an `rsync`
 of a large campaign — belongs to a bundle whose `timeout_seconds` says so. The
@@ -609,15 +623,16 @@ The bundle is an ordinary directory; put it where the CLI looks and configure a
 queue:
 
 ```console
-mkdir -p .httk-project/computers/my-cluster
-cp -a my-cluster/. .httk-project/computers/my-cluster/
-httk workflow computer configure my-cluster --set username=me
-httk workflow computer install my-cluster
-httk workflow remote start-manager my-cluster:wide --count 2
+mkdir -p .httk-project/remotes/my-cluster
+cp -a my-cluster/. .httk-project/remotes/my-cluster/
+httk workflow remote configure my-cluster --set username=me
+httk workflow remote install my-cluster
+httk workflow transfer start-manager my-cluster:wide --count 2
 ```
 
-Nothing about the rest of the system changes: `remote send`, `remote fetch`, and
-`remote status` drive the new bundle through exactly the operations above.
+Nothing about the rest of the system changes: `transfer send`, `transfer fetch`,
+and `transfer status` drive the new bundle through exactly the operations
+above.
 
 ## Reading the maintained implementation
 

@@ -32,7 +32,7 @@ from .projects import (
     require_project,
     trusted_project_keys,
 )
-from .workspace import WorkflowWorkspace
+from .workspace import Workspace
 
 _DOMAIN = b"httk-project-manifest-v2\0"
 
@@ -192,7 +192,7 @@ def _read_maintenance_lock(path: Path) -> MaintenanceLock | None:
     return MaintenanceLock(path=path, pid=None, hostname=None, created=None)
 
 
-def read_maintenance_lock(workspace: WorkflowWorkspace) -> MaintenanceLock | None:
+def read_maintenance_lock(workspace: Workspace) -> MaintenanceLock | None:
     """Describe the workspace maintenance lock, or ``None`` when it is absent."""
 
     return _read_maintenance_lock(workspace.control / MAINTENANCE_LOCK_FILE)
@@ -224,7 +224,7 @@ def _acquire_maintenance_lock(path: Path) -> None:
     raise ValueError(f"cannot acquire the project maintenance lock: {path}")
 
 
-def release_maintenance_lock(workspace: WorkflowWorkspace, *, force: bool = False) -> str:
+def release_maintenance_lock(workspace: Workspace, *, force: bool = False) -> str:
     """Remove a stale, or with *force* any, maintenance lock and report it."""
 
     path = workspace.control / MAINTENANCE_LOCK_FILE
@@ -239,7 +239,7 @@ def release_maintenance_lock(workspace: WorkflowWorkspace, *, force: bool = Fals
 
 
 @contextmanager
-def workspace_maintenance_guard(workspace: WorkflowWorkspace) -> Iterator[None]:
+def workspace_maintenance_guard(workspace: Workspace) -> Iterator[None]:
     """Fence manager launches while a project snapshot is inspected."""
 
     path = workspace.control / MAINTENANCE_LOCK_FILE
@@ -269,7 +269,7 @@ def create_manifest(
     exclusions = project_exclusions(metadata)
     if destination.is_relative_to(root):
         exclusions = (*exclusions, destination.relative_to(root).as_posix())
-    workspace = WorkflowWorkspace(root)
+    workspace = Workspace(root)
     with workspace_maintenance_guard(workspace):
         seed = _seed(root)
         header = {

@@ -12,7 +12,7 @@ from pathlib import Path
 from httk.core import ed25519_generate_seed, ed25519_public_key
 
 from ._util import write_json_atomic
-from .workspace import WorkflowWorkspace
+from .workspace import Workspace
 
 PROJECT_DIRECTORY = ".httk-project"
 PROJECT_FILE = "project.json"
@@ -35,6 +35,9 @@ DEFAULT_MANIFEST_EXCLUSIONS = (
     ".httk-project/project.json",
     ".httk-project/keys/*.seed",
     ".httk-project/keys/*.priv",
+    ".httk-project/remotes/**/credentials*",
+    # The pre-rename name of the same directory, so a project initialized by an
+    # earlier release never publishes a credential either.
     ".httk-project/computers/**/credentials*",
     ".httk-project/manifest.jsonl.bz2",
     ".httk-workflow",
@@ -246,9 +249,9 @@ def initialize_project(
     metadata["public_key"] = _write_project_key(control)
     metadata["trusted_keys"] = []
     write_json_atomic(control / PROJECT_FILE, metadata)
-    (control / "computers").mkdir()
+    (control / "remotes").mkdir()
     try:
-        WorkflowWorkspace.initialize(project, extensions=("detached-transfer-v1",))
+        Workspace.initialize(project, extensions=("detached-transfer-v1",))
     except Exception:
         # Leave a recognizable project rather than guessing whether it is safe
         # to remove a directory that may already contain user files.

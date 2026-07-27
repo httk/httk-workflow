@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest  # pyright: ignore[reportMissingImports]
 from httk.core import CLIContext
 
-from httk.workflow import WorkflowWorkspace
-from httk.workflow.adapters import add_computer, import_v1_computer, run_adapter
+from httk.workflow import Workspace
+from httk.workflow.adapters import add_remote, import_v1_remote, run_adapter
 from httk.workflow.configuration import identity_key_paths
 from httk.workflow.manifests import create_manifest, verify_manifest
 from httk.workflow.projects import initialize_project
@@ -47,7 +47,7 @@ def _payload(root: Path) -> tuple[Path, str]:
 
 def test_all_command_groups_have_help(tmp_path: Path, capsys) -> None:
     context = CLIContext("httk", tmp_path)
-    for group in ("workspace", "runner", "job", "manager", "config", "project", "computer", "remote"):
+    for group in ("workspace", "runner", "job", "manager", "config", "project", "remote", "transfer"):
         assert command([group, "--help"], context) == 0
     assert command(["v1", "prepare", "--help"], context) == 0
     assert "usage:" in capsys.readouterr().out
@@ -97,7 +97,7 @@ def test_manifest_determinism_special_names_exclusions_and_tampering(tmp_path: P
 def test_manifest_refuses_active_workspace(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="active")
-    workspace = WorkflowWorkspace(project)
+    workspace = Workspace(project)
     payload, job_id = _payload(tmp_path)
     submitted = workspace.submit(payload, "jobs")
     # Construct the active state through the public transition protocol.
@@ -127,7 +127,7 @@ print(json.dumps({"format":"httk-computer-result","format_version":1,
     operations = {
         name: "operation" for name in ("configure", "install", "invoke", "push", "pull", "start-manager", "status")
     }
-    (bundle / "computer.json").write_text(
+    (bundle / "remote.json").write_text(
         json.dumps(
             {
                 "format": "httk-computer-adapter",
@@ -146,7 +146,7 @@ print(json.dumps({"format":"httk-computer-result","format_version":1,
     assert not sentinel.exists()
 
 
-def test_safe_v1_computer_import_uses_maintained_adapter(tmp_path: Path) -> None:
+def test_safe_v1_remote_import_uses_maintained_adapter(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="legacy-import")
     legacy = tmp_path / "legacy-local"
@@ -157,8 +157,8 @@ def test_safe_v1_computer_import_uses_maintained_adapter(tmp_path: Path) -> None
         'LOCAL_HTTK_DIR="~/Httk-runs"\nVASP_COMMAND="value; touch should-not-run"\n',
         encoding="utf-8",
     )
-    imported = import_v1_computer(legacy, name="mapped", project=project)
-    metadata = json.loads((imported / "computer.json").read_text(encoding="utf-8"))
+    imported = import_v1_remote(legacy, name="mapped", project=project)
+    metadata = json.loads((imported / "remote.json").read_text(encoding="utf-8"))
     assert metadata["kind"] == "local"
     assert metadata["legacy_import"]["legacy_executables_copied"] is False
     assert metadata["queues"]["default"]["legacy_settings"]["VASP_COMMAND"] == "value; touch should-not-run"
@@ -167,9 +167,9 @@ def test_safe_v1_computer_import_uses_maintained_adapter(tmp_path: Path) -> None
 
 
 def test_workspace_upgrade_and_transfer_round_trip_are_idempotent(tmp_path: Path) -> None:
-    source = WorkflowWorkspace.initialize(tmp_path / "source")
+    source = Workspace.initialize(tmp_path / "source")
     assert source.upgrade(["detached-transfer-v1"]) == frozenset({"detached-transfer-v1"})
-    destination = WorkflowWorkspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+    destination = Workspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
     payload, job_id = _payload(tmp_path)
     source.submit(payload, "jobs")
     transfer_id = str(uuid.uuid4())
@@ -192,22 +192,22 @@ def test_tasks_send_uses_adapter_status_push_import_and_ack(tmp_path: Path) -> N
     destination_root = tmp_path / "destination"
     initialize_project(source_root, name="source")
     initialize_project(destination_root, name="destination")
-    computer = add_computer("local", template="local", project=source_root)
-    metadata = json.loads((computer / "computer.json").read_text(encoding="utf-8"))
+    remote = add_remote("local", template="local", project=source_root)
+    metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = str(destination_root)
-    (computer / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (remote / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
     payload, job_id = _payload(tmp_path)
-    WorkflowWorkspace(source_root).submit(payload, "jobs")
+    Workspace(source_root).submit(payload, "jobs")
     assert (
         command(
-            ["remote", "send", "local", job_id, "--source-workspace", str(source_root)],
+            ["transfer", "send", "local", job_id, "--source-workspace", str(source_root)],
             CLIContext("httk", source_root),
         )
         == 0
     )
-    imported = WorkflowWorkspace(destination_root).find_marker_by_id(job_id)
+    imported = Workspace(destination_root).find_marker_by_id(job_id)
     assert imported is not None and imported.kind == "submitted"
-    assert WorkflowWorkspace(source_root).find_marker_by_id(job_id) is None
+    assert Workspace(source_root).find_marker_by_id(job_id) is None
 
 
 def test_tasks_send_resumes_after_copy_before_import(tmp_path: Path, monkeypatch) -> None:
@@ -215,12 +215,12 @@ def test_tasks_send_resumes_after_copy_before_import(tmp_path: Path, monkeypatch
     destination_root = tmp_path / "destination"
     initialize_project(source_root, name="source")
     initialize_project(destination_root, name="destination")
-    computer = add_computer("local", template="local", project=source_root)
-    metadata = json.loads((computer / "computer.json").read_text(encoding="utf-8"))
+    remote = add_remote("local", template="local", project=source_root)
+    metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = str(destination_root)
-    (computer / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (remote / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
     payload, job_id = _payload(tmp_path)
-    WorkflowWorkspace(source_root).submit(payload, "jobs")
+    Workspace(source_root).submit(payload, "jobs")
 
     from httk.workflow import workflow_cli
 
@@ -240,7 +240,7 @@ def test_tasks_send_resumes_after_copy_before_import(tmp_path: Path, monkeypatch
     # command they had in their shell history from before the rename.
     arguments = ["tasks", "send", "local", job_id, "--workspace", str(source_root)]
     assert command(arguments, CLIContext("httk", source_root)) == 2
-    assert WorkflowWorkspace(source_root).find_marker_by_id(job_id) is None
+    assert Workspace(source_root).find_marker_by_id(job_id) is None
     monkeypatch.setattr(workflow_cli, "run_adapter", real_run_adapter)
     assert command(arguments, CLIContext("httk", source_root)) == 0
-    assert WorkflowWorkspace(destination_root).find_marker_by_id(job_id) is not None
+    assert Workspace(destination_root).find_marker_by_id(job_id) is not None

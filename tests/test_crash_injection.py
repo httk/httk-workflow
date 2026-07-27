@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow import transactions as transactions_module
 from httk.workflow._logging import reset_logging
 from httk.workflow.errors import TransitionLostError, WorkspaceUnavailableError
@@ -267,7 +267,7 @@ def _payload(
     return payload, job_id
 
 
-def _destination_kind(workspace: WorkflowWorkspace, destination: Path) -> str:
+def _destination_kind(workspace: Workspace, destination: Path) -> str:
     """Return the state kind one marker destination path belongs to."""
 
     return destination.relative_to(workspace.control / "state").parts[0]
@@ -287,10 +287,10 @@ def _kill_at_marker_rename(
     authoritative and only cleanup was lost.
     """
 
-    real = WorkflowWorkspace._verified_marker_rename
+    real = Workspace._verified_marker_rename
     armed = [True]
 
-    def hooked(self: WorkflowWorkspace, marker: Marker, destination: Path) -> Marker:
+    def hooked(self: Workspace, marker: Marker, destination: Path) -> Marker:
         if armed[0] and marker.job_key == job_key and _destination_kind(self, destination) == kind:
             armed[0] = False
             if after:
@@ -298,7 +298,7 @@ def _kill_at_marker_rename(
             raise _KilledManager()
         return real(self, marker, destination)
 
-    monkeypatch.setattr(WorkflowWorkspace, "_verified_marker_rename", hooked)
+    monkeypatch.setattr(Workspace, "_verified_marker_rename", hooked)
 
 
 def _kill_on_entry(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
@@ -361,7 +361,7 @@ def _stop_attempts(manager: TaskManager) -> None:
             pass
 
 
-def _walk_chain(workspace: WorkflowWorkspace, marker: Marker) -> list[dict[str, object]]:
+def _walk_chain(workspace: Workspace, marker: Marker) -> list[dict[str, object]]:
     """Return one job's history, newest first, walked back from its marker."""
 
     frames: list[dict[str, object]] = []
@@ -377,7 +377,7 @@ def _walk_chain(workspace: WorkflowWorkspace, marker: Marker) -> list[dict[str, 
     return frames
 
 
-def _drive_until(workspace: WorkflowWorkspace, manager: TaskManager, job_id: str, kinds: set[str]) -> Marker:
+def _drive_until(workspace: Workspace, manager: TaskManager, job_id: str, kinds: set[str]) -> Marker:
     """Tick until one job reaches any of *kinds*, returning its marker."""
 
     deadline = time.monotonic() + 30.0
@@ -463,7 +463,7 @@ def test_a_fresh_manager_completes_an_interrupted_commit_exactly_once(
     interruption: _Interruption,
 ) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root, extensions=["transactional-data-v1"])
+    Workspace.initialize(root, extensions=["transactional-data-v1"])
     payload, job_id = _payload(
         tmp_path / "source",
         _COMMIT_HEAVY_RUNNER,
@@ -471,16 +471,16 @@ def test_a_fresh_manager_completes_an_interrupted_commit_exactly_once(
         data_mode="transactional",
         initial_step="prepare",
     )
-    submitted = WorkflowWorkspace(root).submit(payload, "project/interrupted")
+    submitted = Workspace(root).submit(payload, "project/interrupted")
 
-    with TaskManager(WorkflowWorkspace(root), heartbeat_interval=0.01) as dying:
+    with TaskManager(Workspace(root), heartbeat_interval=0.01) as dying:
         interruption.arm(monkeypatch, submitted.job_key)
         with pytest.raises(_KilledManager):
             _tick_until_killed(dying)
         _stop_attempts(dying)
     monkeypatch.undo()
 
-    workspace = WorkflowWorkspace(root)
+    workspace = Workspace(root)
     interrupted = workspace.find_marker_by_id(job_id)
     assert interrupted is not None and interrupted.kind == interruption.kind_after_kill
     interrupted_payload = workspace.payload_path(interrupted.placement, interrupted.job_key)
@@ -491,7 +491,7 @@ def test_a_fresh_manager_completes_an_interrupted_commit_exactly_once(
         # And here it really did die with the child already registered.
         assert len([m for m in workspace.scan_markers() if m.job_key.startswith("child--")]) == 1
 
-    with TaskManager(WorkflowWorkspace(root), heartbeat_interval=0.01) as fresh:
+    with TaskManager(Workspace(root), heartbeat_interval=0.01) as fresh:
         fresh.run_until_idle(timeout=90.0)
 
     parent = workspace.find_marker_by_id(job_id)
@@ -537,7 +537,7 @@ def test_a_commit_resumes_after_its_registered_child_has_already_started(
     """
 
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root, extensions=["transactional-data-v1"])
+    Workspace.initialize(root, extensions=["transactional-data-v1"])
     payload, job_id = _payload(
         tmp_path / "source",
         _COMMIT_HEAVY_RUNNER,
@@ -545,16 +545,16 @@ def test_a_commit_resumes_after_its_registered_child_has_already_started(
         data_mode="transactional",
         initial_step="prepare",
     )
-    submitted = WorkflowWorkspace(root).submit(payload, "project/overtaken")
+    submitted = Workspace(root).submit(payload, "project/overtaken")
 
-    with TaskManager(WorkflowWorkspace(root), heartbeat_interval=0.01) as dying:
+    with TaskManager(Workspace(root), heartbeat_interval=0.01) as dying:
         _kill_after(monkeypatch, "_register_children")
         with pytest.raises(_KilledManager):
             _tick_until_killed(dying)
         _stop_attempts(dying)
     monkeypatch.undo()
 
-    workspace = WorkflowWorkspace(root)
+    workspace = Workspace(root)
     interrupted = workspace.find_marker_by_id(job_id)
     assert interrupted is not None and interrupted.kind == "committing"
 
@@ -568,7 +568,7 @@ def test_a_commit_resumes_after_its_registered_child_has_already_started(
             real_process_committing(self, marker)
 
     monkeypatch.setattr(TaskManager, "_process_committing", only_the_child)
-    with TaskManager(WorkflowWorkspace(root), heartbeat_interval=0.01) as child_runner:
+    with TaskManager(Workspace(root), heartbeat_interval=0.01) as child_runner:
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:
             child_runner.tick()
@@ -579,7 +579,7 @@ def test_a_commit_resumes_after_its_registered_child_has_already_started(
     monkeypatch.undo()
     assert workspace.find_markers(child_key)[0].kind == "succeeded"
 
-    with TaskManager(WorkflowWorkspace(root), heartbeat_interval=0.01) as fresh:
+    with TaskManager(Workspace(root), heartbeat_interval=0.01) as fresh:
         fresh.run_until_idle(timeout=90.0)
 
     parent = workspace.find_marker_by_id(job_id)
@@ -597,9 +597,9 @@ def test_a_commit_resumes_after_its_registered_child_has_already_started(
 @pytest.mark.slow
 def test_a_sigkilled_manager_process_leaves_a_job_a_fresh_manager_finishes(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root)
+    Workspace.initialize(root)
     payload, job_id = _payload(tmp_path / "source", _ORPHANABLE_RUNNER, tag="sigkilled")
-    WorkflowWorkspace(root).submit(payload, "project/sigkilled")
+    Workspace(root).submit(payload, "project/sigkilled")
 
     source_root = Path(__file__).resolve().parents[1] / "src"
     environment = dict(os.environ)
@@ -630,7 +630,7 @@ def test_a_sigkilled_manager_process_leaves_a_job_a_fresh_manager_finishes(tmp_p
     if not published:  # pragma: no cover - only on a host where the orphan was reaped
         pytest.skip("the orphaned runner never published its outcome on this host")
 
-    workspace = WorkflowWorkspace(root)
+    workspace = Workspace(root)
     with TaskManager(workspace, heartbeat_interval=0.01) as fresh:
         fresh.run_until_idle(timeout=90.0)
 
@@ -691,7 +691,7 @@ def test_a_claim_whose_rename_happened_but_reported_failure_is_won(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "workspace"
-    workspace = WorkflowWorkspace.initialize(root)
+    workspace = Workspace.initialize(root)
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="claimed")
     workspace.submit(payload, "project/claimed")
 
@@ -722,7 +722,7 @@ def test_an_outcome_commit_whose_rename_happened_but_reported_failure_is_won(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "workspace"
-    workspace = WorkflowWorkspace.initialize(root)
+    workspace = Workspace.initialize(root)
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="committed")
     workspace.submit(payload, "project/committed")
 
@@ -750,7 +750,7 @@ def test_a_cancellation_fence_whose_rename_happened_but_reported_failure_is_won(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "workspace"
-    workspace = WorkflowWorkspace.initialize(root)
+    workspace = Workspace.initialize(root)
     payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="cancelled")
     workspace.submit(payload, "project/cancelled")
 
@@ -795,7 +795,7 @@ def test_a_rename_that_really_failed_is_simply_retried(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "workspace"
-    workspace = WorkflowWorkspace.initialize(root)
+    workspace = Workspace.initialize(root)
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="retried")
     workspace.submit(payload, "project/retried")
 
@@ -819,11 +819,11 @@ def test_a_rename_that_failed_because_another_actor_won_is_reported_as_lost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "workspace"
-    workspace = WorkflowWorkspace.initialize(root)
+    workspace = Workspace.initialize(root)
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="lost")
     workspace.submit(payload, "project/lost")
 
-    rival = WorkflowWorkspace(root)
+    rival = Workspace(root)
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager._register_submissions()
         ready = workspace.find_marker_by_id(job_id)
@@ -907,7 +907,7 @@ def test_a_transition_concludes_correctly_once_a_late_destination_becomes_visibl
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "workspace"
-    workspace = WorkflowWorkspace.initialize(root)
+    workspace = Workspace.initialize(root)
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="invisible")
     submitted = workspace.submit(payload, "project/invisible")
 
@@ -934,7 +934,7 @@ def test_a_destination_invisible_past_the_deadline_is_contained_by_the_tick(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     root = tmp_path / "workspace"
-    workspace = WorkflowWorkspace.initialize(root, policy={"visibility_deadline_seconds": 0.05})
+    workspace = Workspace.initialize(root, policy={"visibility_deadline_seconds": 0.05})
     refused, refused_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="refused")
     contained, contained_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="contained")
     workspace.submit(refused, "project/refused")

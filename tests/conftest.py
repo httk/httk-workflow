@@ -1,4 +1,4 @@
-"""The stand-in cluster the computer-adapter tests drive for real.
+"""The stand-in cluster the remote-adapter tests drive for real.
 
 No test that uses this needs a network or a batch system. A stand-in ``ssh`` on
 ``PATH`` runs the command it is given through a local shell rooted in a per-test
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
 
-from httk.workflow.adapters import add_computer
+from httk.workflow.adapters import add_remote
 
 #: The host every fake ``ssh-slurm`` queue is pointed at. The stand-in ``ssh``
 #: ignores it beyond logging it, but the adapters must still carry it around.
@@ -156,21 +156,21 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
     return cluster
 
 
-def fake_computer(
+def fake_remote(
     project: Path,
     *,
     template: str = "ssh-slurm",
     name: str = "cluster",
     **settings: object,
 ) -> Path:
-    """Add one computer to *project* and point its default queue at the stand-in."""
+    """Add one remote to *project* and point its default queue at the stand-in."""
 
-    bundle = add_computer(name, template=template, project=project)
-    metadata = json.loads((bundle / "computer.json").read_text(encoding="utf-8"))
+    bundle = add_remote(name, template=template, project=project)
+    metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     queue = dict(metadata["queues"]["default"])
     if template == "ssh-slurm":
         queue.update({"host": FAKE_HOST, "username": "someone"})
     queue.update(settings)
     metadata["queues"]["default"] = queue
-    (bundle / "computer.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+    (bundle / "remote.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
     return bundle

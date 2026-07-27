@@ -127,12 +127,39 @@ suppress_warnings = ["myst.xref_missing", "autoapi.python_import_resolution"]
 # in full, so the re-export is what gets dropped from the package page.
 shadowed_by_module = {"httk.workflow.harvest"}
 
+# Members that reach a package page only because its ``__init__`` imports them.
+# ``imported-members`` is what documents a package's deliberate re-exports, and
+# for ``httk.workflow`` that is exactly the point. A subpackage whose ``__init__``
+# is one module of implementation is the other case: documenting the helpers it
+# merely uses would repeat pages that already carry them, on a page whose
+# namespace does not contain the names those signatures reference.
+borrowed_by_package = {
+    "httk.workflow.vasp": frozenset(
+        {
+            "JOB_STATE_DIRECTORY",
+            "Diagnostic",
+            "FollowSource",
+            "ProcessReport",
+            "ProcessSupervisor",
+            "ReplayableWorkdirBatch",
+            "SourceEvent",
+            "read_json",
+            "sha256_file",
+            "utc_now",
+            "write_json_atomic",
+        }
+    ),
+}
+
 
 def skip_member(app, what, name, obj, skip, options):
     # Skip private members (those starting with _)
     if name.startswith('_'):
         return True
     if what != "module" and name in shadowed_by_module:
+        return True
+    owner, _, short = str(getattr(obj, "id", None) or name).rpartition(".")
+    if short in borrowed_by_package.get(owner, frozenset()):
         return True
     return skip
 

@@ -9,7 +9,7 @@ from httk.workflow import (
     Failure,
     FormatError,
     TaskManager,
-    WorkflowWorkspace,
+    Workspace,
     validate_failure,
 )
 
@@ -207,7 +207,7 @@ def test_validate_failure_accepts_only_the_canonical_shape() -> None:
 
 
 def test_bash_published_failure_reaches_the_failed_state_frame(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _BASH_FAIL_RUNNER)
     workspace.submit(payload, "project/bash-failure")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
@@ -224,7 +224,7 @@ def test_bash_published_failure_reaches_the_failed_state_frame(tmp_path: Path) -
 
 
 def test_malformed_published_failure_becomes_a_protocol_error(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _LEGACY_SHAPE_RUNNER)
     workspace.submit(payload, "project/malformed-failure")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
@@ -238,7 +238,7 @@ def test_malformed_published_failure_becomes_a_protocol_error(tmp_path: Path) ->
 
 
 def test_gather_registers_the_children_it_joins_on(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _WAIT_RUNNER, initial_step="branch")
     workspace.submit(payload, "project/wait-parent")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
@@ -286,7 +286,7 @@ def test_gather_refuses_a_join_over_no_children(tmp_path: Path) -> None:
 
 
 def test_unresolvable_join_child_fails_instead_of_waiting_forever(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _GHOST_JOIN_RUNNER, initial_step="branch")
     workspace.submit(payload, "project/ghost-join")
     with TaskManager(workspace, heartbeat_interval=0.01, join_grace_seconds=0.0) as manager:
@@ -301,7 +301,7 @@ def test_unresolvable_join_child_fails_instead_of_waiting_forever(tmp_path: Path
 
 
 def test_unresolvable_join_child_is_tolerated_within_the_grace(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _GHOST_JOIN_RUNNER, initial_step="branch")
     workspace.submit(payload, "project/ghost-join-grace")
     with TaskManager(workspace, heartbeat_interval=0.01, join_grace_seconds=3600.0) as manager:

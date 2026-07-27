@@ -1,4 +1,4 @@
-"""The whole computer round trip, driven through the ``ssh-slurm`` adapter.
+"""The whole remote round trip, driven through the ``ssh-slurm`` adapter.
 
 One job is created in a local workspace, sent to a *remote* workspace that lives
 in the stand-in cluster's filesystem root, run there by a real
@@ -15,14 +15,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import Remote, fake_computer
+from conftest import Remote, fake_remote
 from httk.core import CLIContext
 
 from httk.workflow import (
     HarvestRecord,
     JobSpec,
     TaskManager,
-    WorkflowWorkspace,
+    Workspace,
     prepare_job_payload,
 )
 from httk.workflow.projects import initialize_project
@@ -57,23 +57,23 @@ class Campaign:
     """One local workspace, one workspace on the stand-in cluster, one job."""
 
     cluster: Remote
-    local: WorkflowWorkspace
-    station: WorkflowWorkspace
+    local: Workspace
+    station: Workspace
     context: CLIContext
     job_id: str
 
 
 def _campaign(tmp_path: Path, remote: Remote) -> Campaign:
-    """Create both workspaces, the computer between them, and one runnable job."""
+    """Create both workspaces, the remote between them, and one runnable job."""
 
     local_root = tmp_path / "local"
     initialize_project(local_root, name="roundtrip")
-    local = WorkflowWorkspace(local_root)
-    station = WorkflowWorkspace.initialize(
+    local = Workspace(local_root)
+    station = Workspace.initialize(
         remote.root / "runs" / "workspace",
         extensions=["detached-transfer-v1"],
     )
-    fake_computer(local_root, workspace=str(station.root), workers="2")
+    fake_remote(local_root, workspace=str(station.root), workers="2")
 
     source = tmp_path / "runners" / "roundtrip.py"
     source.parent.mkdir(parents=True)
@@ -105,21 +105,21 @@ def _campaign(tmp_path: Path, remote: Remote) -> Campaign:
     return Campaign(cluster=remote, local=local, station=station, context=CLIContext("httk", local_root), job_id=job.id)
 
 
-def _payload_of(workspace: WorkflowWorkspace, job_id: str) -> Path:
+def _payload_of(workspace: Workspace, job_id: str) -> Path:
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
     return workspace.payload_path(marker.placement, marker.job_key)
 
 
 def _send(campaign: Campaign, capsys: pytest.CaptureFixture[str]) -> None:
-    argv = ["remote", "send", "cluster", campaign.job_id, "--source-workspace", str(campaign.local.root)]
+    argv = ["transfer", "send", "cluster", campaign.job_id, "--source-workspace", str(campaign.local.root)]
     assert command(argv, campaign.context) == 0
     acknowledgements = json.loads(capsys.readouterr().out)
     assert [str(entry["job_id"]) for entry in acknowledgements] == [campaign.job_id]
 
 
 def _fetch(campaign: Campaign, capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
-    argv = ["remote", "fetch", "--computer", "cluster", "--workspace", str(campaign.local.root), "--json"]
+    argv = ["transfer", "fetch", "--remote", "cluster", "--workspace", str(campaign.local.root), "--json"]
     assert command(argv, campaign.context) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -129,12 +129,12 @@ def _run_there(campaign: Campaign) -> None:
         manager.run_until_idle(timeout=180.0)
 
 
-def _retired(workspace: WorkflowWorkspace) -> list[Path]:
+def _retired(workspace: Workspace) -> list[Path]:
     retired = workspace.control / "transfers" / "retired"
     return sorted(retired.iterdir()) if retired.is_dir() else []
 
 
-def _staged(workspace: WorkflowWorkspace) -> list[Path]:
+def _staged(workspace: Workspace) -> list[Path]:
     incoming = workspace.control / "transfers" / "incoming"
     return sorted(incoming.iterdir()) if incoming.is_dir() else []
 
@@ -158,7 +158,7 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     # (c) The managers the operator would start really are submitted, with a
     # script that runs this workspace's manager, and the work itself is then
     # done by the manager that batch script would have exec'd.
-    assert command(["remote", "start-manager", "cluster", "--count", "2"], campaign.context) == 0
+    assert command(["transfer", "start-manager", "cluster", "--count", "2"], campaign.context) == 0
     submitted = json.loads(capsys.readouterr().out)
     assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
     spooled = sorted(remote.spool.glob("*.sbatch"))
@@ -234,7 +234,7 @@ def test_a_banner_on_the_remote_stdout_stops_the_fetch_before_anything_is_import
     monkeypatch.setenv("HTTK_FAKE_SSH_BANNER", "*** Welcome to the fake cluster ***")
     monkeypatch.setenv("HTTK_FAKE_SSH_BANNER_WHEN", "tasks offer")
 
-    argv = ["remote", "fetch", "--computer", "cluster", "--workspace", str(campaign.local.root), "--json"]
+    argv = ["transfer", "fetch", "--remote", "cluster", "--workspace", str(campaign.local.root), "--json"]
     assert command(argv, campaign.context) == 2
     captured = capsys.readouterr()
     assert "remote offer did not return a transfer offer document" in captured.err

@@ -5,7 +5,7 @@
 *httk-workflow* ships complete VASP runners. A campaign that wants the ordinary
 thing — relax a structure, run a single point, or both in sequence — writes no
 runner at all: it submits jobs that name one of the installed files in
-`httk.workflow.runners`.
+`httk.workflow.vasp.runners`.
 
 | Runner | Workflow | Steps |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ the manager resolves the reserved `pkg:` form inside its own module allowlist, a
 `httk.workflow` is in that allowlist by default:
 
 ```python
-from httk.workflow import JobSpec, WorkflowWorkspace, prepare_job_payload
+from httk.workflow import JobSpec, Workspace, prepare_job_payload
 from httk.workflow.runners import runner_reference
 
 reference = runner_reference("vasp_relax.py")
@@ -35,7 +35,7 @@ job = prepare_job_payload(
     JobSpec(
         name="Relax silicon",
         workflow="httk.vasp.relax",
-        runner_path=str(reference["path"]),      # pkg:httk.workflow.runners/vasp_relax.py
+        runner_path=str(reference["path"]),      # pkg:httk.workflow.vasp.runners/vasp_relax.py
         runner_source="installed",
         runner_sha256=str(reference["sha256"]),
         initial_step="prepare",
@@ -58,7 +58,7 @@ The same file can be published to the workspace runner store instead, which pins
 it by digest for a whole campaign:
 
 ```python
-workspace = WorkflowWorkspace.initialize("workflow-workspace", extensions=["transactional-data-v1"])
+workspace = Workspace.initialize("workflow-workspace", extensions=["transactional-data-v1"])
 published = workspace.publish_runner("/path/to/vasp_relax.py", name="vasp/relax.py")
 ```
 
@@ -77,7 +77,7 @@ httk workflow manager run workflow-workspace --pool vasp
 ## Job inputs
 
 Every input is optional and every one is documented, with its default, in the API
-reference of {py:mod}`httk.workflow.runners`. The ones a campaign normally sets are
+reference of {py:mod}`httk.workflow.vasp.runners`. The ones a campaign normally sets are
 `poscar`, `incar_tags`, `kpoint_density`, `pseudopotential_library`, `timeout`, and
 `collect`.
 

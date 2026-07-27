@@ -51,14 +51,14 @@ sealed:
 ```python
 from pathlib import Path
 
-from httk.workflow import WorkflowWorkspace, submit_v1_task
+from httk.workflow import Workspace, submit_v1_task
 
 
 def materialize(payload: Path) -> None:
     (payload / "input.dat").write_text("calculation input\n")
 
 
-workspace = WorkflowWorkspace("WORKSPACE")
+workspace = Workspace("WORKSPACE")
 marker = submit_v1_task(
     workspace,
     "TEMPLATE",

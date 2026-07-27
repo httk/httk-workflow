@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow.scaffold import new_job
 
 _ROOT = Path(__file__).parents[1]
@@ -110,7 +110,7 @@ def _run(command: list[str], *, cwd: Path, environment: dict[str, str]) -> subpr
 def _finished(workspace_root: Path) -> tuple[str, Path]:
     """Return the terminal state and payload of the one job of a workspace."""
 
-    workspace = WorkflowWorkspace(workspace_root, mutable=False)
+    workspace = Workspace(workspace_root, mutable=False)
     markers = list(workspace.scan_markers())
     assert len(markers) == 1, f"expected exactly one job, found {[marker.job_key for marker in markers]}"
     return markers[0].kind, workspace.payload_path(markers[0].placement, markers[0].job_key)
@@ -187,7 +187,7 @@ def test_the_python_api_tour_runs(work: Path, tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("runner", ["defect_campaign.py", "defect_campaign.sh"])
 def test_the_campaign_examples_run_in_either_language(runner: str, tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / runner, extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize(tmp_path / runner, extensions=["transactional-data-v1"])
     parent = new_job(
         workspace,
         _EXAMPLES / runner,

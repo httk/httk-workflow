@@ -3,7 +3,7 @@
 Every test here drives at least two independent :class:`TaskManager`
 incarnations against one workspace directory, because contested multi-writer
 operation over a shared filesystem is the whole reason the marker protocol
-exists. Each manager attaches its own :class:`WorkflowWorkspace` instance, so
+exists. Each manager attaches its own :class:`Workspace` instance, so
 the two share nothing in memory — no marker index, no journal writer, no cached
 state frame — exactly as two managers on two nodes would not.
 
@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow._logging import reset_logging
 from httk.workflow.errors import FormatError, TransitionLostError
 from httk.workflow.journal import JournalWriter, read_record
@@ -272,13 +272,13 @@ def _claim_recording_runner(log: Path) -> str:
     return _CLAIM_RECORDING_RUNNER.replace("@LOG@", str(log))
 
 
-def _attached(root: Path) -> WorkflowWorkspace:
+def _attached(root: Path) -> Workspace:
     """Attach one more independent view of the workspace at *root*."""
 
-    return WorkflowWorkspace(root)
+    return Workspace(root)
 
 
-def _backdate_heartbeat(workspace: WorkflowWorkspace, manager_id: str, age: float) -> None:
+def _backdate_heartbeat(workspace: Workspace, manager_id: str, age: float) -> None:
     """Rewrite one manager's heartbeat as if it had stopped *age* seconds ago."""
 
     path = workspace.control / "managers" / manager_id / "heartbeat.json"
@@ -315,7 +315,7 @@ def _interleave(managers: tuple[TaskManager, ...], *, until: Callable[[], bool],
     raise AssertionError("the interleaved managers never reached the expected state")
 
 
-def _kinds(workspace: WorkflowWorkspace) -> dict[str, str]:
+def _kinds(workspace: Workspace) -> dict[str, str]:
     """Return the current state kind of every job in the workspace, by job id."""
 
     return {marker.job_id: marker.kind for marker in workspace.scan_markers()}
@@ -331,7 +331,7 @@ def _launched_by(caplog: pytest.LogCaptureFixture) -> dict[str, str]:
     }
 
 
-def _walk_chain(workspace: WorkflowWorkspace, marker: Marker) -> list[dict[str, object]]:
+def _walk_chain(workspace: Workspace, marker: Marker) -> list[dict[str, object]]:
     """Return the frames of one job's history, newest first, from its marker.
 
     Walking backwards from the authoritative marker is the only sanctioned way
@@ -359,7 +359,7 @@ def _walk_chain(workspace: WorkflowWorkspace, marker: Marker) -> list[dict[str, 
 
 def test_two_interleaved_managers_claim_every_ready_job_exactly_once(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root)
+    Workspace.initialize(root)
     log = tmp_path / "claimlog"
     submitting = _attached(root)
     job_ids = []
@@ -389,7 +389,7 @@ def test_two_interleaved_managers_claim_every_ready_job_exactly_once(tmp_path: P
 
 def test_a_lost_claim_race_leaves_exactly_one_winner_and_a_clean_loser(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root)
+    Workspace.initialize(root)
     log = tmp_path / "claimlog"
     payload, job_id = _payload(tmp_path / "source", _claim_recording_runner(log), tag="raced")
     _attached(root).submit(payload, "project/raced")
@@ -436,7 +436,7 @@ def test_a_lost_claim_race_leaves_exactly_one_winner_and_a_clean_loser(tmp_path:
 
 def test_two_threads_ticking_one_workspace_launch_every_job_exactly_once(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root)
+    Workspace.initialize(root)
     log = tmp_path / "claimlog"
     submitting = _attached(root)
     job_ids = []
@@ -481,7 +481,7 @@ def test_an_operator_request_is_applied_by_exactly_one_manager(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root)
+    Workspace.initialize(root)
     submitting = _attached(root)
     # A pool neither manager serves keeps every job in ready, so the request
     # pass is the only thing that ever moves a marker in this test.
@@ -547,7 +547,7 @@ def test_a_join_resolves_when_the_children_run_on_the_other_manager(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root)
+    Workspace.initialize(root)
     payload, parent_id = _payload(
         tmp_path / "source",
         _SPAWNING_RUNNER,
@@ -584,7 +584,7 @@ def test_a_join_resolves_when_the_children_run_on_the_other_manager(
 
 def test_both_managers_drain_without_stranding_the_work_they_started(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root)
+    Workspace.initialize(root)
     submitting = _attached(root)
     job_ids = []
     for index in range(4):
@@ -633,7 +633,7 @@ def test_a_claim_abandoned_mid_launch_is_recovered_by_the_other_manager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root, policy={"lease_seconds": 2.0})
+    Workspace.initialize(root, policy={"lease_seconds": 2.0})
     log = tmp_path / "claimlog"
     payload, job_id = _payload(tmp_path / "source", _claim_recording_runner(log), tag="abandoned")
     _attached(root).submit(payload, "project/abandoned")
@@ -675,7 +675,7 @@ def test_a_claim_abandoned_mid_launch_is_recovered_by_the_other_manager(
 
 def test_a_persistent_attempt_is_adopted_only_once_its_writer_is_proven_gone(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root, policy={"lease_seconds": 2.0})
+    Workspace.initialize(root, policy={"lease_seconds": 2.0})
     payload, job_id = _payload(
         tmp_path / "source",
         _SLEEPING_RUNNER,
@@ -718,7 +718,7 @@ def test_a_persistent_attempt_is_adopted_only_once_its_writer_is_proven_gone(tmp
 
 def test_an_isolated_attempt_is_adopted_on_the_grace_and_its_zombie_is_fenced(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root, policy={"lease_seconds": 2.0})
+    Workspace.initialize(root, policy={"lease_seconds": 2.0})
     payload, job_id = _payload(
         tmp_path / "source",
         _HANGS_THEN_SUCCEEDS_RUNNER,
@@ -806,7 +806,7 @@ def test_an_isolated_attempt_is_adopted_on_the_grace_and_its_zombie_is_fenced(tm
 
 def test_a_stale_marker_index_never_reports_a_false_absence(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root)
+    Workspace.initialize(root)
     payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="indexed")
     _attached(root).submit(payload, "project/indexed")
 

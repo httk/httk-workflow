@@ -2,7 +2,7 @@
 
 Every wrapper in ``adapter_templates`` executes this module with one operation
 name and one versioned JSON request file. The implementation that runs is
-selected by the ``kind`` recorded in the bundle's ``computer.json``:
+selected by the ``kind`` recorded in the bundle's ``remote.json``:
 
 ``local``
     Files are copied in this filesystem and commands run in this process tree.
@@ -53,6 +53,16 @@ BATCH_DIRECTIVES = (
 
 SUPPORTED_KINDS = ("local", "local-slurm", "ssh-slurm")
 
+#: The bundle metadata file, and what it was called before remotes were called
+#: remotes. A bundle carrying only the old name is still read.
+METADATA_FILE = "remote.json"
+LEGACY_METADATA_FILE = "computer.json"
+
+#: The result format one adapter operation prints. The name is protocol and
+#: keeps its historical spelling: an adapter written against an earlier release
+#: prints exactly this, and every side already agrees on it.
+RESULT_FORMAT = "httk-computer-result"
+
 _CONNECT_TIMEOUT = 20
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 _FALSE_SETTINGS = frozenset({"0", "false", "no", "off"})
@@ -76,7 +86,7 @@ def _result(operation: str, **values: object) -> None:
     print(
         json.dumps(
             {
-                "format": "httk-computer-result",
+                "format": RESULT_FORMAT,
                 "format_version": 1,
                 "operation": operation,
                 "ok": True,
@@ -93,7 +103,7 @@ def _refusal(operation: str, message: str) -> None:
         json.dumps(
             {
                 "error": message,
-                "format": "httk-computer-result",
+                "format": RESULT_FORMAT,
                 "format_version": 1,
                 "operation": operation,
                 "ok": False,
@@ -108,7 +118,10 @@ def _adapter_kind(request: Mapping[str, object]) -> str | None:
     adapter_dir = request.get("adapter_dir")
     if not isinstance(adapter_dir, str) or not adapter_dir:
         return None
-    metadata_path = Path(adapter_dir).expanduser() / "computer.json"
+    root = Path(adapter_dir).expanduser()
+    metadata_path = root / METADATA_FILE
+    if not metadata_path.is_file():
+        metadata_path = root / LEGACY_METADATA_FILE
     if not metadata_path.is_file():
         return None
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))

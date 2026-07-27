@@ -55,25 +55,25 @@ of them installs and imports cleanly while failing at run time:
 
 - `shell/*.sh` — the native Bash authoring libraries, whose absolute paths the
   manager exports to every Bash runner;
-- `adapter_templates/*/…` — the `computer.json` of each maintained computer
+- `adapter_templates/*/…` — the `remote.json` of each maintained remote
   adapter **and its seven executable operations**, which must arrive executable
-  or `httk workflow computer add` refuses the bundle it just copied;
+  or `httk workflow remote add` refuses the bundle it just copied;
 - `v1_runtime/…` — the *httk* v1 task templates and compatibility shell;
-- `runners/*.sh` — the packaged Bash VASP runner beside its Python siblings.
-  The Python runners and everything under `integrations/` are modules of their
-  packages and need no entry.
+- `vasp/runners/*.sh` — the packaged Bash VASP runner beside its Python
+  siblings. The Python runners and everything under `integrations/` are modules
+  of their packages and need no entry.
 
 After a build, confirm they are there rather than assuming:
 
 ```console
-python -m zipfile -l dist/httk_workflow-*.whl | grep -E 'shell/|adapter_templates/|runners/.*\.sh|v1_runtime/'
+python -m zipfile -l dist/httk_workflow-*.whl | grep -E 'shell/|adapter_templates/|vasp/runners/.*\.sh|v1_runtime/'
 ```
 
 A fresh install is the stronger check, because it also proves the executable bit
 survived:
 
 ```console
-/tmp/httk-workflow-test/bin/httk workflow computer add probe --template local --global
+/tmp/httk-workflow-test/bin/httk workflow remote add probe --template local --global
 ```
 
 ## TestPyPI

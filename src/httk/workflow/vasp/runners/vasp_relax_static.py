@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
-"""One VASP relaxation: prepare inputs, run with remedies, collect the result.
+"""One relaxation followed by one static calculation, chained in one job.
 
-The three steps are the whole workflow. ``prepare`` stages the structure and the
-INCAR of the job payload into the workdir and derives everything else;  ``run``
-executes VASP under supervision and, when the run fails in a way the reviewed
-remedy ladder recognizes, applies exactly one remedy and asks for another attempt;
-``collect`` publishes the files that describe the finished calculation.
+The five steps are the whole workflow: ``prepare`` and ``run`` are the relaxation,
+``promote`` archives the relaxation, makes its CONTCAR the new structure, and
+re-derives the inputs for a single point, ``static`` runs that single point, and
+``collect`` publishes both stages — the relaxation under ``relax/`` and the single
+point under ``static/``.
 
-The job inputs are documented in :mod:`httk.workflow.runners`. Nothing here
-imports anything but an installed *httk-workflow*, so this one file is the whole
-runner: reference it as ``pkg:httk.workflow.runners/vasp_relax.py``, publish it to
-a workspace runner store, or copy it and edit it.
+This is the *httk* v1 formation-energy template without its database half: a
+formation energy is assembled at harvest time from the total energies of several
+such jobs and the elemental references they are compared against, which is an
+analysis over finished jobs rather than a step of one job. What this runner
+guarantees is the pair of numbers that assembly needs — one relaxed structure and
+one total energy of it, both with the evidence of how they were produced.
+
+Both stages share one job: one remedy budget, one remedy ladder, one workdir. The
+job inputs are documented in :mod:`httk.workflow.vasp.runners`. Nothing here imports
+anything but an installed *httk-workflow*, so this one file is the whole runner:
+reference it as ``pkg:httk.workflow.vasp.runners/vasp_relax_static.py``, publish it to a
+workspace runner store, or copy it and edit it.
 """
 
 import os
@@ -19,6 +27,7 @@ import shutil
 import sys
 from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 
 try:
     from httk.workflow import (
@@ -27,6 +36,7 @@ try:
         VaspPreparationOptions,
         apply_vasp_remedy,
         clean_vasp_outputs,
+        contcar_to_poscar,
         job_remedy_history_path,
         last_oszicar_energy,
         plan_vasp_remedy,
@@ -46,7 +56,11 @@ except ModuleNotFoundError:  # pragma: no cover - interpreter bootstrap
     os.environ["HTTK_WORKFLOW_RUNNER_BOOTSTRAP"] = "1"
     os.execv(_python, [_python, os.path.abspath(__file__), *sys.argv[1:]])
 
-WORKFLOW = "httk.vasp.relax"
+WORKFLOW = "httk.vasp.relax-static"
+#: What makes the second stage a single point: no ionic step, and no ionic loop.
+DEFAULT_STATIC_TAGS: dict[str, object] = {"IBRION": -1, "NSW": 0}
+#: Where the relaxation is archived inside the workdir before it is overwritten.
+RELAX_ARCHIVE = "relax"
 DEFAULT_COLLECT = "INCAR KPOINTS OUTCAR CONTCAR OSZICAR vasprun.xml vasp-run-report.json POTCAR.provenance.json"
 DEFAULT_TIMEOUT = 86400.0
 DEFAULT_MAXIMUM_REMEDIES = 8
@@ -241,13 +255,14 @@ def execute(a: Attempt, *, next_step: str) -> None:
     a.retry(f"applied the {decision.policy} remedy for {decision.problem}")
 
 
-def publish(a: Attempt, *, prefix: str) -> None:
-    """Publish the collected files of a finished calculation."""
+def publish(a: Attempt, *, prefix: str, directory: Path | None = None) -> None:
+    """Publish the collected files of one finished calculation stage."""
 
+    root = a.workdir if directory is None else directory
     names = names_input(a, "collect", DEFAULT_COLLECT)
     published: list[str] = []
     for name in names:
-        source = a.workdir / name
+        source = root / name
         if not source.is_file():
             continue
         if a.context.data_generation is not None:
@@ -263,7 +278,7 @@ def publish(a: Attempt, *, prefix: str) -> None:
 
 @run.step
 def prepare(a: Attempt) -> None:
-    """Stage the payload inputs, derive the rest, and go on to run VASP."""
+    """Stage the payload inputs, derive the rest, and go on to relax."""
 
     record = stage_inputs(a)
     if record is not None:
@@ -272,16 +287,66 @@ def prepare(a: Attempt) -> None:
 
 @run.step(name="run")
 def run_step(a: Attempt) -> None:
-    """Run VASP, remedy a recognized failure, or fail with what was diagnosed."""
+    """Relax, remedy a recognized failure, or fail with what was diagnosed."""
+
+    execute(a, next_step="promote")
+
+
+@run.step
+def promote(a: Attempt) -> None:
+    """Archive the relaxation, adopt its CONTCAR, and derive the static inputs."""
+
+    contcar = a.workdir / "CONTCAR"
+    if not contcar.is_file() or not contcar.read_text(encoding="utf-8", errors="replace").strip():
+        a.fail(
+            "vasp.no_relaxed_structure",
+            "the relaxation completed without leaving a CONTCAR to run statically",
+        )
+        return
+    archive = a.workdir / RELAX_ARCHIVE
+    archive.mkdir(exist_ok=True)
+    for name in names_input(a, "collect", DEFAULT_COLLECT):
+        source = a.workdir / name
+        if source.is_file():
+            shutil.copyfile(source, archive / name)
+    # The relaxed cell is the structure of the single point, and the reference
+    # POSCAR only lends it its comment line, which carries the MAGMOM override.
+    contcar_to_poscar(contcar, reference=a.workdir / "POSCAR", output=a.workdir / "POSCAR")
+    options = replace(
+        preparation_options(a, library=None),
+        incar_tags={
+            **(tags_input(a, "static_incar_tags") or DEFAULT_STATIC_TAGS),
+            **tags_input(a, "incar_tags"),
+        },
+    )
+    # Re-derived rather than reused: the relaxed cell has its own k-point grid and
+    # its own convergence budget. Tags the relaxation already fixed — NBANDS,
+    # MAGMOM — are left exactly as they were, because they are already explicit.
+    prepare_vasp_inputs(options, directory=a.workdir)
+    relaxed = a.state.get("energy")
+    a.log.append("note", "promoted the relaxed structure to a static calculation")
+    a.advance("static", state={"relax_energy": relaxed, "relax_classification": a.state.get("classification")})
+
+
+@run.step
+def static(a: Attempt) -> None:
+    """Run the single point, remedy a recognized failure, or fail."""
 
     execute(a, next_step="collect")
 
 
 @run.step
 def collect(a: Attempt) -> None:
-    """Publish the finished calculation and complete the job."""
+    """Publish both stages and complete the job."""
 
-    publish(a, prefix=text_input(a, "data_prefix", "vasp"))
+    prefix = text_input(a, "data_prefix", "")
+    publish(a, prefix=f"{prefix}/static" if prefix else "static")
+    publish(
+        a,
+        prefix=f"{prefix}/{RELAX_ARCHIVE}" if prefix else RELAX_ARCHIVE,
+        directory=a.workdir / RELAX_ARCHIVE,
+    )
+    a.state["static_energy"] = a.state.get("energy")
     a.succeed()
 
 

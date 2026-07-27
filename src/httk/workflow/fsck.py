@@ -27,7 +27,7 @@ from .models import STATE_KINDS, Marker
 from .workspace import MarkerFault
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
-    from .workspace import WorkflowWorkspace
+    from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -119,7 +119,7 @@ class _JournalIndex:
     once and keeps the frames that name each job.
     """
 
-    def __init__(self, workspace: "WorkflowWorkspace") -> None:
+    def __init__(self, workspace: "Workspace") -> None:
         self._workspace = workspace
         self._by_job: dict[str, list[JournalFrame]] | None = None
 
@@ -154,7 +154,7 @@ def _frame_generation(entry: JournalFrame) -> int | None:
     return value
 
 
-def _identity_problem(workspace: "WorkflowWorkspace", marker: Marker, frame: Mapping[str, Any]) -> str | None:
+def _identity_problem(workspace: "Workspace", marker: Marker, frame: Mapping[str, Any]) -> str | None:
     """Return why *frame* is not the frame *marker* names, if it is not."""
 
     expected: list[tuple[str, object]] = [
@@ -172,7 +172,7 @@ def _identity_problem(workspace: "WorkflowWorkspace", marker: Marker, frame: Map
     return None
 
 
-def _manager_is_live(workspace: "WorkflowWorkspace", manager_id: str, lease_seconds: float) -> bool:
+def _manager_is_live(workspace: "Workspace", manager_id: str, lease_seconds: float) -> bool:
     """Report whether *manager_id* heartbeated within its own lease."""
 
     try:
@@ -183,7 +183,7 @@ def _manager_is_live(workspace: "WorkflowWorkspace", manager_id: str, lease_seco
     return time.time() - updated <= lease_seconds
 
 
-def _live_owner(workspace: "WorkflowWorkspace", marker: Marker, index: _JournalIndex) -> str | None:
+def _live_owner(workspace: "Workspace", marker: Marker, index: _JournalIndex) -> str | None:
     """Return the manager still working on *marker*, if the evidence shows one.
 
     The damaged frame cannot say who owns the job, so the owner is taken from
@@ -232,9 +232,7 @@ def _last_good_frame(marker: Marker, index: _JournalIndex) -> JournalFrame | Non
     return best
 
 
-def _repair_frame(
-    workspace: "WorkflowWorkspace", marker: Marker, recovered: JournalFrame, problem: str
-) -> dict[str, object]:
+def _repair_frame(workspace: "Workspace", marker: Marker, recovered: JournalFrame, problem: str) -> dict[str, object]:
     """Build the ``fsck_repair`` frame that replaces an unreadable one.
 
     The members of the recovered frame are carried forward so that a repaired
@@ -270,14 +268,14 @@ def _repair_frame(
     return frame
 
 
-def _marker_entries(workspace: "WorkflowWorkspace") -> Iterator[Marker | MarkerFault]:
+def _marker_entries(workspace: "Workspace") -> Iterator[Marker | MarkerFault]:
     """Yield every marker-shaped entry of every state kind, core or not."""
 
     return workspace.scan_marker_entries(STATE_KINDS)
 
 
 def check_workspace(
-    workspace: "WorkflowWorkspace",
+    workspace: "Workspace",
     *,
     repair: bool = False,
     quarantine_unrepairable: bool = False,
@@ -374,7 +372,7 @@ def check_workspace(
     )
 
 
-def _inspect(workspace: "WorkflowWorkspace", marker: Marker) -> tuple[str, str] | None:
+def _inspect(workspace: "Workspace", marker: Marker) -> tuple[str, str] | None:
     """Return the problem of one marker, or ``None`` when it resolves."""
 
     if marker.record_ref == "init":
@@ -399,7 +397,7 @@ def _inspect(workspace: "WorkflowWorkspace", marker: Marker) -> tuple[str, str] 
 
 
 def _handle_unrepairable(
-    workspace: "WorkflowWorkspace",
+    workspace: "Workspace",
     finding: FsckFinding,
     *,
     quarantine: bool,

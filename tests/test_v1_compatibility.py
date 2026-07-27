@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-from httk.workflow import TaskManager, V1TaskManager, WorkflowWorkspace, submit_v1_task
+from httk.workflow import TaskManager, V1TaskManager, Workspace, submit_v1_task
 from httk.workflow._v1_runner import replay_v1_atomic
 from httk.workflow.v1 import V1RunnerBackend
 
@@ -34,7 +34,7 @@ fi
 exit 1
 """,
     )
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     submitted = submit_v1_task(workspace, source, "project/00")
 
     with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
@@ -58,7 +58,7 @@ HT_TASK_INIT "$@"
 HT_TASK_FINISHED
 """,
     )
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     submitted = submit_v1_task(workspace, source, "combined/project")
 
     with TaskManager(workspace) as manager:
@@ -87,7 +87,7 @@ printf '%s:%s\\n' "$HTTK_WORKFLOW_IS_RESTART" "$HTTK_WORKFLOW_UNCLEAN_RESTART" >
 HT_TASK_FINISHED
 """,
     )
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     submitted = submit_v1_task(workspace, source, "project/restart", attempts=2)
 
     with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
@@ -116,7 +116,7 @@ exit 1
     atomic.mkdir(parents=True)
     (atomic / "ht.nextstep").write_text("finish\n", encoding="utf-8")
     (atomic / "committed-result").write_text("complete\n", encoding="utf-8")
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     submitted = submit_v1_task(workspace, source, "project/atomic-recovery")
 
     with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
@@ -162,7 +162,7 @@ HT_TASK_FINISHED
         encoding="utf-8",
     )
     child.chmod(0o755)
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     parent = submit_v1_task(workspace, source, "project/tree")
 
     with V1TaskManager(workspace, maximum_workers=2, heartbeat_interval=0.01, log_compression="none") as manager:
@@ -199,7 +199,7 @@ exit 0
 """,
         program="ht_run",
     )
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     submitted = submit_v1_task(workspace, source, "project/ht-run")
 
     with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
@@ -224,7 +224,7 @@ fi
 HT_TASK_BROKEN
 """,
     )
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     submitted = submit_v1_task(workspace, source, "project/broken")
 
     with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
@@ -250,7 +250,7 @@ HT_TASK_INIT "$@"
 HT_TASK_FINISHED
 """,
     )
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     submitted = submit_v1_task(workspace, source, "project/module")
     marker = workspace.find_marker_by_id(submitted.job_id)
     assert marker is not None
@@ -304,7 +304,7 @@ HT_TASK_FINISHED
         encoding="utf-8",
     )
     child.chmod(0o755)
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     parent = submit_v1_task(workspace, source, "project/abandoned")
 
     with V1TaskManager(workspace, maximum_workers=2, heartbeat_interval=0.01, log_compression="none") as manager:
@@ -334,7 +334,7 @@ fi
 HT_TASK_BROKEN
 """,
     )
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     submitted = submit_v1_task(workspace, source, "project/freeze-failure")
 
     with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
