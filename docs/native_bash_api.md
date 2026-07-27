@@ -182,8 +182,17 @@ step composed lives in shell state, so the subshell costs a step nothing.
 | `httk_workflow_child LABEL FIELD` | one field of one observed child |
 | `$HTTK_WORKFLOW_STEP` | the step this attempt runs |
 | `$HTTK_WORKFLOW_WORKDIR`, `$HTTK_WORKFLOW_JOB_DIR`, `$HTTK_WORKFLOW_DATA_DIR` | absolute paths; the data directory is set only for a transactional job |
+| `$HTTK_WORKFLOW_DURABLE` | `1` on a storage-durable workspace, `0` otherwise |
 
 A step starts in its workdir, so ordinary relative paths are workdir paths.
+
+`$HTTK_WORKFLOW_DURABLE` is the durability contract for a Bash runner. There is
+no new function: every outcome, transaction, spawn, and workdir batch you publish
+through `httk_workflow_*` already synchronizes itself before it becomes
+authoritative exactly when this is `1`, because the bridge reads the same
+workspace mode from the attempt context. A step that writes its own protocol
+bytes by hand should honour the same flag; a step that only calls the packaged
+functions never has to look at it.
 
 Job state is stored inside the payload, below `.httk-job/`, so it survives
 retries, step advances, and isolated workdirs, and it travels with a transferred

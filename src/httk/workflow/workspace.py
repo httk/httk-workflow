@@ -853,6 +853,13 @@ class Workspace:
                     # transition — submission, child registration, transfer
                     # import — lands here, so this is where the index learns
                     # about it.
+                    if self.durable:
+                        # The rename installed a new name in the destination
+                        # directory: a submitted or child marker, a published
+                        # payload tree. A durable workspace synchronizes that
+                        # directory entry so the publication survives a crash,
+                        # not only a process interruption.
+                        fsync_directory(destination.parent)
                     self._index_note_path(destination)
                     return
                 try:

@@ -396,6 +396,7 @@ def apply_vasp_remedy(
     *,
     directory: str | os.PathLike[str] = ".",
     history_path: str | os.PathLike[str] = DEFAULT_REMEDY_HISTORY,
+    durable: bool = False,
 ) -> Path:
     """Explicitly apply a proposed remedy through a replayable workdir batch.
 
@@ -404,6 +405,11 @@ def apply_vasp_remedy(
     ever. A history file inside the VASP directory is written by the same
     replayable batch as the inputs; a job-scoped one, which the batch cannot
     reach, is written atomically just before the batch commits.
+
+    *durable* synchronizes the batch and the job-scoped history on a durable
+    workspace, so a power cut cannot lose a remedy the ladder has already
+    recorded. It defaults to ``False`` for a caller applying a remedy outside an
+    attempt; the Bash bridge sources it from the workspace durability contract.
     """
 
     if decision.give_up:
@@ -485,15 +491,16 @@ def apply_vasp_remedy(
             }
         )
         history.update({"attempts": attempts, "events": events})
-        batch = ReplayableWorkdirBatch.create(root)
+        batch = ReplayableWorkdirBatch.create(root, durable=durable)
         for index, (name, source) in enumerate(sorted(changed.items())):
             batch.transaction.put_file(f"input-{index}", source, name)
         if history_file.is_relative_to(root):
             staged_history = staging / REMEDY_HISTORY_NAME
-            write_json_atomic(staged_history, history)
+            # Staged into the batch, whose seal synchronizes the whole tree.
+            write_json_atomic(staged_history, history, durable=False)
             batch.transaction.put_file("remedy-history", staged_history, history_file.relative_to(root).as_posix())
         else:
-            write_json_atomic(history_file, history)
+            write_json_atomic(history_file, history, durable=durable)
         return batch.commit()
     finally:
         shutil.rmtree(staging, ignore_errors=True)

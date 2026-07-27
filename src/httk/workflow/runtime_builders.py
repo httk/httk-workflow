@@ -19,6 +19,8 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, Self
 
 from ._util import (
+    fsync_directory,
+    fsync_tree,
     json_bytes,
     read_json,
     sha256_file,
@@ -196,8 +198,15 @@ def prepare_job_payload(
     spec: JobSpec,
     *,
     parent: Mapping[str, object] | None = None,
+    durable: bool = False,
 ) -> JobDefinition:
-    """Create and validate ``job.json`` in an existing prepared payload."""
+    """Create and validate ``job.json`` in an existing prepared payload.
+
+    *durable* synchronizes the written ``job.json`` for a caller preparing a
+    payload directly on durable storage; it defaults to ``False`` because a
+    payload prepared here is not yet a workspace artifact, and its submission
+    is what makes it authoritative and durable.
+    """
 
     root = Path(destination)
     root.mkdir(parents=True, exist_ok=True)
@@ -210,22 +219,28 @@ def prepare_job_payload(
         runner = root.joinpath(*job.runner_path.parts)
         if not runner.is_file() or runner.is_symlink():
             raise ValueError(f"runner must be a regular file inside the payload: {job.runner_path}")
-    write_json_atomic(job_path, mapping)
+    write_json_atomic(job_path, mapping, durable=durable)
     return job
 
 
 class TransactionBuilder:
     """Build a validated replayable transaction manifest."""
 
-    def __init__(self, root: Path, *, expected_generation: int) -> None:
+    def __init__(self, root: Path, *, expected_generation: int, durable: bool = False) -> None:
         self.root = root
         self.expected_generation = expected_generation
+        #: Whether :meth:`seal` synchronizes the manifest itself. The staged
+        #: payload files this builder copies are synchronized in one batch by
+        #: the owning publication — an outcome draft or a sealed workdir batch —
+        #: just before its atomic rename, so an owner that batches sets this
+        #: ``False`` and lets that single tree sync cover the manifest too.
+        self.durable = durable
         self._operations: list[dict[str, object]] = []
         self._targets: list[PurePosixPath] = []
         (root / "payload").mkdir(parents=True, exist_ok=False)
 
     @classmethod
-    def resume(cls, root: str | os.PathLike[str], *, expected_generation: int) -> Self:
+    def resume(cls, root: str | os.PathLike[str], *, expected_generation: int, durable: bool = False) -> Self:
         """Reattach to a transaction an earlier process of this attempt sealed.
 
         A Bash runner publishes one outcome through many short-lived processes, so
@@ -247,6 +262,7 @@ class TransactionBuilder:
         result = cls.__new__(cls)
         result.root = target
         result.expected_generation = expected_generation
+        result.durable = durable
         result._operations = [dict(item) for item in operations if isinstance(item, Mapping)]
         if len(result._operations) != len(operations):
             raise ValueError("sealed transaction manifest has an operation that is not an object")
@@ -326,6 +342,7 @@ class TransactionBuilder:
                 "expected_data_generation": self.expected_generation,
                 "operations": self._operations,
             },
+            durable=self.durable,
         )
         return self.root / "manifest.json"
 
@@ -340,21 +357,42 @@ class OutcomeDraft:
     implementation.
     """
 
-    def __init__(self, context: "AttemptContext", control: Path, root: Path | None = None) -> None:
+    def __init__(
+        self,
+        context: "AttemptContext",
+        control: Path,
+        root: Path | None = None,
+        *,
+        durable: bool = False,
+    ) -> None:
         self.context = context
         self.control = control
+        #: Whether :meth:`publish` synchronizes the draft before the atomic
+        #: rename that publishes it. The whole draft is unreferenced until that
+        #: rename, so nothing inside it is synchronized per write: one batched
+        #: tree sync at publication makes the outcome, its transaction manifest
+        #: and staged payload, and its child bundles durable together.
+        self.durable = durable
         self.root = root or control / f"outcome.tmp.{uuid.uuid4()}"
         self.root.mkdir(exist_ok=False)
         self._transaction: TransactionBuilder | None = None
         self._children: list[tuple[ChildReference, dict[str, object]]] = []
 
     @classmethod
-    def _resume(cls, context: "AttemptContext", control: Path, root: str | os.PathLike[str]) -> Self:
+    def _resume(
+        cls,
+        context: "AttemptContext",
+        control: Path,
+        root: str | os.PathLike[str],
+        *,
+        durable: bool = False,
+    ) -> Self:
         """Reattach to a draft an earlier process in this attempt created."""
 
         result = cls.__new__(cls)
         result.context = context
         result.control = control
+        result.durable = durable
         result.root = Path(root).resolve()
         if result.root.parent != control or not result.root.name.startswith("outcome.tmp."):
             raise ValueError("outcome draft is not below this attempt control directory")
@@ -384,6 +422,10 @@ class OutcomeDraft:
         self._transaction = TransactionBuilder(
             self.root / "transaction",
             expected_generation=self.context.data_generation,
+            # The draft's own publish-time tree sync makes the manifest and the
+            # staged payload durable in one batch, so the builder does not sync
+            # the manifest a second time on its own.
+            durable=False,
         )
         return self._transaction
 
@@ -458,7 +500,9 @@ class OutcomeDraft:
             destination.mkdir(exist_ok=False)
         else:
             _copy_tree(source, destination)
-        write_json_atomic(destination / "job.json", child_mapping)
+        # Draft-internal: the publish-time tree sync of this draft synchronizes
+        # every staged child bundle in one batch just before the outcome rename.
+        write_json_atomic(destination / "job.json", child_mapping, durable=False)
         reference = ChildReference(
             self.context.workspace_id,
             child.id,
@@ -489,6 +533,10 @@ class OutcomeDraft:
                 "format_version": 1,
                 "children": [item[1] for item in self._children],
             },
+            # Draft-internal and rewritten once per registered child: the
+            # publish-time tree sync makes the final set durable in one batch,
+            # so this rewrite is never synchronized on its own.
+            durable=False,
         )
 
     def publish(
@@ -565,48 +613,74 @@ class OutcomeDraft:
             "runner_steps": None if runner_steps is None else [validate_step(item) for item in runner_steps],
         }
         body.update({key: value for key, value in optional.items() if value is not None})
-        write_json_atomic(self.root / "outcome.json", body)
+        # Draft-internal: durability of the whole draft is the one batched tree
+        # sync below, so this final write is not synchronized on its own.
+        write_json_atomic(self.root / "outcome.json", body, durable=False)
+        if self.durable:
+            # Everything the draft staged — the outcome, its sealed transaction
+            # manifest and copied payload, its child bundles — is synchronized
+            # here, before the rename that makes the outcome authoritative, so a
+            # node crash can never leave a published outcome that names data its
+            # storage never received.
+            fsync_tree(self.root)
         os.rename(self.root, ready)
+        if self.durable:
+            # The rename created the ``outcome.ready`` name in the attempt
+            # control directory; synchronize that directory entry too.
+            fsync_directory(self.control)
         return ready
 
 
 class ReplayableWorkdirBatch:
     """A sealed, idempotently replayable set of workdir changes."""
 
-    def __init__(self, workdir: Path, root: Path) -> None:
+    def __init__(self, workdir: Path, root: Path, *, durable: bool = False) -> None:
         self.workdir = workdir
         self.root = root
-        self.transaction = TransactionBuilder(root, expected_generation=0)
+        #: Whether the batch synchronizes its sealed staging before publishing
+        #: the ``workdir-ready`` name recovery replays from, and synchronizes the
+        #: replayed workdir destinations before retiring the batch as applied.
+        self.durable = durable
+        self.transaction = TransactionBuilder(root, expected_generation=0, durable=False)
 
     @classmethod
-    def create(cls, workdir: str | os.PathLike[str]) -> "ReplayableWorkdirBatch":
+    def create(cls, workdir: str | os.PathLike[str], *, durable: bool = False) -> "ReplayableWorkdirBatch":
         target = Path(workdir).resolve()
         draft = target / ".httk-runner" / "workdir-drafts" / str(uuid.uuid4())
         draft.mkdir(parents=True)
-        return cls(target, draft)
+        return cls(target, draft, durable=durable)
 
     def seal(self) -> Path:
         self.transaction.seal()
         ready_root = self.workdir / ".httk-runner" / "workdir-ready"
         ready_root.mkdir(parents=True, exist_ok=True)
         ready = ready_root / self.root.name
+        if self.durable:
+            # The sealed batch is what recovery replays if this process dies
+            # before the commit, so its manifest and staged payload are made
+            # durable in one batched tree sync before the rename publishes it.
+            fsync_tree(self.root)
         os.rename(self.root, ready)
+        if self.durable:
+            fsync_directory(ready_root)
         self.root = ready
         return ready
 
     def commit(self) -> Path:
         if self.root.parent.name != "workdir-ready":
             self.seal()
-        replay_transaction(self.root, self.workdir, expected_generation=0)
+        replay_transaction(self.root, self.workdir, expected_generation=0, durable=self.durable)
         applied_root = self.workdir / ".httk-runner" / "workdir-applied"
         applied_root.mkdir(parents=True, exist_ok=True)
         applied = applied_root / self.root.name
         os.rename(self.root, applied)
+        if self.durable:
+            fsync_directory(applied_root)
         self.root = applied
         return applied
 
     @staticmethod
-    def recover(workdir: str | os.PathLike[str]) -> tuple[Path, ...]:
+    def recover(workdir: str | os.PathLike[str], *, durable: bool = False) -> tuple[Path, ...]:
         target = Path(workdir).resolve()
         ready_root = target / ".httk-runner" / "workdir-ready"
         if not ready_root.is_dir():
@@ -615,11 +689,13 @@ class ReplayableWorkdirBatch:
         for batch in sorted(ready_root.iterdir()):
             if not batch.is_dir():
                 continue
-            replay_transaction(batch, target, expected_generation=0)
+            replay_transaction(batch, target, expected_generation=0, durable=durable)
             applied_root = target / ".httk-runner" / "workdir-applied"
             applied_root.mkdir(parents=True, exist_ok=True)
             applied = applied_root / batch.name
             os.rename(batch, applied)
+            if durable:
+                fsync_directory(applied_root)
             recovered.append(applied)
         return tuple(recovered)
 
@@ -638,8 +714,12 @@ class JobState(MutableMapping[str, object]):
     previous state or the new one.
     """
 
-    def __init__(self, payload: str | os.PathLike[str]) -> None:
+    def __init__(self, payload: str | os.PathLike[str], *, durable: bool = False) -> None:
         self.path = Path(payload).resolve() / JOB_STATE_DIRECTORY / "state.json"
+        #: Whether each atomic replace is synchronized. State is committed
+        #: immediately rather than staged in a draft, so a durable workspace
+        #: synchronizes every write here rather than deferring to a later batch.
+        self.durable = durable
 
     def read(self) -> dict[str, object]:
         """Return the whole state document."""
@@ -653,7 +733,7 @@ class JobState(MutableMapping[str, object]):
         for name, value in values.items():
             _check_state_item(name, value)
             state[name] = value
-        write_json_atomic(self.path, state)
+        write_json_atomic(self.path, state, durable=self.durable)
 
     def set(self, name: str, value: object) -> None:
         """Store one value, an alias of ``state[name] = value``."""
@@ -667,7 +747,7 @@ class JobState(MutableMapping[str, object]):
         if name not in state:
             return False
         del state[name]
-        write_json_atomic(self.path, state)
+        write_json_atomic(self.path, state, durable=self.durable)
         return True
 
     def __getitem__(self, name: str) -> object:
@@ -677,7 +757,7 @@ class JobState(MutableMapping[str, object]):
         _check_state_item(name, value)
         state = self.read()
         state[name] = value
-        write_json_atomic(self.path, state)
+        write_json_atomic(self.path, state, durable=self.durable)
 
     def __delitem__(self, name: str) -> None:
         if not self.delete(name):

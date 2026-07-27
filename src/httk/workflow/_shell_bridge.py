@@ -390,7 +390,7 @@ def _bind() -> Attempt:
     root = _draft_root(bound.control)
     if root is None:
         return attempt
-    draft = OutcomeDraft._resume(bound.context, bound.control, root)
+    draft = OutcomeDraft._resume(bound.context, bound.control, root, durable=bound.context.durable)
     attempt._draft = draft
     if (draft.root / "transaction" / "manifest.json").is_file():
         generation = attempt.context.data_generation
@@ -399,7 +399,9 @@ def _bind() -> Attempt:
         # The sealed manifest is the operation counter of a Bash runner, so the
         # next identifier is the same whichever process of this attempt asks.
         try:
-            transaction = TransactionBuilder.resume(draft.root / "transaction", expected_generation=generation)
+            transaction = TransactionBuilder.resume(
+                draft.root / "transaction", expected_generation=generation, durable=False
+            )
         except ValueError as exception:
             raise _Refused(f"the staged transaction manifest of this draft is unusable: {exception}") from exception
         attempt._transaction = transaction
@@ -602,6 +604,7 @@ def _abort(arguments: argparse.Namespace) -> None:
             "message": arguments.message,
             "traceback": trace or f"{arguments.exception}: {arguments.message}\n",
         },
+        durable=attempt.context.durable,
     )
 
 
@@ -641,7 +644,7 @@ def _workdir_apply(arguments: argparse.Namespace) -> None:
     operations = raw.get("operations")
     if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
         raise _Refused("a workdir operation spec requires an operations array")
-    batch = ReplayableWorkdirBatch.create(_attempt().workdir)
+    batch = ReplayableWorkdirBatch.create(_attempt().workdir, durable=_attempt().context.durable)
     for item in operations:
         if not isinstance(item, Mapping):
             raise _Refused("a workdir operation must be an object")
@@ -732,7 +735,7 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
     command = arguments.command
     if command == "begin":
         attempt = _attempt()
-        ReplayableWorkdirBatch.recover(attempt.workdir)
+        ReplayableWorkdirBatch.recover(attempt.workdir, durable=attempt.context.durable)
         print(attempt.step)
     elif command == "context":
         raw = _attempt().context.raw
@@ -972,6 +975,9 @@ def _vasp_command(arguments: argparse.Namespace) -> int:
             _decision(Path(arguments.decision)),
             directory=arguments.directory,
             history_path=arguments.history,
+            # The language-neutral durability contract, honoured without binding
+            # an attempt so the utility still runs by hand outside one.
+            durable=os.environ.get("HTTK_WORKFLOW_DURABLE") == "1",
         )
     else:
         raise AssertionError(command)
