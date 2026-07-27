@@ -20,12 +20,11 @@ from httk.core import CLIContext
 
 from httk.workflow import (
     HarvestRecord,
-    JobSpec,
     TaskManager,
     Workspace,
-    prepare_job_payload,
 )
 from httk.workflow.projects import initialize_project
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.transfers import TRANSFER_DIRECTORY
 from httk.workflow.workflow_cli import command
 
@@ -211,9 +210,9 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     # Every leg really used the stand-in transport rather than this filesystem.
     commands = remote.commands()
     assert any("workspace status" in item for item in commands)
-    assert any("tasks receive" in item for item in commands)
-    assert any("tasks offer" in item for item in commands)
-    assert any("tasks retire" in item for item in commands)
+    assert any("transfer receive" in item for item in commands)
+    assert any("transfer offer" in item for item in commands)
+    assert any("transfer retire" in item for item in commands)
     assert any("sbatch" in item for item in commands)
     assert any(item.startswith("rsync ") or " rsync " in item for item in commands)
 
@@ -232,7 +231,7 @@ def test_a_banner_on_the_remote_stdout_stops_the_fetch_before_anything_is_import
     # remote offer, so its answer is no longer the pure JSON this protocol
     # requires. The workspace probe before it is untouched and still passes.
     monkeypatch.setenv("HTTK_FAKE_SSH_BANNER", "*** Welcome to the fake cluster ***")
-    monkeypatch.setenv("HTTK_FAKE_SSH_BANNER_WHEN", "tasks offer")
+    monkeypatch.setenv("HTTK_FAKE_SSH_BANNER_WHEN", "transfer offer")
 
     argv = ["transfer", "fetch", "--remote", "cluster", "--workspace", str(campaign.local.root), "--json"]
     assert command(argv, campaign.context) == 2

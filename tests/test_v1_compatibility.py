@@ -1,9 +1,9 @@
 import sys
 from pathlib import Path
 
-from httk.workflow import TaskManager, V1TaskManager, Workspace, submit_v1_task
+from httk.workflow import TaskManager, Workspace
 from httk.workflow._v1_runner import replay_v1_atomic
-from httk.workflow.v1 import V1RunnerBackend
+from httk.workflow.v1 import V1RunnerBackend, V1TaskManager, submit_v1_task
 
 
 def _legacy_source(root: Path, source: str, *, program: str = "ht_steps") -> Path:

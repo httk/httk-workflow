@@ -4,10 +4,15 @@ This site documents the *httk-workflow* module. For the full documentation of
 *httk₂*, see [docs.httk.org](https://docs.httk.org).
 
 The module implements a recoverable, language-neutral workflow protocol whose
-source of truth is a single atomically renamed state marker per job. Python
-applications use `httk.workflow`; installations register the canonical
-`httk workflow` command tree, plus the `httk-taskmanager` and
-`httk-v1-taskmanager` executables, which are aliases of it.
+source of truth is a single atomically renamed state marker per job. It presents
+three layers, each with its own import home: the **filesystem protocol**
+(`httk.workflow.protocol`), the **execution and authoring** surface
+(`httk.workflow` — `Runner`, `Attempt` — with lower-level helpers in
+`httk.workflow.runtime`), and **orchestration and management** (`Workspace`,
+`TaskManager`, `harvest`, and named submodules for transfers, remotes, and
+compatibility). Installations register the canonical `httk workflow` command
+tree, plus the `httk-taskmanager` and `httk-v1-taskmanager` executables, which
+are aliases of it.
 
 ```{admonition} Quick links
 :class: tip
@@ -15,7 +20,12 @@ applications use `httk.workflow`; installations register the canonical
 **New here** — start with {doc}`quickstart`: five commands from an empty
 directory to a finished relaxation, no runner written and no VASP required.
 
-**Writing workflows**
+**The filesystem protocol** — the language-neutral on-disk contract
+
+- {doc}`workflow_protocol_api` — the `httk.workflow.protocol` namespace
+- {doc}`workflow_filesystem_api` — the normative on-disk specification
+
+**The execution API** — writing and running workflow steps
 
 - {doc}`runtime_helpers` — the Python authoring SDK: `Runner`, `Attempt`, steps
 - {doc}`native_bash_api` — the same surface in Bash
@@ -23,19 +33,18 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`vasp_runners` — the packaged runners, for campaigns that write none
 - {doc}`declarations` — saying what a workflow *is*, for a data layer
 - {doc}`importing_workflows` — running PWD and CWL documents as ordinary jobs
-- {doc}`reference/index` — the generated API reference
 - {doc}`notebooks/examples` — worked examples as a notebook
 
-**Running them**
+**Orchestration and management** — driving and inspecting a workspace
 
 - {doc}`taskmanager` — workspaces, submission, managers, inspection, repair
 - {doc}`workflow_cli` — the whole `httk workflow` tree: projects, config, remotes
 - {doc}`harvest` — reading finished jobs back out as records
 - {doc}`adapter_authoring` — reaching a machine the packaged adapters do not cover
+- {doc}`reference/index` — the generated API reference
 
-**Specification and migration**
+**Migration**
 
-- {doc}`workflow_filesystem_api` — the normative on-disk protocol
 - [*httk* v1 migration guide](httk_v1_migration_guide.md)
 - [*httk* v1 compatibility](v1_compatibility.md)
 ```
@@ -74,6 +83,7 @@ httk workflow job submit workflow-workspace prepared-job --placement project/00
 :caption: Documentation
 
 quickstart
+workflow_protocol_api
 runtime_helpers
 native_bash_api
 sdk_parity

@@ -17,6 +17,21 @@ from .manager import TaskManager
 from .models import JobDefinition, Marker, normalize_placement, validate_label
 from .workspace import Workspace
 
+__all__ = [
+    "V1_BACKEND",
+    "V1_CAPABILITY",
+    "V1_WORKFLOW",
+    "V1_PRIORITY_MAP",
+    "V2_TO_V1_PRIORITY",
+    "bundled_v1_root",
+    "legacy_priority",
+    "prepare_v1_payload",
+    "submit_v1_task",
+    "parse_v1_task_name",
+    "V1RunnerBackend",
+    "V1TaskManager",
+]
+
 V1_BACKEND = "httk-v1"
 V1_CAPABILITY = "httk-v1"
 V1_WORKFLOW = "httk.v1.ht_steps"

@@ -1,9 +1,25 @@
-"""Filesystem-native workflow execution for httk₂."""
+"""Filesystem-native workflow execution for httk₂.
 
-from typing import TYPE_CHECKING, Any
+The package presents three layers, each with its own import home:
 
-from ._util import _warn_deprecated
-from .backends import AttemptLaunch, OutcomeCommit, PathRunnerBackend, RunnerBackend
+* **Filesystem protocol** — the language-neutral on-disk contract lives in
+  :mod:`httk.workflow.protocol`. Independent tools read and verify a workspace
+  through it and the specification alone.
+* **Execution / authoring** — the surface a runner author uses. :class:`Runner`,
+  :class:`Attempt`, and the small set of job and result types below are exported
+  here; the lower-level runtime helpers live in :mod:`httk.workflow.runtime` and
+  :mod:`httk.workflow.runtime_utils`, and job scaffolding in
+  :mod:`httk.workflow.scaffold`.
+* **Orchestration and management** — :class:`Workspace`, :class:`TaskManager`,
+  and :func:`harvest` drive and inspect a running workspace. The management
+  operations that surround them (transfers, manifests, hygiene, configuration,
+  adapters, supervision, and the VASP and v1 compatibility surfaces) live in
+  their own named submodules rather than in this root.
+
+Only the deliberate top-level surface is re-exported here; everything else is
+reached through its submodule.
+"""
+
 from .errors import (
     FormatError,
     RunnerResolutionError,
@@ -14,37 +30,9 @@ from .errors import (
     WorkspaceCorruptionError,
     WorkspaceUnavailableError,
 )
-from .harvest import HarvestRecord, harvest
+from .harvesting import HarvestRecord, harvest
 from .manager import TaskManager
-from .models import (
-    CORE_PROFILE,
-    Failure,
-    JobDefinition,
-    Marker,
-    RetryPolicy,
-    job_digest,
-    validate_failure,
-)
-from .runtime import AttemptContext, AttemptRuntime, CommandResult, run_command
-from .runtime_builders import (
-    ChildReference,
-    JobSpec,
-    JobState,
-    JoinSpec,
-    OutcomeBuilder,
-    OutcomeDraft,
-    ReplayableWorkdirBatch,
-    RunLog,
-    TransactionBuilder,
-    WorkdirState,
-    prepare_job_payload,
-)
-from .runtime_utils import (
-    compress_files,
-    decompress_files,
-    evaluate_expression,
-    render_template,
-)
+from .runtime_builders import JobState
 from .scaffold import ScaffoldedJob, new_job, new_jobs
 from .sdk import (
     Attempt,
@@ -54,201 +42,32 @@ from .sdk import (
     Runner,
     RunnerRef,
 )
-from .supervision import (
-    CheckerSpec,
-    Diagnostic,
-    FollowSource,
-    ProcessReport,
-    ProcessSupervisor,
-    SourceEvent,
-)
-from .transfers import (
-    acknowledge_transfer,
-    detach_job,
-    import_bundle,
-    offer_transfers,
-    recover_transfers,
-    retire_transfers,
-    validate_bundle,
-)
-from .v1 import (
-    V1Materializer,
-    V1RunnerBackend,
-    V1TaskManager,
-    bundled_v1_root,
-    prepare_v1_payload,
-    submit_v1_task,
-)
-from .vasp import (
-    DEFAULT_KPOINT_CENTERING,
-    DEFAULT_REMEDY_HISTORY,
-    REMEDY_OPERATIONS,
-    VASP_RESTART_ARTIFACTS,
-    PoscarHeader,
-    PotcarAssembly,
-    PotcarChoice,
-    RemedyPolicy,
-    VaspPreparationOptions,
-    VaspRemedyDecision,
-    VaspRunReport,
-    apply_vasp_remedy,
-    assemble_potcar,
-    automatic_kpoint_grid,
-    calculate_nbands,
-    clean_outcar,
-    clean_vasp_outputs,
-    contcar_to_poscar,
-    derive_seed,
-    diagnose_vasp_files,
-    job_remedy_history_path,
-    last_oszicar_energy,
-    last_vasprun_volume,
-    normalize_poscar_handedness,
-    outcar_plane_wave_count,
-    outcar_potim,
-    plan_vasp_remedy,
-    potcar_summary,
-    prepare_vasp_inputs,
-    rattle_poscar,
-    read_incar,
-    read_poscar_header,
-    register_remedy_policy,
-    remedy_policy,
-    remedy_policy_names,
-    run_vasp,
-    scale_poscar_lattice,
-    suggested_magnetic_moments,
-    update_incar,
-    validate_vasp_workdir,
-    write_automatic_kpoints,
-)
-from .workspace import MarkerFault, Workspace
-
-if TYPE_CHECKING:  # pragma: no cover - the alias is served at runtime below
-    #: Deprecated spelling of :class:`Workspace`, kept for one release.
-    WorkflowWorkspace = Workspace
+from .workspace import Workspace
 
 __all__ = [
-    "CORE_PROFILE",
-    "Attempt",
-    "AttemptContext",
-    "AttemptLaunch",
-    "AttemptRuntime",
-    "CommandResult",
-    "CheckerSpec",
-    "ChildReference",
-    "ChildResult",
-    "ChildSpec",
-    "ChildrenView",
-    "Diagnostic",
-    "Failure",
-    "FormatError",
-    "HarvestRecord",
-    "ScaffoldedJob",
-    "JobDefinition",
-    "JobSpec",
-    "JobState",
-    "JoinSpec",
-    "Runner",
-    "RunnerRef",
-    "Marker",
-    "MarkerFault",
-    "OutcomeCommit",
-    "OutcomeBuilder",
-    "OutcomeDraft",
-    "PathRunnerBackend",
-    "PoscarHeader",
-    "ProcessReport",
-    "ProcessSupervisor",
-    "FollowSource",
-    "SourceEvent",
-    "ReplayableWorkdirBatch",
-    "RunLog",
-    "RetryPolicy",
-    "RunnerBackend",
-    "RunnerResolutionError",
-    "WorkspaceCorruptionError",
-    "WorkspaceUnavailableError",
-    "TaskManager",
-    "TransactionError",
-    "TransitionLostError",
-    "UnsupportedExtensionError",
-    "V1Materializer",
-    "V1RunnerBackend",
-    "V1TaskManager",
-    "WorkflowError",
+    # Orchestration and management entry points.
     "Workspace",
-    "WorkflowWorkspace",
-    "TransactionBuilder",
-    "WorkdirState",
-    "DEFAULT_KPOINT_CENTERING",
-    "DEFAULT_REMEDY_HISTORY",
-    "REMEDY_OPERATIONS",
-    "VASP_RESTART_ARTIFACTS",
-    "PotcarAssembly",
-    "PotcarChoice",
-    "RemedyPolicy",
-    "VaspPreparationOptions",
-    "VaspRemedyDecision",
-    "VaspRunReport",
-    "detach_job",
-    "validate_bundle",
-    "import_bundle",
-    "acknowledge_transfer",
-    "offer_transfers",
-    "recover_transfers",
-    "retire_transfers",
-    "run_command",
+    "TaskManager",
     "harvest",
+    "HarvestRecord",
+    # Execution / authoring surface.
+    "Runner",
+    "Attempt",
+    "ChildSpec",
+    "RunnerRef",
+    "ChildResult",
+    "ChildrenView",
+    "JobState",
     "new_job",
     "new_jobs",
-    "job_digest",
-    "validate_failure",
-    "prepare_job_payload",
-    "evaluate_expression",
-    "render_template",
-    "compress_files",
-    "decompress_files",
-    "read_poscar_header",
-    "suggested_magnetic_moments",
-    "automatic_kpoint_grid",
-    "write_automatic_kpoints",
-    "read_incar",
-    "update_incar",
-    "assemble_potcar",
-    "last_oszicar_energy",
-    "contcar_to_poscar",
-    "normalize_poscar_handedness",
-    "scale_poscar_lattice",
-    "rattle_poscar",
-    "calculate_nbands",
-    "last_vasprun_volume",
-    "outcar_potim",
-    "outcar_plane_wave_count",
-    "potcar_summary",
-    "clean_outcar",
-    "clean_vasp_outputs",
-    "prepare_vasp_inputs",
-    "diagnose_vasp_files",
-    "run_vasp",
-    "plan_vasp_remedy",
-    "apply_vasp_remedy",
-    "register_remedy_policy",
-    "remedy_policy",
-    "remedy_policy_names",
-    "job_remedy_history_path",
-    "derive_seed",
-    "validate_vasp_workdir",
-    "bundled_v1_root",
-    "prepare_v1_payload",
-    "submit_v1_task",
+    "ScaffoldedJob",
+    # The public exception family.
+    "WorkflowError",
+    "FormatError",
+    "WorkspaceUnavailableError",
+    "WorkspaceCorruptionError",
+    "TransitionLostError",
+    "UnsupportedExtensionError",
+    "TransactionError",
+    "RunnerResolutionError",
 ]
-
-
-def __getattr__(name: str) -> Any:
-    """Serve the deprecated ``WorkflowWorkspace`` spelling, with a warning."""
-
-    if name == "WorkflowWorkspace":
-        _warn_deprecated("WorkflowWorkspace", "httk.workflow.Workspace")
-        return Workspace
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

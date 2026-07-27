@@ -210,7 +210,7 @@ def test_tasks_send_uses_adapter_status_push_import_and_ack(tmp_path: Path) -> N
     assert Workspace(source_root).find_marker_by_id(job_id) is None
 
 
-def test_tasks_send_resumes_after_copy_before_import(tmp_path: Path, monkeypatch) -> None:
+def test_transfer_send_resumes_after_copy_before_import(tmp_path: Path, monkeypatch) -> None:
     source_root = tmp_path / "source"
     destination_root = tmp_path / "destination"
     initialize_project(source_root, name="source")
@@ -235,10 +235,9 @@ def test_tasks_send_resumes_after_copy_before_import(tmp_path: Path, monkeypatch
         return real_run_adapter(bundle, operation, request, timeout=timeout)
 
     monkeypatch.setattr(workflow_cli, "run_adapter", interrupt_import)
-    # Deliberately the superseded spelling of both the group and the option: a
-    # resumed transfer is exactly the situation in which an operator retypes a
-    # command they had in their shell history from before the rename.
-    arguments = ["tasks", "send", "local", job_id, "--workspace", str(source_root)]
+    # A resumed transfer: an interrupted send, retyped, must pick up where it
+    # stopped rather than start a second copy.
+    arguments = ["transfer", "send", "local", job_id, "--source-workspace", str(source_root)]
     assert command(arguments, CLIContext("httk", source_root)) == 2
     assert Workspace(source_root).find_marker_by_id(job_id) is None
     monkeypatch.setattr(workflow_cli, "run_adapter", real_run_adapter)

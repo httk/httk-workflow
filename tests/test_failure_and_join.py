@@ -6,12 +6,11 @@ import pytest
 
 from httk.workflow import (
     Attempt,
-    Failure,
     FormatError,
     TaskManager,
     Workspace,
-    validate_failure,
 )
+from httk.workflow.protocol import Failure, validate_failure
 
 _SRC = str(Path(__file__).parents[1] / "src")
 
@@ -103,7 +102,8 @@ import sys
 
 sys.path.insert(0, {_SRC!r})
 
-from httk.workflow import JobSpec, Runner, prepare_job_payload
+from httk.workflow import Runner
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 
 run = Runner("tests.wait")
 

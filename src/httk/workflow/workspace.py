@@ -13,7 +13,6 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from ._util import (
-    _warn_deprecated,
     fsync_directory,
     read_json,
     sha256_file,
@@ -958,22 +957,3 @@ class Workspace:
 
 class WorkspaceOperationError(WorkspaceUnavailableError):
     """A workspace operation could not be completed."""
-
-
-if TYPE_CHECKING:  # pragma: no cover - the alias is served at runtime below
-    #: Deprecated spelling of :class:`Workspace`, kept for one release.
-    WorkflowWorkspace = Workspace
-
-
-def __getattr__(name: str) -> Any:
-    """Serve the deprecated ``WorkflowWorkspace`` spelling, with a warning.
-
-    The alias is the class itself rather than a subclass of it, so every
-    ``isinstance`` check and every annotation keeps meaning what it meant, and
-    only naming the old spelling is deprecated.
-    """
-
-    if name == "WorkflowWorkspace":
-        _warn_deprecated("WorkflowWorkspace", "httk.workflow.Workspace")
-        return Workspace
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

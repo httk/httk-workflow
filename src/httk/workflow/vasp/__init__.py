@@ -35,6 +35,51 @@ from ..supervision import (
 
 _LOGGER = logging.getLogger(__name__)
 
+__all__ = [
+    "DEFAULT_KPOINT_CENTERING",
+    "KPOINT_CENTERINGS",
+    "VASP_RESTART_ARTIFACTS",
+    "DEFAULT_REMEDY_HISTORY",
+    "REMEDY_OPERATIONS",
+    "PoscarHeader",
+    "PotcarChoice",
+    "PotcarAssembly",
+    "VaspPreparationOptions",
+    "VaspRunReport",
+    "VaspRemedyDecision",
+    "RemedyPolicy",
+    "read_poscar_header",
+    "suggested_magnetic_moments",
+    "automatic_kpoint_grid",
+    "write_automatic_kpoints",
+    "read_incar",
+    "update_incar",
+    "assemble_potcar",
+    "last_oszicar_energy",
+    "contcar_to_poscar",
+    "normalize_poscar_handedness",
+    "scale_poscar_lattice",
+    "derive_seed",
+    "rattle_poscar",
+    "calculate_nbands",
+    "last_vasprun_volume",
+    "outcar_potim",
+    "outcar_plane_wave_count",
+    "potcar_summary",
+    "clean_outcar",
+    "validate_vasp_workdir",
+    "clean_vasp_outputs",
+    "prepare_vasp_inputs",
+    "diagnose_vasp_files",
+    "run_vasp",
+    "plan_vasp_remedy",
+    "apply_vasp_remedy",
+    "register_remedy_policy",
+    "remedy_policy",
+    "remedy_policy_names",
+    "job_remedy_history_path",
+]
+
 #: The k-point centering every entry point starts from. Monkhorst-Pack is the
 #: starting point rather than Gamma because the reviewed remedy ladder promotes
 #: ``("centering", "Gamma")`` as the *fix* for the ``kpoints_class`` and

@@ -16,7 +16,8 @@ from typing import Any
 
 import pytest
 
-from httk.workflow import JobSpec, TaskManager, Workspace, prepare_job_payload
+from httk.workflow import TaskManager, Workspace
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.runners import RUNNERS, runner_path, runner_reference
 from httk.workflow.vasp.runners import PACKAGE
 

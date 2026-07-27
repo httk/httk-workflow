@@ -10,19 +10,20 @@ import sys
 import uuid
 from pathlib import Path
 
-from httk.workflow import (
+from httk.workflow.protocol import (
     AttemptContext,
-    Diagnostic,
     JobSpec,
     OutcomeDraft,
-    ProcessSupervisor,
     ReplayableWorkdirBatch,
+    prepare_job_payload,
+)
+from httk.workflow.supervision import Diagnostic, ProcessSupervisor
+from httk.workflow.vasp import (
     VaspRemedyDecision,
     apply_vasp_remedy,
     clean_vasp_outputs,
     diagnose_vasp_files,
     plan_vasp_remedy,
-    prepare_job_payload,
     run_vasp,
 )
 
@@ -139,7 +140,7 @@ for line in sys.stdin:
 """,
         encoding="utf-8",
     )
-    from httk.workflow import CheckerSpec
+    from httk.workflow.supervision import CheckerSpec
 
     literal = f"literal;touch {tmp_path / 'unsafe'}"
     report = ProcessSupervisor(
