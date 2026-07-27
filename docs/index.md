@@ -40,6 +40,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`taskmanager` — workspaces, submission, managers, inspection, repair
 - {doc}`workflow_cli` — the whole `httk workflow` tree: projects, config, remotes
 - {doc}`campaigns` — partitioning a very large campaign across many workspaces
+- {doc}`benchmarks` — measured local scale snapshot and benchmark methodology
 - {doc}`harvest` — reading finished jobs back out as records
 - {doc}`adapter_authoring` — reaching a machine the packaged adapters do not cover
 - {doc}`reference/index` — the generated API reference
@@ -94,6 +95,7 @@ importing_workflows
 taskmanager
 workflow_cli
 campaigns
+benchmarks
 harvest
 adapter_authoring
 reference/index

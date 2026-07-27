@@ -157,7 +157,8 @@ def describe_project(
 
     *verify* walks the tree to classify the manifest, which is what makes the
     description say whether the project is *currently* described by what it
-    signed; pass ``False`` for a cheap answer on a very large project.
+    signed; by design, pass ``False`` for a cheap answer when verification is
+    not required, because that skips the tree walk.
     """
 
     project = require_project(project_root)

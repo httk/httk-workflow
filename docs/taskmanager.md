@@ -188,8 +188,8 @@ consumes the source directory.
 
 ## Share one runner between many jobs
 
-A campaign of millions of jobs should not copy its runner into every payload.
-Publish the runner once into the workspace runner store instead:
+A partitioned campaign should not copy its runner into every payload. Publish
+the runner once into the workspace runner store instead:
 
 ```console
 httk workflow runner publish ./relax.py --workspace WORKSPACE --name relax.py
@@ -289,7 +289,7 @@ walk keeps a resume cursor per top-level placement root, held in the manager's
 memory alone — nothing is written to disk, so two managers of one workspace
 never contend on a shared position and a restarted manager simply begins a fresh
 cycle. The roots are served in a round-robin rotation with per-root resume, so a
-subtree holding a million markers can never starve a sibling holding three, and
+one large placement subtree can never starve a smaller sibling, and
 the next tick continues precisely where this one stopped. A concurrent
 transition that renames or removes a marker underneath the walk is tolerated
 silently, consistent with how a vanished marker becomes a miss rather than a

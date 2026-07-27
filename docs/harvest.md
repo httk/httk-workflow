@@ -42,8 +42,10 @@ skipped, loudly, through the module logger: the contract of a record is the
 
 **Harvesting scales by iteration.** `harvest` is a lazy iterator over one scan of
 the requested state directories, and building one record reads only that job's
-own payload and journal chain. A workspace with a hundred million jobs is
-harvested by iterating it, never by materializing it.
+own payload and journal chain. The measured local snapshot in
+{doc}`benchmarks` establishes a reference point; larger campaigns should be
+partitioned across workspaces and harvested one partition at a time, never
+materialized as one in-memory result array.
 
 ## Members
 

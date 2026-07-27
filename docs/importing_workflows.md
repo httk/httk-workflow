@@ -22,8 +22,8 @@ job; the old one keeps running exactly the bytes it was submitted with.
 `pkg:httk.workflow.compat.cwl/cwl_runner.py` — referenced through the reserved
 installed form the manager resolves inside its own module allowlist. The document
 is data in the payload; the program that executes it is the same installed bytes
-for every imported job, so a campaign of ten thousand imported workflows copies
-no runner even once.
+for every imported job, so a partitioned campaign of imported workflows copies no
+runner even once.
 
 **The workflow runs on httk's own machinery.** No other engine is invoked, no
 other engine is bundled, and nothing shells out to `cwltool`. An imported job is
@@ -63,7 +63,7 @@ print(job.job_key, job.payload)
 
 The whole graph runs inside **one** job, sequentially, in topological order. A
 PWD node is one Python call: it is not worth a claim, a lease and a process of
-its own, and a hundred-node document would otherwise become a hundred jobs with
+its own, and a multi-node document would otherwise become one job per node with
 no parallelism to show for it.
 
 The packaged runner registers exactly one step, `execute`, and keeps the position

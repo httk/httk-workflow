@@ -12,8 +12,8 @@ object that carries everything the step may read, do, and publish.
 
 Nothing declares the shape of a workflow. A step decides *at run time* which
 children to spawn and which step runs next, so the graph of a job is whatever its
-steps published — one runner can drive a two-step relaxation and a
-thousand-child campaign without a graph definition anywhere.
+steps published — one runner can drive a two-step relaxation and a large,
+partitioned child campaign without a graph definition anywhere.
 
 ## A complete runner
 

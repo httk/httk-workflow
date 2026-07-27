@@ -9,8 +9,9 @@ scheduler, but a *partition map* over the ordinary workspaces you already
 {doc}`register <workflow_cli>`. Each partition is a named bucket that points at
 one registered workspace; every command that drives a workspace drives a
 partition's workspace unchanged. Multi-workspace partitioning is the intended
-route to a very large campaign: a million jobs live in twenty workspaces of
-fifty thousand, each an ordinary workspace a manager serves and a harvest reads.
+route to a campaign larger than one measured workspace: its partition sizes are
+chosen from the local measurements in {doc}`benchmarks`, with each partition an
+ordinary workspace a manager serves and a harvest reads.
 
 The map lives in the project, in a `campaign` member of `project.json`, so it
 travels with the project and every helper reads it from there.
@@ -114,13 +115,12 @@ harvested a few partitions at a time.
 
 Partitioning across workspaces bounds *how many jobs one workspace holds*; within
 a workspace, `--placement` bounds *how wide any one directory gets*. A workspace
-scans its state tree by placement, so a flat directory of a hundred thousand
-markers is one enormous `scandir`, while a shallow tree of them is cheap to walk
-and cheap to resume. These are recipes, not policy — the engine imposes none of
-them:
+scans its state tree by placement, so a flat directory with many markers is one
+wide `scandir`, while a shallow tree is cheaper to walk and resume. These are
+recipes, not policy — the engine imposes none of them:
 
 - **Hash-prefix fan-out** — place a job under a short prefix of its key's hash:
-  `project/<hash-prefix>/<batch>`. A few hundred prefixes turn one wide directory
+  `project/<hash-prefix>/<batch>`. Multiple prefixes turn one wide directory
   into a shallow tree with a bounded fan-out at every level.
 - **Batch buckets** — place a submission run under its own `project/<date>/<run>`,
   so each batch is a subtree a harvest or a placement-scoped manager can take on

@@ -31,9 +31,9 @@ module exists at all:
   result that exists must not become invisible just because part of its history
   did not survive.
 
-:func:`harvest` is lazily evaluated over one scan of the workspace: a workspace
-with a hundred million jobs is harvested by iterating it, never by materializing
-it, and building one record reads only that job's own payload and journal chain.
+:func:`harvest` is lazily evaluated over one scan of the workspace. By design it
+iterates jobs without materializing the workspace, and building one record reads
+only that job's own payload and journal chain.
 """
 
 import json

@@ -468,8 +468,8 @@ class OutcomeDraft:
         """Register one synthesized child that needs no prepared payload.
 
         A child whose runner lives outside the payload — a workspace or installed
-        runner — is completely described by its ``job.json``, so a campaign can
-        spawn thousands of them without copying a payload tree per child.
+        runner — is completely described by its ``job.json``, so a partitioned
+        campaign can spawn children without copying a payload tree per child.
         """
 
         return self._register_child(dict(job), placement, label=label, source=None)
