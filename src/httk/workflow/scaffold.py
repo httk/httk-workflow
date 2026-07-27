@@ -35,9 +35,9 @@ instead of replacing it. ``publish="installed"`` instead references a packaged
 template through the reserved ``pkg:`` form, which copies nothing at all.
 
 :func:`new_jobs` is the same operation for a campaign: one template resolution and
-one publication amortized over every job, and a lazy iterator over the results, so
-generating a hundred million jobs costs one payload and one marker each and never
-materializes a list of them.
+one publication amortized over every job, and a lazy iterator over the results. By
+design, generating a partitioned campaign costs one payload and one marker per
+job and never materializes a list of them.
 """
 
 import importlib
@@ -587,9 +587,9 @@ def new_jobs(
     This is the pattern for a campaign of any size. The template is resolved once
     and its runner published once, however many jobs follow, so every job costs
     exactly one payload directory and one state marker; *items* is consumed as an
-    iterator and the results are yielded as they are submitted, so a generator of
-    a hundred million structures is turned into a hundred million jobs without
-    either side of the loop ever being materialized.
+    iterator and the results are yielded as they are submitted, so a structure
+    generator can be turned into jobs without either side of the loop ever being
+    materialized.
 
     .. code-block:: python
 

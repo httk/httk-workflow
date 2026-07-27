@@ -102,8 +102,8 @@ DISCOVERY_HEARTBEAT_STRIDE = 512
 
 #: How many active-job locations one workspace instance caches before it evicts
 #: the least recently touched. Terminal jobs are never indexed, so this only
-#: bounds the working set: a workspace with a hundred million finished jobs
-#: never grows an index proportional to its whole history.
+#: bounds the working set: finished history never makes the index proportional
+#: to the workspace's whole history.
 DEFAULT_MARKER_INDEX_CAPACITY = 1 << 20
 
 
@@ -1277,8 +1277,8 @@ class MarkerStream:
     assigned — or, with no assignment, the first-level components that exist
     under the kind. Each :meth:`advance` serves the roots in rotation, keeps a
     per-root resume position, and moves the rotation pointer on, so a subtree
-    holding a million markers can never starve a sibling holding three. Priority
-    is therefore best-within-window rather than exact-global: bounded discovery
+    holding many markers can never starve a smaller sibling. Priority is therefore
+    best-within-window rather than exact-global: bounded discovery
     is the whole point, and rotation is what guarantees the starved window is
     reached on a later tick.
     """

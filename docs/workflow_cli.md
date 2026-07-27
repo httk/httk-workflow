@@ -463,8 +463,8 @@ equivalent.)
 
 `project show` reports the project's metadata, whether it pins a key and which,
 its workspace and job counts, and what its manifest currently verifies as;
-`--no-verify` skips the tree walk that last part needs, which is what makes the
-command cheap on a very large project.
+`--no-verify` skips the tree walk that last part needs; by design, this makes the
+command cheap when verification is not required.
 
 `project doctor` checks the conditions that quietly break a project later — an
 uninitialized workspace, a stale maintenance lock, an unpinned key, staging
