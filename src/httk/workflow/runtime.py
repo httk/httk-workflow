@@ -45,6 +45,13 @@ class AttemptContext:
     workdir_reused: bool
     unsafe_persistent_takeover: bool
     data_generation: int | None
+    #: Whether the workspace this attempt runs in claims storage-crash
+    #: durability. A runner threads it into every artifact it publishes so an
+    #: outcome, a transaction, or a spawned child is synchronized before it is
+    #: renamed authoritative. An old context that predates the member reads as
+    #: ``False``: process-interruption safety only, which is what such a context
+    #: was written under.
+    durable: bool
     resources: Mapping[str, object]
     join: object
     raw: Mapping[str, Any]
@@ -102,6 +109,7 @@ class AttemptContext:
             workdir_reused=bool(value.get("workdir_reused", False)),
             unsafe_persistent_takeover=bool(value.get("unsafe_persistent_takeover", False)),
             data_generation=generation,
+            durable=bool(value.get("durable", False)),
             resources=dict(resources_raw),
             join=value.get("join"),
             raw=value,

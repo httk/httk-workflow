@@ -379,7 +379,7 @@ def _publish_outcome(
     those as spawned jobs would strand real jobs behind a parent nothing joins.
     """
 
-    draft = OutcomeDraft(context, control)
+    draft = OutcomeDraft(context, control, durable=context.durable)
     children = (
         _spawn_children(
             draft,

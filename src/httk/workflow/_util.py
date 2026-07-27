@@ -91,6 +91,40 @@ def fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def fsync_file(path: Path) -> None:
+    """Synchronize one regular file's contents to storage."""
+
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def fsync_tree(root: Path) -> None:
+    """Synchronize every regular file and directory below *root*, and *root*.
+
+    This is the batched counterpart of :func:`write_json_atomic`'s per-file
+    durability: a publication that stages a whole tree — an outcome draft, a
+    sealed workdir batch — synchronizes it once, just before the atomic rename
+    that makes it authoritative, rather than paying an ``fsync`` per staged
+    write. Each directory is synchronized exactly once. Symlinks are skipped:
+    the protocol trees this walks never contain them, and a symlink carries no
+    file contents of its own to flush.
+    """
+
+    directories: list[Path] = [root]
+    for entry in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        if entry.is_symlink():
+            continue
+        if entry.is_dir():
+            directories.append(entry)
+        elif entry.is_file():
+            fsync_file(entry)
+    for directory in directories:
+        fsync_directory(directory)
+
+
 def sha256_file(path: Path) -> str:
     """Return the lowercase SHA-256 digest of one regular file."""
 

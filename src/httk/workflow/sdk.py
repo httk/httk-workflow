@@ -357,7 +357,11 @@ class Attempt:
         self.workspace = workspace
         self.data = data
         self.step = step or context.step
-        self.state = JobState(payload)
+        # Every artifact this attempt publishes inherits the workspace's
+        # durability from the manager-written context, so a durable workspace
+        # synchronizes an outcome, a transaction, or a spawned child before it
+        # is renamed authoritative without the step asking.
+        self.state = JobState(payload, durable=context.durable)
         self.log = RunLog(workdir)
         self._runner = runner
         self._draft: OutcomeDraft | None = None
@@ -383,7 +387,7 @@ class Attempt:
         """
 
         bound = _read_environment(environment)
-        ReplayableWorkdirBatch.recover(bound.workdir)
+        ReplayableWorkdirBatch.recover(bound.workdir, durable=bound.context.durable)
         return cls(
             bound.context,
             control=bound.control,
@@ -464,7 +468,7 @@ class Attempt:
         declaration = validate_declaration_name(name, "declaration name")
         validated = validate_declarations({declaration: document}, "declaration")[declaration]
         path = self._declaration_path(declaration)
-        write_json_atomic(path, validated)
+        write_json_atomic(path, validated, durable=self.context.durable)
         _LOGGER.debug("declared %s for job %s", declaration, self.context.job_key)
         return path
 
@@ -508,7 +512,7 @@ class Attempt:
     def workdir_batch(self) -> ReplayableWorkdirBatch:
         """Start a replayable group of workdir changes."""
 
-        return ReplayableWorkdirBatch.create(self.workdir)
+        return ReplayableWorkdirBatch.create(self.workdir, durable=self.context.durable)
 
     def put(self, source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> str:
         """Stage one file or directory for the job's transactional data.
@@ -658,7 +662,7 @@ class Attempt:
 
         self._reject_published()
         if self._draft is None:
-            self._draft = OutcomeDraft(self.context, self.control)
+            self._draft = OutcomeDraft(self.context, self.control, durable=self.context.durable)
         return self._draft
 
     def _data_transaction(self) -> TransactionBuilder:
@@ -737,7 +741,7 @@ class Attempt:
     def _record_steps(self, steps: Sequence[str]) -> None:
         path = self.payload / JOB_STATE_DIRECTORY / _RUNNER_STEPS_FILE
         try:
-            write_json_atomic(path, {"steps": list(steps)})
+            write_json_atomic(path, {"steps": list(steps)}, durable=self.context.durable)
         except OSError as exc:  # pragma: no cover - only an optimization
             _LOGGER.debug("cannot record the declared steps of %s: %s", self.context.job_key, exc)
 
@@ -766,6 +770,7 @@ class Attempt:
                     "message": str(exception),
                     "traceback": "".join(traceback.format_exception(exception)),
                 },
+                durable=self.context.durable,
             )
         except OSError as exc:  # pragma: no cover - the original exception wins
             _LOGGER.debug("cannot write the error breadcrumb of %s: %s", self.context.attempt_id, exc)

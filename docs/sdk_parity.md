@@ -57,6 +57,7 @@ language, and compares everything both left behind.
 | `Attempt.workdir` | — | The directory the step does its work in. | **$HTTK_WORKFLOW_WORKDIR** |
 | `Attempt.workspace` | — | The workspace root this job belongs to. | **$HTTK_WORKFLOW_WORKSPACE_DIR** |
 | `Attempt.data` | — | The job's published transactional data, or `None` when the job has `data.mode` `none`. | **$HTTK_WORKFLOW_DATA_DIR** |
+| `runtime.AttemptContext.durable` | `httk_workflow_context durable` | The workspace durability mode, threaded into every artifact the attempt publishes so an outcome, transaction, or child is synchronized before it is renamed authoritative. Neither SDK needs a call to act on it. | `context.json` → `durable`; **$HTTK_WORKFLOW_DURABLE** |
 | `Attempt.job` | — | The immutable job definition as a typed value. | `job.json` (read-only) |
 | `Attempt.inputs` | `httk_workflow_input` | The application-defined `inputs` object of the job. | `job.json` → `inputs` |
 | `Attempt.input` | `httk_workflow_input` | One input, with an optional default; without one, a missing input raises `KeyError` in Python and exits 1 in Bash. | `job.json` → `inputs` |

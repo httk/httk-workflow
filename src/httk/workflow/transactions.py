@@ -5,7 +5,15 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-from ._util import read_json, retry_delay, sha256_file, tree_digest
+from ._util import (
+    fsync_directory,
+    fsync_file,
+    fsync_tree,
+    read_json,
+    retry_delay,
+    sha256_file,
+    tree_digest,
+)
 from .errors import FormatError, TransactionError, WorkspaceUnavailableError
 from .models import validate_label
 
@@ -59,11 +67,20 @@ def replay_transaction(
     data_dir: Path,
     *,
     expected_generation: int,
+    durable: bool = False,
 ) -> bool:
     """Idempotently apply one published transaction.
 
     Returns whether the manifest contains operations and therefore advances the
     data generation.
+
+    When *durable* is set, every destination this replay installs and every
+    directory whose entries it changes — including the parents that gained or
+    lost a name, and the trash a removal moved into — is synchronized before
+    this call returns. The manager relies on that ordering: it appends the
+    destination state frame and renames the marker out of ``committing`` only
+    after replay returns, so a committed transaction is on storage before the
+    marker that claims it is.
     """
 
     manifest = read_json(transaction_dir / "manifest.json")
@@ -91,6 +108,11 @@ def replay_transaction(
                 raise FormatError(f"transaction paths overlap: {left} and {right}")
 
     data_dir.mkdir(parents=True, exist_ok=True)
+    # Parent directories whose entries this replay changed. A durable replay
+    # synchronizes each of them once at the end rather than per operation, so a
+    # transaction touching many files under one directory pays one directory
+    # fsync, not one per file.
+    touched_directories: set[Path] = set()
     for raw in operations:
         assert isinstance(raw, Mapping)
         operation_id = validate_label(raw.get("id"), "transaction operation id")
@@ -103,6 +125,9 @@ def replay_transaction(
             destination.mkdir(parents=True, exist_ok=True)
             if not destination.is_dir():
                 raise TransactionError(f"make-dir destination is not a directory: {path}")
+            if durable:
+                touched_directories.add(destination)
+                touched_directories.add(destination.parent)
             continue
 
         if operation == "put-file":
@@ -115,6 +140,9 @@ def replay_transaction(
             _rename_verified(source, destination, replace=True)
             if not _digest_matches(destination, expected):
                 raise TransactionError(f"put-file destination digest mismatch: {path}")
+            if durable:
+                fsync_file(destination)
+                touched_directories.add(destination.parent)
             continue
 
         if operation == "put-tree":
@@ -127,6 +155,9 @@ def replay_transaction(
             if not source.is_dir() or not _digest_matches(source, expected):
                 raise TransactionError(f"put-tree source digest mismatch: {path}")
             _rename_verified(source, destination)
+            if durable:
+                fsync_tree(destination)
+                touched_directories.add(destination.parent)
             continue
 
         if operation == "remove":
@@ -138,6 +169,9 @@ def replay_transaction(
             if not destination.exists():
                 raise TransactionError(f"remove target is missing: {path}")
             _rename_verified(destination, trash)
+            if durable:
+                touched_directories.add(destination.parent)
+                touched_directories.add(trash.parent)
             continue
 
         if operation == "replace-tree":
@@ -148,10 +182,19 @@ def replay_transaction(
                 continue
             if destination.exists() and not trash.exists():
                 _rename_verified(destination, trash)
+                if durable:
+                    touched_directories.add(trash.parent)
             if not source.is_dir() or not _digest_matches(source, expected):
                 raise TransactionError(f"replace-tree source digest mismatch: {path}")
             _rename_verified(source, destination)
+            if durable:
+                fsync_tree(destination)
+                touched_directories.add(destination.parent)
             continue
 
         raise FormatError(f"unsupported transaction operation: {operation!r}")
+    if durable:
+        for directory in touched_directories:
+            if directory.is_dir():
+                fsync_directory(directory)
     return bool(operations)
