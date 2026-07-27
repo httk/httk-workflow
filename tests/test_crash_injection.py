@@ -763,6 +763,7 @@ def test_a_cancellation_fence_whose_rename_happened_but_reported_failure_is_won(
                 "request_id": str(uuid.uuid4()),
                 "job_id": running.job_id,
                 "job_key": running.job_key,
+                "placement": running.placement.as_posix(),
                 "expected_generation": running.generation,
                 "expected_record_ref": running.record_ref,
                 "action": "cancel",

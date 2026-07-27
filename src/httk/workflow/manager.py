@@ -57,7 +57,7 @@ from .models import (
     validate_step,
 )
 from .transactions import replay_transaction
-from .workspace import Workspace
+from .workspace import DISCOVERY_HEARTBEAT_STRIDE, MarkerStream, Workspace
 
 _LOGGER = logging.getLogger(__name__)
 _DRAIN_SIGNALS = (signal.SIGTERM, signal.SIGINT)
@@ -74,6 +74,12 @@ _MAXIMUM_HEARTBEAT_LEASE_FRACTION = 1.0 / 3.0
 #: rest to the next tick. Every bounded pass resumes where it stopped, so a
 #: workspace larger than the bound is served round-robin rather than starved.
 DEFAULT_MAXIMUM_PASS_MARKERS = 256
+#: How many directory entries a single bounded pass visits before deferring the
+#: rest to the next tick, whether or not it has filled its marker budget. It
+#: bounds the cost of discovery itself — a tick can neither materialize nor even
+#: walk an unbounded tree — while the marker budget bounds the work that
+#: discovery feeds. A pass resumes its walk where it stopped on the next tick.
+DEFAULT_DISCOVERY_BUDGET = 4096
 #: The multiple of the lease a takeover waits for when nothing else proves that
 #: the previous attempt has stopped. It is deliberately larger than one lease:
 #: an expired lease alone only says that a manager is slow.
@@ -147,12 +153,16 @@ class TaskManager:
         join_grace_seconds: float = 3600.0,
         cancel_grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS,
         maximum_pass_markers: int = DEFAULT_MAXIMUM_PASS_MARKERS,
+        discovery_budget: int = DEFAULT_DISCOVERY_BUDGET,
+        placement_prefixes: Sequence[str] = (),
         runner_search_paths: Iterable[str | os.PathLike[str]] = (),
         runner_modules: Iterable[str] = DEFAULT_RUNNER_MODULES,
         gc_interval: float | None = None,
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
+        if discovery_budget < 1:
+            raise ValueError("discovery_budget must be positive")
         if gc_interval is not None and gc_interval <= 0.0:
             raise ValueError("gc_interval must be positive")
         if join_grace_seconds < 0:
@@ -188,6 +198,16 @@ class TaskManager:
         self.join_grace_seconds = join_grace_seconds
         self.cancel_grace_seconds = cancel_grace_seconds
         self.maximum_pass_markers = maximum_pass_markers
+        self.discovery_budget = discovery_budget
+        # Placement subtrees this manager restricts every scheduling scan to, as
+        # deployment policy like pools and capabilities. An empty assignment is
+        # the whole workspace. Overlapping assignments stay safe on the
+        # rename-claim; disjoint ones simply stop two managers scanning each
+        # other's trees. The values are project-owned placement semantics; the
+        # engine only validates and filters on them.
+        self.placement_prefixes: tuple[PurePosixPath, ...] = tuple(
+            normalize_placement(prefix) for prefix in placement_prefixes
+        )
         # Background collection is off unless a deployment asks for it. It is a
         # housekeeping timer of this manager, never part of a scheduling
         # decision: it runs at the end of a tick, after every pass has decided
@@ -213,9 +233,10 @@ class TaskManager:
         self._running: dict[str, RunningAttempt] = {}
         # Parent job key -> (unresolvable child job id, monotonic first-seen).
         self._join_unresolved: dict[str, tuple[str, float]] = {}
-        # Bounded pass name -> the marker path this manager stopped after, so
-        # the next tick resumes there instead of restarting the same prefix.
-        self._pass_cursor: dict[str, str] = {}
+        # Bounded pass name -> its streaming walker. Each keeps a per-root cursor
+        # and rotation in memory so the next tick resumes where this one stopped
+        # and no placement subtree starves; nothing is written to disk.
+        self._streams: dict[str, MarkerStream] = {}
         # Attempt id -> the monotonic instant after which a cancelled attempt
         # that has not exited is killed.
         self._cancel_kill_at: dict[str, float] = {}
@@ -242,6 +263,7 @@ class TaskManager:
                 "pid": os.getpid(),
                 "pools": sorted(self.pools),
                 "capabilities": sorted(self.capabilities),
+                "placement_prefixes": [prefix.as_posix() for prefix in self.placement_prefixes],
                 "runner_backends": sorted(self.allowed_backends),
                 "runner_search_paths": [str(path) for path in self.runner_search_paths],
                 "runner_modules": list(self.runner_modules),
@@ -362,44 +384,43 @@ class TaskManager:
 
         self.heartbeat()
 
-    @staticmethod
-    def _order_key(marker: Marker) -> tuple[str, str]:
-        """Return the stable scheduling order of one marker.
+    def _window(self, pass_name: str, kind: str) -> list[Marker]:
+        """Return the *kind* markers *pass_name* processes this tick.
 
-        Placement and job key survive every transition, unlike the marker
-        basename, so a bounded pass that resumes at this key resumes at the same
-        job however many generations it has moved through meanwhile.
+        Discovery is streaming and bounded: the pass walks its assigned
+        placement subtrees with :class:`MarkerStream`, visiting at most
+        ``discovery_budget`` directory entries and collecting at most
+        ``maximum_pass_markers`` markers, heartbeating from inside the walk. The
+        walker resumes where it stopped on the next tick and rotates its roots,
+        so a workspace larger than one tick's budget is served round-robin and
+        nothing starves — without ever materializing or globally sorting the
+        tree. No terminal kind is ever a *kind* here, so a scheduling scan never
+        opens the succeeded, failed, or cancelled trees.
         """
 
-        return marker.placement.as_posix(), marker.job_key
-
-    def _bounded(self, pass_name: str, markers: Iterable[Marker]) -> list[Marker]:
-        """Return the markers *pass_name* processes this tick, in stable order.
-
-        A pass over more than ``maximum_pass_markers`` markers is cut, and the
-        next tick resumes immediately after the last marker it processed rather
-        than at the beginning, so a workspace larger than one tick's budget is
-        served round-robin and nothing at the end of the order starves.
-        """
-
-        ordered = sorted(markers, key=self._order_key)
-        cursor = self._pass_cursor.get(pass_name)
-        if cursor is not None:
-            resumed = sum(1 for item in ordered if self._order_key(item) <= tuple(cursor.split("\0", 1)))
-            ordered = ordered[resumed:] + ordered[:resumed]
-        if len(ordered) <= self.maximum_pass_markers:
-            self._pass_cursor.pop(pass_name, None)
-            return ordered
-        selected = ordered[: self.maximum_pass_markers]
-        self._pass_cursor[pass_name] = "\0".join(self._order_key(selected[-1]))
-        _LOGGER.info(
-            "%s deferred %d of %d markers to the next tick",
-            pass_name,
-            len(ordered) - len(selected),
-            len(ordered),
-            extra=self._event("pass_bounded", pass_name=pass_name, processed=len(selected), pending=len(ordered)),
+        stream = self._streams.get(pass_name)
+        if stream is None:
+            stream = MarkerStream(self.workspace, kind, prefixes=self.placement_prefixes)
+            self._streams[pass_name] = stream
+        return stream.advance(
+            processing_budget=self.maximum_pass_markers,
+            discovery_budget=self.discovery_budget,
+            heartbeat=self.heartbeat,
+            heartbeat_every=DISCOVERY_HEARTBEAT_STRIDE,
         )
-        return selected
+
+    def _walk(self, kinds: Sequence[str]) -> Iterable[Marker]:
+        """Stream every marker of *kinds* this manager may schedule, exhaustively.
+
+        A few passes must see all of their kind at once — polling running
+        attempts to reap orphans, recovering abandoned claims, and the idleness
+        probe — so they cannot be windowed. They still stream through the same
+        scandir walker, restricted to the assigned placement subtrees and
+        heartbeating from inside the walk, so a long exhaustive pass never holds
+        its heartbeat and never touches a placement outside its assignment.
+        """
+
+        return self.workspace.walk_markers(kinds, roots=self.placement_prefixes, heartbeat=self.heartbeat)
 
     def _report_tick_duration(self, seconds: float) -> None:
         """Report a tick that spent a dangerous fraction of the lease."""
@@ -711,7 +732,7 @@ class TaskManager:
         raise TimeoutError("workflow manager did not become idle")
 
     def _has_actionable_work(self) -> bool:
-        for marker in self.workspace.scan_markers(("submitted", "ready", "committing", "cancelling")):
+        for marker in self._walk(("submitted", "ready", "committing", "cancelling")):
             try:
                 job = self.workspace.load_job(marker)
             except (WorkflowError, OSError):
@@ -755,7 +776,7 @@ class TaskManager:
 
     def _register_submissions(self) -> bool:
         changed = False
-        for marker in self._bounded("register_submissions", self.workspace.scan_markers(("submitted",))):
+        for marker in self._window("register_submissions", "submitted"):
             self._pace()
             try:
                 job = self.workspace.validate_job_payload(marker)
@@ -801,10 +822,20 @@ class TaskManager:
         return changed
 
     def _eligible_ready(self) -> list[Marker]:
-        """Return one priority-ordered snapshot of locally eligible work."""
+        """Return the best-priority eligible work found in one bounded window.
+
+        Discovery is a single streaming window over the ready tree — never a
+        global scan and never a global sort. Within that window the manager
+        claims the best-priority candidates first, and the window's round-robin
+        rotation is what eventually reaches a starved subtree on a later tick.
+        Priority is therefore best-within-window rather than exact-global; that
+        is the deliberate price of bounded discovery, and a derived priority
+        index would be the only way to recover exact global order — not built
+        here, and only worth building if a deployment measures that it needs it.
+        """
 
         eligible: list[Marker] = []
-        for marker in self.workspace.scan_markers(("ready",)):
+        for marker in self._window("eligible_ready", "ready"):
             self._pace()
             try:
                 job = self.workspace.load_job(marker)
@@ -1275,7 +1306,7 @@ class TaskManager:
         # attempts must be preserved: an unreadable marker is not evidence that
         # the attempt it describes has disappeared.
         unreadable: set[str] = set()
-        for marker in list(self.workspace.scan_markers(("running",))):
+        for marker in list(self._walk(("running",))):
             self._pace()
             loaded = self._load_job_and_state(marker, "poll_running")
             if loaded is None:
@@ -1536,7 +1567,7 @@ class TaskManager:
 
     def _resume_committing(self) -> bool:
         changed = False
-        for marker in self._bounded("resume_committing", self.workspace.scan_markers(("committing",))):
+        for marker in self._window("resume_committing", "committing"):
             self._pace()
             loaded = self._load_job_and_state(marker, "resume_committing")
             if loaded is None:
@@ -1854,7 +1885,7 @@ class TaskManager:
                 published_here = True
             if not target.is_dir():
                 raise FormatError(f"registered child bundle does not match: {job_key}")
-            if self.workspace.find_markers(job_key):
+            if self.workspace.find_marker_at(job_key, placement) is not None:
                 # This child is already registered. Registration is the point of
                 # no return for a spawn set, so from the instant its marker
                 # exists the child is a job in its own right: another manager
@@ -2021,7 +2052,7 @@ class TaskManager:
 
     def _recover_abandoned_claims(self) -> bool:
         changed = False
-        for marker in list(self.workspace.scan_markers(("claimed",))):
+        for marker in list(self._walk(("claimed",))):
             self._pace()
             loaded = self._load_job_and_state(marker, "recover_claims")
             if loaded is None:
@@ -2131,15 +2162,18 @@ class TaskManager:
             child_id = canonical_uuid(reference.get("job_id"), "join child job_id")
             label_raw = reference.get("label")
             label = None if label_raw is None else validate_label(label_raw, "join child label")
-            child_marker = None
             placement_hint = reference.get("placement_hint")
             job_key = reference.get("job_key")
-            if isinstance(placement_hint, str) and isinstance(job_key, str):
-                child_marker = self.workspace.find_marker_at(job_key, normalize_placement(placement_hint))
-                if child_marker is not None and child_marker.job_id != child_id:
-                    raise FormatError("join child identity disagrees with placement hint")
-            if child_marker is None:
-                child_marker = self.workspace.find_marker_by_id(child_id)
+            if not isinstance(placement_hint, str) or not isinstance(job_key, str):
+                # Placement is required in a child reference: join evaluation
+                # probes the child's exact state set and never falls back to a
+                # whole-workspace scan inside a tick. A reference that lacks it —
+                # only an old workspace can produce one — is a protocol error of
+                # whatever wrote it, not a reason to rescan the tree per child.
+                raise FormatError("join child reference must carry a job_key and placement_hint")
+            child_marker = self.workspace.find_marker_at(job_key, normalize_placement(placement_hint))
+            if child_marker is not None and child_marker.job_id != child_id:
+                raise FormatError("join child identity disagrees with placement hint")
             if child_marker is None:
                 return observations, child_id
             observations.append(
@@ -2261,7 +2295,7 @@ class TaskManager:
 
     def _evaluate_joins(self) -> bool:
         changed = False
-        for marker in self._bounded("evaluate_joins", self.workspace.scan_markers(("waiting",))):
+        for marker in self._window("evaluate_joins", "waiting"):
             self._pace()
             loaded = self._load_job_and_state(marker, "evaluate_joins")
             if loaded is None:
@@ -2379,6 +2413,23 @@ class TaskManager:
             return successes + nonterminal < count
         raise FormatError(f"unknown join condition: {condition!r}")
 
+    def _resolve_request_marker(self, request: Mapping[str, Any]) -> Marker | None:
+        """Resolve the job one operator request names, by its exact placement.
+
+        A request carries the job's placement exactly as a join child reference
+        does, so the manager probes the finite state set at that placement and
+        never rescans the workspace from a scheduling tick. A request that lacks
+        a placement — only a pre-release client can produce one — is a protocol
+        error that is claimed and quarantined, not a reason to fall back to a
+        global lookup.
+        """
+
+        job_key = request.get("job_key")
+        placement = request.get("placement")
+        if not isinstance(job_key, str) or not isinstance(placement, str):
+            raise FormatError("request must carry a job_key and placement")
+        return self.workspace.find_marker_at(job_key, normalize_placement(placement))
+
     def _handle_requests(self) -> bool:
         ready_dir = self.workspace.control / "requests" / "ready"
         changed = False
@@ -2388,7 +2439,7 @@ class TaskManager:
             self._pace()
             try:
                 request = read_json(request_path)
-                marker = self.workspace.find_marker_by_id(str(request.get("job_id", "")))
+                marker = self._resolve_request_marker(request)
                 if marker is not None:
                     job = self.workspace.load_job(marker)
                     if self._backend_for(job) is None:
@@ -2523,7 +2574,7 @@ class TaskManager:
         if request.get("format") != "httk-workflow-request" or request.get("format_version") != 1:
             raise FormatError("request must use httk-workflow-request version 1")
         operator_key = self._request_operator_key(request)
-        marker = self.workspace.find_marker_by_id(str(request.get("job_id", "")))
+        marker = self._resolve_request_marker(request)
         if marker is None:
             raise FormatError("request job does not exist")
         if marker.generation != int(request.get("expected_generation", -1)):
@@ -2617,9 +2668,16 @@ class TaskManager:
             parent_id = canonical_uuid(parent.get("job_id"), "parent.job_id")
         except FormatError:
             return None
+        parent_key = parent.get("job_key")
+        parent_placement = parent.get("placement")
+        if not isinstance(parent_key, str) or not isinstance(parent_placement, str):
+            # A child written before spawns carried the parent's placement. The
+            # guard is advisory, so it probes nothing rather than rescan the
+            # whole workspace to reconstruct a hint the child should have held.
+            return None
         try:
-            parent_marker = self.workspace.find_marker_by_id(parent_id)
-            if parent_marker is None:
+            parent_marker = self.workspace.find_marker_at(parent_key, normalize_placement(parent_placement))
+            if parent_marker is None or parent_marker.job_id != parent_id:
                 return None
             summary = self._read_frame(parent_marker).join_summary
         except (WorkflowError, OSError) as exc:
@@ -2707,7 +2765,7 @@ class TaskManager:
         """
 
         changed = False
-        for marker in self._bounded("process_cancelling", self.workspace.scan_markers(("cancelling",))):
+        for marker in self._window("process_cancelling", "cancelling"):
             self._pace()
             loaded = self._load_job_and_state(marker, "process_cancelling")
             if loaded is None:

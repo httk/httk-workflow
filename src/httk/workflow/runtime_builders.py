@@ -487,6 +487,9 @@ class OutcomeDraft:
             "workspace_id": self.context.workspace_id,
             "job_id": self.context.job_id,
             "job_key": self.context.job_key,
+            # The parent's own placement, so a manager can probe its exact state
+            # set — for the decided-join revival guard — without a workspace scan.
+            "placement": self.context.placement,
             "activation_id": self.context.activation_id,
             "spawn_id": spawn_id,
         }

@@ -1,5 +1,6 @@
 """Workflow workspace creation, submission, marker discovery, and transitions."""
 
+import bisect
 import errno
 import logging
 import os
@@ -7,7 +8,8 @@ import re
 import shutil
 import time
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -31,6 +33,7 @@ from .errors import (
 )
 from .journal import JournalWriter, read_record
 from .models import (
+    ACTIVE_STATE_KINDS,
     CORE_PROFILE,
     CORE_STATE_KINDS,
     READABLE_CORE_PROFILES,
@@ -56,6 +59,68 @@ _LOGGER = logging.getLogger(__name__)
 # silently: NFS silly-renames, editor droppings, and other foreign files are
 # not protocol entries and must never stop a scan or reach quarantine.
 _MARKER_SHAPE_PATTERN = re.compile(r"\.p[0-9]{3}\.g[0-9a-z]+\.")
+
+#: How many directory entries a streaming scheduling scan visits before it
+#: takes a heartbeat opportunity. A walk of one enormous flat directory keeps a
+#: manager's lease alive from inside the walk exactly as a walk across many
+#: kinds does, rather than only between passes.
+DISCOVERY_HEARTBEAT_STRIDE = 512
+
+#: How many active-job locations one workspace instance caches before it evicts
+#: the least recently touched. Terminal jobs are never indexed, so this only
+#: bounds the working set: a workspace with a hundred million finished jobs
+#: never grows an index proportional to its whole history.
+DEFAULT_MARKER_INDEX_CAPACITY = 1 << 20
+
+
+def _scandir_sorted(directory: Path) -> list[os.DirEntry[str]]:
+    """Return one directory's entries by name, or nothing if it is not there.
+
+    A directory that a concurrent transition renamed or removed while the walk
+    was reaching it reads as empty rather than as an error: an incremental scan
+    tolerates the churn of the very managers it runs beside, consistent with
+    how a vanished marker becomes a silent miss rather than a fault.
+    """
+
+    try:
+        with os.scandir(directory) as scan:
+            entries = list(scan)
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            return []
+        raise
+    entries.sort(key=lambda item: item.name)
+    return entries
+
+
+def _safe_is_dir(entry: os.DirEntry[str]) -> bool:
+    """Report whether *entry* is a directory, tolerating its disappearance."""
+
+    try:
+        return entry.is_dir()
+    except OSError:
+        return False
+
+
+def _cursor_relation(position: tuple[str, ...], after: tuple[str, ...] | None) -> str:
+    """Classify a subtree at *position* against a resume cursor *after*.
+
+    ``"descend"`` walks the whole subtree, ``"resume"`` walks it carrying the
+    cursor because the resume point is inside it, and ``"skip"`` prunes it
+    without a single ``scandir`` because every position it could contain was
+    already consumed. This is what keeps resuming an interrupted walk cheap.
+    """
+
+    if after is None:
+        return "descend"
+    head = after[: len(position)]
+    if position < head:
+        return "skip"
+    if position > head:
+        return "descend"
+    return "resume"
 
 
 @dataclass(frozen=True)
@@ -89,7 +154,17 @@ def _marker_shaped(name: str) -> bool:
 class Workspace:
     """One self-contained httk workflow filesystem workspace."""
 
-    def __init__(self, root: str | os.PathLike[str], *, mutable: bool = True, durable: bool = True) -> None:
+    def __init__(
+        self,
+        root: str | os.PathLike[str],
+        *,
+        mutable: bool = True,
+        durable: bool = True,
+        marker_index_capacity: int = DEFAULT_MARKER_INDEX_CAPACITY,
+    ) -> None:
+        if marker_index_capacity < 1:
+            raise ValueError("marker_index_capacity must be positive")
+        self._marker_index_capacity = marker_index_capacity
         self.root = Path(root).resolve()
         self.control = self.root / ".httk-workflow"
         self.runners = self.control / "runners"
@@ -138,10 +213,14 @@ class Workspace:
                 raise ValueError
         except ValueError as exc:
             raise FormatError("workspace_id must be a canonical UUID") from exc
-        # Job id -> where this instance last saw that job's marker. It is a pure
-        # cache of the state tree, built lazily from one scan and maintained by
-        # every rename this instance performs; see :meth:`find_marker_by_id`.
-        self._marker_index: dict[str, _IndexEntry] | None = None
+        # Job id -> where this instance last saw that job's marker, most recently
+        # touched last. It is a pure cache of the state tree, built lazily from
+        # one scan and maintained by every rename this instance performs; see
+        # :meth:`find_marker_by_id`. Only active jobs are cached and the map is
+        # capped, so it tracks the working set rather than the whole history: a
+        # job that reaches a terminal kind is evicted, and interactive lookups of
+        # a finished job pay one exhaustive scan instead.
+        self._marker_index: "OrderedDict[str, _IndexEntry] | None" = None
         # Job ids the last complete scan found more than one marker for. That is
         # workspace corruption, and the lookup that meets one must say so rather
         # than pick a winner.
@@ -427,30 +506,121 @@ class Workspace:
     def payload_path(self, placement: PurePosixPath, job_key: str) -> Path:
         return self.root.joinpath(*placement.parts, job_key)
 
+    def _iter_state_subtree(
+        self,
+        directory: Path,
+        rel: tuple[str, ...],
+        after: tuple[str, ...] | None,
+    ) -> Iterator[tuple[tuple[str, ...], "Marker | MarkerFault | None"]]:
+        """Yield every entry below *directory* in stable pre-order, past *after*.
+
+        ``directory`` sits at position ``rel`` relative to ``state/<kind>``.
+        Each tuple is ``(position, entry)``: ``entry`` is the parsed marker or
+        the fault of a marker-shaped file and ``None`` for every other visited
+        entry — a subdirectory the walk descends, a foreign file, or a marker an
+        earlier tick already consumed. The caller therefore counts one yield per
+        directory entry examined, which is exactly the discovery budget.
+
+        ``after`` prunes: an entry not strictly greater than it is skipped, and a
+        subtree entirely at or below it is never opened, so resuming a walk costs
+        the fan-out along the cursor path rather than a re-scan of all that came
+        before it. The walk holds one directory's entries in memory at a time,
+        never a materialized list of the tree, and never sorts globally.
+        """
+
+        state_root = self.control / "state"
+        for entry in _scandir_sorted(directory):
+            position = rel + (entry.name,)
+            if _safe_is_dir(entry):
+                relation = _cursor_relation(position, after)
+                if relation == "skip":
+                    continue
+                yield position, None
+                yield from self._iter_state_subtree(
+                    directory / entry.name, position, after if relation == "resume" else None
+                )
+                continue
+            if after is not None and position <= after:
+                yield position, None
+                continue
+            if not _marker_shaped(entry.name):
+                _LOGGER.debug("ignoring foreign file below state: %s", directory / entry.name)
+                yield position, None
+                continue
+            path = directory / entry.name
+            if not path.is_file():
+                # A directory entry that does not resolve to a file is not a
+                # marker the scan may report: it is a name the readdir surfaced
+                # before the inode is visible, or one a concurrent transition
+                # has already renamed away. Honouring the same ``is_file`` probe
+                # the rename verification uses keeps discovery inside the one
+                # visibility model, so a momentarily-invisible destination is
+                # treated as absent rather than as a marker.
+                yield position, None
+                continue
+            try:
+                yield position, Marker.from_path(state_root, path)
+            except (WorkflowError, ValueError) as exc:
+                yield position, MarkerFault(path=path, reason=str(exc))
+
+    def _subtree_roots(self, kind: str, roots: Sequence[PurePosixPath]) -> list[tuple[Path, tuple[str, ...]]]:
+        """Return the ``(directory, position)`` roots a walk of *kind* starts at.
+
+        With no placement assignment the walk starts at the whole kind; a
+        deployment that restricts a manager to placement subtrees starts one walk
+        per assigned prefix, so disjoint managers never scan each other's trees.
+        """
+
+        base = self.control / "state" / kind
+        if not roots:
+            return [(base, ())]
+        return [(base.joinpath(*prefix.parts), prefix.parts) for prefix in roots]
+
+    def walk_markers(
+        self,
+        kinds: Iterable[str] | None = None,
+        *,
+        roots: Sequence[PurePosixPath] = (),
+        heartbeat: Callable[[], None] | None = None,
+        heartbeat_every: int = DISCOVERY_HEARTBEAT_STRIDE,
+    ) -> Iterator[Marker]:
+        """Stream every schedulable marker of *kinds*, exhaustively.
+
+        This is the streaming, cursorless counterpart of a bounded pass: it walks
+        the same scandir tree with no discovery budget, reports every fault, and
+        takes a heartbeat opportunity every *heartbeat_every* entries so a long
+        exhaustive pass — polling running attempts, recovering claims — keeps its
+        lease alive from inside the walk. A pass MAY restrict itself to placement
+        *roots*; the debug workspace narrows what it surfaces through its private
+        ``_scheduling_includes`` hook.
+        """
+
+        visited = 0
+        for kind in tuple(kinds or CORE_STATE_KINDS):
+            for start, rel in self._subtree_roots(kind, roots):
+                for _position, entry in self._iter_state_subtree(start, rel, None):
+                    visited += 1
+                    if heartbeat is not None and visited % heartbeat_every == 0:
+                        heartbeat()
+                    if isinstance(entry, MarkerFault):
+                        self.report_marker_fault(entry)
+                    elif isinstance(entry, Marker) and self._scheduling_includes(entry):
+                        yield entry
+
     def scan_marker_entries(self, kinds: Iterable[str] | None = None) -> Iterator[Marker | MarkerFault]:
         """Yield every marker below ``state/``, reporting damage per entry.
 
         One unusable entry must never hide the rest of the workspace, so a
         marker-shaped basename that fails validation is reported as a
-        :class:`MarkerFault` instead of aborting the scan.
+        :class:`MarkerFault` instead of aborting the scan. This is the exhaustive
+        walk the workspace tools (fsck, collection, status, harvest) use; the
+        scheduling passes use the bounded :class:`~httk.workflow.workspace.MarkerStream` instead.
         """
 
-        selected = tuple(kinds or CORE_STATE_KINDS)
-        state_root = self.control / "state"
-        for kind in selected:
-            directory = state_root / kind
-            if not directory.exists():
-                continue
-            for path in directory.rglob("*"):
-                if not path.is_file():
-                    continue
-                if not _marker_shaped(path.name):
-                    _LOGGER.debug("ignoring foreign file below state: %s", path)
-                    continue
-                try:
-                    yield Marker.from_path(state_root, path)
-                except (WorkflowError, ValueError) as exc:
-                    yield MarkerFault(path=path, reason=str(exc))
+        for kind in tuple(kinds or CORE_STATE_KINDS):
+            for _position, entry in self._iter_state_subtree(self.control / "state" / kind, (), None):
+                if entry is not None:
+                    yield entry
 
     def scan_markers(self, kinds: Iterable[str] | None = None) -> Iterable[Marker]:
         for entry in self.scan_marker_entries(kinds):
@@ -458,6 +628,16 @@ class Workspace:
                 yield entry
             else:
                 self.report_marker_fault(entry)
+
+    def _scheduling_includes(self, marker: Marker) -> bool:
+        """Whether a scheduling scan of this workspace may surface *marker*.
+
+        Production managers see the whole workspace; the private manager behind
+        the foreground debug runner overrides this to the one job it is driving,
+        so its streaming passes never schedule a marker outside that scope.
+        """
+
+        return True
 
     def report_marker_fault(self, fault: MarkerFault) -> None:
         """Report an uninterpretable state entry loudly once, then quietly.
@@ -496,17 +676,25 @@ class Workspace:
     # implied; a process that must not pay it can drop the whole index at any
     # moment with :meth:`invalidate_marker_index`, at the cost of one rescan.
 
+    def _trim_index(self, index: "OrderedDict[str, _IndexEntry]") -> None:
+        """Evict least-recently-touched entries until the cap is satisfied."""
+
+        while len(index) > self._marker_index_capacity:
+            index.popitem(last=False)
+
     def _index_note(self, marker: Marker) -> None:
         """Record where this instance just observed one job's marker.
 
-        The index covers exactly the kinds a lookup answers for, so a job that
-        moves into ``relocating`` or ``transferring`` is dropped rather than
-        recorded: a lookup must report it as absent from the schedulable tree.
+        The index covers only the *active* kinds — a job that reaches a terminal
+        kind, or moves into ``relocating`` or ``transferring``, is evicted rather
+        than recorded, so the map tracks the working set and not the workspace's
+        whole history. A recorded job is moved to the most-recently-touched end
+        and the cap is enforced, so the index never grows without bound.
         """
 
         if self._marker_index is None:
             return
-        if marker.kind not in CORE_STATE_KINDS:
+        if marker.kind not in ACTIVE_STATE_KINDS:
             self._marker_index.pop(marker.job_id, None)
             return
         self._marker_index[marker.job_id] = _IndexEntry(
@@ -514,6 +702,8 @@ class Workspace:
             placement=marker.placement,
             basename=marker.path.name,
         )
+        self._marker_index.move_to_end(marker.job_id)
+        self._trim_index(self._marker_index)
 
     def _index_note_path(self, path: Path) -> None:
         """Record one marker this instance published or moved by raw path.
@@ -548,32 +738,47 @@ class Workspace:
         self._marker_index = None
         self._marker_duplicates = frozenset()
 
-    def _rebuild_marker_index(self) -> dict[str, _IndexEntry]:
-        """Rebuild the whole index from one complete scan of ``state/``.
+    def _rebuild_marker_index(self, wanted: str | None = None) -> Marker | None:
+        """Rebuild the active index from one complete scan and locate *wanted*.
 
         The scan is deliberately the base-class one: a subclass may narrow what
         a manager *scans* for scheduling, but never what the workspace may look
         up, and an index built from a narrowed scan would answer "absent" for a
-        job that is plainly there.
+        job that is plainly there. Every core kind is walked so duplicates and a
+        terminal *wanted* job are found, but only active jobs are cached — a
+        finished job is located and returned without being kept, so the index
+        never carries the history of a workspace that has run for years.
         """
 
-        index: dict[str, _IndexEntry] = {}
+        index: "OrderedDict[str, _IndexEntry]" = OrderedDict()
         duplicates: set[str] = set()
+        seen: set[str] = set()
+        found: Marker | None = None
         for entry in Workspace.scan_marker_entries(self, CORE_STATE_KINDS):
             if isinstance(entry, MarkerFault):
                 self.report_marker_fault(entry)
                 continue
-            if entry.job_id in index:
+            if entry.job_id in seen:
                 duplicates.add(entry.job_id)
-            index[entry.job_id] = _IndexEntry(
-                kind=entry.kind,
-                placement=entry.placement,
-                basename=entry.path.name,
-            )
+            seen.add(entry.job_id)
+            if entry.kind in ACTIVE_STATE_KINDS:
+                index[entry.job_id] = _IndexEntry(
+                    kind=entry.kind,
+                    placement=entry.placement,
+                    basename=entry.path.name,
+                )
+            if wanted is not None and entry.job_id == wanted:
+                found = entry
+        self._trim_index(index)
         self._marker_index = index
         self._marker_duplicates = frozenset(duplicates)
-        _LOGGER.debug("rebuilt the marker index of workspace %s with %d jobs", self.workspace_id, len(index))
-        return index
+        _LOGGER.debug(
+            "rebuilt the marker index of workspace %s with %d active jobs of %d seen",
+            self.workspace_id,
+            len(index),
+            len(seen),
+        )
+        return found
 
     def _index_marker(self, job_id: str, entry: "_IndexEntry") -> Marker | None:
         """Return the marker one index entry names, if it is still there."""
@@ -617,6 +822,7 @@ class Workspace:
             if entry is not None and job_id not in self._marker_duplicates:
                 marker = self._index_marker(job_id, entry)
                 if marker is not None:
+                    index.move_to_end(job_id)
                     return marker
                 # The cached location is stale. The job most likely only changed
                 # kind, and ordinary transitions never change placement, so the
@@ -626,11 +832,10 @@ class Workspace:
                 if probed is not None:
                     self._index_note(probed)
                     return probed
-        index = self._rebuild_marker_index()
+        found = self._rebuild_marker_index(job_id)
         if job_id in self._marker_duplicates:
             raise WorkspaceCorruptionError(f"job {job_id} has more than one state marker")
-        entry = index.get(job_id)
-        return None if entry is None else self._index_marker(job_id, entry)
+        return found
 
     def _probe_placement(self, job_id: str, placement: PurePosixPath) -> Marker | None:
         """Find one job id by checking every state kind at one placement."""
@@ -960,6 +1165,122 @@ class Workspace:
         write_json_atomic(temporary, dict(request), durable=self.durable)
         self._publish_path(temporary, ready)
         return ready
+
+
+class MarkerStream:
+    """A resumable, bounded, fair scandir walk of one active state kind.
+
+    One stream serves one scheduling pass. It is workspace-level and reusable,
+    but its cursor and rotation live only in the manager that holds it: nothing
+    is written to disk, so two managers of one workspace never contend on a
+    shared position, and a restarted manager simply begins a fresh cycle.
+
+    Fairness is round-robin over the top-level placement roots the pass is
+    assigned — or, with no assignment, the first-level components that exist
+    under the kind. Each :meth:`advance` serves the roots in rotation, keeps a
+    per-root resume position, and moves the rotation pointer on, so a subtree
+    holding a million markers can never starve a sibling holding three. Priority
+    is therefore best-within-window rather than exact-global: bounded discovery
+    is the whole point, and rotation is what guarantees the starved window is
+    reached on a later tick.
+    """
+
+    def __init__(
+        self,
+        workspace: Workspace,
+        kind: str,
+        *,
+        prefixes: Sequence[PurePosixPath] = (),
+    ) -> None:
+        self.workspace = workspace
+        self.kind = kind
+        self._prefixes = tuple(prefixes)
+        # Root position -> the DFS position the last tick stopped after in that
+        # root's subtree. A root absent from the map restarts from its
+        # beginning, which is exactly what a completed cycle wants.
+        self._cursors: dict[tuple[str, ...], tuple[str, ...]] = {}
+        # The root the next advance begins its rotation at.
+        self._rotation: tuple[str, ...] | None = None
+
+    def _roots(self) -> list[tuple[str, ...]]:
+        """Return the rotation roots, sorted, for one advance."""
+
+        if self._prefixes:
+            return sorted(prefix.parts for prefix in self._prefixes)
+        base = self.workspace.control / "state" / self.kind
+        return sorted((entry.name,) for entry in _scandir_sorted(base) if _safe_is_dir(entry))
+
+    def advance(
+        self,
+        *,
+        processing_budget: int,
+        discovery_budget: int,
+        heartbeat: Callable[[], None] | None = None,
+        heartbeat_every: int = DISCOVERY_HEARTBEAT_STRIDE,
+    ) -> list[Marker]:
+        """Return up to *processing_budget* markers, visiting a bounded window.
+
+        At most *processing_budget* markers are collected and at most
+        *discovery_budget* *new* directory entries are visited; *heartbeat* is
+        called every *heartbeat_every* entries examined, including the entries a
+        resume re-lists on its way past the cursor. Roots are served in rotation
+        with per-root resume, so the next tick continues where this one stopped
+        and the rotation pointer advances so no root starves.
+
+        A resume re-lists the entries at or before the cursor — ``scandir``
+        cannot seek — so those are heartbeated but counted against neither the
+        discovery budget nor the cursor. That keeps forward progress guaranteed:
+        every advance either processes ``processing_budget`` markers past the
+        cursor or exhausts the subtree, and never spends its whole budget
+        re-skipping a directory it has already consumed.
+        """
+
+        roots = self._roots()
+        if not roots:
+            self._cursors.clear()
+            self._rotation = None
+            return []
+        known = set(roots)
+        self._cursors = {key: value for key, value in self._cursors.items() if key in known}
+        start = bisect.bisect_left(roots, self._rotation) if self._rotation is not None else 0
+        if start >= len(roots):
+            start = 0
+        order = roots[start:] + roots[:start]
+        base = self.workspace.control / "state" / self.kind
+        collected: list[Marker] = []
+        visited = 0
+        examined = 0
+        last_root = order[0]
+        for root in order:
+            if len(collected) >= processing_budget or visited >= discovery_budget:
+                break
+            last_root = root
+            after = self._cursors.get(root)
+            reached_end = True
+            for position, entry in self.workspace._iter_state_subtree(base.joinpath(*root), root, after):
+                examined += 1
+                if heartbeat is not None and examined % heartbeat_every == 0:
+                    heartbeat()
+                if after is not None and position <= after:
+                    # An entry the walk re-lists while seeking past the cursor:
+                    # already consumed on an earlier advance, so it neither
+                    # advances the cursor nor spends the discovery budget.
+                    continue
+                visited += 1
+                self._cursors[root] = position
+                if isinstance(entry, MarkerFault):
+                    self.workspace.report_marker_fault(entry)
+                elif isinstance(entry, Marker) and self.workspace._scheduling_includes(entry):
+                    collected.append(entry)
+                if len(collected) >= processing_budget or visited >= discovery_budget:
+                    reached_end = False
+                    break
+            if reached_end:
+                # This root's subtree was exhausted within the budget, so the
+                # next cycle restarts it rather than resuming a spent cursor.
+                self._cursors.pop(root, None)
+        self._rotation = roots[(roots.index(last_root) + 1) % len(roots)]
+        return collected
 
 
 class WorkspaceOperationError(WorkspaceUnavailableError):

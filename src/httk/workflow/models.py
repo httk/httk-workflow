@@ -52,6 +52,12 @@ STATE_KINDS = (
 )
 CORE_STATE_KINDS = tuple(kind for kind in STATE_KINDS if kind not in {"relocating", "transferring"})
 TERMINAL_KINDS = frozenset({"succeeded", "failed", "cancelled"})
+# The core kinds a job can still move on from, and the only ones a scheduling
+# scan ever has to visit. A hundred-million-job workspace keeps every finished
+# job below the terminal kinds, so anything scaling with active work — the
+# streaming scheduler's scans and the in-memory marker index — is scoped to
+# these rather than to every marker that ever existed.
+ACTIVE_STATE_KINDS = tuple(kind for kind in CORE_STATE_KINDS if kind not in TERMINAL_KINDS)
 QUIESCENT_KINDS = frozenset({"submitted", "ready", "waiting", "paused", "failed", "succeeded", "cancelled"})
 
 # Payload entries that belong to a runner rather than to the immutable job: the

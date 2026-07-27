@@ -1794,8 +1794,15 @@ A step places complete child bundles in its outcome:
 ```
 
 Each child `job.json` names parent workspace, parent job, parent activation, and
-spawn ID. `spawn.json` chooses the target workspace and arbitrary placement for
-each child. Child UUIDs and tags are chosen before outcome publication. In the
+spawn ID, and — a clean pre-release requirement — the parent's `placement`.
+`spawn.json` chooses the target workspace and arbitrary placement for each
+child. The parent placement lets the decided-join revival guard resolve the
+parent by probing its exact state set rather than scanning the workspace: a
+manager deciding whether a `continue` would revive a child a join already
+consumed reads the parent at that placement alone and never falls back to a
+whole-workspace scan inside a scheduling tick. The guard is advisory, so a child
+written before spawns carried the parent placement makes it probe nothing rather
+than rescan; a fresh child MUST carry it. Child UUIDs and tags are chosen before outcome publication. In the
 core profile, the target workspace MUST be the parent's workspace;
 cross-workspace children require `multiworkspace-v1`.
 
@@ -1883,8 +1890,18 @@ A manager resolves each named child through this ladder, in order:
    transfer forwarding record;
 4. a complete marker scan of the named workspace.
 
-A cache is never the only recovery path, and a cache miss is never the answer:
-the ladder always ends in step 4 before a child is called unresolvable. The
+A cache is never the only recovery path, and a cache miss is never the answer.
+In the core profile a clean pre-release break makes step 1 mandatory: every join
+child reference MUST carry both `job_key` and `placement`, join evaluation
+resolves each child by probing the finite state set at that exact placement
+alone, and it never falls back to a whole-workspace scan from inside a
+scheduling tick. A reference that lacks a placement is a protocol error of
+whatever published it, and the manager rejects the outcome rather than rescanning
+the workspace per child. The whole-workspace scan of step 4 survives for the
+extension forwarding of step 3 and for interactive resolution — `job show`, `job
+why`, `job log`, and harvest resolve — where locating an arbitrary and possibly
+finished job by one exhaustive scan is acceptable; it is never entered on the
+scheduling hot path. The
 consequence that matters at scale is that a waiting parent's per-tick cost is
 independent of how many children its join names — each child is one hint lookup
 or one confirmed index hit — rather than one complete scan per child.
@@ -2075,7 +2092,7 @@ into `requests/ready/` under the same name, so a manager never reads a partially
 written request and the publication is the same verified rename as every other
 one in this protocol. A request names:
 
-- job UUID and job key;
+- job UUID, job key, and the job's `placement`;
 - exact expected marker generation and record reference;
 - requested action;
 - operator identity and reason;
@@ -2121,9 +2138,13 @@ must stop live work uses `cancel`; a pause can be requested after that work is
 released or fenced.
 
 A manager claims the request by rename, verifies the exact expected current
-marker, appends the new journal frame, and renames that marker. A delayed
-request cannot apply to a newer state because its expected generation no longer
-matches. All request-induced marker moves use verified transitions. A manager
+marker, appends the new journal frame, and renames that marker. It resolves the
+target by probing the finite state set at the request's exact `placement`, the
+same clean pre-release break the join ladder makes, and never by scanning the
+workspace from a scheduling tick; a request that carries no placement is a
+protocol error, claimed and quarantined as malformed input rather than allowed
+to trigger a global lookup. A delayed request cannot apply to a newer state
+because its expected generation no longer matches. All request-induced marker moves use verified transitions. A manager
 whose live transition loses to cancellation rereads the current marker and
 stops the fenced attempt; it does not infer ownership merely from an errno.
 
@@ -2256,6 +2277,16 @@ priority inversion, especially after cold start; priority is a preference
 rather than a strict global ordering guarantee. This is not a gap an extension
 should close by adding directory levels — see the withdrawn `priority-bands-v1`
 above — and no scan strategy changes claim correctness.
+
+A manager MAY restrict every scan to a set of placement prefixes, the same kind
+of deployment policy by which it advertises pools and capabilities, so that
+disjoint managers divide a large workspace without walking each other's trees.
+This is a restriction a manager places on itself and not a protocol change:
+placement values remain project-owned semantics that the engine only validates
+and filters on, overlapping assignments stay safe because the marker rename
+still arbitrates a claim, and a manager records its assigned prefixes in its
+manifest so a diagnosis can report when a live manager's prefixes exclude a
+job's placement. A manager with no assignment scans the whole workspace.
 
 ## Workspace check and marker repair
 

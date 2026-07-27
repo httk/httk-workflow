@@ -234,6 +234,75 @@ and keeps committing their outcomes for `--drain-timeout` seconds before
 exiting successfully; a second signal exits immediately. Anything left behind
 is recovered from its expired lease by the next manager.
 
+## Scheduling
+
+A manager never reads the whole workspace on a tick. Every scheduling pass
+discovers its work by streaming the state tree of one active kind — one of
+`submitted`, `ready`, `claimed`, `running`, `committing`, `waiting`, and
+`cancelling` — and never opens the terminal `succeeded`, `failed`, or
+`cancelled` trees at all. The in-memory marker index and every scheduling scan
+therefore grow with the active work in flight rather than with the accumulated
+history of a workspace that has run for years.
+
+**Bounded streaming discovery.** A pass walks directory entries with
+`os.scandir` instead of materializing an `rglob` of the tree, and it stops early
+on two independent budgets: it visits at most `discovery_budget` directory
+entries — `4096` by default — and it collects at most `maximum_pass_markers`
+markers — `256` by default — before it yields the tick. It also takes a
+heartbeat opportunity every 512 entries *inside* the walk, so even one enormous
+flat placement directory keeps a manager's lease alive from within the scan
+exactly as crossing many placements does, rather than only between passes. The
+walk keeps a resume cursor per top-level placement root, held in the manager's
+memory alone — nothing is written to disk, so two managers of one workspace
+never contend on a shared position and a restarted manager simply begins a fresh
+cycle. The roots are served in a round-robin rotation with per-root resume, so a
+subtree holding a million markers can never starve a sibling holding three, and
+the next tick continues precisely where this one stopped. A concurrent
+transition that renames or removes a marker underneath the walk is tolerated
+silently, consistent with how a vanished marker becomes a miss rather than a
+fault.
+
+The exhaustive workspace operations — `fsck`, `gc`, `harvest`, `status`, and
+`job list` — use the same scandir walker in an exhaustive mode with no cursor
+and no budget, so their semantics are unchanged; only the bounded scheduling
+passes carry the budgets.
+
+**Best-within-window priority.** Claiming ready work scans a single bounded
+window and then claims the best-priority candidates found *within that window*,
+in a stable order among equal priorities, up to the number of free worker slots.
+Priority is therefore best-within-window rather than exact-global: that is the
+deliberate price of bounded discovery, and the round-robin rotation is what
+eventually reaches a starved subtree on a later tick. Recovering exact global
+order would require a derived priority index, which this implementation does not
+build; it remains a possible future addition only where a deployment measures
+that it needs one.
+
+**Restricting a manager to placement prefixes.** A manager may be told to scan
+only part of the tree, exactly the way pools and capabilities restrict what it
+claims:
+
+```console
+httk workflow manager run WORKSPACE \
+  --placement-prefix project-a \
+  --placement-prefix project-b/2026
+```
+
+The flag is repeatable, and every scheduling scan — bounded window and
+exhaustive walk alike — is then confined to those subtrees. With no
+`--placement-prefix` a manager scans the whole workspace, which is the default.
+Overlapping assignments stay safe because the marker rename still arbitrates a
+claim, so two managers assigned the same subtree never both run one job;
+disjoint assignments simply divide the scanning, so neither manager pays to walk
+the other's trees. The assignment is deployment policy and not a protocol
+change — placement values remain project-owned semantics that the engine only
+validates and filters on — and it is recorded in the manager's manifest, so `job
+why` reports a prefix mismatch when a live manager's placement prefixes exclude
+the placement of the job being diagnosed.
+
+Laying out placements across a large campaign and assigning their subtrees to
+managers by a written recipe rather than by hand is out of scope here; the
+Phase 14 campaign recipes add it.
+
 ## Inspect and control
 
 ```console

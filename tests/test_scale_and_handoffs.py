@@ -9,6 +9,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest  # pyright: ignore[reportMissingImports]
 
@@ -102,18 +103,26 @@ def _chain(workspace: Workspace, marker: Marker, kinds: list[tuple[str, dict[str
     return marker
 
 
-class _RglobCounter:
-    """Count every complete subtree walk the workspace performs."""
+class _ScandirCounter:
+    """Count every directory ``os.scandir`` opens.
+
+    The streaming walker, ``pathlib`` globbing, and every exhaustive scan reach
+    the filesystem through ``os.scandir``, so counting its calls measures how
+    many directories a lookup or a tick reads — the cost a whole-tree rescan
+    multiplies and the index, the placement probe, and the bounded window each
+    avoid. It is the scandir-era successor of the old ``rglob`` counter: there
+    is no ``rglob`` left in the scheduling paths to count.
+    """
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self.calls = 0
-        original = Path.rglob
+        original = os.scandir
 
-        def counting(inner_self: Path, pattern: str, *args: object, **kwargs: object):
+        def counting(*args: Any, **kwargs: Any) -> Any:
             self.calls += 1
-            return original(inner_self, pattern, *args, **kwargs)  # pyright: ignore[reportCallIssue]
+            return original(*args, **kwargs)
 
-        monkeypatch.setattr(Path, "rglob", counting)
+        monkeypatch.setattr(os, "scandir", counting)
 
     def reset(self) -> int:
         seen = self.calls
@@ -121,14 +130,17 @@ class _RglobCounter:
         return seen
 
 
-def _scan_cost(workspace: Workspace) -> int:
-    """Return the tree walks one complete scan of this workspace performs.
+def _full_scan_cost(workspace: Workspace, counter: _ScandirCounter) -> int:
+    """Return the ``os.scandir`` calls one complete scan of ``state/`` performs.
 
-    A scan walks the state kinds that exist, so this is what a lookup that
-    cannot answer from the index costs — once per lookup, before the index.
+    A lookup that answers from neither the index nor a placement probe rebuilds
+    the index from exactly this scan, so this is the cost a whole-workspace
+    rescan pays — once per such lookup, and never for an index hit.
     """
 
-    return sum(1 for kind in CORE_STATE_KINDS if (workspace.control / "state" / kind).is_dir())
+    counter.reset()
+    list(Workspace.scan_marker_entries(workspace, CORE_STATE_KINDS))
+    return counter.reset()
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +152,10 @@ def test_marker_lookup_answers_from_the_index_instead_of_rescanning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    kinds = ("submitted", "ready", "waiting", "succeeded", "failed")
+    # Only active kinds: the index is now scoped to work a job can still move on
+    # from, so a terminal job is deliberately not cached and is covered by its
+    # own test below rather than confusing the index-hit accounting here.
+    kinds = ("submitted", "ready", "waiting", "committing", "cancelling")
     job_ids: list[str] = []
     for index in range(300):
         job_id = str(uuid.uuid4())
@@ -148,18 +163,21 @@ def test_marker_lookup_answers_from_the_index_instead_of_rescanning(
         directory.mkdir(parents=True, exist_ok=True)
         (directory / f"job--{job_id}.p500.g0.init").touch()
         job_ids.append(job_id)
-    scan = _scan_cost(workspace)
-    assert scan == len(kinds)
 
-    counter = _RglobCounter(monkeypatch)
-    # Without the index every lookup walks every populated state kind, which is
-    # what a join child, an operator request, and 'job show' each used to cost.
+    counter = _ScandirCounter(monkeypatch)
+    per_scan = _full_scan_cost(workspace, counter)
+    # A full scan reads the whole state tree — many directories, not one per
+    # kind — so the index is exactly what a scaling workspace cannot do without.
+    assert per_scan > len(kinds)
+
+    # Without the index every lookup rebuilds it from one whole-tree scan, which
+    # is what a join child, an operator request, and 'job show' each used to cost.
     for job_id in job_ids[:3]:
         workspace.invalidate_marker_index()
         assert workspace.find_marker_by_id(job_id) is not None
-    assert counter.reset() == 3 * scan
+    assert counter.reset() == 3 * per_scan
 
-    # With it warm, 300 lookups walk nothing at all.
+    # With it warm, 300 lookups read no directory at all.
     for job_id in job_ids:
         marker = workspace.find_marker_by_id(job_id)
         assert marker is not None and marker.kind in kinds
@@ -168,24 +186,32 @@ def test_marker_lookup_answers_from_the_index_instead_of_rescanning(
     # Absence is never taken from the cache: it costs one rescan, so a job
     # another manager has just published is found rather than denied.
     assert workspace.find_marker_by_id(str(uuid.uuid4())) is None
-    assert counter.reset() == scan
+    assert counter.reset() == per_scan
 
 
 def test_a_stale_index_entry_falls_back_to_the_placement_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", "payload")
     marker = workspace.submit(payload, "project/probe")
+    # Populate other placements so a whole-tree rescan would be visibly dearer
+    # than a probe of the one placement the stale entry names.
+    for index in range(20):
+        other_payload, _ = _payload(tmp_path / "source", f"other-{index}")
+        workspace.submit(other_payload, f"project/other/{index:02d}")
     assert workspace.find_marker_by_id(job_id) is not None
 
     # Another actor moves the marker: the cached entry now names nothing.
     other = Workspace(workspace.root)
     moved = _chain(other, other.find_marker_by_id(job_id) or marker, [("ready", _progress(reason="submitted"))])
-    counter = _RglobCounter(monkeypatch)
+    counter = _ScandirCounter(monkeypatch)
     found = workspace.find_marker_by_id(job_id)
     assert found is not None and found.kind == "ready" and found.path == moved.path
+    probe = counter.reset()
     # An ordinary transition never changes placement, so the finite state set at
-    # the remembered placement resolves it without a full rescan.
-    assert counter.reset() == 0
+    # the remembered placement resolves it by reading only that placement's kind
+    # directories — bounded by the number of state kinds, never the whole tree.
+    assert 0 < probe <= len(CORE_STATE_KINDS)
+    assert probe < _full_scan_cost(workspace, counter)
 
 
 def test_a_relocated_job_still_resolves_after_the_index_misses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,24 +225,39 @@ def test_a_relocated_job_still_resolves_after_the_index_misses(tmp_path: Path, m
     destination = workspace.control / "state" / "ready" / "project" / "second"
     destination.mkdir(parents=True)
     marker.path.rename(destination / marker.path.name)
-    scan = _scan_cost(workspace)
-    counter = _RglobCounter(monkeypatch)
+    counter = _ScandirCounter(monkeypatch)
+    per_scan = _full_scan_cost(workspace, counter)
     found = workspace.find_marker_by_id(job_id)
     assert found is not None and found.placement.as_posix() == "project/second"
-    assert counter.reset() == scan
+    # The index entry is stale and its placement is wrong too, so neither the
+    # index nor the placement probe resolves it: only a whole-tree rescan does,
+    # which costs at least one full scan on top of the fruitless probe.
+    assert counter.reset() >= per_scan
 
 
-def _waiting_campaign(root: Path, children: int) -> tuple[Workspace, str]:
-    """Build one waiting parent whose join names *children* unhinted children."""
+def _waiting_campaign(root: Path, children: int, *, hint: bool = True) -> tuple[Workspace, str]:
+    """Build one waiting parent whose join names *children* children.
+
+    Every child reference carries its placement, as the protocol now requires:
+    the join probes each child's exact state set instead of ever rescanning the
+    tree. Passing ``hint=False`` reproduces the withdrawn pre-release shape whose
+    reference omits the placement, which a manager now rejects as a protocol
+    error rather than resolving by a whole-workspace scan.
+    """
 
     workspace = Workspace.initialize(root / "workspace")
     references: list[dict[str, object]] = []
     for index in range(children):
         payload, child_id = _payload(root / "source", f"child-{index}", tag="child")
         child = workspace.submit(payload, f"project/children/{index}")
-        # Deliberately no placement_hint: the hint is optional, and this is the
-        # shape that made a waiting parent rescan the tree once per child.
-        references.append({"workspace_id": workspace.workspace_id, "job_id": child.job_id, "job_key": child.job_key})
+        reference: dict[str, object] = {
+            "workspace_id": workspace.workspace_id,
+            "job_id": child.job_id,
+            "job_key": child.job_key,
+        }
+        if hint:
+            reference["placement_hint"] = child.placement.as_posix()
+        references.append(reference)
     payload, parent_id = _payload(root / "source", "parent", tag="parent")
     parent = workspace.submit(payload, "project/parent")
     _chain(
@@ -236,8 +277,8 @@ def _waiting_campaign(root: Path, children: int) -> tuple[Workspace, str]:
     return workspace, parent_id
 
 
-def _steady_tick_cost(workspace: Workspace, counter: _RglobCounter) -> int:
-    """Return the tree walks one steady-state tick of a waiting parent costs."""
+def _steady_tick_cost(workspace: Workspace, counter: _ScandirCounter) -> int:
+    """Return the directories one steady-state tick of a waiting parent reads."""
 
     with TaskManager(workspace, pools=("nothing-runs-here",), heartbeat_interval=600.0) as manager:
         manager.tick()
@@ -247,32 +288,48 @@ def _steady_tick_cost(workspace: Workspace, counter: _RglobCounter) -> int:
         return counter.reset()
 
 
-def test_a_waiting_parent_costs_the_same_per_tick_however_many_children_it_has(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    three, parent_id = _waiting_campaign(tmp_path / "three", 3)
-    six, _ = _waiting_campaign(tmp_path / "six", 6)
-    counter = _RglobCounter(monkeypatch)
-    with_three = _steady_tick_cost(three, counter)
-    with_six = _steady_tick_cost(six, counter)
-    # The scheduling passes each walk their own state kind once; resolving the
-    # join children adds nothing, so doubling the children changes nothing.
-    assert with_three == with_six
-    assert with_three <= _scan_cost(three)
+def test_a_waiting_parents_tick_never_opens_the_terminal_trees(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, parent_id = _waiting_campaign(tmp_path / "campaign", 4)
+    counter = _ScandirCounter(monkeypatch)
+    with TaskManager(workspace, pools=("nothing-runs-here",), heartbeat_interval=600.0) as manager:
+        # Reach the steady state: the children are registered to ready but never
+        # claimed here, and the parent stays waiting on a still-pending join.
+        for _ in range(4):
+            manager.tick()
+        marker = workspace.find_marker_by_id(parent_id)
+        assert marker is not None and marker.kind == "waiting"
 
-    # The parent is still waiting, and the same tick without the index costs one
-    # complete scan per child on top of the passes.
-    marker = three.find_marker_by_id(parent_id)
-    assert marker is not None and marker.kind == "waiting"
-    resolve = three.find_marker_by_id
+        counter.reset()
+        manager.tick()
+        base = counter.reset()
+        # The tick reads the active trees and resolves each child by its exact
+        # placement, so it touches the filesystem but never the whole tree.
+        assert base > 0
 
-    def rescanning(job_id: str) -> Marker | None:
-        three.invalidate_marker_index()
-        return resolve(job_id)
+        # Pile finished markers below the terminal kinds. A scheduling tick owns
+        # none of succeeded, failed, or cancelled, so it never opens them and its
+        # cost does not move by a single directory however many pile up.
+        for index in range(100):
+            for kind in ("succeeded", "failed", "cancelled"):
+                directory = workspace.control / "state" / kind / "project" / "done" / f"{index:03d}"
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / f"job--{uuid.uuid4()}.p500.g3.done").touch()
+        counter.reset()
+        manager.tick()
+        assert counter.reset() == base
 
-    monkeypatch.setattr(three, "find_marker_by_id", rescanning)
-    unindexed = _steady_tick_cost(three, counter)
-    assert unindexed - with_three >= 3 * _scan_cost(three)
+
+def test_a_join_child_reference_without_placement_is_a_protocol_error(tmp_path: Path) -> None:
+    # A pre-release reference that omits the placement is no longer resolved by a
+    # whole-workspace scan; the manager fails the waiting parent as a protocol
+    # error rather than rescanning the tree once per unhinted child.
+    workspace, parent_id = _waiting_campaign(tmp_path / "campaign", 2, hint=False)
+    with TaskManager(workspace, pools=("nothing-runs-here",), heartbeat_interval=600.0) as manager:
+        manager.tick()
+    parent = workspace.find_marker_by_id(parent_id)
+    assert parent is not None and parent.kind == "failed"
+    failure = workspace.read_state(parent).get("failure")
+    assert isinstance(failure, dict) and failure.get("code") == "protocol_error"
 
 
 def test_a_placement_hint_is_resolved_before_the_index_or_a_scan(
@@ -281,10 +338,12 @@ def test_a_placement_hint_is_resolved_before_the_index_or_a_scan(
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", "payload")
     marker = workspace.submit(payload, "project/hinted")
-    counter = _RglobCounter(monkeypatch)
+    counter = _ScandirCounter(monkeypatch)
     found = workspace.find_marker_at(marker.job_key, marker.placement)
     assert found is not None and found.job_id == job_id
-    assert counter.reset() == 0
+    # The hint resolves by a bounded sweep of the one named placement — at most
+    # one directory per state kind, never a recursive walk of the whole tree.
+    assert 0 < counter.reset() <= len(CORE_STATE_KINDS)
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +379,7 @@ def test_registration_accepts_a_submitted_marker_an_operator_already_repriced(tm
             "request_id": str(uuid.uuid4()),
             "job_id": job_id,
             "job_key": submitted.job_key,
+            "placement": submitted.placement.as_posix(),
             "expected_generation": submitted.generation,
             "expected_record_ref": submitted.record_ref,
             "action": "set_priority",
@@ -524,7 +584,12 @@ def _consumed_child(tmp_path: Path) -> tuple[Workspace, Marker, Marker]:
         tmp_path / "source",
         "child",
         tag="child",
-        parent={"workspace_id": workspace.workspace_id, "job_id": parent_id, "job_key": parent.job_key},
+        parent={
+            "workspace_id": workspace.workspace_id,
+            "job_id": parent_id,
+            "job_key": parent.job_key,
+            "placement": parent.placement.as_posix(),
+        },
     )
     child = workspace.submit(child_payload, "project/children")
     child = _chain(
@@ -565,6 +630,7 @@ def _continue_request(workspace: Workspace, marker: Marker, *, force: bool = Fal
         "request_id": str(uuid.uuid4()),
         "job_id": marker.job_id,
         "job_key": marker.job_key,
+        "placement": marker.placement.as_posix(),
         "expected_generation": marker.generation,
         "expected_record_ref": marker.record_ref,
         "action": "continue",
