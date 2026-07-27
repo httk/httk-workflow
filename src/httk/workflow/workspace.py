@@ -55,6 +55,40 @@ if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .gc import GcReport
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _validate_setting_key(key: str) -> str:
+    """Return one application-setting key, refusing an ill-formed one.
+
+    Application settings are a flat, dotted-name map (``vasp.command``,
+    ``vasp.pseudo_library``) of small values a runner resolves at execution
+    time — never nested objects, which belong in a job's ``inputs`` instead.
+    """
+
+    if not isinstance(key, str) or not key or key != key.strip() or "/" in key:
+        raise ValueError(f"application setting name must be a nonempty dotted identifier: {key!r}")
+    return key
+
+
+def _validate_setting_value(key: str, value: object) -> object:
+    """Return one application-setting value, refusing a non-scalar.
+
+    ``bool`` is a subclass of ``int`` and is accepted as the JSON scalar it is.
+    """
+
+    if value is None or isinstance(value, (str, int, float)):
+        return value
+    raise ValueError(f"application setting {key!r} must be a JSON scalar, not {type(value).__name__}")
+
+
+def _validate_settings(raw: object) -> dict[str, object]:
+    """Return a validated flat map of application settings."""
+
+    if not isinstance(raw, Mapping):
+        raise FormatError("workspace settings must be a JSON object")
+    return {_validate_setting_key(key): _validate_setting_value(str(key), value) for key, value in raw.items()}
+
+
 # Anything below state/ that cannot possibly be a marker basename is ignored
 # silently: NFS silly-renames, editor droppings, and other foreign files are
 # not protocol entries and must never stop a scan or reach quarantine.
@@ -320,6 +354,70 @@ class Workspace:
             extra={"event": "policy_updated", "workspace_id": self.workspace_id},
         )
         return merged
+
+    @property
+    def settings(self) -> dict[str, object]:
+        """Return this workspace's application settings, a flat dotted map.
+
+        Application settings are distinct from :attr:`policy`, which tunes the
+        engine. These are the values an application step resolves at run time —
+        the VASP command, a pseudopotential library — one layer of the
+        job-inputs → environment → workspace → default resolution a runner reads
+        through :meth:`~httk.workflow.sdk.Attempt.setting`. A workspace written
+        before the section existed reads as an empty map.
+        """
+
+        return _validate_settings(self.format.get("settings", {}))
+
+    def set_setting(self, key: str, value: object) -> dict[str, object]:
+        """Store one application setting and return the resulting map.
+
+        The write is the same read-modify-write of ``format.json`` that
+        :meth:`set_policy` uses: an exclusively created temporary and a rename,
+        so a reader never sees a torn object, and last writer wins.
+        """
+
+        _validate_setting_key(key)
+        _validate_setting_value(key, value)
+        stored = read_json(self.control / "format.json")
+        settings = _validate_settings(stored.get("settings", {}))
+        settings[key] = value
+        stored["settings"] = settings
+        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
+        self.format = stored
+        return dict(settings)
+
+    def unset_setting(self, key: str) -> dict[str, object]:
+        """Remove one application setting, refusing one that is not set."""
+
+        stored = read_json(self.control / "format.json")
+        settings = _validate_settings(stored.get("settings", {}))
+        if key not in settings:
+            raise ValueError(f"application setting is not set: {key}")
+        del settings[key]
+        stored["settings"] = settings
+        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
+        self.format = stored
+        return dict(settings)
+
+    def seed_settings(self, seeds: Mapping[str, object]) -> dict[str, object]:
+        """Merge *seeds* into the settings, keeping any value already set.
+
+        Seeding happens once, when a workspace bound to a remote is created: the
+        remote definition's whitelisted queue settings become the workspace's
+        starting application settings. An explicit setting already present is
+        never overwritten, so a value the operator chose outlives a reseed.
+        """
+
+        merged = _validate_settings(seeds)
+        stored = read_json(self.control / "format.json")
+        current = _validate_settings(stored.get("settings", {}))
+        for key, value in merged.items():
+            current.setdefault(key, value)
+        stored["settings"] = current
+        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
+        self.format = stored
+        return dict(current)
 
     def open_journal_writer(self, *, writer_id: str | None = None) -> JournalWriter:
         """Open one exclusive journal writer configured by workspace policy."""

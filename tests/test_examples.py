@@ -124,7 +124,10 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
 
     # The page really is five commands, and they are the ones a newcomer types.
     assert sum(1 for line in commands if line.startswith(("httk", "export"))) == 5
-    assert "httk workflow workspace init quickstart-workspace --extension transactional-data-v1" in commands
+    assert (
+        "httk workflow workspace init quickstart-workspace "
+        "--remote local --path quickstart-workspace --extension transactional-data-v1"
+    ) in commands
     assert any(line.startswith("httk workflow job new quickstart-workspace --template vasp-relax") for line in commands)
 
     completed = _run(

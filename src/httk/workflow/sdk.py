@@ -448,6 +448,29 @@ class Attempt:
             raise KeyError(f"job input {name!r} is not defined; defined inputs: {available}")
         return default
 
+    def setting(self, name: str, default: object = None) -> object:
+        """Resolve one application setting through its layers.
+
+        The layers are consulted most-specific first, and the first that has the
+        name wins: this job's ``inputs`` object, then the environment variable
+        ``HTTK_`` + the name upper-cased with dots as underscores (so
+        ``vasp.command`` reads ``HTTK_VASP_COMMAND``), then the workspace's
+        application settings, then *default*. This is how a step reads the VASP
+        command a workspace was configured with without the operator exporting it
+        for every job, while still letting one job or one shell override it.
+        """
+
+        inputs = self.job.inputs
+        if name in inputs:
+            return inputs[name]
+        variable = "HTTK_" + name.upper().replace(".", "_")
+        if variable in os.environ:
+            return os.environ[variable]
+        settings = self.context.settings
+        if name in settings:
+            return settings[name]
+        return default
+
     def declare(self, name: str, document: Mapping[str, object]) -> Path:
         """Record the observed workflow declaration *name* of this job.
 

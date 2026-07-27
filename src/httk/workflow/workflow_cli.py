@@ -21,8 +21,9 @@ import argparse
 import json
 import logging
 import sys
+import tempfile
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -39,12 +40,19 @@ from .adapters import (
     import_v1_remote,
     list_remotes,
     metadata_path,
-    queue_settings,
     read_metadata,
     resolve_remote,
     run_adapter,
     split_settings,
     store_credentials,
+)
+from .campaigns import (
+    ASSIGNMENT_POLICIES,
+    campaign_harvest,
+    campaign_managers,
+    campaign_submit,
+    read_campaign,
+    write_campaign,
 )
 from .compat.cwl import import_cwl
 from .compat.pwd import import_pwd
@@ -82,7 +90,17 @@ from .introspection import (
 from .manager import DEFAULT_TAKEOVER_GRACE_FACTOR, TaskManager
 from .manifests import create_manifest, release_maintenance_lock, verify_manifest
 from .models import CORE_PROFILE, POLICY_KEYS, STATE_KINDS, canonical_uuid
-from .projects import import_v1_project, initialize_project, require_project
+from .projects import import_v1_project, initialize_project
+from .registry import (
+    LOCAL_REMOTE,
+    WorkspaceBinding,
+    create_workspace,
+    delete_workspace,
+    forget_workspace,
+    list_workspaces,
+    remove_local_workspace,
+    resolve_workspace,
+)
 from .scaffold import (
     DEFAULT_PLACEMENT,
     STRUCTURE_PATTERNS,
@@ -122,6 +140,11 @@ REMOTE_OFFER_COMMAND = ("httk", "workflow", "transfer", "offer")
 REMOTE_RETIRE_COMMAND = ("httk", "workflow", "transfer", "retire")
 REMOTE_STATUS_COMMAND = ("httk", "workflow", "workspace", "status")
 REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
+
+#: The hidden protocol subcommands the ``transfer`` verb dispatches by name: the
+#: far-side halves one machine invokes on another. A workspace name can never be
+#: one of these, so the verb never mistakes ``transfer offer`` for a move.
+_TRANSFER_PROTOCOL = ("receive", "offer", "retire")
 
 #: What the two installed executables say about themselves in ``--help``. The
 #: note lives in the epilog rather than on every run, because an alias that
@@ -331,6 +354,119 @@ def _field(name: str, value: object) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Workspace name resolution
+#
+# Every user-typed command names a *registered* workspace, never a bare path.
+# The helpers below turn that name into either a local path or a remote binding.
+# The one exception is ``--by-path``: a hidden switch the transfer choreography
+# and remote-workspace creation set when one machine invokes a command on
+# another, where there is no registry and the workspace is addressed by its path.
+# ---------------------------------------------------------------------------
+
+
+def _by_path(arguments: argparse.Namespace) -> bool:
+    """Report whether this invocation addresses its workspace by literal path."""
+
+    return bool(getattr(arguments, "by_path", False))
+
+
+def _resolve_binding(arguments: argparse.Namespace, context: CLIContext) -> tuple[WorkspaceBinding | None, Path | None]:
+    """Resolve the workspace argument to a binding and, when local, its path.
+
+    ``--by-path`` yields ``(None, path)``: a literal filesystem path with no
+    registry lookup, for the protocol spellings one machine runs on another. A
+    registered name yields the binding, and its path too when the binding is
+    local; a remote binding yields ``(binding, None)`` so the caller either
+    dispatches over the adapter or refuses.
+    """
+
+    if _by_path(arguments):
+        return None, Path(arguments.workspace)
+    binding = resolve_workspace(arguments.workspace, project=context.cwd)
+    return binding, (Path(binding.path) if binding.remote == LOCAL_REMOTE else None)
+
+
+def _local_root(arguments: argparse.Namespace, context: CLIContext, *, action: str) -> Path:
+    """Return the local path of the named workspace, refusing a remote binding."""
+
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        raise ValueError(
+            f"workspace {binding.name!r} is bound to the remote {binding.remote!r}, so it cannot "
+            f"{action} locally; run this on {binding.remote}, or reach it with "
+            f"`httk workflow transfer` and `httk workflow workspace status {binding.name}`"
+        )
+    return root
+
+
+def _run_remote_workspace(
+    binding: WorkspaceBinding,
+    context: CLIContext,
+    argv_tail: Sequence[str],
+    *,
+    timeout: float | None = None,
+) -> int:
+    """Run one command against a remote binding's workspace and echo its output.
+
+    The workspace on the far side has no registry, so the command it is sent is
+    the path-based ``--by-path`` spelling built from the binding's remote path.
+    Its standard output and error are relayed verbatim and its exit status is
+    returned, so a read command reads exactly as it would locally.
+    """
+
+    target = resolve_remote(binding.remote, project=context.cwd)
+    result = run_adapter(
+        target.bundle,
+        "invoke",
+        {"queue": target.queue, "argv": ["httk", "workflow", *argv_tail]},
+        timeout=timeout,
+    )
+    stdout = str(result.get("stdout", ""))
+    if stdout:
+        sys.stdout.write(stdout if stdout.endswith("\n") else stdout + "\n")
+    stderr = str(result.get("stderr", ""))
+    if stderr:
+        sys.stderr.write(stderr)
+    return int(result.get("returncode", 0) or 0)
+
+
+def _remote_workspace_read(
+    binding: WorkspaceBinding,
+    context: CLIContext,
+    command: Sequence[str],
+    arguments: argparse.Namespace,
+    *,
+    flags: Sequence[str] = (),
+) -> int:
+    """Dispatch one read-style workspace command to a remote binding.
+
+    *command* is the group and verb, e.g. ``("workspace", "status")``; the remote
+    path and ``--by-path`` are appended, then whichever of *flags* the parsed
+    arguments set. This is the single path every remote-capable read command runs
+    through, so ``status``, ``gc``, ``fsck``, ``harvest``, and the ``job`` reads
+    all reach a remote the same way.
+    """
+
+    tail = [*command, binding.path, "--by-path"]
+    for flag in flags:
+        if getattr(arguments, flag.lstrip("-").replace("-", "_"), False):
+            tail.append(flag)
+    return _run_remote_workspace(binding, context, tail, timeout=getattr(arguments, "adapter_timeout", None))
+
+
+def _add_by_path_argument(parser: argparse.ArgumentParser) -> None:
+    """Add the hidden switch that makes the workspace argument a literal path.
+
+    It is protocol, not user interface: the transfer choreography and remote
+    workspace creation set it when one machine runs a command on another, where
+    the workspace is addressed by path because the far side keeps no registry.
+    """
+
+    parser.add_argument("--by-path", action="store_true", help=argparse.SUPPRESS)
+
+
+# ---------------------------------------------------------------------------
 # workspace
 # ---------------------------------------------------------------------------
 
@@ -338,7 +474,26 @@ def _field(name: str, value: object) -> str:
 def add_workspace_init_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`workspace init`, shared with ``httk-taskmanager init``."""
 
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the directory to initialize as a workspace")
+    parser.add_argument("workspace", metavar="NAME", help="the name to register this workspace under")
+    parser.add_argument(
+        "--remote",
+        metavar="REMOTE",
+        help="the remote this workspace lives on, or 'local' for this machine (required)",
+    )
+    parser.add_argument("--path", metavar="PATH", help="where the workspace lives on that remote (required)")
+    parser.add_argument(
+        "--scope",
+        choices=("global", "project"),
+        default="global",
+        help="register the name globally (default) or in this project",
+    )
+    parser.add_argument(
+        "--setting",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="seed one application setting at creation, e.g. vasp.command=... (repeatable)",
+    )
     parser.add_argument(
         "--extension",
         action="append",
@@ -347,33 +502,78 @@ def add_workspace_init_arguments(parser: argparse.ArgumentParser) -> None:
         choices=("transactional-data-v1", "detached-transfer-v1"),
         help="enable this optional workspace extension (repeatable)",
     )
+    _add_by_path_argument(parser)
     add_durability_arguments(parser)
 
 
-def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Create one workflow workspace and print its root."""
+def _init_settings(arguments: argparse.Namespace) -> dict[str, object]:
+    """Return the application settings ``workspace init --setting`` carried."""
 
-    workspace = Workspace.initialize(
+    return {name: _json_value(text, f"setting {name}") for name, text in _pairs(arguments.setting, "a setting")}
+
+
+def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Create one workflow workspace, register it, and print its name.
+
+    The user form takes a NAME and the ``--remote``/``--path`` the workspace is
+    bound to. The protocol form (``--by-path``) initializes a workspace directly
+    at a path with no registration: it is what one machine runs on another, where
+    the far side keeps no registry.
+    """
+
+    settings = _init_settings(arguments)
+    if _by_path(arguments):
+        workspace = Workspace.initialize(
+            arguments.workspace,
+            extensions=arguments.extension,
+            durable=_durable(arguments),
+        )
+        for key, value in settings.items():
+            workspace.set_setting(key, value)
+        print(workspace.root)
+        return 0
+    if not arguments.remote:
+        raise ValueError(
+            "workspace init requires --remote; use --remote local for a workspace on this machine, "
+            "because being local is never implied"
+        )
+    if not arguments.path:
+        raise ValueError("workspace init requires --path: where the workspace lives on that remote")
+    binding = create_workspace(
         arguments.workspace,
+        remote=arguments.remote,
+        path=arguments.path,
+        scope=arguments.scope,
+        project=context.cwd,
         extensions=arguments.extension,
         durable=_durable(arguments),
+        settings=settings,
     )
-    print(workspace.root)
+    print(binding.name)
     return 0
 
 
 def add_workspace_status_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`workspace status`, shared with ``httk-taskmanager status``."""
 
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the workspace to summarize")
+    parser.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to summarize")
     parser.add_argument("--json", action="store_true", help="print the machine-readable status document")
+    _add_by_path_argument(parser)
     add_durability_arguments(parser)
 
 
 def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Summarize the authoritative markers of one workspace."""
+    """Summarize the authoritative markers of one workspace.
 
-    workspace = Workspace(arguments.workspace, mutable=False, durable=_durable(arguments))
+    A remote binding is summarized over its adapter, so ``workspace status NAME``
+    reads a remote workspace exactly as it reads a local one.
+    """
+
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        return _remote_workspace_read(binding, context, ("workspace", "status"), arguments, flags=("--json",))
+    workspace = Workspace(root, mutable=False, durable=_durable(arguments))
     counts: dict[str, int] = {}
     rows: list[dict[str, object]] = []
     for marker in workspace.scan_markers(STATE_KINDS):
@@ -434,31 +634,41 @@ def _print_policy(policy: Any, *, as_json: bool) -> int:
 def handle_workspace_policy_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Show the tunables one workspace shares with every process attaching it."""
 
-    return _print_policy(Workspace(arguments.workspace, mutable=False).policy, as_json=arguments.json)
+    root = _local_root(arguments, context, action="show its policy")
+    return _print_policy(Workspace(root, mutable=False).policy, as_json=arguments.json)
 
 
 def handle_workspace_policy_set(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Store one policy member of a workspace and print the result."""
 
+    root = _local_root(arguments, context, action="change its policy")
     # A retention member is addressed directly so that setting one limit does
     # not require restating the whole object as JSON.
     if arguments.key.startswith("retention."):
         member = arguments.key.split(".", 1)[1]
-        workspace = Workspace(arguments.workspace)
+        workspace = Workspace(root)
         retention = dict(workspace.policy.retention.as_mapping())
         retention[member] = _policy_value(arguments.key, arguments.value)
         policy = workspace.set_policy({"retention": retention})
     else:
-        policy = Workspace(arguments.workspace).set_policy(
-            {arguments.key: _policy_value(arguments.key, arguments.value)}
-        )
+        policy = Workspace(root).set_policy({arguments.key: _policy_value(arguments.key, arguments.value)})
     return _print_policy(policy, as_json=arguments.json)
 
 
 def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Check, and optionally repair, the marker-to-journal integrity."""
 
-    workspace = Workspace(arguments.workspace, mutable=arguments.repair)
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        return _remote_workspace_read(
+            binding,
+            context,
+            ("workspace", "fsck"),
+            arguments,
+            flags=("--repair", "--quarantine-unrepairable", "--json"),
+        )
+    workspace = Workspace(root, mutable=arguments.repair)
     report = workspace.check(repair=arguments.repair, quarantine_unrepairable=arguments.quarantine_unrepairable)
     if arguments.json:
         print(json.dumps(report.as_mapping(), indent=2, sort_keys=True))
@@ -474,7 +684,11 @@ def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) ->
 def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Free the disk the workspace retention policy says may be freed."""
 
-    workspace = Workspace(arguments.workspace, mutable=not arguments.dry_run)
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        return _remote_workspace_read(binding, context, ("workspace", "gc"), arguments, flags=("--dry-run", "--json"))
+    workspace = Workspace(root, mutable=not arguments.dry_run)
     report = workspace.collect_garbage(dry_run=arguments.dry_run)
     if arguments.json:
         print(json.dumps(report.as_mapping(), indent=2, sort_keys=True))
@@ -492,7 +706,7 @@ def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> i
 def handle_workspace_upgrade(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Enable one implemented workspace extension in place."""
 
-    workspace = Workspace(arguments.workspace)
+    workspace = Workspace(_local_root(arguments, context, action="upgrade it"))
     print("\n".join(sorted(workspace.upgrade(arguments.extension))))
     return 0
 
@@ -500,7 +714,104 @@ def handle_workspace_upgrade(arguments: argparse.Namespace, context: CLIContext)
 def handle_workspace_unlock(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Release a workspace maintenance lock."""
 
-    print(release_maintenance_lock(Workspace(arguments.workspace), force=arguments.force))
+    workspace = Workspace(_local_root(arguments, context, action="release its lock"))
+    print(release_maintenance_lock(workspace, force=arguments.force))
+    return 0
+
+
+def handle_workspace_list(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """List the registered workspaces and where each resolves to."""
+
+    rows: list[dict[str, object]] = []
+    for binding in list_workspaces(project=context.cwd):
+        reachable: object
+        if binding.remote == LOCAL_REMOTE:
+            reachable = (Path(binding.path) / ".httk-workflow" / "format.json").is_file()
+        else:
+            # A remote is not probed here: reachability would need a live adapter
+            # call per row, which listing must not require. The binding is shown
+            # so `workspace status NAME` can check it deliberately.
+            reachable = None
+        rows.append(
+            {
+                "name": binding.name,
+                "remote": binding.remote,
+                "path": binding.path,
+                "scope": binding.scope,
+                "reachable": reachable,
+            }
+        )
+    if arguments.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+    if not rows:
+        print("no workspaces are registered; create one with `httk workflow workspace init`")
+        return 0
+    for row in rows:
+        mark = "?" if row["reachable"] is None else ("ok" if row["reachable"] else "missing")
+        print(f"{row['name']}\t{row['remote']}\t{row['path']}\t{row['scope']}\t{mark}")
+    return 0
+
+
+def handle_workspace_forget(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Deregister one workspace name, leaving the workspace itself in place."""
+
+    binding = forget_workspace(arguments.workspace, project=context.cwd)
+    print(f"forgot {binding.name} ({binding.scope})")
+    return 0
+
+
+def handle_workspace_delete(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Destroy a registered workspace and deregister it.
+
+    Destruction is irreversible, so it is refused without ``--force``.
+    """
+
+    if _by_path(arguments):
+        # The protocol form one machine runs on another: destroy the workspace at
+        # a literal path, with no registry involved.
+        if not arguments.force:
+            raise ValueError("workspace delete requires --force")
+        remove_local_workspace(Path(arguments.workspace))
+        print(arguments.workspace)
+        return 0
+    binding = delete_workspace(arguments.workspace, project=context.cwd, force=arguments.force)
+    print(f"deleted {binding.name}")
+    return 0
+
+
+def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Show one workspace's application settings, or one named member."""
+
+    workspace = Workspace(_local_root(arguments, context, action="read its settings"), mutable=False)
+    settings = workspace.settings
+    if arguments.key is not None:
+        if arguments.key not in settings:
+            raise ValueError(f"application setting is not set: {arguments.key}")
+        print(json.dumps(settings[arguments.key], sort_keys=True))
+        return 0
+    if arguments.json:
+        print(json.dumps(settings, indent=2, sort_keys=True))
+        return 0
+    for key in sorted(settings):
+        print(f"{key}\t{json.dumps(settings[key], sort_keys=True)}")
+    return 0
+
+
+def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Store one application setting on a workspace."""
+
+    workspace = Workspace(_local_root(arguments, context, action="set its settings"))
+    settings = workspace.set_setting(arguments.key, _json_value(arguments.value, f"setting {arguments.key}"))
+    print(json.dumps(settings[arguments.key], sort_keys=True))
+    return 0
+
+
+def handle_workspace_settings_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove one application setting from a workspace."""
+
+    workspace = Workspace(_local_root(arguments, context, action="unset its settings"))
+    workspace.unset_setting(arguments.key)
     return 0
 
 
@@ -546,7 +857,7 @@ def build_workspace_parser(subparsers: "argparse._SubParsersAction[argparse.Argu
         description="Print the shared policy of one workflow workspace",
         handler=handle_workspace_policy_show,
     )
-    show.add_argument("workspace", metavar="WORKSPACE", help="the workspace whose policy to print")
+    show.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace whose policy to print")
     show.add_argument("--json", action="store_true", help="print the policy as one JSON object")
     store = _leaf(
         policy_actions,
@@ -555,10 +866,75 @@ def build_workspace_parser(subparsers: "argparse._SubParsersAction[argparse.Argu
         description="Store one member of the shared policy of a workflow workspace",
         handler=handle_workspace_policy_set,
     )
-    store.add_argument("workspace", metavar="WORKSPACE", help="the workspace whose policy to change")
+    store.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace whose policy to change")
     store.add_argument("key", metavar="KEY", help="one of " + ", ".join(sorted(POLICY_KEYS)))
     store.add_argument("value", metavar="VALUE", help="the JSON value to store")
     store.add_argument("--json", action="store_true", help="print the resulting policy as one JSON object")
+
+    listing = _leaf(
+        group,
+        "list",
+        summary="list the registered workspaces",
+        description="List the registered workspaces and where each name resolves to",
+        handler=handle_workspace_list,
+    )
+    listing.add_argument("--json", action="store_true", help="print the registry as one JSON document")
+
+    forget = _leaf(
+        group,
+        "forget",
+        summary="deregister a workspace name",
+        description="Deregister one workspace name, leaving the workspace itself untouched",
+        handler=handle_workspace_forget,
+    )
+    forget.add_argument("workspace", metavar="NAME", help="the registered workspace name to forget")
+
+    delete = _leaf(
+        group,
+        "delete",
+        summary="destroy a workspace and deregister it",
+        description="Destroy a registered workspace and deregister it; refused without --force",
+        handler=handle_workspace_delete,
+    )
+    delete.add_argument("workspace", metavar="NAME", help="the registered workspace to destroy")
+    delete.add_argument("--force", action="store_true", help="confirm the irreversible destruction")
+    _add_by_path_argument(delete)
+
+    _, settings_actions = _group(
+        group,
+        "settings",
+        summary="show or set a workspace's application settings",
+        description="Show or set the application settings a workspace's runners resolve at run time",
+    )
+    settings_show = _leaf(
+        settings_actions,
+        "show",
+        summary="print the application settings",
+        description="Print the application settings of one workspace, or one named setting",
+        handler=handle_workspace_settings_show,
+    )
+    settings_show.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace whose settings to read")
+    settings_show.add_argument("key", metavar="KEY", nargs="?", help="print only this setting (default: all of them)")
+    settings_show.add_argument("--json", action="store_true", help="print the settings as one JSON object")
+    settings_set = _leaf(
+        settings_actions,
+        "set",
+        summary="store one application setting",
+        description="Store one application setting on a workspace, e.g. vasp.command",
+        handler=handle_workspace_settings_set,
+    )
+    settings_set.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to change")
+    settings_set.add_argument("key", metavar="KEY", help="the dotted setting name, e.g. vasp.command")
+    settings_set.add_argument("value", metavar="VALUE", help="the JSON value, or a bare string, to store")
+    settings_unset = _leaf(
+        settings_actions,
+        "unset",
+        summary="remove one application setting",
+        description="Remove one application setting from a workspace",
+        handler=handle_workspace_settings_unset,
+    )
+    settings_unset.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to change")
+    settings_unset.add_argument("key", metavar="KEY", help="the dotted setting name to remove")
 
     fsck = _leaf(
         group,
@@ -567,7 +943,7 @@ def build_workspace_parser(subparsers: "argparse._SubParsersAction[argparse.Argu
         description="Check, and optionally repair, the marker-to-journal integrity of a workspace",
         handler=handle_workspace_fsck,
     )
-    fsck.add_argument("workspace", metavar="WORKSPACE", help="the workspace to check")
+    fsck.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to check")
     fsck.add_argument("--repair", action="store_true", help="re-point damaged markers at the last readable frame")
     fsck.add_argument(
         "--quarantine-unrepairable",
@@ -575,6 +951,7 @@ def build_workspace_parser(subparsers: "argparse._SubParsersAction[argparse.Argu
         help="with --repair, move a marker with no readable history into the quarantine",
     )
     fsck.add_argument("--json", action="store_true", help="print the findings as one JSON report")
+    _add_by_path_argument(fsck)
 
     collect = _leaf(
         group,
@@ -583,9 +960,10 @@ def build_workspace_parser(subparsers: "argparse._SubParsersAction[argparse.Argu
         description="Collect the garbage one workflow workspace has accumulated",
         handler=handle_workspace_gc,
     )
-    collect.add_argument("workspace", metavar="WORKSPACE", help="the workspace to collect")
+    collect.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to collect")
     collect.add_argument("--dry-run", action="store_true", help="report what would be removed without touching it")
     collect.add_argument("--json", action="store_true", help="print the collection as one JSON report")
+    _add_by_path_argument(collect)
 
     upgrade = _leaf(
         group,
@@ -594,7 +972,7 @@ def build_workspace_parser(subparsers: "argparse._SubParsersAction[argparse.Argu
         description="Enable one implemented workflow workspace extension",
         handler=handle_workspace_upgrade,
     )
-    upgrade.add_argument("workspace", metavar="WORKSPACE", help="the workspace to upgrade")
+    upgrade.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to upgrade")
     upgrade.add_argument(
         "--extension",
         action="append",
@@ -610,7 +988,7 @@ def build_workspace_parser(subparsers: "argparse._SubParsersAction[argparse.Argu
         description="Release a stale, or with --force a live, workspace maintenance lock",
         handler=handle_workspace_unlock,
     )
-    unlock.add_argument("workspace", metavar="WORKSPACE", help="the workspace whose lock to release")
+    unlock.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace whose lock to release")
     unlock.add_argument("--force", action="store_true", help="also remove a lock whose holder is still alive")
 
 
@@ -622,7 +1000,7 @@ def build_workspace_parser(subparsers: "argparse._SubParsersAction[argparse.Argu
 def handle_runner_publish(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Publish one runner file into a workspace runner store."""
 
-    reference = Workspace(arguments.workspace).publish_runner(
+    reference = Workspace(_local_root(arguments, context, action="publish a runner into it")).publish_runner(
         arguments.file,
         name=arguments.name,
         replace=arguments.replace,
@@ -634,7 +1012,7 @@ def handle_runner_publish(arguments: argparse.Namespace, context: CLIContext) ->
 def handle_runner_describe(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Report the runners a workspace has published, with their digests."""
 
-    workspace = Workspace(arguments.workspace, mutable=False)
+    workspace = Workspace(_local_root(arguments, context, action="read its runners"), mutable=False)
     store = workspace.runners
     if arguments.name is not None:
         target = workspace.runner_store_path(arguments.name)
@@ -703,7 +1081,7 @@ def build_runner_parser(subparsers: "argparse._SubParsersAction[argparse.Argumen
 def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Scaffold and submit one job per template, structure, or both."""
 
-    workspace = Workspace(arguments.workspace)
+    workspace = Workspace(_local_root(arguments, context, action="submit into it"))
     inputs = {name: _json_value(text, f"job input {name!r}") for name, text in _pairs(arguments.inputs, "a job input")}
     files: dict[str, str | Path] = {name: Path(text) for name, text in _pairs(arguments.files, "a staged file")}
     shared: dict[str, Any] = {
@@ -760,7 +1138,7 @@ def add_job_submit_arguments(parser: argparse.ArgumentParser) -> None:
 def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Submit one prepared payload directory and print its marker."""
 
-    workspace = Workspace(arguments.workspace, durable=_durable(arguments))
+    workspace = Workspace(_local_root(arguments, context, action="submit into it"), durable=_durable(arguments))
     marker = workspace.submit(arguments.source, arguments.placement, move=arguments.move)
     print(marker.path)
     return 0
@@ -795,7 +1173,7 @@ def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
 def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Publish one operator request against a job and print its path."""
 
-    workspace = Workspace(arguments.workspace, durable=_durable(arguments))
+    workspace = Workspace(_local_root(arguments, context, action="request against it"), durable=_durable(arguments))
     marker = workspace.find_marker_by_id(arguments.job_id)
     if marker is None:
         raise ValueError(f"job does not exist: {arguments.job_id}")
@@ -828,7 +1206,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
 def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     """List the jobs of one workspace as a cheap table."""
 
-    workspace = Workspace(arguments.workspace, mutable=False)
+    workspace = Workspace(_local_root(arguments, context, action="list its jobs"), mutable=False)
     rows = list_jobs(workspace, kinds=arguments.kind, placement=arguments.placement)
     if arguments.json:
         print(json.dumps({"format": JOB_LIST_FORMAT, "format_version": 1, "jobs": rows}, indent=2))
@@ -840,7 +1218,7 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
 def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Describe one job completely from its authoritative state."""
 
-    workspace = Workspace(arguments.workspace, mutable=False)
+    workspace = Workspace(_local_root(arguments, context, action="show its jobs"), mutable=False)
     report = describe_job(workspace, resolve_job(workspace, arguments.job))
     print(json.dumps(report, indent=2, sort_keys=True) if arguments.json else render_job(report))
     return 0
@@ -851,7 +1229,7 @@ def handle_job_log(arguments: argparse.Namespace, context: CLIContext) -> int:
 
     if arguments.limit is not None and arguments.limit < 1:
         raise ValueError("--limit must be positive")
-    workspace = Workspace(arguments.workspace, mutable=False)
+    workspace = Workspace(_local_root(arguments, context, action="read its job log"), mutable=False)
     frames = job_frames(workspace, resolve_job(workspace, arguments.job), limit=arguments.limit)
     if arguments.json:
         print(json.dumps({"format": JOB_HISTORY_FORMAT, "format_version": 1, "frames": frames}, indent=2))
@@ -863,7 +1241,7 @@ def handle_job_log(arguments: argparse.Namespace, context: CLIContext) -> int:
 def handle_job_why(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Explain why one job is, or is not, making progress."""
 
-    workspace = Workspace(arguments.workspace, mutable=False)
+    workspace = Workspace(_local_root(arguments, context, action="explain its jobs"), mutable=False)
     diagnosis = explain_job(workspace, resolve_job(workspace, arguments.job))
     print(json.dumps(diagnosis.as_mapping(), indent=2, sort_keys=True) if arguments.json else diagnosis.render())
     return 0
@@ -875,7 +1253,7 @@ def handle_job_debug(arguments: argparse.Namespace, context: CLIContext) -> int:
     # The transitions of the debugged job are reported by the debug runner
     # itself, so the private manager's own log stays quiet unless asked for.
     configure_logging(level=arguments.log_level)
-    workspace = Workspace(arguments.workspace)
+    workspace = Workspace(_local_root(arguments, context, action="debug in it"))
     outcome = debug_job(
         workspace,
         arguments.job,
@@ -1089,7 +1467,7 @@ def _print_imported(job: ScaffoldedJob, *, as_json: bool) -> int:
 def handle_import_pwd(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Import one Python Workflow Definition document as one job."""
 
-    workspace = Workspace(arguments.workspace)
+    workspace = Workspace(_local_root(arguments, context, action="import into it"))
     overrides = {
         name: _json_value(text, f"workflow input {name!r}")
         for name, text in _pairs(arguments.inputs, "a workflow input")
@@ -1115,7 +1493,7 @@ def handle_import_pwd(arguments: argparse.Namespace, context: CLIContext) -> int
 def handle_import_cwl(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Import one CWL workflow or command-line tool as one job."""
 
-    workspace = Workspace(arguments.workspace)
+    workspace = Workspace(_local_root(arguments, context, action="import into it"))
     job = import_cwl(
         workspace,
         arguments.workflow,
@@ -1242,7 +1620,7 @@ def _add_import_arguments(parser: argparse.ArgumentParser) -> None:
 def handle_harvest(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Stream the finished jobs of one workspace as harvest records."""
 
-    workspace = Workspace(arguments.workspace, mutable=False)
+    workspace = Workspace(_local_root(arguments, context, action="harvest it"), mutable=False)
     records = harvest(
         workspace,
         states=arguments.state or DEFAULT_HARVEST_STATES,
@@ -1296,7 +1674,7 @@ def build_harvest_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
 def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`manager run`, shared with ``httk-taskmanager run``."""
 
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the workspace this manager serves")
+    parser.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace this manager serves")
     parser.add_argument(
         "--pool",
         action="append",
@@ -1304,6 +1682,20 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="POOL",
         help="claim only jobs of this pool (repeatable, default: default)",
     )
+    parser.add_argument(
+        "--foreground",
+        action="store_true",
+        help="run the manager in this process (the local default); refused for a remote workspace",
+    )
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=1,
+        metavar="COUNT",
+        help="for a remote workspace, how many managers to submit to its scheduler (default: 1)",
+    )
+    _add_adapter_timeout(parser)
+    _add_by_path_argument(parser)
     parser.add_argument(
         "--capability",
         action="append",
@@ -1321,7 +1713,12 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
             "(repeatable, default: the whole workspace)"
         ),
     )
-    parser.add_argument("--workers", type=int, default=1, metavar="COUNT", help="attempts to run at once (default: 1)")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        metavar="COUNT",
+        help="attempts to run at once, locally, or workers per submitted remote manager (default: 1)",
+    )
     parser.add_argument(
         "--lease-seconds",
         type=float,
@@ -1404,10 +1801,48 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     add_durability_arguments(parser)
 
 
-def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Run one task manager with its own log file."""
+def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Submit one or more managers to a remote binding's scheduler."""
 
-    workspace = Workspace(arguments.workspace, durable=_durable(arguments))
+    if arguments.count < 1:
+        raise ValueError("--count must be a positive integer")
+    target = resolve_remote(binding.remote, project=context.cwd)
+    manager_argv = [*REMOTE_MANAGER_COMMAND, binding.path, "--by-path"]
+    # Left off unless asked for, so a queue configured with workers=N is not
+    # permanently shadowed by a command-line default.
+    if arguments.workers is not None:
+        if arguments.workers < 1:
+            raise ValueError("--workers must be a positive integer")
+        manager_argv += ["--workers", str(arguments.workers)]
+    request: dict[str, object] = {
+        "queue": target.queue,
+        "argv": manager_argv,
+        "workspace": binding.path,
+        "count": arguments.count,
+    }
+    print(json.dumps(run_adapter(target.bundle, "start-manager", request, timeout=arguments.adapter_timeout), indent=2))
+    return 0
+
+
+def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Run one task manager with its own log file.
+
+    A local binding runs the manager in this process. A remote binding submits
+    managers through the remote's scheduler over its adapter; ``--foreground``,
+    which asks to run here, is refused for a remote workspace because a manager
+    on another machine cannot run in this process.
+    """
+
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        if arguments.foreground:
+            raise ValueError(
+                f"--foreground cannot run a manager on the remote {binding.remote!r}; "
+                "a remote workspace's managers are submitted through its scheduler"
+            )
+        return _submit_remote_manager(binding, arguments, context)
+    workspace = Workspace(root, durable=_durable(arguments))
     # Without an explicit level the console stays quiet about normal lifecycle
     # events while the manager log file keeps the complete info-level record.
     configure_logging(level=arguments.log_level or "warning", json_logs=arguments.json_logs)
@@ -1416,7 +1851,7 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
         pools=arguments.pool or ["default"],
         capabilities=arguments.capability,
         placement_prefixes=arguments.placement_prefix,
-        maximum_workers=arguments.workers,
+        maximum_workers=arguments.workers if arguments.workers is not None else 1,
         lease_seconds=arguments.lease_seconds,
         heartbeat_interval=arguments.heartbeat_interval,
         unsafe_persistent_takeover=arguments.unsafe_persistent_takeover,
@@ -1528,7 +1963,7 @@ def handle_v1_prepare(arguments: argparse.Namespace, context: CLIContext) -> int
 def handle_v1_submit(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Prepare and submit one instantiated *httk* v1 task."""
 
-    workspace = Workspace(arguments.workspace, durable=_durable(arguments))
+    workspace = Workspace(_local_root(arguments, context, action="submit into it"), durable=_durable(arguments))
     marker = submit_v1_task(
         workspace,
         arguments.source,
@@ -1548,7 +1983,7 @@ def handle_v1_submit(arguments: argparse.Namespace, context: CLIContext) -> int:
 def handle_v1_run(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Run only *httk* v1 jobs of one v2 workspace."""
 
-    workspace = Workspace(arguments.workspace, durable=_durable(arguments))
+    workspace = Workspace(_local_root(arguments, context, action="run its managers"), durable=_durable(arguments))
     compression = "zstd" if arguments.zstdlog else "none" if arguments.no_bzip2log else "bzip2"
     with V1TaskManager(
         workspace,
@@ -2377,30 +2812,21 @@ def build_remote_parser(
 # ---------------------------------------------------------------------------
 
 
-def _destination_from_adapter(target: Any, supplied: str | None, *, option: str = "--destination-workspace") -> str:
-    """Return the far-side workspace root, from the command line or the queue."""
-
-    if supplied:
-        return supplied
-    workspace = queue_settings(target.bundle, target.queue).get("workspace")
-    if isinstance(workspace, str) and workspace:
-        return workspace
-    raise ValueError(f"remote workspace is missing; use {option} or configure queue workspace=PATH")
-
-
 def _remote_workspace_id(target: Any, root: str, *, timeout: float | None, noun: str = "destination") -> str:
     """Probe one remote workspace over the adapter and return its UUID.
 
     The probe is the same for both directions of a transfer: nothing is sealed,
     pushed, or pulled until the far side has answered with a status of the
     profile and extension this protocol needs, so an incompatible or absent
-    workspace is reported before any state moves.
+    workspace is reported before any state moves. The status is asked for
+    ``--by-path`` because the far side keeps no registry: it addresses its own
+    workspace by the path this client resolved the binding to.
     """
 
     status = run_adapter(
         target.bundle,
         "status",
-        {"queue": target.queue, "argv": [*REMOTE_STATUS_COMMAND, root, "--json"]},
+        {"queue": target.queue, "argv": [*REMOTE_STATUS_COMMAND, root, "--by-path", "--json"]},
         timeout=timeout,
     )
     if status.get("returncode") != 0:
@@ -2421,18 +2847,26 @@ def _remote_workspace_id(target: Any, root: str, *, timeout: float | None, noun:
     return workspace_id
 
 
-def handle_transfer_send(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Detach explicit jobs from here and import them on a remote."""
+def _send_jobs_to_remote(
+    source: Workspace,
+    target: Any,
+    destination_root: str,
+    jobs: Sequence[str],
+    *,
+    destination_placement: str | None,
+    timeout: float | None,
+) -> list[dict[str, object]]:
+    """Detach the named jobs from *source* and import them on a remote.
 
-    source_root = (
-        Path(arguments.source_workspace).resolve() if arguments.source_workspace else require_project(context.cwd)
-    )
-    source = Workspace(source_root)
-    target = resolve_remote(arguments.remote, project=context.cwd)
-    destination_root = _destination_from_adapter(target, arguments.destination_workspace)
-    destination_workspace_id = _remote_workspace_id(target, destination_root, timeout=arguments.adapter_timeout)
+    This is the local→remote leg of the ``transfer`` verb: probe the destination
+    workspace, then for each job seal a detached bundle, push it, and ask the far
+    side to import it. Every step is idempotent, so an interrupted transfer is
+    finished by running the same command again.
+    """
+
+    destination_workspace_id = _remote_workspace_id(target, destination_root, timeout=timeout)
     acknowledgements: list[dict[str, object]] = []
-    for job_id in arguments.jobs:
+    for job_id in jobs:
         source.recover_transfers()
         candidates: list[dict[str, object]] = []
         for ledger_path in (source.control / "transfers").glob("*.json"):
@@ -2446,14 +2880,14 @@ def handle_transfer_send(arguments: argparse.Namespace, context: CLIContext) -> 
         if len(candidates) > 1:
             raise ValueError(f"multiple resumable transfers exist for job: {job_id}")
         transfer_id = str(candidates[0]["transfer_id"]) if candidates else str(uuid.uuid4())
-        if candidates and arguments.destination_placement:
-            requested = str(arguments.destination_placement).strip("/")
+        if candidates and destination_placement:
+            requested = str(destination_placement).strip("/")
             if candidates[0].get("destination_placement") != requested:
                 raise ValueError("resumed transfer destination placement disagrees with the request")
         bundle = source.detach(
             job_id,
             destination_workspace_id=destination_workspace_id,
-            destination_placement=arguments.destination_placement,
+            destination_placement=destination_placement,
             transfer_id=transfer_id,
         )
         incoming = f"{destination_root.rstrip('/')}/.httk-workflow/transfers/incoming/{transfer_id}"
@@ -2461,7 +2895,7 @@ def handle_transfer_send(arguments: argparse.Namespace, context: CLIContext) -> 
             target.bundle,
             "push",
             {"queue": target.queue, "source": str(bundle), "destination": incoming},
-            timeout=arguments.adapter_timeout,
+            timeout=timeout,
         )
         remote_bundle = str(push.get("path", incoming))
         invoked = run_adapter(
@@ -2477,7 +2911,7 @@ def handle_transfer_send(arguments: argparse.Namespace, context: CLIContext) -> 
                     remote_bundle,
                 ],
             },
-            timeout=arguments.adapter_timeout,
+            timeout=timeout,
         )
         if invoked.get("returncode") != 0:
             raise RuntimeError(f"destination import failed: {invoked.get('stderr', '')}")
@@ -2489,8 +2923,7 @@ def handle_transfer_send(arguments: argparse.Namespace, context: CLIContext) -> 
             raise ValueError("destination acknowledgement is not an object")
         source.acknowledge_transfer(acknowledgement)
         acknowledgements.append(acknowledgement)
-    print(json.dumps(acknowledgements, indent=2, sort_keys=True))
-    return 0
+    return acknowledgements
 
 
 def handle_transfer_receive(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -2543,41 +2976,23 @@ def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -
     return 0
 
 
-def handle_transfer_fetch(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Bring the jobs that finished on one remote back into a local workspace.
+def _remote_offer(
+    target: Any,
+    remote_root: str,
+    destination_workspace_id: str,
+    *,
+    states: Sequence[str] | None,
+    placement: str | None,
+    timeout: float | None,
+) -> list[dict[str, object]]:
+    """Ask a remote to seal its finished jobs and return the offers it made."""
 
-    The orchestration mirrors ``transfer send`` in the opposite direction: probe
-    the remote workspace, ask it to offer what stopped there, pull each offered
-    bundle into local staging, import it, and only then tell the remote to
-    retire the sources it still holds. Every step is idempotent, so an
-    interrupted fetch is finished by running the same command again.
-    """
-
-    if not arguments.remote:
-        raise ValueError("--remote is required: name the remote to fetch from, as NAME or NAME:QUEUE")
-    local_root = Path(arguments.workspace).resolve() if arguments.workspace else require_project(context.cwd)
-    local = Workspace(local_root)
-    target = resolve_remote(arguments.remote, project=context.cwd)
-    remote_root = _destination_from_adapter(target, arguments.remote_workspace, option="--remote-workspace")
-    _remote_workspace_id(target, remote_root, timeout=arguments.adapter_timeout, noun="remote")
-
-    offer_argv = [
-        *REMOTE_OFFER_COMMAND,
-        remote_root,
-        "--destination-workspace-id",
-        local.workspace_id,
-        "--json",
-    ]
-    for state in arguments.state or DEFAULT_OFFER_STATES:
-        offer_argv += ["--state", state]
-    if arguments.placement:
-        offer_argv += ["--placement", arguments.placement]
-    offered = run_adapter(
-        target.bundle,
-        "invoke",
-        {"queue": target.queue, "argv": offer_argv},
-        timeout=arguments.adapter_timeout,
-    )
+    argv = [*REMOTE_OFFER_COMMAND, remote_root, "--destination-workspace-id", destination_workspace_id, "--json"]
+    for state in states or DEFAULT_OFFER_STATES:
+        argv += ["--state", state]
+    if placement:
+        argv += ["--placement", placement]
+    offered = run_adapter(target.bundle, "invoke", {"queue": target.queue, "argv": argv}, timeout=timeout)
     if offered.get("returncode") != 0:
         raise RuntimeError(f"remote offer failed: {offered.get('stderr', '')}")
     try:
@@ -2589,19 +3004,68 @@ def handle_transfer_fetch(arguments: argparse.Namespace, context: CLIContext) ->
             raise ValueError
     except (AttributeError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
         raise ValueError("remote offer did not return a transfer offer document") from exc
+    return [offer for offer in offers if isinstance(offer, dict)]
 
+
+def _remote_retire(
+    target: Any,
+    remote_root: str,
+    job_ids: Sequence[str],
+    destination_workspace_id: str,
+    *,
+    timeout: float | None,
+) -> list[object]:
+    """Tell a remote the sources of imported jobs are no longer needed there."""
+
+    if not job_ids:
+        return []
+    argv = [
+        *REMOTE_RETIRE_COMMAND,
+        remote_root,
+        *job_ids,
+        "--destination-workspace-id",
+        destination_workspace_id,
+        "--json",
+    ]
+    response = run_adapter(target.bundle, "invoke", {"queue": target.queue, "argv": argv}, timeout=timeout)
+    if response.get("returncode") != 0:
+        raise RuntimeError(f"remote retirement failed: {response.get('stderr', '')}")
+    try:
+        report = json.loads(str(response.get("stdout", "")))
+        return list(report["retired"])
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError("remote retirement did not return a retirement report") from exc
+
+
+def _fetch_jobs_from_remote(
+    local: Workspace,
+    target: Any,
+    remote_root: str,
+    *,
+    states: Sequence[str] | None,
+    placement: str | None,
+    timeout: float | None,
+) -> tuple[list[dict[str, object]], list[object]]:
+    """Bring the jobs that finished on one remote back into *local*.
+
+    Probe the remote workspace, ask it to offer what stopped there, pull each
+    offered bundle into local staging, import it, and only then tell the remote
+    to retire the sources it still holds. Every step is idempotent, so an
+    interrupted fetch is finished by running the same command again.
+    """
+
+    _remote_workspace_id(target, remote_root, timeout=timeout, noun="remote")
+    offers = _remote_offer(target, remote_root, local.workspace_id, states=states, placement=placement, timeout=timeout)
     staging_root = local.control / "transfers" / "incoming"
     acknowledgements: list[dict[str, object]] = []
     for offer in offers:
-        if not isinstance(offer, dict):
-            raise ValueError("remote offered something that is not an object")
         transfer_id = canonical_uuid(offer.get("transfer_id"), "transfer_id")
         staging = staging_root / transfer_id
         pulled = run_adapter(
             target.bundle,
             "pull",
             {"queue": target.queue, "source": str(offer["bundle_path"]), "destination": str(staging)},
-            timeout=arguments.adapter_timeout,
+            timeout=timeout,
         )
         acknowledgement = local.import_bundle(str(pulled.get("path", staging)))
         # The payload now lives at its placement in this workspace, so the
@@ -2609,70 +3073,257 @@ def handle_transfer_fetch(arguments: argparse.Namespace, context: CLIContext) ->
         # re-imported by the next fetch.
         discard_staged_bundle(local, staging)
         acknowledgements.append(acknowledgement)
+    retired = _remote_retire(
+        target,
+        remote_root,
+        [str(acknowledgement["job_id"]) for acknowledgement in acknowledgements],
+        local.workspace_id,
+        timeout=timeout,
+    )
+    return acknowledgements, retired
 
-    retired: list[object] = []
-    if acknowledgements:
-        retire_argv = [
-            *REMOTE_RETIRE_COMMAND,
-            remote_root,
-            *[str(acknowledgement["job_id"]) for acknowledgement in acknowledgements],
-            "--destination-workspace-id",
-            local.workspace_id,
-            "--json",
-        ]
-        response = run_adapter(
-            target.bundle,
-            "invoke",
-            {"queue": target.queue, "argv": retire_argv},
-            timeout=arguments.adapter_timeout,
+
+def _transfer_local_to_local(source: Workspace, destination: Workspace, jobs: Sequence[str]) -> list[dict[str, object]]:
+    """Move explicit jobs from one local workspace into another, directly."""
+
+    if not jobs:
+        raise ValueError("a local-to-local transfer needs at least one --job JOB_ID")
+    acknowledgements: list[dict[str, object]] = []
+    for job_id in jobs:
+        source.recover_transfers()
+        bundle = source.detach(
+            job_id,
+            destination_workspace_id=destination.workspace_id,
+            transfer_id=str(uuid.uuid4()),
         )
-        if response.get("returncode") != 0:
-            raise RuntimeError(f"remote retirement failed: {response.get('stderr', '')}")
-        try:
-            report = json.loads(str(response.get("stdout", "")))
-            retired = list(report["retired"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-            raise ValueError("remote retirement did not return a retirement report") from exc
+        acknowledgement = destination.import_bundle(str(bundle))
+        source.acknowledge_transfer(acknowledgement)
+        acknowledgements.append(acknowledgement)
+    return acknowledgements
+
+
+def _transfer_remote_to_remote(
+    source_binding: WorkspaceBinding,
+    destination_binding: WorkspaceBinding,
+    context: CLIContext,
+    *,
+    states: Sequence[str] | None,
+    placement: str | None,
+    timeout: float | None,
+) -> tuple[list[dict[str, object]], list[object]]:
+    """Relay jobs between two remotes through this client (v1 semantics).
+
+    A direct remote-to-remote copy is deferred: this pulls each offered bundle
+    from the source into local staging and pushes it to the destination, then
+    asks the destination to import it and the source to retire the sources it
+    still holds. Every leg reuses the same offer, pull, push, receive and retire
+    the single-hop transfers use.
+    """
+
+    source_target = resolve_remote(source_binding.remote, project=context.cwd)
+    destination_target = resolve_remote(destination_binding.remote, project=context.cwd)
+    destination_workspace_id = _remote_workspace_id(destination_target, destination_binding.path, timeout=timeout)
+    _remote_workspace_id(source_target, source_binding.path, timeout=timeout, noun="source")
+    offers = _remote_offer(
+        source_target,
+        source_binding.path,
+        destination_workspace_id,
+        states=states,
+        placement=placement,
+        timeout=timeout,
+    )
+    acknowledgements: list[dict[str, object]] = []
+    with tempfile.TemporaryDirectory(prefix="httk-relay-") as relay:
+        for offer in offers:
+            transfer_id = canonical_uuid(offer.get("transfer_id"), "transfer_id")
+            staging = Path(relay) / transfer_id
+            pulled = run_adapter(
+                source_target.bundle,
+                "pull",
+                {"queue": source_target.queue, "source": str(offer["bundle_path"]), "destination": str(staging)},
+                timeout=timeout,
+            )
+            local_bundle = str(pulled.get("path", staging))
+            incoming = f"{destination_binding.path.rstrip('/')}/.httk-workflow/transfers/incoming/{transfer_id}"
+            pushed = run_adapter(
+                destination_target.bundle,
+                "push",
+                {"queue": destination_target.queue, "source": local_bundle, "destination": incoming},
+                timeout=timeout,
+            )
+            remote_bundle = str(pushed.get("path", incoming))
+            imported = run_adapter(
+                destination_target.bundle,
+                "invoke",
+                {
+                    "queue": destination_target.queue,
+                    "argv": [
+                        *REMOTE_RECEIVE_COMMAND,
+                        "--workspace",
+                        destination_binding.path,
+                        "--bundle",
+                        remote_bundle,
+                    ],
+                },
+                timeout=timeout,
+            )
+            if imported.get("returncode") != 0:
+                raise RuntimeError(f"destination import failed: {imported.get('stderr', '')}")
+            try:
+                acknowledgement = json.loads(str(imported.get("stdout", "")))
+            except json.JSONDecodeError as exc:
+                raise ValueError("destination import did not return an acknowledgement") from exc
+            if not isinstance(acknowledgement, dict):
+                raise ValueError("destination acknowledgement is not an object")
+            acknowledgements.append(acknowledgement)
+    retired = _remote_retire(
+        source_target,
+        source_binding.path,
+        [str(acknowledgement["job_id"]) for acknowledgement in acknowledgements],
+        destination_workspace_id,
+        timeout=timeout,
+    )
+    return acknowledgements, retired
+
+
+def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Move jobs between two registered workspaces, or run a protocol command.
+
+    ``transfer SRC DST`` is the canonical verb. It resolves both names and moves
+    work whichever way they point: local→remote seals and imports on the remote,
+    remote→local fetches finished jobs home, local→local imports directly, and
+    remote→remote relays through this client. The hidden ``receive``, ``offer``,
+    and ``retire`` spellings are the frozen protocol one machine runs on another.
+    """
+
+    tokens = list(arguments.args)
+    if tokens and tokens[0] in _TRANSFER_PROTOCOL:
+        return _dispatch_transfer_protocol(tokens, context)
+    return _run_transfer_verb(tokens, context, getattr(arguments, "help_parser", None))
+
+
+def _run_transfer_verb(tokens: Sequence[str], context: CLIContext, help_parser: argparse.ArgumentParser | None) -> int:
+    """Parse and run the ``transfer SRC DST`` verb."""
+
+    if not tokens:
+        if help_parser is not None:
+            help_parser.print_help()
+        return 0
+    parser = argparse.ArgumentParser(prog="httk workflow transfer", description="Move jobs between two workspaces")
+    parser.add_argument("source", metavar="SRC", help="the registered workspace the jobs leave")
+    parser.add_argument("destination", metavar="DST", help="the registered workspace the jobs arrive in")
+    parser.add_argument(
+        "--job", action="append", default=[], dest="jobs", metavar="JOB_ID", help="a job to move (repeatable)"
+    )
+    parser.add_argument(
+        "--state",
+        action="append",
+        metavar="STATE",
+        choices=HARVESTABLE_KINDS,
+        help=f"state kind to move when fetching (repeatable, default: {', '.join(DEFAULT_OFFER_STATES)})",
+    )
+    parser.add_argument("--placement", metavar="PLACEMENT", help="move only jobs at or below this placement")
+    parser.add_argument(
+        "--destination-placement", metavar="PLACEMENT", help="where the jobs land (default: their placement)"
+    )
+    _add_adapter_timeout(parser)
+    parser.add_argument("--json", action="store_true", help="print what moved as one JSON document")
+    try:
+        arguments = parser.parse_args(list(tokens))
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 2
+
+    source_binding = resolve_workspace(arguments.source, project=context.cwd)
+    destination_binding = resolve_workspace(arguments.destination, project=context.cwd)
+    source_local = source_binding.remote == LOCAL_REMOTE
+    destination_local = destination_binding.remote == LOCAL_REMOTE
+    timeout = arguments.adapter_timeout
+
+    if source_local and not destination_local:
+        target = resolve_remote(destination_binding.remote, project=context.cwd)
+        if not arguments.jobs:
+            raise ValueError("a local-to-remote transfer needs at least one --job JOB_ID")
+        acknowledgements = _send_jobs_to_remote(
+            Workspace(source_binding.path),
+            target,
+            destination_binding.path,
+            arguments.jobs,
+            destination_placement=arguments.destination_placement,
+            timeout=timeout,
+        )
+        return _report_transfer(arguments, {"moved": acknowledgements})
+    if destination_local and not source_local:
+        target = resolve_remote(source_binding.remote, project=context.cwd)
+        acknowledgements, retired = _fetch_jobs_from_remote(
+            Workspace(destination_binding.path),
+            target,
+            source_binding.path,
+            states=arguments.state,
+            placement=arguments.placement,
+            timeout=timeout,
+        )
+        return _report_transfer(arguments, {"moved": acknowledgements, "retired": retired})
+    if source_local and destination_local:
+        acknowledgements = _transfer_local_to_local(
+            Workspace(source_binding.path), Workspace(destination_binding.path), arguments.jobs
+        )
+        return _report_transfer(arguments, {"moved": acknowledgements})
+    acknowledgements, retired = _transfer_remote_to_remote(
+        source_binding,
+        destination_binding,
+        context,
+        states=arguments.state,
+        placement=arguments.placement,
+        timeout=timeout,
+    )
+    return _report_transfer(arguments, {"moved": acknowledgements, "retired": retired})
+
+
+def _report_transfer(arguments: argparse.Namespace, report: Mapping[str, object]) -> int:
+    """Print the result of one ``transfer`` verb run."""
 
     if arguments.json:
-        print(json.dumps({"fetched": acknowledgements, "retired": retired}, indent=2, sort_keys=True))
+        print(json.dumps(report, indent=2, sort_keys=True))
         return 0
-    for acknowledgement in acknowledgements:
+    moved = report.get("moved", [])
+    assert isinstance(moved, list)
+    for acknowledgement in moved:
+        assert isinstance(acknowledgement, Mapping)
         print(f"{acknowledgement['job_key']}\t{acknowledgement['state']}\t{acknowledgement['placement']}")
     return 0
 
 
-def handle_transfer_operation(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Start managers on a remote, or report the status of its workspace."""
+def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> int:
+    """Parse and run one hidden ``receive``/``offer``/``retire`` protocol command."""
 
-    operation = arguments.operation
-    target = resolve_remote(arguments.remote, project=context.cwd)
-    workspace = _destination_from_adapter(target, arguments.remote_workspace, option="--remote-workspace")
-    if operation == "start-manager":
-        if arguments.count < 1:
-            raise ValueError("--count must be a positive integer")
-        manager_argv = [*REMOTE_MANAGER_COMMAND, workspace]
-        # Left off unless asked for, so a queue configured with workers=N is not
-        # permanently shadowed by a command-line default.
-        if arguments.workers is not None:
-            if arguments.workers < 1:
-                raise ValueError("--workers must be a positive integer")
-            manager_argv += ["--workers", str(arguments.workers)]
-        request: dict[str, object] = {
-            "queue": target.queue,
-            "argv": manager_argv,
-            # Stated outright; the adapter can also read it back out of the argv
-            # above, but only as a documented fallback.
-            "workspace": workspace,
-            "count": arguments.count,
-        }
-    else:
-        request = {
-            "queue": target.queue,
-            "argv": [*REMOTE_STATUS_COMMAND, workspace, "--json"],
-        }
-    print(json.dumps(run_adapter(target.bundle, operation, request, timeout=arguments.adapter_timeout), indent=2))
-    return 0
+    parser = argparse.ArgumentParser(prog="httk workflow transfer", add_help=True)
+    protocol = parser.add_subparsers(dest="_which", required=True)
+
+    receive = protocol.add_parser("receive")
+    receive.add_argument("--workspace", metavar="WORKSPACE", required=True)
+    receive.add_argument("--bundle", metavar="BUNDLE", required=True)
+    receive.set_defaults(handler=handle_transfer_receive)
+
+    offer = protocol.add_parser("offer")
+    offer.add_argument("workspace", metavar="WORKSPACE")
+    offer.add_argument("--destination-workspace-id", metavar="UUID", required=True)
+    offer.add_argument("--state", action="append", metavar="STATE", choices=HARVESTABLE_KINDS)
+    offer.add_argument("--placement", metavar="PLACEMENT")
+    offer.add_argument("--json", action="store_true")
+    offer.set_defaults(handler=handle_transfer_offer)
+
+    retire = protocol.add_parser("retire")
+    retire.add_argument("workspace", metavar="WORKSPACE")
+    retire.add_argument("jobs", metavar="JOB_ID", nargs="+")
+    retire.add_argument("--destination-workspace-id", metavar="UUID")
+    retire.add_argument("--json", action="store_true")
+    retire.set_defaults(handler=handle_transfer_retire)
+
+    try:
+        arguments = parser.parse_args(list(tokens))
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 2
+    return arguments.handler(arguments, context)
 
 
 def _add_adapter_timeout(parser: argparse.ArgumentParser) -> None:
@@ -2686,178 +3337,230 @@ def _add_adapter_timeout(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_transfer_receive(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
-    """Add the hidden import half that ``transfer send`` invokes on the far side."""
-
-    receive = _leaf(
-        subparsers,
-        "receive",
-        summary="import one sealed transfer bundle",
-        description=(
-            "Import one sealed detached transfer bundle. This is the far-side half of `transfer send`, "
-            "invoked over a remote adapter rather than typed; its spelling is protocol"
-        ),
-        handler=handle_transfer_receive,
-        hidden=True,
-    )
-    receive.add_argument("--workspace", metavar="WORKSPACE", required=True, help="the workspace to import into")
-    receive.add_argument("--bundle", metavar="BUNDLE", required=True, help="the sealed bundle directory to import")
-
-
 def build_transfer_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
 ) -> None:
-    """Declare the ``transfer`` group: work that travels to a remote.
+    """Declare the ``transfer`` verb: move jobs between two registered workspaces.
 
-    Its ``receive``, ``offer``, and ``retire`` commands are also the frozen
-    protocol spelling one machine invokes on another over an adapter, named by
-    the ``REMOTE_*_COMMAND`` vectors above.
+    ``transfer`` takes two workspace names and a few options, so it is one leaf
+    with a trailing argument vector its handler parses. That vector also carries
+    the hidden ``receive``/``offer``/``retire`` protocol spellings one machine
+    runs on another over an adapter, named by the ``REMOTE_*_COMMAND`` vectors
+    above; a workspace can therefore never be named after one of them.
     """
+
+    transfer = _leaf(
+        subparsers,
+        "transfer",
+        summary="move jobs between two registered workspaces",
+        description=(
+            "Move jobs between two registered workspaces: `transfer SRC DST`. It works whichever way the "
+            "workspaces point — local to remote, remote to local, local to local, or remote to remote "
+            "(relayed through this client). The hidden receive/offer/retire spellings are protocol."
+        ),
+        handler=handle_transfer,
+    )
+    transfer.set_defaults(help_parser=transfer)
+    transfer.add_argument(
+        "args",
+        nargs=argparse.REMAINDER,
+        metavar="SRC DST [--job JOB_ID] [--state STATE] [--placement P]",
+        help="the source and destination workspace names, and how much to move",
+    )
+
+
+# ---------------------------------------------------------------------------
+# campaign
+# ---------------------------------------------------------------------------
+
+
+def handle_campaign_init(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Define this project's campaign partition map and assignment policy."""
+
+    partitions = dict(_pairs(arguments.partition, "a partition"))
+    config = write_campaign(partitions, assignment=arguments.assignment, project=context.cwd)
+    print(
+        json.dumps({"partitions": dict(config.partitions), "assignment": config.assignment}, indent=2, sort_keys=True)
+    )
+    return 0
+
+
+def handle_campaign_show(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Show this project's campaign partition map."""
+
+    config = read_campaign(context.cwd)
+    document = {"partitions": dict(config.partitions), "assignment": config.assignment}
+    if arguments.json:
+        print(json.dumps(document, indent=2, sort_keys=True))
+        return 0
+    print(f"assignment\t{config.assignment}")
+    for partition in config.ordered_partitions():
+        print(f"{partition}\t{config.partitions[partition]}")
+    return 0
+
+
+def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Assign one root job to a partition and submit it into that workspace."""
+
+    inputs = {name: _json_value(text, f"job input {name!r}") for name, text in _pairs(arguments.inputs, "a job input")}
+    files: dict[str, str | Path] = {name: Path(text) for name, text in _pairs(arguments.files, "a staged file")}
+    job = campaign_submit(
+        arguments.template,
+        key=arguments.key,
+        index=arguments.index,
+        project=context.cwd,
+        inputs=inputs,
+        files=files,
+        tag=arguments.tag,
+        placement=arguments.placement or DEFAULT_PLACEMENT,
+        priority=arguments.priority,
+        name=arguments.name,
+    )
+    if arguments.json:
+        print(json.dumps(job.as_mapping(), indent=2))
+        return 0
+    print(f"{job.job_key}\t{job.payload}")
+    return 0
+
+
+def handle_campaign_harvest(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Harvest every partition of this campaign, one workspace after another."""
+
+    records = campaign_harvest(
+        states=arguments.state or DEFAULT_HARVEST_STATES,
+        placement=arguments.placement,
+        partitions=arguments.partition or None,
+        project=context.cwd,
+    )
+    if arguments.json:
+        print(json.dumps([record.as_mapping() for record in records], indent=2, sort_keys=True))
+        return 0
+    for record in records:
+        print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+def handle_campaign_start_managers(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Start a manager per selected partition of this campaign."""
+
+    report = campaign_managers(
+        partitions=arguments.partition or None,
+        workers=arguments.workers,
+        count=arguments.count,
+        adapter_timeout=arguments.adapter_timeout,
+        project=context.cwd,
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
+def build_campaign_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
+    """Declare the ``campaign`` group: a partition map over many workspaces."""
 
     _, group = _group(
         subparsers,
-        "transfer",
-        summary="send work to a remote, run it there, and fetch it back",
-        description="Send workflow jobs to a remote, run them there, and fetch the finished ones back",
+        "campaign",
+        summary="partition a large campaign across many workspaces",
+        description="Define and drive a campaign that partitions its jobs across many registered workspaces",
     )
 
-    send = _leaf(
+    init = _leaf(
         group,
-        "send",
-        summary="detach named jobs and import them on a remote",
-        description="Detach the named jobs from a local workspace and import them on a remote",
-        handler=handle_transfer_send,
+        "init",
+        summary="define the partition map and assignment policy",
+        description="Define this project's campaign partitions and how root jobs are assigned to them",
+        handler=handle_campaign_init,
     )
-    send.add_argument("remote", metavar="REMOTE", help="the remote to send to, as NAME or NAME:QUEUE")
-    send.add_argument("jobs", metavar="JOB_ID", nargs="+", help="the UUIDs of the jobs to send")
-    send.add_argument(
-        "--source-workspace",
-        metavar="WORKSPACE",
-        help="the local workspace the jobs leave from (default: the project's)",
+    init.add_argument(
+        "--partition",
+        action="append",
+        default=[],
+        metavar="NAME=WORKSPACE",
+        help="map one partition name to a registered workspace (repeatable)",
     )
-    send.add_argument(
-        "--destination-workspace",
-        metavar="WORKSPACE",
-        help="the workspace on the remote the jobs arrive in (default: its queue workspace=PATH)",
+    init.add_argument(
+        "--assignment",
+        choices=ASSIGNMENT_POLICIES,
+        default="hash",
+        help="how root jobs pick a partition (default: hash)",
     )
-    send.add_argument(
-        "--destination-placement",
-        metavar="PLACEMENT",
-        help="where the jobs land on the remote (default: the placement they have here)",
-    )
-    _add_adapter_timeout(send)
 
-    fetch = _leaf(
+    show = _leaf(
         group,
-        "fetch",
-        summary="bring the jobs that finished on a remote back here",
-        description="Fetch the jobs that finished on one remote into a local workspace",
-        handler=handle_transfer_fetch,
+        "show",
+        summary="show the partition map",
+        description="Show this project's campaign partition map and assignment policy",
+        handler=handle_campaign_show,
     )
-    # Not argparse-required: the handler validates it and raises a ValueError
-    # that names the option, which is friendlier than argparse's usage exit.
-    fetch.add_argument(
-        "--remote",
-        metavar="REMOTE",
-        help="the remote to fetch from, as NAME or NAME:QUEUE (required)",
+    show.add_argument("--json", action="store_true", help="print the campaign as one JSON object")
+
+    submit = _leaf(
+        group,
+        "submit",
+        summary="submit one root job to its assigned partition",
+        description="Assign one root job to a partition by policy and submit it into that partition's workspace",
+        handler=handle_campaign_submit,
     )
-    fetch.add_argument(
-        "--workspace",
-        metavar="WORKSPACE",
-        help="the local workspace the jobs arrive in (default: the project's)",
+    submit.add_argument("--template", metavar="TEMPLATE", required=True, help="the runner template to scaffold")
+    submit.add_argument("--key", metavar="KEY", required=True, help="the tag or key the assignment policy hashes")
+    submit.add_argument(
+        "--index", type=int, default=0, metavar="N", help="the batch position, for round-robin (default: 0)"
     )
-    fetch.add_argument(
-        "--remote-workspace",
-        metavar="WORKSPACE",
-        help="the workspace on the remote the jobs leave from (default: its queue workspace=PATH)",
+    submit.add_argument(
+        "--input", action="append", default=[], dest="inputs", metavar="NAME=VALUE", help="one job input (repeatable)"
     )
-    fetch.add_argument(
+    submit.add_argument(
+        "--file", action="append", default=[], dest="files", metavar="NAME=PATH", help="one staged file (repeatable)"
+    )
+    submit.add_argument("--tag", metavar="TAG", help="the job tag")
+    submit.add_argument("--placement", metavar="PLACEMENT", help="where the job lands in its workspace")
+    submit.add_argument("--priority", type=int, metavar="PRIORITY", help="the job priority")
+    submit.add_argument("--name", metavar="NAME", help="a human name for the job")
+    submit.add_argument("--json", action="store_true", help="print the scaffolded job as one JSON object")
+
+    harvest_parser = _leaf(
+        group,
+        "harvest",
+        summary="harvest every partition of the campaign",
+        description="Harvest the finished jobs of every campaign partition, one workspace after another",
+        handler=handle_campaign_harvest,
+    )
+    harvest_parser.add_argument(
+        "--partition",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="harvest only this partition (repeatable, default: all of them)",
+    )
+    harvest_parser.add_argument(
         "--state",
         action="append",
         metavar="STATE",
         choices=HARVESTABLE_KINDS,
-        help=f"state kind to fetch (repeatable, default: {', '.join(DEFAULT_OFFER_STATES)})",
+        help=f"state kind to harvest (repeatable, default: {', '.join(DEFAULT_HARVEST_STATES)})",
     )
-    fetch.add_argument("--placement", metavar="PLACEMENT", help="fetch only jobs at or below this placement")
-    _add_adapter_timeout(fetch)
-    fetch.add_argument("--json", action="store_true", help="print what was fetched and retired as one JSON document")
+    harvest_parser.add_argument("--placement", metavar="PLACEMENT", help="harvest only jobs at or below this placement")
+    harvest_parser.add_argument("--json", action="store_true", help="print every record as one JSON array")
 
-    offer = _leaf(
+    managers = _leaf(
         group,
-        "offer",
-        summary="seal the finished jobs of this workspace for a fetcher",
-        description="Seal the finished jobs of one workspace as bundles a named workspace may fetch",
-        handler=handle_transfer_offer,
+        "start-managers",
+        summary="start a manager per selected partition",
+        description="Start a manager for each selected partition: in-process for local ones, via the scheduler for remote ones",
+        handler=handle_campaign_start_managers,
     )
-    offer.add_argument("workspace", metavar="WORKSPACE", help="the workspace whose finished jobs to seal")
-    offer.add_argument(
-        "--destination-workspace-id",
-        metavar="UUID",
-        required=True,
-        help="the UUID of the workspace that will import these bundles",
-    )
-    offer.add_argument(
-        "--state",
+    managers.add_argument(
+        "--partition",
         action="append",
-        metavar="STATE",
-        choices=HARVESTABLE_KINDS,
-        help=f"state kind to offer (repeatable, default: {', '.join(DEFAULT_OFFER_STATES)})",
+        default=[],
+        metavar="NAME",
+        help="start a manager only for this partition (repeatable, default: all of them)",
     )
-    offer.add_argument("--placement", metavar="PLACEMENT", help="offer only jobs at or below this placement")
-    offer.add_argument("--json", action="store_true", help="print the offers as one JSON document")
-
-    retire = _leaf(
-        group,
-        "retire",
-        summary="retire the sealed sources another workspace imported",
-        description="Retire the sealed source bundles of jobs another workspace has already imported",
-        handler=handle_transfer_retire,
+    managers.add_argument("--workers", type=int, metavar="COUNT", help="workers per manager")
+    managers.add_argument(
+        "--count", type=int, default=1, metavar="COUNT", help="remote managers to submit per partition (default: 1)"
     )
-    retire.add_argument("workspace", metavar="WORKSPACE", help="the workspace still holding the sealed sources")
-    retire.add_argument(
-        "jobs",
-        metavar="JOB_ID",
-        nargs="+",
-        help="the job UUIDs whose source bundles are no longer needed here",
-    )
-    retire.add_argument(
-        "--destination-workspace-id",
-        metavar="UUID",
-        help="refuse to retire a bundle sealed for another workspace",
-    )
-    retire.add_argument("--json", action="store_true", help="print the retirements as one JSON document")
-
-    for operation, summary, description in (
-        (
-            "start-manager",
-            "start task managers on a remote",
-            "Start one or more task managers on a remote, against its workspace",
-        ),
-        (
-            "status",
-            "report the status of the workspace on a remote",
-            "Report the status of the workspace on a remote, over its adapter",
-        ),
-    ):
-        parser = _leaf(group, operation, summary=summary, description=description, handler=handle_transfer_operation)
-        parser.set_defaults(operation=operation)
-        parser.add_argument("remote", metavar="REMOTE", help="the remote to act on, as NAME or NAME:QUEUE")
-        parser.add_argument(
-            "--remote-workspace",
-            metavar="WORKSPACE",
-            help="the workspace on the remote (default: its queue workspace=PATH)",
-        )
-        _add_adapter_timeout(parser)
-        if operation == "start-manager":
-            parser.add_argument(
-                "--workers",
-                type=int,
-                metavar="COUNT",
-                help="workers per manager (default: the queue's workers=N, else the manager's own default)",
-            )
-            parser.add_argument("--count", type=int, default=1, metavar="COUNT", help="managers to start (default: 1)")
-
-    _add_transfer_receive(group)
+    _add_adapter_timeout(managers)
 
 
 # ---------------------------------------------------------------------------
@@ -2886,6 +3589,7 @@ def build_parser(program: str, context: CLIContext) -> argparse.ArgumentParser:
     build_project_parser(groups, context)
     build_remote_parser(groups)
     build_transfer_parser(groups)
+    build_campaign_parser(groups)
     return parser
 
 

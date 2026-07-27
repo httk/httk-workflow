@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest  # pyright: ignore[reportMissingImports]
+from conftest import register_ws
 from httk.core import CLIContext, ed25519_generate_seed, ed25519_public_key
 
 from httk.workflow import TaskManager, Workspace
@@ -304,11 +305,12 @@ def test_signed_operator_request_round_trips_and_is_attributed(tmp_path: Path, m
     _isolate(tmp_path, monkeypatch)
     ensure_identity_key()
     workspace, job_id = _request_workspace(tmp_path)
+    ws = register_ws(None, workspace.root)
     assert (
         native_cli.main(
             [
                 "request",
-                str(workspace.root),
+                ws,
                 job_id,
                 "cancel",
                 "--operator",
@@ -335,8 +337,9 @@ def test_signed_operator_request_round_trips_and_is_attributed(tmp_path: Path, m
 def test_unsigned_operator_request_is_still_accepted(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
     workspace, job_id = _request_workspace(tmp_path)
+    ws = register_ws(None, workspace.root)
     assert identity_public_key() is None
-    arguments = ["request", str(workspace.root), job_id, "cancel", "--operator", "nobody", "--reason", "no key"]
+    arguments = ["request", ws, job_id, "cancel", "--operator", "nobody", "--reason", "no key"]
     assert native_cli.main(arguments) == 0
     document = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
     assert "signature" not in document and "operator_key" not in document
@@ -460,7 +463,7 @@ def test_config_set_is_restricted_to_the_registry_and_unset_removes(tmp_path: Pa
 
 def test_describe_project_reports_keys_workspace_and_manifest(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch, name="described")
-    add_remote("local", template="local", project=project)
+    add_remote("cluster", template="local", project=project)
     create_manifest(project)
 
     description = _fields(describe_project(project))
@@ -473,7 +476,7 @@ def test_describe_project_reports_keys_workspace_and_manifest(tmp_path: Path, mo
     assert "detached-transfer-v1" in description["workspace"]["extensions"]
     assert description["workspace"]["counts"] == {} and description["workspace"]["jobs"] == 0
     assert description["manifest"]["verdict"] == VALID_TRUSTED
-    assert description["remotes"] == ["local"]
+    assert description["remotes"] == ["cluster"]
 
     cheap = _fields(describe_project(project, verify=False))
     assert cheap["manifest"]["present"] is True and cheap["manifest"]["verdict"] is None

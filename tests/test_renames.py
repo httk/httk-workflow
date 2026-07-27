@@ -148,33 +148,30 @@ def _sample(action: str) -> list[str]:
 
 
 def test_the_transfer_group_is_the_former_remote_group(tmp_path: Path) -> None:
+    """The former send/fetch/offer/retire/status verbs are one ``transfer`` verb now."""
+
     parser = cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
-    expected = {
-        "send": cli.handle_transfer_send,
-        "fetch": cli.handle_transfer_fetch,
-        "offer": cli.handle_transfer_offer,
-        "retire": cli.handle_transfer_retire,
-        "start-manager": cli.handle_transfer_operation,
-        "status": cli.handle_transfer_operation,
-        "receive": cli.handle_transfer_receive,
-    }
-    for action, handler in expected.items():
-        assert parser.parse_args(["transfer", action, *_sample(action)]).handler is handler
+    # Every former per-verb spelling now resolves to the single transfer handler,
+    # which reads the direction from the two workspace names it is given.
+    for action in ("send", "fetch", "offer", "retire", "start-manager", "status", "receive"):
+        assert parser.parse_args(["transfer", action, *_sample(action)]).handler is cli.handle_transfer
+    # The superseded per-verb handlers are removed, not merely hidden.
+    for name in ("handle_transfer_send", "handle_transfer_fetch", "handle_transfer_operation"):
+        assert not hasattr(cli, name), f"workflow_cli still exposes the removed handler {name!r}"
     # The superseded ``tasks`` group is gone entirely.
     with pytest.raises(SystemExit):
         parser.parse_args(["tasks", "offer", "WS", "--destination-workspace-id", "UUID"])
 
 
 def test_the_transfer_commands_name_a_remote(tmp_path: Path) -> None:
-    """``REMOTE`` is what the argument is, on both the positional and the option."""
+    """The transfer verb captures its workspace names as a trailing vector."""
 
     parser = cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
-    assert parser.parse_args(["transfer", "send", "cluster", "JOB"]).remote == "cluster"
-    assert parser.parse_args(["transfer", "status", "cluster"]).remote == "cluster"
-    assert parser.parse_args(["transfer", "fetch", "--remote", "cluster"]).remote == "cluster"
+    assert parser.parse_args(["transfer", "src", "dst"]).args == ["src", "dst"]
+    assert parser.parse_args(["transfer", "cluster", "JOB"]).args == ["cluster", "JOB"]
     # The superseded ``--computer`` option is gone.
     with pytest.raises(SystemExit):
-        parser.parse_args(["transfer", "fetch", "--computer", "cluster"])
+        parser.parse_args(["transfer", "--computer", "cluster"])
 
 
 def test_neither_removed_alias_is_advertised_or_parses(tmp_path: Path, capsys) -> None:
@@ -194,11 +191,12 @@ def test_the_protocol_vectors_send_the_frozen_transfer_spellings() -> None:
     assert cli.REMOTE_RECEIVE_COMMAND == ("httk", "workflow", "transfer", "receive")
     assert cli.REMOTE_OFFER_COMMAND == ("httk", "workflow", "transfer", "offer")
     assert cli.REMOTE_RETIRE_COMMAND == ("httk", "workflow", "transfer", "retire")
-    # And the frozen spelling really resolves to its handler.
+    # And the frozen spelling really resolves to its handler: the transfer verb's
+    # single handler, which dispatches the hidden ``receive`` protocol inside.
     parser = cli.build_parser("httk workflow", CLIContext("httk", Path.cwd()))
-    assert parser.parse_args(["transfer", "receive", "--workspace", "/w", "--bundle", "/b"]).handler is (
-        cli.handle_transfer_receive
-    )
+    parsed = parser.parse_args(["transfer", "receive", "--workspace", "/w", "--bundle", "/b"])
+    assert parsed.handler is cli.handle_transfer and parsed.args[0] == "receive"
+    assert callable(cli.handle_transfer_receive)
 
 
 # ---------------------------------------------------------------------------

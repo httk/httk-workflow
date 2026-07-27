@@ -41,7 +41,7 @@ END
 ## The five commands
 
 ```console
-$ httk workflow workspace init quickstart-workspace --extension transactional-data-v1
+$ httk workflow workspace init quickstart-workspace --remote local --path quickstart-workspace --extension transactional-data-v1
 $ httk workflow job new quickstart-workspace --template vasp-relax --from POSCAR --tag silicon
 $ export HTTK_VASP_COMMAND="$PWD/examples/mock_vasp.py"
 $ httk workflow manager run quickstart-workspace --until-idle
@@ -53,10 +53,15 @@ example `export HTTK_VASP_COMMAND="srun -n 32 vasp_std"`.
 
 ## What each command did
 
-**`init`** created the workspace: one directory that is the whole state of your
-work. `--extension transactional-data-v1` lets jobs publish their results as
-transactional data, which is what makes a finished calculation readable without
-looking inside a workdir.
+**`init`** created the workspace *and* registered it under a name: one directory
+that is the whole state of your work, addressed everywhere after by the name you
+gave it rather than by its path. `--remote local --path quickstart-workspace`
+says where it lives — on this machine, in a `quickstart-workspace/` directory
+here; being local is never implied, so the remote is always spelled out (a
+cluster workspace names the remote it lives on instead). Every later command
+takes that registered name, never a bare path. `--extension transactional-data-v1`
+lets jobs publish their results as transactional data, which is what makes a
+finished calculation readable without looking inside a workdir.
 
 **`job new`** built and submitted one job. `--template vasp-relax` is the packaged
 relaxation runner — one file, three steps, the reviewed remedy ladder — so no
@@ -148,8 +153,11 @@ marker.
   already have becomes one job with `httk workflow import pwd` or
   `httk workflow import cwl`, without being rewritten and without a runner file.
 - {doc}`harvest` — turning finished jobs into stored results.
-- Running on a cluster — `transfer send` puts jobs on a remote, `transfer
-  start-manager` runs them there, and `transfer fetch` brings the finished ones
-  back into this workspace for `harvest`; see {doc}`workflow_cli`.
+- Running on a cluster — register a workspace on a remote with `workspace init
+  NAME --remote R --path P`, then `transfer LOCAL REMOTE --job JOB` puts jobs
+  there, `manager run REMOTE` submits managers through its scheduler, and
+  `transfer REMOTE LOCAL` brings the finished ones home for `harvest`; a very
+  large run spread across many workspaces is a {doc}`campaigns`. See
+  {doc}`workflow_cli`.
 - {doc}`taskmanager` and {doc}`workflow_cli` — running managers for real, and the
   complete command tree.

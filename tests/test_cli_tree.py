@@ -20,8 +20,22 @@ from httk.workflow.compat.v1 import cli as v1_cli
 from httk.workflow.workflow_cli import command
 
 #: Every group of the canonical tree, with the subcommands its help must name.
+#: ``transfer`` is deliberately absent: it is a single verb (``transfer SRC DST``)
+#: rather than a group, so it is a leaf and is checked on its own below.
 GROUPS: dict[str, tuple[str, ...]] = {
-    "workspace": ("init", "status", "policy", "fsck", "gc", "upgrade", "unlock"),
+    "workspace": (
+        "init",
+        "status",
+        "list",
+        "forget",
+        "delete",
+        "settings",
+        "policy",
+        "fsck",
+        "gc",
+        "upgrade",
+        "unlock",
+    ),
     "runner": ("publish", "describe"),
     "job": ("new", "submit", "request", "list", "show", "log", "why", "debug"),
     "manager": ("run",),
@@ -29,7 +43,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "config": ("init", "show", "set", "unset", "import-v1"),
     "project": ("init", "import-v1", "show", "doctor", "manifest"),
     "remote": ("list", "add", "configure", "install", "import-v1", "show", "remove"),
-    "transfer": ("send", "fetch", "offer", "retire", "start-manager", "status"),
+    "campaign": ("init", "show", "submit", "harvest", "start-managers"),
 }
 
 #: Superseded group spellings that were removed: ``tasks`` was the transfer
@@ -62,6 +76,8 @@ def test_the_tree_itself_answers_help_and_names_every_group(tmp_path: Path, caps
     printed = capsys.readouterr().out
     for group in GROUPS:
         assert group in printed
+    # The single-verb transfer command is a leaf, but the tree still names it.
+    assert "transfer" in printed
     # A bare invocation is somebody exploring, not somebody making a mistake.
     assert command([], _context(tmp_path)) == 0
     assert "usage:" in capsys.readouterr().out
@@ -107,8 +123,10 @@ def test_the_removed_spellings_are_absent_from_the_help(tmp_path: Path, capsys) 
     for group in REMOVED_GROUPS:
         assert group not in printed
 
+    # transfer is a verb, not a group: its help shows the SRC/DST usage rather
+    # than a subcommand listing (receive/offer/retire are hidden protocol).
     assert command(["transfer", "--help"], _context(tmp_path)) == 0
-    assert "receive" not in capsys.readouterr().out
+    assert "SRC DST" in capsys.readouterr().out
 
     assert command(["v1", "run", "--help"], _context(tmp_path)) == 0
     v1_run = capsys.readouterr().out
@@ -209,13 +227,18 @@ def test_the_taskmanager_alias_really_does_the_work_it_names(tmp_path: Path, cap
     """Not only the same parse: the same effect on the filesystem."""
 
     root = tmp_path / "workspace"
-    assert native_cli.main(["init", str(root), "--extension", "detached-transfer-v1"]) == 0
-    assert str(root) in capsys.readouterr().out
+    assert (
+        native_cli.main(
+            ["init", "aliased", "--remote", "local", "--path", str(root), "--extension", "detached-transfer-v1"]
+        )
+        == 0
+    )
+    assert "aliased" in capsys.readouterr().out
     assert (root / ".httk-workflow" / "format.json").is_file()
 
-    assert native_cli.main(["status", str(root), "--json"]) == 0
+    assert native_cli.main(["status", "aliased", "--json"]) == 0
     alias = capsys.readouterr().out
-    assert command(["workspace", "status", str(root), "--json"], _context(tmp_path)) == 0
+    assert command(["workspace", "status", "aliased", "--json"], _context(tmp_path)) == 0
     assert capsys.readouterr().out == alias
 
 
@@ -252,10 +275,6 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
     # But --set on `remote configure` is, and stays, KEY=VALUE settings.
     assert parser.parse_args(["remote", "configure", "cluster", "--set", "host=a"]).set == ["host=a"]
 
-    # Adapter timeouts are --adapter-timeout only.
-    assert parser.parse_args(["transfer", "fetch", "--remote", "c", "--adapter-timeout", "5"]).adapter_timeout == 5.0
-    with pytest.raises(SystemExit):
-        parser.parse_args(["transfer", "fetch", "--remote", "c", "--timeout", "5"])
     with pytest.raises(SystemExit):
         parser.parse_args(["remote", "install", "c", "--timeout", "5"])
     # The manager's idle wait is --idle-timeout only.
@@ -264,14 +283,19 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         parser.parse_args(["manager", "run", "WS", "--timeout", "5"])
 
-    # The workspace direction flags no longer accept the ambiguous --workspace.
-    assert parser.parse_args(["transfer", "send", "c", "J", "--source-workspace", "/w"]).source_workspace == "/w"
-    with pytest.raises(SystemExit):
-        parser.parse_args(["transfer", "send", "c", "J", "--workspace", "/w"])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["transfer", "status", "c", "--workspace", "/w"])
-    # `transfer fetch` keeps --workspace for the local destination it always meant.
-    assert parser.parse_args(["transfer", "fetch", "--remote", "c", "--workspace", "/w"]).workspace == "/w"
+
+def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
+    """`transfer SRC DST` replaced the old send/fetch/start-manager subcommands."""
+
+    parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
+    # The verb is one leaf: its handler is handle_transfer and its argument is the
+    # trailing vector its handler parses, so the two workspace names travel there.
+    parsed = parser.parse_args(["transfer", "a", "b", "--job", "J"])
+    assert parsed.handler is workflow_cli.handle_transfer
+    assert parsed.args == ["a", "b", "--job", "J"]
+    # The removed group subcommands no longer parse as group actions: they are just
+    # more of the verb's own trailing vector now.
+    assert parser.parse_args(["transfer", "send", "c", "J"]).args == ["send", "c", "J"]
 
 
 def test_the_v1_siblings_default_their_task_set_differently_on_purpose(tmp_path: Path) -> None:
@@ -307,10 +331,14 @@ def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
         workflow_cli.REMOTE_MANAGER_COMMAND,
     ):
         assert spelling[:2] == ("httk", "workflow")
-    # ``transfer receive`` is the frozen, invocable spelling of the import half.
+    # ``transfer receive`` is the frozen import half: the verb leaf parses it as
+    # its own trailing vector and its handler dispatches "receive" at run time to
+    # the still-present handle_transfer_receive.
     receive = parser.parse_args(["transfer", "receive", "--workspace", "/w", "--bundle", "/b"])
-    assert receive.handler is workflow_cli.handle_transfer_receive
-    # The old ``tasks``/``internal`` spellings of it are gone.
+    assert receive.handler is workflow_cli.handle_transfer
+    assert receive.args[0] == "receive"
+    assert callable(workflow_cli.handle_transfer_receive)
+    # The old ``tasks``/``internal`` group spellings are gone.
     with pytest.raises(SystemExit):
         parser.parse_args(["tasks", "receive", "--workspace", "/w", "--bundle", "/b"])
     with pytest.raises(SystemExit):

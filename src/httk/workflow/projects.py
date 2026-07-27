@@ -39,10 +39,12 @@ from httk.project import (
     pinned_project_key,
     project_public_key_path,
     read_project,
+    read_project_section,
     read_public_key_file,
     require_project,
     trust_project_key,
     trusted_project_keys,
+    write_project_section,
 )
 
 from ._util import write_json_atomic
@@ -65,10 +67,12 @@ __all__ = [
     "project_exclusions",
     "project_public_key_path",
     "read_project",
+    "read_project_section",
     "read_public_key_file",
     "require_project",
     "trust_project_key",
     "trusted_project_keys",
+    "write_project_section",
 ]
 
 #: Paths a signed project manifest never records.

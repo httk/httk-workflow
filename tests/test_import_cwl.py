@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
 import pytest
+from conftest import register_ws
 from httk.core import CLIContext
 
 from httk.workflow import TaskManager, Workspace
@@ -484,10 +485,12 @@ def test_the_import_command_submits_a_cwl_job(flows: Path, workspace: Workspace,
     workflow = _write(flows, "flow.cwl", _SCATTER_WORKFLOW)
     inputs = _inputs(flows, {"messages": ["one", "two"]})
 
+    context = CLIContext("httk", tmp_path)
+    ws = register_ws(context, workspace.root)
     assert (
         command(
-            ["import", "cwl", str(workspace.root), str(workflow), str(inputs), "--tag", "cli", "--json"],
-            CLIContext("httk", tmp_path),
+            ["import", "cwl", ws, str(workflow), str(inputs), "--tag", "cli", "--json"],
+            context,
         )
         == 0
     )

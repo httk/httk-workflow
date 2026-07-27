@@ -52,6 +52,13 @@ class AttemptContext:
     #: ``False``: process-interruption safety only, which is what such a context
     #: was written under.
     durable: bool
+    #: The workspace's application settings at claim time, a flat dotted map. It
+    #: is the workspace layer of the job-inputs → environment → workspace →
+    #: default resolution a runner reads through
+    #: :meth:`~httk.workflow.sdk.Attempt.setting`. An old context that predates
+    #: the member reads as empty, which is what a context written before layered
+    #: settings existed meant.
+    settings: Mapping[str, object]
     resources: Mapping[str, object]
     join: object
     raw: Mapping[str, Any]
@@ -72,6 +79,9 @@ class AttemptContext:
         resources_raw = value.get("resources", {})
         if not isinstance(resources_raw, Mapping):
             raise ValueError("attempt resources must be an object")
+        settings_raw = value.get("settings", {})
+        if not isinstance(settings_raw, Mapping):
+            raise ValueError("attempt settings must be an object")
 
         def optional_integer(name: str) -> int | None:
             raw = value.get(name)
@@ -110,6 +120,7 @@ class AttemptContext:
             unsafe_persistent_takeover=bool(value.get("unsafe_persistent_takeover", False)),
             data_generation=generation,
             durable=bool(value.get("durable", False)),
+            settings=dict(settings_raw),
             resources=dict(resources_raw),
             join=value.get("join"),
             raw=value,

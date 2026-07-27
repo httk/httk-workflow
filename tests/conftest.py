@@ -17,6 +17,37 @@ from pathlib import Path
 import pytest  # pyright: ignore[reportMissingImports]
 
 from httk.workflow.adapters import add_remote
+from httk.workflow.registry import register_workspace
+
+
+@pytest.fixture(autouse=True)
+def _isolated_httk_config(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test its own httk config home, so the global workspace registry
+    (``$XDG_CONFIG_HOME/httk/workspaces.json``) never leaks between tests or into
+    the developer's real configuration. A test that wants a different config home
+    still overrides it: this only runs first."""
+
+    monkeypatch.setenv("HTTK_CONFIG_HOME", str(tmp_path_factory.mktemp("httk-config")))
+
+
+def register_ws(
+    context: object,
+    path: object,
+    name: str = "ws",
+    *,
+    remote: str = "local",
+    scope: str = "global",
+) -> str:
+    """Register *path* under *name* and return the name.
+
+    Every CLI command now takes a *registered* workspace name, never a bare path,
+    so a test that used to pass ``str(workspace.root)`` registers a name for it
+    first with this helper and passes the name instead.
+    """
+
+    register_workspace(name, remote, str(path), scope=scope, project=getattr(context, "cwd", None))
+    return name
+
 
 #: The host every fake ``ssh-slurm`` queue is pointed at. The stand-in ``ssh``
 #: ignores it beyond logging it, but the adapters must still carry it around.
