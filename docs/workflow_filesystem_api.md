@@ -33,10 +33,10 @@ is ever required to run cleanup code. Either may disappear between any two
 instructions. A later task manager must be able to identify the last commit
 point and continue from it.
 
-The design is intended for workspaces containing many millions of jobs. Metadata
-inode count, directory fan-out, scheduler scan cost, and manual filesystem
-inspection are therefore correctness-level design concerns, not later
-optimizations.
+The design target is workspaces larger than the measured local snapshot in
+{doc}`benchmarks`; that target is not a capacity measurement. Metadata inode
+count, directory fan-out, scheduler scan cost, and manual filesystem inspection
+are therefore correctness-level design concerns, not later optimizations.
 
 The protocol covers:
 
@@ -96,11 +96,12 @@ data is:
 | Persistent/isolated workdir | 0 or 1 directory | Application policy |
 | Per-state/per-event/per-failure files | 0 | Not used |
 
-The permanent floor is therefore **three inodes**: the payload directory, its
+**Design arithmetic, not a measurement:** the permanent floor is therefore
+**three inodes**: the payload directory, its
 `job.json`, and the one marker. The floor is reachable in practice and not only
 in theory, because a runner may live outside the payload — `runner.source`
 naming the workspace runner store or an installed search path, pinned by
-`runner.sha256` — so a campaign of a million children that all execute the same
+`runner.sha256` — so a partitioned campaign whose children all execute the same
 program stores that program once and each child's payload is exactly its
 `job.json`. A payload runner is the alternative, not the requirement, and costs
 whatever its own files cost. A runner that keeps state across the attempts and
@@ -909,10 +910,10 @@ backend-specific program while retaining these path-containment rules.
 
 A `payload` runner is already pinned by the immutable job digest, so
 `runner.sha256` MUST be absent for it. Every other source names one file, or one
-tree, shared by arbitrarily many jobs, so `runner.sha256` is REQUIRED and pins
-it: the digest of a file is over its bytes, and the digest of a tree is the
-canonical tree digest. Sharing one runner file between the millions of jobs of
-one campaign is the purpose of the non-payload sources.
+tree, shared across jobs by design, so `runner.sha256` is REQUIRED and pins it:
+the digest of a file is over its bytes, and the digest of a tree is the
+canonical tree digest. Sharing one runner file across a large partitioned
+campaign is the purpose of the non-payload sources.
 
 A manager MUST NOT execute a shared runner in place. It resolves the runner,
 copies it below the attempt control directory as `runner`, verifies
@@ -2656,6 +2657,7 @@ The principal improvements are:
 - transactional replay with no permanent revision-metadata tree per step;
 - structured, durable manual and failure history.
 
-The filesystem remains the interoperability layer, but its steady-state inode
-cost is small enough for multi-million-job workspaces and its state remains directly
-understandable to a human with ordinary filesystem tools.
+The filesystem remains the interoperability layer. Its steady-state inode cost
+is a design property described by the arithmetic above, while capacity beyond
+the measured snapshot is an operational question for the target filesystem and
+should be evaluated with {doc}`benchmarks` before a campaign is sized.

@@ -44,7 +44,7 @@ Python Workflow Definition documents needs no extra at all.
 
 - **Runs workflows without a graph.** A step decides at run time which children
   to spawn and which step runs next, so a two-step relaxation and a
-  thousand-child campaign are the same engine —
+  partitioned child campaign are the same engine —
   [runners in Python](docs/runtime_helpers.md) or
   [in Bash](docs/native_bash_api.md), with a
   [normative parity table](docs/sdk_parity.md) between the two.

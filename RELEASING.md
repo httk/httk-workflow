@@ -47,11 +47,16 @@ Versions on package indexes are immutable. Use a new development or release
 candidate version when repeating an upload, for example `2.0.0rc1` followed by
 `2.0.0`.
 
-## Data that must be in the wheel
+## Packages and data that must be in the wheel
 
-This package is not Python modules alone. Several things it ships are *data*,
-declared in `[tool.setuptools.package-data]`, and a wheel that silently lost one
-of them installs and imports cleanly while failing at run time:
+This package is not Python modules alone. Its split Python packages and several
+shipped data files must be present in the wheel; the data files are declared in
+`[tool.setuptools.package-data]`. A wheel that silently lost one of them
+installs and imports cleanly while failing at run time:
+
+- `workflow_cli/*.py`, `introspection/*.py`, and `_manager_*.py` — split
+  implementation modules that must remain discoverable alongside their public
+  package entrypoints;
 
 - `shell/*.sh` — the native Bash authoring libraries, whose absolute paths the
   manager exports to every Bash runner;
