@@ -21,7 +21,7 @@ from httk.workflow import (
     JobSpec,
     ReplayableWorkdirBatch,
     TaskManager,
-    WorkflowWorkspace,
+    Workspace,
     prepare_job_payload,
 )
 
@@ -493,7 +493,7 @@ record payload_runner httk_workflow_spawn two --step relax""",
         assert name in refused
     # A synthesized child cannot inherit a runner that lives inside the payload,
     # and the refusal says exactly what to do instead.
-    assert "publish it with WorkflowWorkspace.publish_runner" in refused
+    assert "publish it with Workspace.publish_runner" in refused
     assert not (fixture.control / "outcome.ready").exists()
 
 
@@ -685,7 +685,7 @@ httk_workflow_main
 
 
 def test_a_payload_bash_runner_advances_commits_data_and_succeeds(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
     payload = tmp_path / "payload"
     files = payload / "files"
     files.mkdir(parents=True)

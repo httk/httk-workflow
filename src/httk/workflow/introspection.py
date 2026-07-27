@@ -47,7 +47,7 @@ from .models import (
     normalize_placement,
     validate_step,
 )
-from .workspace import MarkerFault, WorkflowWorkspace
+from .workspace import MarkerFault, Workspace
 
 JOB_REPORT_FORMAT = "httk-workflow-job-report"
 JOB_HISTORY_FORMAT = "httk-workflow-job-history"
@@ -63,7 +63,7 @@ DEBUG_EXIT_UNFINISHED = 4
 _HISTORY_READ_DEADLINE_SECONDS = 0.1
 
 
-def resolve_job(workspace: WorkflowWorkspace, selector: str) -> Marker:
+def resolve_job(workspace: Workspace, selector: str) -> Marker:
     """Return the marker of the one job *selector* names.
 
     A selector is a job UUID, a complete ``tag--uuid`` job key, or any unique
@@ -90,7 +90,7 @@ def resolve_job(workspace: WorkflowWorkspace, selector: str) -> Marker:
     return matches[0]
 
 
-def _state_of(workspace: WorkflowWorkspace, marker: Marker) -> tuple[dict[str, Any], str | None]:
+def _state_of(workspace: Workspace, marker: Marker) -> tuple[dict[str, Any], str | None]:
     """Return one job's state frame, reporting rather than raising on damage."""
 
     try:
@@ -99,7 +99,7 @@ def _state_of(workspace: WorkflowWorkspace, marker: Marker) -> tuple[dict[str, A
         return {}, str(exc)
 
 
-def _job_of(workspace: WorkflowWorkspace, marker: Marker) -> tuple[JobDefinition | None, str | None]:
+def _job_of(workspace: Workspace, marker: Marker) -> tuple[JobDefinition | None, str | None]:
     """Return one job's immutable definition, reporting rather than raising."""
 
     try:
@@ -199,7 +199,7 @@ def _label_set(value: object) -> frozenset[str]:
     return frozenset(item for item in value if isinstance(item, str))
 
 
-def read_managers(workspace: WorkflowWorkspace) -> list[ManagerRecord]:
+def read_managers(workspace: Workspace) -> list[ManagerRecord]:
     """Return every manager that has ever registered in this workspace.
 
     The records are exactly what each manager published for itself. A manager
@@ -377,7 +377,7 @@ def budget_status(job: JobDefinition, state: Mapping[str, Any]) -> BudgetStatus:
 # ---------------------------------------------------------------------------
 
 
-def observe_join(workspace: WorkflowWorkspace, join: Mapping[str, Any]) -> list[dict[str, object]]:
+def observe_join(workspace: Workspace, join: Mapping[str, Any]) -> list[dict[str, object]]:
     """Observe every child one waiting job's join names.
 
     This is a read-only observation for an operator: an unresolvable child is
@@ -455,7 +455,7 @@ def _workdir_relative(job: JobDefinition | None, state: Mapping[str, Any]) -> Pu
     return base.parent / f"{base.name}.{attempt_id}"
 
 
-def _attempt_control(workspace: WorkflowWorkspace, marker: Marker, state: Mapping[str, Any]) -> Path | None:
+def _attempt_control(workspace: Workspace, marker: Marker, state: Mapping[str, Any]) -> Path | None:
     """Return the attempt control directory of one job's last attempt."""
 
     name = _optional_string(state.get("attempt_control"))
@@ -478,7 +478,7 @@ def read_error_breadcrumb(control: Path | None) -> dict[str, Any] | None:
         return None
 
 
-def describe_job(workspace: WorkflowWorkspace, marker: Marker) -> dict[str, Any]:
+def describe_job(workspace: Workspace, marker: Marker) -> dict[str, Any]:
     """Return the complete machine-readable report of one job."""
 
     state, state_error = _state_of(workspace, marker)
@@ -681,7 +681,7 @@ def render_job(report: Mapping[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def job_frames(workspace: WorkflowWorkspace, marker: Marker, *, limit: int | None = None) -> list[dict[str, Any]]:
+def job_frames(workspace: Workspace, marker: Marker, *, limit: int | None = None) -> list[dict[str, Any]]:
     """Return the state frames of one job, oldest first.
 
     The walk starts at the frame the authoritative marker names and follows
@@ -747,7 +747,7 @@ def render_frames(frames: Sequence[Mapping[str, Any]]) -> str:
 
 
 def list_jobs(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     *,
     kinds: Iterable[str] | None = None,
     placement: str | None = None,
@@ -863,7 +863,7 @@ class _Diagnosing:
         self.hints.append(text)
 
 
-def _maintenance_check(workspace: WorkflowWorkspace, report: _Diagnosing) -> bool:
+def _maintenance_check(workspace: Workspace, report: _Diagnosing) -> bool:
     """Record whether a live maintenance lock forbids launching work."""
 
     lock = read_maintenance_lock(workspace)
@@ -887,7 +887,7 @@ def _maintenance_check(workspace: WorkflowWorkspace, report: _Diagnosing) -> boo
     return True
 
 
-def _profile_check(workspace: WorkflowWorkspace, report: _Diagnosing) -> bool:
+def _profile_check(workspace: Workspace, report: _Diagnosing) -> bool:
     """Record whether this workspace's core profile can be served at all."""
 
     if workspace.core_profile == CORE_PROFILE:
@@ -903,7 +903,7 @@ def _profile_check(workspace: WorkflowWorkspace, report: _Diagnosing) -> bool:
 
 
 def _manager_checks(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     requirements: ClaimRequirements,
     report: _Diagnosing,
     *,
@@ -992,7 +992,7 @@ def _budget_checks(job: JobDefinition, state: Mapping[str, Any], report: _Diagno
     return budgets
 
 
-def _owner_checks(workspace: WorkflowWorkspace, state: Mapping[str, Any], report: _Diagnosing) -> bool:
+def _owner_checks(workspace: Workspace, state: Mapping[str, Any], report: _Diagnosing) -> bool:
     """Record who owns a claimed or running job and whether that owner lives."""
 
     manager_id = _optional_string(state.get("manager_id"))
@@ -1070,7 +1070,7 @@ def _breadcrumb_check(control: Path | None, report: _Diagnosing) -> None:
         report.hint(f"read the complete traceback in {control / 'error.json'}")
 
 
-def explain_job(workspace: WorkflowWorkspace, marker: Marker) -> Diagnosis:
+def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
     """Explain why one job is, or is not, making progress."""
 
     state, state_error = _state_of(workspace, marker)
@@ -1233,7 +1233,7 @@ def explain_job(workspace: WorkflowWorkspace, marker: Marker) -> Diagnosis:
 # ---------------------------------------------------------------------------
 
 
-class ScopedWorkspace(WorkflowWorkspace):
+class ScopedWorkspace(Workspace):
     """A workspace whose scheduling scans observe only the named jobs.
 
     The debug runner drives exactly one job with the real manager code paths, so
@@ -1262,7 +1262,7 @@ class ScopedWorkspace(WorkflowWorkspace):
                 yield entry
 
     def _unscoped_markers(self, kinds: Iterable[str] | None = None) -> Iterator[Marker]:
-        for entry in WorkflowWorkspace.scan_marker_entries(self, kinds):
+        for entry in Workspace.scan_marker_entries(self, kinds):
             if isinstance(entry, Marker):
                 yield entry
             else:
@@ -1361,7 +1361,7 @@ def _stage_payload_with_step(source: Path, step: str) -> Path:
 
 
 def debug_job(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     target: str,
     *,
     placement: str = "debug",
@@ -1438,7 +1438,7 @@ def _print_line(line: str) -> None:
 
 
 def _drive(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     marker: Marker,
     *,
     label: str | None,
@@ -1530,7 +1530,7 @@ def _frame_summary(state: Mapping[str, Any]) -> str:
 
 
 def _pump(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     marker: Marker,
     state: Mapping[str, Any],
     tails: dict[str, list[_Tail]],
@@ -1557,7 +1557,7 @@ def _pump(
 
 
 def _drive_children(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     marker: Marker,
     state: Mapping[str, Any],
     *,

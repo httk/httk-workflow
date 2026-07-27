@@ -1,6 +1,6 @@
 # Project and workflow command line
 
-*For operators and campaign owners: the whole command tree, including projects, configuration, signed manifests, computers, and remote work.*
+*For operators and campaign owners: the whole command tree, including projects, configuration, signed manifests, remotes, and work that travels to them.*
 
 Installing *httk-workflow* registers the lazy `workflow` command with
 *httk-core*:
@@ -55,8 +55,8 @@ httk workflow manager    run
 httk workflow v1         prepare | submit | run
 httk workflow config     init | show | set | unset | import-v1
 httk workflow project    init | import-v1 | show | doctor | manifest create | manifest verify
-httk workflow computer   list | add | configure | install | import-v1 | show | remove
-httk workflow remote     send | fetch | offer | retire | start-manager | status
+httk workflow remote     list | add | configure | install | import-v1 | show | remove
+httk workflow transfer   send | fetch | offer | retire | start-manager | status
 ```
 
 ### `workspace` — the workspace itself, not its jobs
@@ -157,37 +157,40 @@ named `any`.
 | `project manifest create [PROJECT]` | write the signed manifest | `--manifest` |
 | `project manifest verify [PROJECT]` | verify the manifest against the tree | `--manifest`, `--trusted-key` |
 
-### `computer` — the adapters that reach other machines
+### `remote` — the adapters that reach other machines
+
+Named after `git remote`: a *remote* is one machine this project can reach, and
+the bundle of adapter operations that reaches it.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `computer list` | list the computers this project can reach | |
-| `computer add NAME` | create a computer from a packaged template | `--template`, `--global`, `--non-interactive` |
-| `computer configure COMPUTER` | run the adapter's `configure` operation | `--set KEY=VALUE`, `--adapter-timeout` |
-| `computer install COMPUTER` | run the adapter's `install` operation | `--set KEY=VALUE`, `--adapter-timeout` |
-| `computer import-v1 SOURCE` | map a legacy computer bundle | `--name`, `--global` |
-| `computer show NAME` | describe one computer and its queues | `--json` |
-| `computer remove NAME` | remove one computer bundle | `--force` |
+| `remote list` | list the remotes this project can reach | |
+| `remote add NAME` | create a remote from a packaged template | `--template`, `--global`, `--non-interactive` |
+| `remote configure REMOTE` | run the adapter's `configure` operation | `--set KEY=VALUE`, `--adapter-timeout` |
+| `remote install REMOTE` | run the adapter's `install` operation | `--set KEY=VALUE`, `--adapter-timeout` |
+| `remote import-v1 SOURCE` | map a legacy *httk* v1 computer bundle | `--name`, `--global` |
+| `remote show NAME` | describe one remote and its queues | `--json` |
+| `remote remove NAME` | remove one remote bundle | `--force` |
 
-`computer show` never prints a credential *value*: a queue setting stored in
+`remote show` never prints a credential *value*: a queue setting stored in
 the manifest-excluded `credentials.json` is reported by name only, so a
 description an operator pastes into a bug report cannot carry a password.
 
-`computer remove` refuses while an unretired transfer still depends on the
-computer, because removing it would leave that transfer with no way home;
+`remote remove` refuses while an unretired transfer still depends on the
+remote, because removing it would leave that transfer with no way home;
 `--force` skips the interactive confirmation and **nothing else** — the refusal
 stands either way. Fetch or retire the transfer first.
 
-### `remote` — work that travels to another computer
+### `transfer` — work that travels to a remote
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `remote send COMPUTER JOB_ID …` | detach named jobs and import them on the computer | `--source-workspace`, `--destination-workspace`, `--destination-placement`, `--adapter-timeout` |
-| `remote fetch` | bring the jobs that finished on a computer back here | `--computer` (required), `--workspace`, `--remote-workspace`, `--state`, `--placement`, `--adapter-timeout`, `--json` |
-| `remote offer WORKSPACE` | seal the finished jobs here for a workspace that will fetch | `--destination-workspace-id` (required), `--state`, `--placement`, `--json` |
-| `remote retire WORKSPACE JOB_ID …` | retire the sealed sources another workspace imported | `--destination-workspace-id`, `--json` |
-| `remote start-manager COMPUTER` | start managers on the computer | `--count`, `--workers`, `--remote-workspace`, `--adapter-timeout` |
-| `remote status COMPUTER` | report the status of the workspace on the computer | `--remote-workspace`, `--adapter-timeout` |
+| `transfer send REMOTE JOB_ID …` | detach named jobs and import them on the remote | `--source-workspace`, `--destination-workspace`, `--destination-placement`, `--adapter-timeout` |
+| `transfer fetch` | bring the jobs that finished on a remote back here | `--remote` (required), `--workspace`, `--remote-workspace`, `--state`, `--placement`, `--adapter-timeout`, `--json` |
+| `transfer offer WORKSPACE` | seal the finished jobs here for a workspace that will fetch | `--destination-workspace-id` (required), `--state`, `--placement`, `--json` |
+| `transfer retire WORKSPACE JOB_ID …` | retire the sealed sources another workspace imported | `--destination-workspace-id`, `--json` |
+| `transfer start-manager REMOTE` | start managers on the remote | `--count`, `--workers`, `--remote-workspace`, `--adapter-timeout` |
+| `transfer status REMOTE` | report the status of the workspace on the remote | `--remote-workspace`, `--adapter-timeout` |
 
 Every workspace option says which side of the transfer it names. `send` leaves
 `--source-workspace` here and arrives at `--destination-workspace` there;
@@ -202,23 +205,41 @@ more. They are kept for one release; move to the canonical column.
 
 | Deprecated | Canonical | Note |
 | --- | --- | --- |
-| `httk workflow tasks …` | `httk workflow remote …` | the whole group was renamed |
-| `remote send --workspace` | `remote send --source-workspace` | it names the local side |
-| `remote start-manager --workspace` | `remote start-manager --remote-workspace` | it names the far side |
-| `remote status --workspace` | `remote status --remote-workspace` | it names the far side |
-| `remote … --timeout` | `remote … --adapter-timeout` | it bounds adapter calls, not the work |
-| `computer configure/install --timeout` | `--adapter-timeout` | as above |
+| `httk workflow computer …` | `httk workflow remote …` | the group borrowed git's word for the same idea |
+| `httk workflow tasks …` | `httk workflow transfer …` | the whole group was renamed |
+| `transfer fetch --computer` | `transfer fetch --remote` | it names a remote |
+| `transfer send --workspace` | `transfer send --source-workspace` | it names the local side |
+| `transfer start-manager --workspace` | `transfer start-manager --remote-workspace` | it names the far side |
+| `transfer status --workspace` | `transfer status --remote-workspace` | it names the far side |
+| `transfer … --timeout` | `transfer … --adapter-timeout` | it bounds adapter calls, not the work |
+| `remote configure/install --timeout` | `--adapter-timeout` | as above |
 | `manager run --timeout` | `manager run --idle-timeout` | it is the `--until-idle` wait |
-| `v1 prepare/submit/run --set` | `--taskset` | `--set` now means `KEY=VALUE` only, on `computer configure` |
+| `v1 prepare/submit/run --set` | `--taskset` | `--set` now means `KEY=VALUE` only, on `remote configure` |
 | `tasks receive` | `internal receive` | see below; the invoked spelling is protocol |
 
-`remote fetch --workspace` is **not** deprecated: on `fetch` that option has
+`transfer fetch --workspace` is **not** deprecated: on `fetch` that option has
 always named the local destination, which is what it still means.
+
+### Two hard breaks, and what they were
+
+`httk workflow remote send|fetch|offer|retire|start-manager|status` — the
+spelling of the transfer group in the previous release — is now
+`httk workflow transfer …`, because `remote` came to mean *the machine*, as it
+does in git. There is no alias for the old reading of `remote`: the same words
+would otherwise mean two different groups. `httk workflow tasks …` still reaches
+the transfer group, so a script written against the release before that keeps
+working.
+
+A job whose `runner.path` pins the old `pkg:httk.workflow.runners/vasp_*` form
+also breaks: the packaged VASP runners are now modules of
+`httk.workflow.vasp.runners`. A job pinning the old path fails with
+`runner_unavailable` naming exactly the module it could not resolve; scaffold the
+job again, or edit the one `runner.path` member.
 
 ### The one spelling that is protocol, not interface
 
-`remote send` finishes by asking the far side to import the bundle it pushed,
-and `remote fetch` asks the far side to offer and then retire. Those argument
+`transfer send` finishes by asking the far side to import the bundle it pushed,
+and `transfer fetch` asks the far side to offer and then retire. Those argument
 vectors run on a machine whose *httk* may be older or newer than yours, so their
 spelling is frozen:
 
@@ -233,9 +254,10 @@ httk workflow manager run WORKSPACE
 They are listed once, as module constants, in
 {py:mod}`httk.workflow.workflow_cli`. `receive` is an import half rather than an
 operator command, so its canonical home is the unadvertised
-`httk workflow internal receive`; `remote receive` and `tasks receive` both
+`httk workflow internal receive`; `transfer receive` and `tasks receive` both
 still work, and the *invoked* spelling will not change until every supported
-release understands the new one.
+release understands the new one — which is why the hidden `tasks` group is not
+merely tolerated but load-bearing.
 
 ## Creating jobs
 
@@ -298,14 +320,25 @@ layer to store, as JSON lines by default; see {doc}`harvest`.
 
 ## Configuration and projects
 
-User configuration follows the XDG base-directory convention:
+User configuration follows the XDG base-directory convention, and everything
+per-user this package keeps is *configuration*:
 
 - `$XDG_CONFIG_HOME/httk/config.json`;
-- keys and global computers below `$XDG_DATA_HOME/httk/`.
+- identity keys in `$XDG_CONFIG_HOME/httk/keys/`;
+- global remote definitions in `$XDG_CONFIG_HOME/httk/remotes/`.
 
 `HTTK_CONFIG_HOME` and `HTTK_DATA_HOME` can provide explicit deployment or test
 overrides. Legacy `~/.httk` data is read only through `config import-v1`; its
 64-byte private material is not converted.
+
+An earlier release kept the keys and the global definitions below
+`$XDG_DATA_HOME/httk/` instead, as `keys/` and `computers/`. The first command
+that needs either one moves what is there to its configuration home, preserving
+the `0600`/`0700` modes, and says so in one line on stderr. The move happens
+once and is idempotent. If both roots somehow exist, the configuration home wins
+and the stale legacy copy is reported in the log rather than merged: guessing
+which of two definitions of one remote was meant would be worse than saying
+nothing was.
 
 ```console
 httk workflow config init --name "A User" --email user@example.org
@@ -541,9 +574,9 @@ points into is protected, so the deep history of an old job goes with the
 segments behind it; `harvest` and `job log` then report that job's timeline
 with `gaps` set. Its state, payload, and outcome are unaffected.
 
-## Computer adapters
+## Remote adapters
 
-Computer definitions are versioned directories containing `computer.json` and
+Remote definitions are versioned directories containing `remote.json` and
 executable `configure`, `install`, `invoke`, `push`, `pull`, `start-manager`,
 and `status` operations. Each receives one versioned JSON request filename and
 prints one JSON result; diagnostics belong on stderr. Commands and remote
@@ -557,18 +590,20 @@ none of the maintained kinds covers.
 Maintained `local`, `local-slurm`, and `ssh-slurm` templates are packaged with
 the module. Project definitions shadow global definitions. `NAME:QUEUE`
 selects an explicit queue; otherwise the project default and then `default`
-are tried. `computer import-v1` maps recognized legacy bundles by reading
-assignment-only configuration; legacy shell executables are never copied or
-run. Any other `kind` in a `computer.json` is refused rather than executed in
-the wrong place.
+are tried. `remote import-v1` maps recognized legacy *httk* v1 computer bundles
+by reading assignment-only configuration; legacy shell executables are never
+copied or run. Any other `kind` in a `remote.json` is refused rather than
+executed in the wrong place. A definition written before the rename carries
+`computer.json`, below `computers/` rather than `remotes/`, and is still read
+where it lies.
 
-`computer configure --set KEY=VALUE` persists only the non-secret keys
+`remote configure --set KEY=VALUE` persists only the non-secret keys
 `account`, `bootstrap`, `check_connectivity`, `cpus_per_task`, `host`,
 `httk_command`, `legacy_settings`, `nodes`, `partition`, `port`, `reservation`,
 `time_limit`, `username`, `workers`, and `workspace` in the shareable
-`computer.json`. Every other key is stored per queue in `credentials.json` with
+`remote.json`. Every other key is stored per queue in `credentials.json` with
 mode `0600` beside it, which project manifests exclude. Adapters receive both
-together as the request's `queue_settings`. `computer show NAME` reports which
+together as the request's `queue_settings`. `remote show NAME` reports which
 file each setting came from, and the name — never the value — of every
 credential.
 
@@ -579,8 +614,8 @@ starts the requested `count` of managers as detached local processes.
 
 `local-slurm` keeps the same local copies and local commands, but submits the
 manager with a generated batch script through the local `sbatch`. It therefore
-requires `sbatch` on the machine that defines the computer, which is checked
-when the computer is added.
+requires `sbatch` on the machine that defines the remote, which is checked
+when the remote is added.
 
 `ssh-slurm` moves files with `rsync` over `ssh` and runs every command on the
 configured host, where the manager is submitted with `sbatch`. Only `ssh` and
@@ -626,7 +661,7 @@ travel in the protocol rather than through the remote shell.
 
 ### Installing httk on the target
 
-`computer install` never installs software behind your back. It reports the
+`remote install` never installs software behind your back. It reports the
 `httk` it found and the workspace directory it ensured; when nothing answers it
 fails with a message pointing at `pipx install httk-workflow` on the target.
 Configuring the queue with `bootstrap=pip` opts into one attempt at
@@ -644,7 +679,7 @@ A transfer fences an explicit quiescent marker, seals it in the payload,
 validates the payload digest at import, publishes the preserved UUID and prior
 state only at the destination, and retires the source only after an
 idempotent acknowledgement. Transfer UUID and digest checks suppress retries;
-sealed and retired bundles are retained for recovery. Repeating `remote send`
+sealed and retired bundles are retained for recovery. Repeating `transfer send`
 resumes the matching sealed transfer, including the copy-before-import and
 lost-acknowledgement boundaries.
 
@@ -656,56 +691,56 @@ must stay inside the payload: an absolute target, or a relative one climbing out
 with `..`, is refused by name, because it would mean something else at the
 destination.
 
-## Running on a computer and fetching the results
+## Running on a remote and fetching the results
 
-The complete loop is four commands. Work is sent to a computer, run there,
+The complete loop is four commands. Work is sent to a remote, run there,
 fetched back once it has stopped, and harvested locally:
 
 ```console
-httk workflow remote send CLUSTER JOB_ID ...          # local -> computer
-httk workflow remote start-manager CLUSTER --count 2 --workers 4
-httk workflow remote fetch --computer CLUSTER --workspace LOCAL_WS
+httk workflow transfer send CLUSTER JOB_ID ...          # local -> remote
+httk workflow transfer start-manager CLUSTER --count 2 --workers 4
+httk workflow transfer fetch --remote CLUSTER --workspace LOCAL_WS
 httk workflow harvest LOCAL_WS --state succeeded --state failed
 ```
 
-`remote send` detaches each named job from the local workspace and imports it on
-the computer. `--source-workspace` names the local workspace when it is not the
+`transfer send` detaches each named job from the local workspace and imports it
+on the remote. `--source-workspace` names the local workspace when it is not the
 project's, `--destination-workspace` overrides the queue's `workspace=PATH`, and
 `--destination-placement` puts the arriving jobs somewhere other than the
-placement they had here. `remote status` reports the remote workspace status
-through the adapter, and `internal receive` is the remote half `send` invokes.
+placement they had here. `transfer status` reports the remote workspace status
+through the adapter, and `internal receive` is the far-side half `send` invokes.
 
-`remote start-manager` starts managers on the computer: `--count N` submits the
+`transfer start-manager` starts managers on the remote: `--count N` submits the
 generated batch script `N` times, `--workers N` fixes the workers per manager,
 and leaving `--workers` off lets the queue's configured `workers=N` decide. Both
 take `--remote-workspace` and `--adapter-timeout`.
 
-`remote fetch` is the local half. It probes the remote workspace over the
+`transfer fetch` is the local half. It probes the remote workspace over the
 adapter's `status` operation, asks it to `offer` what has stopped, `pull`s each
 offered bundle into `.httk-workflow/transfers/incoming/`, imports it, and only
-then tells the remote to `retire` the sources it still holds. Both the computer
+then tells the remote to `retire` the sources it still holds. Both the remote
 and its workspace can be named explicitly:
 
 ```console
-httk workflow remote fetch --computer CLUSTER:large --remote-workspace /scratch/me/runs \
+httk workflow transfer fetch --remote CLUSTER:large --remote-workspace /scratch/me/runs \
     --state succeeded --state failed --placement project/screening --json
 ```
 
 `--remote-workspace` defaults to the queue's configured `workspace=PATH`, the
-same setting `remote send` uses. `--state` accepts the kinds a stopped job can be
-in and defaults to `succeeded` and `failed`; `--placement` restricts the fetch to
-one subtree; `--adapter-timeout` bounds every adapter operation the fetch runs, as
-it does for `send`, `start-manager`, and `status`. A fetched job arrives as an
+same setting `transfer send` uses. `--state` accepts the kinds a stopped job can
+be in and defaults to `succeeded` and `failed`; `--placement` restricts the fetch
+to one subtree; `--adapter-timeout` bounds every adapter operation the fetch runs,
+as it does for `send`, `start-manager`, and `status`. A fetched job arrives as an
 ordinary job of the local workspace, in
-the terminal state and at the placement it had on the computer, so
+the terminal state and at the placement it had on the remote, so
 `httk workflow harvest` then reports it exactly like a job that ran at home.
 
-The other two commands are the remote half, invoked over the adapter by `remote
-fetch` but usable on their own on the computer itself:
+The other two commands are the far-side half, invoked over the adapter by
+`transfer fetch` but usable on their own on the remote itself:
 
 ```console
-httk workflow remote offer WORKSPACE --destination-workspace-id UUID --json
-httk workflow remote retire WORKSPACE JOB_ID ... --destination-workspace-id UUID
+httk workflow transfer offer WORKSPACE --destination-workspace-id UUID --json
+httk workflow transfer retire WORKSPACE JOB_ID ... --destination-workspace-id UUID
 ```
 
 `offer` detaches every finished job into its sealed bundle and prints one entry
@@ -730,4 +765,4 @@ Because `fetch` reads these two commands' answers back over the adapter's
 banner or a profile's greeting printed on the far side's stdout makes the fetch
 stop with *remote offer did not return a transfer offer document* before
 anything is pulled or imported. Put such greetings on stderr, or behind a
-non-interactive-shell test, on any host a computer adapter reaches.
+non-interactive-shell test, on any host a remote adapter reaches.

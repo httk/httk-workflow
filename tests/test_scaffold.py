@@ -15,11 +15,11 @@ from pathlib import Path
 import pytest
 from httk.core import CLIContext
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow._util import sha256_file
 from httk.workflow.errors import UnsupportedExtensionError
 from httk.workflow.models import JobDefinition, validate_label
-from httk.workflow.runners import PACKAGE, RUNNERS, runner_path
+from httk.workflow.runners import RUNNERS, runner_path
 from httk.workflow.scaffold import (
     JOB_SCAFFOLD_FORMAT,
     PACKAGED_TEMPLATES,
@@ -33,6 +33,7 @@ from httk.workflow.scaffold import (
     structure_files,
     structure_tag,
 )
+from httk.workflow.vasp.runners import PACKAGE
 from httk.workflow.workflow_cli import command
 
 _POSCAR = """silicon
@@ -78,8 +79,8 @@ def structure(tmp_path: Path) -> Path:
 
 
 @pytest.fixture()
-def workspace(tmp_path: Path) -> Iterator[WorkflowWorkspace]:
-    yield WorkflowWorkspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
+def workspace(tmp_path: Path) -> Iterator[Workspace]:
+    yield Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
 
 
 def test_every_packaged_runner_has_a_template_that_says_what_it_implements() -> None:
@@ -114,7 +115,7 @@ def test_every_packaged_runner_has_a_template_that_says_what_it_implements() -> 
         resolve_template("vasp-nonexistent")
 
 
-def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: WorkflowWorkspace, structure: Path) -> None:
+def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, structure: Path) -> None:
     job = new_job(workspace, "vasp-relax", files={"POSCAR": structure}, tag="silicon", inputs={"kpoint_density": 30.0})
 
     # The job is submitted, its runner is in the store under a name carrying the
@@ -139,9 +140,7 @@ def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: WorkflowWor
     assert sorted(path.name for path in workspace.runners.iterdir()) == [f"vasp_relax.{digest[:12]}.py"]
 
 
-def test_the_installed_form_references_a_packaged_runner_without_copying(
-    workspace: WorkflowWorkspace, structure: Path
-) -> None:
+def test_the_installed_form_references_a_packaged_runner_without_copying(workspace: Workspace, structure: Path) -> None:
     job = new_job(workspace, "vasp-static", files={"POSCAR": structure}, publish="installed")
 
     assert job.runner["source"] == "installed"
@@ -150,7 +149,7 @@ def test_the_installed_form_references_a_packaged_runner_without_copying(
     assert job.tag is None and job.job_key == job.job_id
 
 
-def test_a_runner_file_of_ones_own_is_described_and_published(tmp_path: Path, workspace: WorkflowWorkspace) -> None:
+def test_a_runner_file_of_ones_own_is_described_and_published(tmp_path: Path, workspace: Workspace) -> None:
     runner = tmp_path / "single.py"
     runner.write_text(_SINGLE_STEP_RUNNER, encoding="utf-8")
 
@@ -171,9 +170,7 @@ def test_a_runner_file_of_ones_own_is_described_and_published(tmp_path: Path, wo
     assert (job.payload / "run" / "done.txt").is_file()
 
 
-def test_a_runner_with_several_steps_needs_the_starting_step_named(
-    tmp_path: Path, workspace: WorkflowWorkspace
-) -> None:
+def test_a_runner_with_several_steps_needs_the_starting_step_named(tmp_path: Path, workspace: Workspace) -> None:
     runner = tmp_path / "two.py"
     runner.write_text(_TWO_STEP_RUNNER, encoding="utf-8")
     assert describe_runner(runner)["steps"] == ["finish", "start"]
@@ -186,7 +183,7 @@ def test_a_runner_with_several_steps_needs_the_starting_step_named(
     assert new_job(workspace, runner, step="finish", tag="named").initial_step == "finish"
 
 
-def test_an_undescribable_template_is_refused_by_name(tmp_path: Path, workspace: WorkflowWorkspace) -> None:
+def test_an_undescribable_template_is_refused_by_name(tmp_path: Path, workspace: Workspace) -> None:
     broken = tmp_path / "broken.py"
     broken.write_text("raise SystemExit(3)\n", encoding="utf-8")
     with pytest.raises(ValueError, match="refused to describe itself"):
@@ -204,7 +201,7 @@ def test_an_undescribable_template_is_refused_by_name(tmp_path: Path, workspace:
 
 
 def test_a_transactional_template_needs_the_extension(tmp_path: Path, structure: Path) -> None:
-    plain = WorkflowWorkspace.initialize(tmp_path / "plain")
+    plain = Workspace.initialize(tmp_path / "plain")
     with pytest.raises(UnsupportedExtensionError, match="transactional-data-v1"):
         new_job(plain, "vasp-relax", files={"POSCAR": structure})
 
@@ -214,7 +211,7 @@ def test_a_transactional_template_needs_the_extension(tmp_path: Path, structure:
     assert JobDefinition.from_path(job.payload / "job.json").data_mode == "none"
 
 
-def test_a_campaign_publishes_one_runner_and_yields_jobs_lazily(workspace: WorkflowWorkspace, tmp_path: Path) -> None:
+def test_a_campaign_publishes_one_runner_and_yields_jobs_lazily(workspace: Workspace, tmp_path: Path) -> None:
     directory = tmp_path / "structures"
     directory.mkdir()
     for name in ("POSCAR.Si2O", "POSCAR.fcc-Al", "mp-149.vasp", "notes.txt"):
@@ -247,9 +244,7 @@ def test_a_campaign_publishes_one_runner_and_yields_jobs_lazily(workspace: Workf
     assert len(list(workspace.scan_markers())) == 3
 
 
-def test_a_staged_name_lands_where_the_runner_reads_it(
-    workspace: WorkflowWorkspace, structure: Path, tmp_path: Path
-) -> None:
+def test_a_staged_name_lands_where_the_runner_reads_it(workspace: Workspace, structure: Path, tmp_path: Path) -> None:
     assert payload_relative("POSCAR").as_posix() == "files/POSCAR"
     assert payload_relative("inputs/potcars/POTCAR").as_posix() == "inputs/potcars/POTCAR"
     for refused in ("", "../escape", "/absolute/POSCAR", "job.json", ".httk-job/state.json"):

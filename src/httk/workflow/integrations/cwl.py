@@ -11,10 +11,10 @@ never invoked.**
 
 .. code-block:: python
 
-    from httk.workflow import WorkflowWorkspace
+    from httk.workflow import Workspace
     from httk.workflow.integrations.cwl import import_cwl
 
-    workspace = WorkflowWorkspace.initialize("workflow-workspace")
+    workspace = Workspace.initialize("workflow-workspace")
     imported = import_cwl(workspace, "flow.cwl", "job.yml", tag="echo")
     print(imported.job.job_key, imported.warnings)
 
@@ -72,7 +72,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 
-from ..workspace import WorkflowWorkspace
+from ..workspace import Workspace
 from . import DEFAULT_PLACEMENT, FILES_DIRECTORY, ScaffoldedJob, submit_integration_job
 
 _LOGGER = logging.getLogger(__name__)
@@ -835,7 +835,7 @@ def _local_path(value: Mapping[str, object], base: Path, where: str) -> Path:
 
 
 def import_cwl(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     workflow_path: str | os.PathLike[str],
     inputs_path: str | os.PathLike[str],
     *,

@@ -1,7 +1,7 @@
-"""Describing and repairing a project, its computers, and its workspace.
+"""Describing and repairing a project, its remotes, and its workspace.
 
 Everything here answers an operator question about state that already exists:
-*what is this project*, *what is this computer configured to do*, *what is wrong
+*what is this project*, *what is this remote configured to do*, *what is wrong
 with this project and can it be fixed*. Nothing here is on the execution path of
 a job, and every repair is explicit — :func:`project_doctor` reports by default
 and only changes something when it is asked to.
@@ -19,10 +19,13 @@ from typing import Any
 from ._util import read_json, utc_now, write_json_atomic
 from .adapters import (
     CREDENTIALS_FILE,
+    metadata_path,
+    project_remote_roots,
     read_credentials,
+    read_metadata,
     validate_adapter_bundle,
 )
-from .configuration import data_home
+from .configuration import keys_home, remotes_home
 from .errors import WorkflowError
 from .manifests import (
     read_maintenance_lock,
@@ -42,12 +45,12 @@ from .projects import (
     require_project,
     trusted_project_keys,
 )
-from .workspace import WorkflowWorkspace
+from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 
 PROJECT_DESCRIPTION_FORMAT = "httk-project-description"
-COMPUTER_DESCRIPTION_FORMAT = "httk-computer-description"
+REMOTE_DESCRIPTION_FORMAT = "httk-remote-description"
 DOCTOR_REPORT_FORMAT = "httk-project-doctor"
 #: The journal frame one repairing doctor run appends. It is not a state frame,
 #: so every reader that walks the journal for job history ignores it.
@@ -63,11 +66,11 @@ def _key_record(value: str) -> dict[str, object]:
     return {"public_key": value, "fingerprint": key_fingerprint(value)}
 
 
-def _workspace_of(project: Path) -> WorkflowWorkspace | None:
+def _workspace_of(project: Path) -> Workspace | None:
     """Attach the project's workspace read-only, or report that there is none."""
 
     try:
-        return WorkflowWorkspace(project, mutable=False)
+        return Workspace(project, mutable=False)
     except (WorkflowError, OSError, ValueError):
         return None
 
@@ -145,7 +148,6 @@ def describe_project(
     own = pinned_project_key(metadata)
     trusted = trusted_project_keys(metadata)
     seed = project / PROJECT_DIRECTORY / "keys" / "project.seed"
-    computers = project / PROJECT_DIRECTORY / "computers"
     return {
         "format": PROJECT_DESCRIPTION_FORMAT,
         "format_version": 1,
@@ -166,37 +168,46 @@ def describe_project(
         },
         "workspace": _workspace_summary(project, metadata),
         "manifest": _manifest_summary(project, verify=verify),
-        "computers": sorted(path.name for path in computers.iterdir() if path.is_dir()) if computers.is_dir() else [],
+        "remotes": sorted(
+            {
+                path.name
+                for root in project_remote_roots(project)
+                if root.is_dir()
+                for path in root.iterdir()
+                if path.is_dir()
+            }
+        ),
     }
 
 
-def _computer_bundle(name: str, *, project: str | os.PathLike[str] | None) -> tuple[Path, str]:
-    """Locate one computer bundle directory, project-local before global.
+def _remote_bundle(name: str, *, project: str | os.PathLike[str] | None) -> tuple[Path, str]:
+    """Locate one remote bundle directory, project-local before global.
 
     The bundle is located by name rather than resolved through the adapter
-    contract, because describing or removing a computer must still work when the
+    contract, because describing or removing a remote must still work when the
     bundle is exactly what is broken about it.
     """
 
     if not name or "/" in name or name in {".", ".."}:
-        raise ValueError(f"invalid computer name: {name!r}")
+        raise ValueError(f"invalid remote name: {name!r}")
     project_root = discover_project(project)
     if project_root is not None:
-        local = project_root / PROJECT_DIRECTORY / "computers" / name
-        if local.is_dir():
-            return local, "project"
-    shared = data_home() / "computers" / name
+        for root in project_remote_roots(project_root):
+            local = root / name
+            if local.is_dir():
+                return local, "project"
+    shared = remotes_home() / name
     if shared.is_dir():
         return shared, "global"
-    raise ValueError(f"unknown computer: {name}")
+    raise ValueError(f"unknown remote: {name}")
 
 
-def describe_computer(
+def describe_remote(
     name: str,
     *,
     project: str | os.PathLike[str] | None = None,
 ) -> dict[str, object]:
-    """Describe one computer: where it lives, what it is, how it is configured.
+    """Describe one remote: where it lives, what it is, how it is configured.
 
     Credential values never appear. A queue's settings are reported with the
     file each one came from, and for a setting stored in the manifest-excluded
@@ -204,14 +215,15 @@ def describe_computer(
     can paste into a bug report must never carry a password.
     """
 
-    bundle, scope = _computer_bundle(name, project=project)
+    bundle, scope = _remote_bundle(name, project=project)
     project_root = discover_project(project)
     default_queue = str(read_project(project_root).get("default_queue") or "") if project_root is not None else ""
     try:
         metadata: dict[str, Any] = dict(validate_adapter_bundle(bundle))
         valid, problem = True, None
     except (OSError, ValueError) as exc:
-        metadata = read_json(bundle / "computer.json") if (bundle / "computer.json").is_file() else {}
+        recorded = metadata_path(bundle)
+        metadata = read_json(recorded) if recorded.is_file() else {}
         valid, problem = False, str(exc)
     raw_queues = metadata.get("queues", {"default": {}})
     queues: dict[str, object] = {}
@@ -225,13 +237,13 @@ def describe_computer(
             # stay in credentials.json, which is also what manifests exclude.
             "settings_source": {
                 **{key: CREDENTIALS_FILE for key in credentials},
-                **{key: "computer.json" for key in sorted(persisted)},
+                **{key: metadata_path(bundle).name for key in sorted(persisted)},
             },
             "credential_keys": credentials,
         }
     operations = metadata.get("operations", {})
     return {
-        "format": COMPUTER_DESCRIPTION_FORMAT,
+        "format": REMOTE_DESCRIPTION_FORMAT,
         "format_version": 1,
         "name": name,
         "scope": scope,
@@ -254,10 +266,10 @@ def describe_computer(
 
 
 def _configured_workspace_ids(bundle: Path) -> set[str]:
-    """Return the workspace UUIDs this computer's queues point at, if readable."""
+    """Return the workspace UUIDs this remote's queues point at, if readable."""
 
     try:
-        metadata = read_json(bundle / "computer.json")
+        metadata = read_metadata(bundle)
     except (WorkflowError, OSError, ValueError):
         return set()
     queues = metadata.get("queues", {})
@@ -302,36 +314,36 @@ def _pending_transfers(project: Path, workspace_ids: set[str]) -> list[dict[str,
     return pending
 
 
-def remove_computer(
+def remove_remote(
     name: str,
     *,
     project: str | os.PathLike[str] | None = None,
 ) -> dict[str, object]:
-    """Remove one computer bundle, refusing while a transfer still needs it.
+    """Remove one remote bundle, refusing while a transfer still needs it.
 
-    A sealed bundle that has not been acknowledged is work this computer still
+    A sealed bundle that has not been acknowledged is work this remote still
     owes an answer about, and the adapter is how that answer is fetched.
-    Removing the computer would leave the transfer with no way home, so it is
+    Removing the remote would leave the transfer with no way home, so it is
     refused by name — retire or fetch the transfer first.
     """
 
-    bundle, scope = _computer_bundle(name, project=project)
+    bundle, scope = _remote_bundle(name, project=project)
     project_root = discover_project(project)
     if project_root is not None:
         pending = _pending_transfers(project_root, _configured_workspace_ids(bundle))
         if pending:
             jobs = ", ".join(str(item["job_key"]) for item in pending)
             raise ValueError(
-                f"computer {name!r} is still referenced by {len(pending)} unretired transfer(s): {jobs}; "
-                "fetch or retire them before removing the computer"
+                f"remote {name!r} is still referenced by {len(pending)} unretired transfer(s): {jobs}; "
+                "fetch or retire them before removing the remote"
             )
     shutil.rmtree(bundle)
     _LOGGER.info(
-        "removed the %s computer %s at %s",
+        "removed the %s remote %s at %s",
         scope,
         name,
         bundle,
-        extra={"event": "computer_removed", "computer": name, "bundle": str(bundle)},
+        extra={"event": "remote_removed", "remote": name, "bundle": str(bundle)},
     )
     return {"name": name, "scope": scope, "bundle": str(bundle), "removed": True}
 
@@ -376,7 +388,7 @@ def _check_workspace_initialization(project: Path, metadata: dict[str, object], 
     if not repair:
         return finding
     if not (project / ".httk-workflow" / "format.json").is_file():
-        WorkflowWorkspace.initialize(project, extensions=("detached-transfer-v1",))
+        Workspace.initialize(project, extensions=("detached-transfer-v1",))
         finding.action = "initialized a detached-transfer workspace"
     else:
         finding.action = "the workspace already exists; cleared the failure flag"
@@ -411,7 +423,7 @@ def _check_maintenance_lock(project: Path, repair: bool) -> Finding:
         details={"path": str(holder.path)},
     )
     if repair:
-        finding.action = release_maintenance_lock(WorkflowWorkspace(project))
+        finding.action = release_maintenance_lock(Workspace(project))
         finding.repaired = True
         finding.status = "ok"
     return finding
@@ -480,7 +492,7 @@ def _check_legacy_identity(project: Path, metadata: dict[str, object]) -> Findin
             continue
         if recorded not in trusted:
             unpinned.append(path.name)
-    user_legacy = data_home() / "keys" / "legacy-identity.pub"
+    user_legacy = keys_home() / "legacy-identity.pub"
     if user_legacy.is_file():
         try:
             if read_public_key_file(user_legacy) not in trusted:
@@ -580,7 +592,7 @@ def _journal_repairs(project: Path, report: Mapping[str, object], findings: Sequ
         ],
     }
     try:
-        with WorkflowWorkspace(project).open_journal_writer() as writer:
+        with Workspace(project).open_journal_writer() as writer:
             writer.append(frame)
     except (WorkflowError, OSError, ValueError) as exc:  # pragma: no cover - a broken journal is its own finding
         _LOGGER.warning("cannot journal the doctor repairs of %s: %s", project, exc)

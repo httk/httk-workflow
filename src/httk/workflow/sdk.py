@@ -133,7 +133,7 @@ class RunnerRef:
             raise ValueError(
                 "RunnerRef.inherit() needs a runner that lives outside the payload, but this job runs the "
                 f"payload runner {parent.runner_path.as_posix()!r}; publish it with "
-                "WorkflowWorkspace.publish_runner and reference it with RunnerRef.workspace(path, sha256), "
+                "Workspace.publish_runner and reference it with RunnerRef.workspace(path, sha256), "
                 "or spawn a prepared payload directory instead of a ChildSpec"
             )
         return (

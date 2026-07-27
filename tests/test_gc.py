@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest  # pyright: ignore[reportMissingImports]
 from httk.core import CLIContext
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow import gc as gc_module
 from httk.workflow._util import read_json, tree_digest, utc_now, write_json_atomic
 from httk.workflow.gc import GcReport
@@ -128,7 +128,7 @@ def _timestamp(days_ago: float) -> str:
     return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _manager_directory(workspace: WorkflowWorkspace, writer_id: str, *, live: bool, days: float) -> Path:
+def _manager_directory(workspace: Workspace, writer_id: str, *, live: bool, days: float) -> Path:
     """Craft one manager directory naming *writer_id*."""
 
     manager_id = str(uuid.uuid4())
@@ -153,7 +153,7 @@ def _manager_directory(workspace: WorkflowWorkspace, writer_id: str, *, live: bo
     return manager_dir
 
 
-def _two_segment_writer(workspace: WorkflowWorkspace, *, days: float) -> tuple[str, list[Path], str]:
+def _two_segment_writer(workspace: Workspace, *, days: float) -> tuple[str, list[Path], str]:
     """Open one writer, force it to rotate, and age both of its segments."""
 
     with workspace.open_journal_writer() as writer:
@@ -168,7 +168,7 @@ def _two_segment_writer(workspace: WorkflowWorkspace, *, days: float) -> tuple[s
     return writer_id, segments, second
 
 
-def _sealed_ledger(workspace: WorkflowWorkspace, record_ref: str) -> Path:
+def _sealed_ledger(workspace: Workspace, record_ref: str) -> Path:
     """Publish a sealed transfer ledger whose marker names *record_ref*."""
 
     transfer_id = str(uuid.uuid4())
@@ -190,7 +190,7 @@ class _Fixture:
     """One aged workspace and the paths every assertion refers to."""
 
     def __init__(self, tmp_path: Path) -> None:
-        self.workspace = WorkflowWorkspace.initialize(
+        self.workspace = Workspace.initialize(
             tmp_path / "workspace",
             extensions=["detached-transfer-v1"],
             durable=False,
@@ -455,7 +455,7 @@ def test_unset_retention_collects_only_the_always_safe_categories(aged: _Fixture
 
 
 def test_empty_placement_mirrors_are_pruned_below_every_state_kind(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", durable=False)
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
     payload, job_id = _payload(tmp_path / "source", "job")
     workspace.submit(payload, "project/deep/nested/leaf")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:

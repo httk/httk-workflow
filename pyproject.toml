@@ -70,6 +70,7 @@ release = [
   "build>=1.2",
   "twine>=6.0",
 ]
+default = []
 # Importing CWL needs a CWL *parser*; executing what was imported does not, so
 # this extra belongs on the machine that runs `httk workflow import cwl` and
 # nowhere else. cwltool is deliberately absent: httk executes the normalized
@@ -99,7 +100,7 @@ namespaces = true
   "v1_runtime/README.md",
   "v1_runtime/compat/*.sh",
   "shell/*.sh",
-  "adapter_templates/*/computer.json",
+  "adapter_templates/*/remote.json",
   "adapter_templates/*/configure",
   "adapter_templates/*/install",
   "adapter_templates/*/invoke",
@@ -109,9 +110,9 @@ namespaces = true
   "adapter_templates/*/status",
 ]
 # The Python runners are modules of the package and ship with it; the Bash runner
-# beside them is data, and a job referencing pkg:httk.workflow.runners/... needs it
-# installed exactly like the shell libraries above.
-"httk.workflow.runners" = [
+# beside them is data, and a job referencing pkg:httk.workflow.vasp.runners/...
+# needs it installed exactly like the shell libraries above.
+"httk.workflow.vasp.runners" = [
   "*.sh",
 ]
 # httk.workflow.integrations follows the same rule and needs no entry of its own:

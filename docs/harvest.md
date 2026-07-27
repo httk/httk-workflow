@@ -13,9 +13,9 @@ consumes them. A consumer therefore reads results like this, and nothing in
 *httk-workflow* knows what `store` or `load_vasp` are:
 
 ```python
-from httk.workflow import WorkflowWorkspace, harvest
+from httk.workflow import Workspace, harvest
 
-workspace = WorkflowWorkspace("workflow-workspace", mutable=False)
+workspace = Workspace("workflow-workspace", mutable=False)
 for record in harvest(workspace):
     store.save(load_vasp(record))
 ```
@@ -136,8 +136,8 @@ $ httk workflow harvest workflow-workspace | head -1
  "workspace":"/…/workflow-workspace","workspace_id":"a2d1…"}
 ```
 
-Jobs that ran on another computer are harvested the same way once they are
-home: `httk workflow remote fetch --computer NAME --workspace WORKSPACE` imports
+Jobs that ran on a remote are harvested the same way once they are
+home: `httk workflow transfer fetch --remote NAME --workspace WORKSPACE` imports
 them into this workspace in the terminal state they stopped in, and the harvest
 that follows cannot tell them from jobs that ran locally. See
 {doc}`workflow_cli`.

@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from httk.workflow import JobSpec, TaskManager, WorkflowWorkspace, prepare_job_payload
+from httk.workflow import JobSpec, TaskManager, Workspace, prepare_job_payload
 
 _PYTHON_RUNNER = '''#!/usr/bin/env python3
 """Defect campaign: characterize, relax every site, aggregate, triage."""
@@ -163,14 +163,14 @@ def _tag(job_key: str) -> str:
     return job_key.split("--")[0]
 
 
-def _campaign(root: Path, source: str, name: str) -> WorkflowWorkspace:
+def _campaign(root: Path, source: str, name: str) -> Workspace:
     """Run the whole campaign of one runner file in its own workspace."""
 
     root.mkdir(parents=True)
     runner = root / name
     runner.write_text(source, encoding="utf-8")
     runner.chmod(0o755)
-    workspace = WorkflowWorkspace.initialize(root / "workspace", extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize(root / "workspace", extensions=["transactional-data-v1"])
     reference = workspace.publish_runner(runner, name=f"parity/{name}")
     payload = root / "parent"
     prepare_job_payload(
@@ -211,7 +211,7 @@ def _normalized_outcome(body: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def _outcomes(workspace: WorkflowWorkspace) -> dict[str, list[dict[str, Any]]]:
+def _outcomes(workspace: Workspace) -> dict[str, list[dict[str, Any]]]:
     """Every published outcome of every job, in publication order per job."""
 
     collected: dict[str, list[tuple[int, dict[str, Any]]]] = {}
@@ -223,7 +223,7 @@ def _outcomes(workspace: WorkflowWorkspace) -> dict[str, list[dict[str, Any]]]:
     return {tag: [body for _, body in sorted(items)] for tag, items in collected.items()}
 
 
-def _transactions(workspace: WorkflowWorkspace) -> dict[str, list[Any]]:
+def _transactions(workspace: Workspace) -> dict[str, list[Any]]:
     """The operations of every published data transaction, keyed by job tag."""
 
     collected: dict[str, list[Any]] = {}
@@ -233,7 +233,7 @@ def _transactions(workspace: WorkflowWorkspace) -> dict[str, list[Any]]:
     return collected
 
 
-def _jobs(workspace: WorkflowWorkspace) -> dict[str, dict[str, Any]]:
+def _jobs(workspace: Workspace) -> dict[str, dict[str, Any]]:
     """Every job definition, minus the members that identify one workspace."""
 
     result: dict[str, dict[str, Any]] = {}
@@ -245,7 +245,7 @@ def _jobs(workspace: WorkflowWorkspace) -> dict[str, dict[str, Any]]:
     return result
 
 
-def _states(workspace: WorkflowWorkspace) -> dict[str, dict[str, Any]]:
+def _states(workspace: Workspace) -> dict[str, dict[str, Any]]:
     """The terminal state frame of every job, keyed by job tag."""
 
     result: dict[str, dict[str, Any]] = {}
@@ -261,7 +261,7 @@ def _states(workspace: WorkflowWorkspace) -> dict[str, dict[str, Any]]:
     return result
 
 
-def _artifacts(workspace: WorkflowWorkspace) -> dict[str, str]:
+def _artifacts(workspace: Workspace) -> dict[str, str]:
     """The workdir files, data files, and job state of every job."""
 
     result: dict[str, str] = {}

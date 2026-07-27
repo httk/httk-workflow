@@ -15,7 +15,7 @@ from .backends import AttemptLaunch, OutcomeCommit
 from .errors import FormatError, WorkflowError
 from .manager import TaskManager
 from .models import JobDefinition, Marker, normalize_placement, validate_label
-from .workspace import WorkflowWorkspace
+from .workspace import Workspace
 
 V1_BACKEND = "httk-v1"
 V1_CAPABILITY = "httk-v1"
@@ -224,7 +224,7 @@ def prepare_v1_payload(
 
 
 def submit_v1_task(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     source: str | os.PathLike[str],
     placement: str | PurePosixPath,
     *,
@@ -364,7 +364,7 @@ class V1RunnerBackend:
             target = commit.payload.parents[len(commit.marker.placement.parts)].joinpath(*placement.parts, job_key)
             _replace_with_relative_symlink(commit.payload / legacy_path, target)
 
-    def reconcile(self, workspace: WorkflowWorkspace) -> None:
+    def reconcile(self, workspace: Workspace) -> None:
         for marker in workspace.scan_markers():
             try:
                 job = workspace.load_job(marker)
@@ -375,7 +375,7 @@ class V1RunnerBackend:
             except (WorkflowError, OSError):
                 continue
 
-    def marker_changed(self, workspace: WorkflowWorkspace, marker: Marker) -> None:
+    def marker_changed(self, workspace: Workspace, marker: Marker) -> None:
         job = workspace.load_job(marker)
         compatibility = _compatibility(job)
         link = compatibility.get("legacy_link")
@@ -388,7 +388,7 @@ class V1TaskManager(TaskManager):
 
     def __init__(
         self,
-        workspace: WorkflowWorkspace,
+        workspace: Workspace,
         *,
         taskset: str = "any",
         maximum_workers: int = 1,
@@ -481,7 +481,7 @@ def _legacy_status(marker: Marker, state: Mapping[str, object]) -> str:
     return "stopped"
 
 
-def _reconcile_legacy_link(workspace: WorkflowWorkspace, marker: Marker, link: Mapping[str, object]) -> None:
+def _reconcile_legacy_link(workspace: Workspace, marker: Marker, link: Mapping[str, object]) -> None:
     parent_key = str(link.get("parent_job_key", ""))
     parent_placement = normalize_placement(str(link.get("parent_placement", "")))
     link_directory = _relative_legacy_path(link.get("directory"))

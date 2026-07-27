@@ -91,9 +91,9 @@ httk workflow runner publish defects.sh --workspace workflow-workspace --name de
 ```
 
 ```python
-from httk.workflow import JobSpec, WorkflowWorkspace, prepare_job_payload
+from httk.workflow import JobSpec, Workspace, prepare_job_payload
 
-workspace = WorkflowWorkspace("workflow-workspace")
+workspace = Workspace("workflow-workspace")
 reference = workspace.publish_runner("defects.sh", name="defects/run.sh")
 prepare_job_payload(
     "prepared-job",

@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from httk.core import CLIContext
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow.integrations import PACKAGE, RUNNERS, runner_path, runner_reference
 from httk.workflow.integrations.pwd import (
     DEFAULT_MAXIMUM_EMBEDDED_BYTES,
@@ -99,8 +99,8 @@ _ARITHMETIC: dict[str, object] = {
 
 
 @pytest.fixture()
-def workspace(tmp_path: Path) -> Iterator[WorkflowWorkspace]:
-    yield WorkflowWorkspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
+def workspace(tmp_path: Path) -> Iterator[Workspace]:
+    yield Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
 
 
 @pytest.fixture()
@@ -116,7 +116,7 @@ def _document(tmp_path: Path, content: dict[str, object], name: str = "workflow.
     return path
 
 
-def _drive(workspace: WorkflowWorkspace) -> None:
+def _drive(workspace: Workspace) -> None:
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=180.0)
 
@@ -205,7 +205,7 @@ def test_a_document_that_is_not_a_workflow_is_refused_with_a_reason() -> None:
     )
 
 
-def test_unknown_members_survive_the_import(tmp_path: Path, workspace: WorkflowWorkspace, module: Path) -> None:
+def test_unknown_members_survive_the_import(tmp_path: Path, workspace: Workspace, module: Path) -> None:
     annotated = {**_ARITHMETIC, "engineAnnotations": {"who": "some other engine"}}
     job = import_pwd(workspace, _document(tmp_path, annotated), modules=[module], tag="annotated")
 
@@ -234,7 +234,7 @@ def test_the_packaged_runner_describes_itself_as_one_step() -> None:
 
 
 def test_an_imported_job_references_the_packaged_runner_and_writes_no_runner_file(
-    tmp_path: Path, workspace: WorkflowWorkspace, module: Path
+    tmp_path: Path, workspace: Workspace, module: Path
 ) -> None:
     job = import_pwd(workspace, _document(tmp_path, _ARITHMETIC), modules=[module], tag="arithmetic")
 
@@ -250,7 +250,7 @@ def test_an_imported_job_references_the_packaged_runner_and_writes_no_runner_fil
 
 
 def test_an_imported_document_runs_to_success_through_the_manager(
-    tmp_path: Path, workspace: WorkflowWorkspace, module: Path
+    tmp_path: Path, workspace: Workspace, module: Path
 ) -> None:
     job = import_pwd(
         workspace,
@@ -274,7 +274,7 @@ def test_an_imported_document_runs_to_success_through_the_manager(
 
 
 def test_workflow_inputs_override_the_input_nodes_of_the_document(
-    tmp_path: Path, workspace: WorkflowWorkspace, module: Path
+    tmp_path: Path, workspace: Workspace, module: Path
 ) -> None:
     job = import_pwd(
         workspace,
@@ -293,7 +293,7 @@ def test_workflow_inputs_override_the_input_nodes_of_the_document(
 
 
 def test_a_failed_node_is_retried_from_the_checkpoint_rather_than_from_the_start(
-    tmp_path: Path, workspace: WorkflowWorkspace, module: Path
+    tmp_path: Path, workspace: Workspace, module: Path
 ) -> None:
     """The whole point of checkpointing: node one does not run twice."""
 
@@ -318,7 +318,7 @@ def test_a_failed_node_is_retried_from_the_checkpoint_rather_than_from_the_start
 
 
 def test_a_node_outside_the_allowlist_is_refused_at_run_time(
-    tmp_path: Path, workspace: WorkflowWorkspace, module: Path
+    tmp_path: Path, workspace: Workspace, module: Path
 ) -> None:
     job = import_pwd(
         workspace,
@@ -339,7 +339,7 @@ def test_a_node_outside_the_allowlist_is_refused_at_run_time(
 
 
 def test_a_document_too_large_to_embed_is_staged_in_the_payload(
-    tmp_path: Path, workspace: WorkflowWorkspace, module: Path
+    tmp_path: Path, workspace: Workspace, module: Path
 ) -> None:
     job = import_pwd(
         workspace,
@@ -383,7 +383,7 @@ def test_the_import_group_is_a_group_of_the_canonical_tree(tmp_path: Path, capsy
 
 
 def test_the_import_command_submits_a_job_and_reports_it(
-    tmp_path: Path, workspace: WorkflowWorkspace, module: Path, capsys
+    tmp_path: Path, workspace: Workspace, module: Path, capsys
 ) -> None:
     document = _document(tmp_path, _ARITHMETIC)
     context = CLIContext("httk", tmp_path)

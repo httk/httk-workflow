@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from httk.core import CLIContext
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow._util import tree_digest
 from httk.workflow.errors import UnsupportedExtensionError, WorkspaceCorruptionError
 from httk.workflow.workflow_cli import command as workflow_command
@@ -72,7 +72,7 @@ def _payload(root: Path, runner: dict[str, object], *, tag: str = "shared") -> t
     return payload, job_id
 
 
-def _failure(workspace: WorkflowWorkspace, job_id: str) -> dict[str, object]:
+def _failure(workspace: Workspace, job_id: str) -> dict[str, object]:
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "failed"
     failure = workspace.read_state(marker)["failure"]
@@ -81,7 +81,7 @@ def _failure(workspace: WorkflowWorkspace, job_id: str) -> dict[str, object]:
 
 
 def test_workspace_runner_is_published_resolved_staged_and_verified(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     reference = workspace.publish_runner(_runner_file(tmp_path / "source"))
     assert reference["source"] == "workspace"
     assert reference["path"] == "succeed.py"
@@ -111,7 +111,7 @@ def test_workspace_runner_is_published_resolved_staged_and_verified(tmp_path: Pa
 
 
 def test_installed_runner_resolves_from_a_manager_search_path(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     installed = _runner_file(tmp_path / "opt" / "runners", name="tool.py")
     digest = workspace.publish_runner(installed)["sha256"]
     (workspace.runners / "tool.py").unlink()
@@ -142,7 +142,7 @@ def test_an_installed_runner_tree_is_pinned_and_staged_whole(tmp_path: Path) -> 
     )
     entry.chmod(0o755)
 
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(
         tmp_path / "payloads",
         {"source": "installed", "path": "toolbox", "sha256": tree_digest(bundle)},
@@ -161,7 +161,7 @@ def test_an_installed_runner_tree_is_pinned_and_staged_whole(tmp_path: Path) -> 
 
 
 def test_a_replaced_runner_fails_the_job_with_runner_mismatch(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     reference = workspace.publish_runner(_runner_file(tmp_path / "source"))
     payload, job_id = _payload(tmp_path / "payloads", dict(reference), tag="pinned")
     workspace.submit(payload, "project/pinned")
@@ -177,7 +177,7 @@ def test_a_replaced_runner_fails_the_job_with_runner_mismatch(tmp_path: Path) ->
 
 
 def test_an_unpublished_runner_fails_the_job_with_runner_unavailable(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     digest = "0" * 64
     absent, absent_id = _payload(
         tmp_path / "payloads" / "absent",
@@ -207,7 +207,7 @@ def test_an_unpublished_runner_fails_the_job_with_runner_unavailable(tmp_path: P
 
 
 def test_publish_refuses_a_different_digest_without_replace(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     first = workspace.publish_runner(_runner_file(tmp_path / "source"), name="tools/step.py")
     assert first["path"] == "tools/step.py"
     # Republishing identical bytes is an idempotent no-op.
@@ -222,7 +222,7 @@ def test_publish_refuses_a_different_digest_without_replace(tmp_path: Path) -> N
 
 
 def test_runner_publish_command_prints_the_job_reference(tmp_path: Path, capsys) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     context = CLIContext("httk", tmp_path)
     runner = _runner_file(tmp_path / "source")
     code = workflow_command(
@@ -263,8 +263,8 @@ def test_runner_publish_command_prints_the_job_reference(tmp_path: Path, capsys)
 
 
 def test_detached_transfer_carries_the_workspace_runner_it_references(tmp_path: Path) -> None:
-    source = WorkflowWorkspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
-    destination = WorkflowWorkspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+    source = Workspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
+    destination = Workspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
     reference = source.publish_runner(_runner_file(tmp_path / "runners"))
     payload, job_id = _payload(tmp_path / "payloads", dict(reference), tag="detached")
     source.submit(payload, "project/detached")
@@ -288,8 +288,8 @@ def test_detached_transfer_carries_the_workspace_runner_it_references(tmp_path: 
 
 
 def test_import_refuses_a_runner_name_holding_different_content(tmp_path: Path) -> None:
-    source = WorkflowWorkspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
-    destination = WorkflowWorkspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+    source = Workspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
+    destination = Workspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
     reference = source.publish_runner(_runner_file(tmp_path / "runners"))
     destination.publish_runner(_runner_file(tmp_path / "other", _OTHER_RUNNER, name="succeed.py"))
     payload, job_id = _payload(tmp_path / "payloads", dict(reference), tag="conflicting")
@@ -300,7 +300,7 @@ def test_import_refuses_a_runner_name_holding_different_content(tmp_path: Path) 
 
 
 def test_core_v1_workspaces_are_readable_but_never_mutated(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     format_path = workspace.control / "format.json"
     assert json.loads(format_path.read_text(encoding="utf-8"))["core_profile"] == "core-v2"
     stored = json.loads(format_path.read_text(encoding="utf-8"))
@@ -308,15 +308,15 @@ def test_core_v1_workspaces_are_readable_but_never_mutated(tmp_path: Path) -> No
     format_path.write_text(json.dumps(stored), encoding="utf-8")
 
     with pytest.raises(UnsupportedExtensionError, match="core-v1"):
-        WorkflowWorkspace(workspace.root)
-    inspected = WorkflowWorkspace(workspace.root, mutable=False)
+        Workspace(workspace.root)
+    inspected = Workspace(workspace.root, mutable=False)
     assert inspected.core_profile == "core-v1"
     with pytest.raises(UnsupportedExtensionError, match="cannot serve"):
         TaskManager(inspected)
 
 
 def test_runner_describe_reports_every_published_reference(tmp_path: Path, capsys) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     context = CLIContext("httk", tmp_path)
     first = workspace.publish_runner(_runner_file(tmp_path / "source"))
     second = workspace.publish_runner(

@@ -45,7 +45,7 @@ from .models import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
-    from .workspace import WorkflowWorkspace
+    from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -254,7 +254,7 @@ def _marker_record_ref(name: str) -> str | None:
 class _Collection:
     """One pass over a workspace, driven by its retention policy."""
 
-    def __init__(self, workspace: "WorkflowWorkspace", *, dry_run: bool, now: float) -> None:
+    def __init__(self, workspace: "Workspace", *, dry_run: bool, now: float) -> None:
         self.workspace = workspace
         self.control = workspace.control
         self.dry_run = dry_run
@@ -739,7 +739,7 @@ def _segment_number(path: Path) -> int | None:
 
 
 def collect_garbage(
-    workspace: "WorkflowWorkspace",
+    workspace: "Workspace",
     *,
     dry_run: bool = False,
     now: float | None = None,

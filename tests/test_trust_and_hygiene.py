@@ -13,9 +13,9 @@ from typing import Any, cast
 import pytest  # pyright: ignore[reportMissingImports]
 from httk.core import CLIContext, ed25519_generate_seed, ed25519_public_key
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow import cli as native_cli
-from httk.workflow.adapters import add_computer, store_credentials
+from httk.workflow.adapters import add_remote, store_credentials
 from httk.workflow.configuration import (
     CONFIG_KEYS,
     config_path,
@@ -31,10 +31,10 @@ from httk.workflow.configuration import (
 )
 from httk.workflow.errors import FormatError
 from httk.workflow.hygiene import (
-    describe_computer,
     describe_project,
+    describe_remote,
     project_doctor,
-    remove_computer,
+    remove_remote,
 )
 from httk.workflow.manifests import (
     INVALID,
@@ -288,14 +288,14 @@ def test_document_signing_is_optional_and_verifiable(tmp_path: Path, monkeypatch
     assert not verify_document(truncated).valid
 
 
-def _request_workspace(tmp_path: Path) -> tuple[WorkflowWorkspace, str]:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+def _request_workspace(tmp_path: Path) -> tuple[Workspace, str]:
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path, pool="unserved")
     workspace.submit(payload, "jobs")
     return workspace, job_id
 
 
-def _handle_requests(workspace: WorkflowWorkspace) -> None:
+def _handle_requests(workspace: Workspace) -> None:
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.tick()
 
@@ -384,8 +384,8 @@ def test_forged_operator_request_is_quarantined(tmp_path: Path, monkeypatch) -> 
 def test_transfer_acknowledgement_is_signed_and_a_forged_one_is_refused(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
     ensure_identity_key()
-    source = WorkflowWorkspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
-    destination = WorkflowWorkspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+    source = Workspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
+    destination = Workspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
     payload, job_id = _payload(tmp_path)
     source.submit(payload, "jobs")
     bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)
@@ -460,7 +460,7 @@ def test_config_set_is_restricted_to_the_registry_and_unset_removes(tmp_path: Pa
 
 def test_describe_project_reports_keys_workspace_and_manifest(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch, name="described")
-    add_computer("local", template="local", project=project)
+    add_remote("local", template="local", project=project)
     create_manifest(project)
 
     description = _fields(describe_project(project))
@@ -473,22 +473,22 @@ def test_describe_project_reports_keys_workspace_and_manifest(tmp_path: Path, mo
     assert "detached-transfer-v1" in description["workspace"]["extensions"]
     assert description["workspace"]["counts"] == {} and description["workspace"]["jobs"] == 0
     assert description["manifest"]["verdict"] == VALID_TRUSTED
-    assert description["computers"] == ["local"]
+    assert description["remotes"] == ["local"]
 
     cheap = _fields(describe_project(project, verify=False))
     assert cheap["manifest"]["present"] is True and cheap["manifest"]["verdict"] is None
 
 
-def test_describe_computer_never_reports_a_credential_value(tmp_path: Path, monkeypatch) -> None:
-    project = _project(tmp_path, monkeypatch, name="computers")
-    bundle = add_computer("cluster", template="local", project=project)
+def test_describe_remote_never_reports_a_credential_value(tmp_path: Path, monkeypatch) -> None:
+    project = _project(tmp_path, monkeypatch, name="remotes")
+    bundle = add_remote("cluster", template="local", project=project)
     store_credentials(bundle, "default", {"password": "hunter2", "token": "abc"})
-    metadata = json.loads((bundle / "computer.json").read_text(encoding="utf-8"))
+    metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = str(tmp_path / "remote")
-    (bundle / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
 
-    description = _fields(describe_computer("cluster", project=project))
-    assert description["format"] == "httk-computer-description"
+    description = _fields(describe_remote("cluster", project=project))
+    assert description["format"] == "httk-remote-description"
     assert description["scope"] == "project" and description["kind"] == "local"
     assert description["valid"] is True
     assert set(description["operations"]) >= {"configure", "install", "invoke", "status"}
@@ -496,35 +496,35 @@ def test_describe_computer_never_reports_a_credential_value(tmp_path: Path, monk
     assert queue["settings"] == {"workspace": str(tmp_path / "remote")}
     assert queue["credential_keys"] == ["password", "token"]
     assert queue["settings_source"] == {
-        "workspace": "computer.json",
+        "workspace": "remote.json",
         "password": "credentials.json",
         "token": "credentials.json",
     }
     assert "hunter2" not in json.dumps(description) and "abc" not in json.dumps(description)
 
 
-def test_remove_computer_refuses_while_a_transfer_still_needs_it(tmp_path: Path, monkeypatch) -> None:
+def test_remove_remote_refuses_while_a_transfer_still_needs_it(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch, name="removal")
-    destination = WorkflowWorkspace.initialize(tmp_path / "remote", extensions=["detached-transfer-v1"])
-    bundle = add_computer("cluster", template="local", project=project)
-    metadata = json.loads((bundle / "computer.json").read_text(encoding="utf-8"))
+    destination = Workspace.initialize(tmp_path / "remote", extensions=["detached-transfer-v1"])
+    bundle = add_remote("cluster", template="local", project=project)
+    metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = str(destination.root)
-    (bundle / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
 
-    workspace = WorkflowWorkspace(project)
+    workspace = Workspace(project)
     payload, job_id = _payload(tmp_path)
     workspace.submit(payload, "jobs")
     sealed = workspace.detach(job_id, destination_workspace_id=destination.workspace_id)
 
     with pytest.raises(ValueError, match="unretired transfer"):
-        remove_computer("cluster", project=project)
+        remove_remote("cluster", project=project)
     assert bundle.is_dir()
 
     workspace.acknowledge_transfer(destination.import_bundle(sealed))
-    assert remove_computer("cluster", project=project)["removed"] is True
+    assert remove_remote("cluster", project=project)["removed"] is True
     assert not bundle.exists()
-    with pytest.raises(ValueError, match="unknown computer"):
-        remove_computer("cluster", project=project)
+    with pytest.raises(ValueError, match="unknown remote"):
+        remove_remote("cluster", project=project)
 
 
 def test_project_doctor_reports_then_repairs(tmp_path: Path, monkeypatch) -> None:
@@ -655,51 +655,51 @@ def test_project_show_and_doctor_are_reachable_from_the_command_line(
     assert repaired["format"] == "httk-project-doctor" and repaired["repair"] is True
 
 
-def test_computer_show_and_remove_are_reachable_from_the_command_line(
+def test_remote_show_and_remove_are_reachable_from_the_command_line(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
-    project = _project(tmp_path, monkeypatch, name="computers-cli")
-    bundle = add_computer("cluster", template="local", project=project)
+    project = _project(tmp_path, monkeypatch, name="remotes-cli")
+    bundle = add_remote("cluster", template="local", project=project)
     store_credentials(bundle, "default", {"password": "hunter2"})
     context = CLIContext("httk", project)
 
-    assert command(["computer", "show", "cluster", "--json"], context) == 0
+    assert command(["remote", "show", "cluster", "--json"], context) == 0
     description = _fields(json.loads(capsys.readouterr().out))
     assert description["name"] == "cluster" and description["scope"] == "project"
 
-    assert command(["computer", "show", "cluster"], context) == 0
+    assert command(["remote", "show", "cluster"], context) == 0
     rendered = capsys.readouterr().out
     # The name of a credential is reported; its value never is.
     assert "password=<credential>" in rendered and "hunter2" not in rendered
 
-    assert command(["computer", "show", "nowhere"], context) == 2
-    assert "unknown computer" in capsys.readouterr().err
+    assert command(["remote", "show", "nowhere"], context) == 2
+    assert "unknown remote" in capsys.readouterr().err
 
     # --force skips the confirmation this non-interactive test cannot answer.
-    assert command(["computer", "remove", "cluster"], context) == 2
+    assert command(["remote", "remove", "cluster"], context) == 2
     assert "requires --force" in capsys.readouterr().err
     assert bundle.is_dir()
-    assert command(["computer", "remove", "cluster", "--force"], context) == 0
+    assert command(["remote", "remove", "cluster", "--force"], context) == 0
     assert not bundle.exists()
 
 
-def test_computer_remove_force_does_not_skip_the_transfer_refusal(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_remote_remove_force_does_not_skip_the_transfer_refusal(tmp_path: Path, monkeypatch, capsys) -> None:
     """``--force`` answers the prompt; it does not overrule the refusal."""
 
     project = _project(tmp_path, monkeypatch, name="forced-removal")
-    destination = WorkflowWorkspace.initialize(tmp_path / "remote", extensions=["detached-transfer-v1"])
-    bundle = add_computer("cluster", template="local", project=project)
-    metadata = json.loads((bundle / "computer.json").read_text(encoding="utf-8"))
+    destination = Workspace.initialize(tmp_path / "remote", extensions=["detached-transfer-v1"])
+    bundle = add_remote("cluster", template="local", project=project)
+    metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = str(destination.root)
-    (bundle / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
-    workspace = WorkflowWorkspace(project)
+    (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
+    workspace = Workspace(project)
     payload, job_id = _payload(tmp_path)
     workspace.submit(payload, "jobs")
     workspace.detach(job_id, destination_workspace_id=destination.workspace_id)
 
     context = CLIContext("httk", project)
-    assert command(["computer", "remove", "cluster", "--force"], context) == 2
+    assert command(["remote", "remove", "cluster", "--force"], context) == 2
     assert "unretired transfer" in capsys.readouterr().err
     assert bundle.is_dir()

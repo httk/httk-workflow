@@ -53,7 +53,7 @@ Python Workflow Definition documents needs no extra at all.
 - **Runs workflows written elsewhere.** Python Workflow Definition and CWL
   documents become ordinary jobs; see
   [`docs/importing_workflows.md`](docs/importing_workflows.md).
-- **Reaches other machines.** Versioned [computer adapters](docs/adapter_authoring.md)
+- **Reaches other machines.** Versioned [remote adapters](docs/adapter_authoring.md)
   send work to a cluster, start managers there, and fetch results back through
   crash-recoverable detached transfer.
 - **Manages projects and identity**: XDG configuration, signed project

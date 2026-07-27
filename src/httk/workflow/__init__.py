@@ -1,5 +1,8 @@
 """Filesystem-native workflow execution for httk₂."""
 
+from typing import TYPE_CHECKING, Any
+
+from ._util import _warn_deprecated
 from .backends import AttemptLaunch, OutcomeCommit, PathRunnerBackend, RunnerBackend
 from .errors import (
     FormatError,
@@ -119,7 +122,11 @@ from .vasp import (
     validate_vasp_workdir,
     write_automatic_kpoints,
 )
-from .workspace import MarkerFault, WorkflowWorkspace
+from .workspace import MarkerFault, Workspace
+
+if TYPE_CHECKING:  # pragma: no cover - the alias is served at runtime below
+    #: Deprecated spelling of :class:`Workspace`, kept for one release.
+    WorkflowWorkspace = Workspace
 
 __all__ = [
     "CORE_PROFILE",
@@ -170,6 +177,7 @@ __all__ = [
     "V1RunnerBackend",
     "V1TaskManager",
     "WorkflowError",
+    "Workspace",
     "WorkflowWorkspace",
     "TransactionBuilder",
     "WorkdirState",
@@ -235,3 +243,12 @@ __all__ = [
     "prepare_v1_payload",
     "submit_v1_task",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Serve the deprecated ``WorkflowWorkspace`` spelling, with a warning."""
+
+    if name == "WorkflowWorkspace":
+        _warn_deprecated("WorkflowWorkspace", "httk.workflow.Workspace")
+        return Workspace
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

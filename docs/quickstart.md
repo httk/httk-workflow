@@ -121,10 +121,10 @@ size is built:
 ```python
 from pathlib import Path
 
-from httk.workflow import WorkflowWorkspace
+from httk.workflow import Workspace
 from httk.workflow.scaffold import new_jobs, structure_tag
 
-workspace = WorkflowWorkspace("quickstart-workspace")
+workspace = Workspace("quickstart-workspace")
 items = ({"files": {"POSCAR": path}, "tag": structure_tag(path)} for path in Path("structures").glob("POSCAR.*"))
 for job in new_jobs(workspace, "vasp-relax", items, inputs={"kpoint_density": 30.0}):
     print(job.job_key)
@@ -148,8 +148,8 @@ marker.
   already have becomes one job with `httk workflow import pwd` or
   `httk workflow import cwl`, without being rewritten and without a runner file.
 - {doc}`harvest` — turning finished jobs into stored results.
-- Running on a cluster — `remote send` puts jobs on a computer, `remote
-  start-manager` runs them there, and `remote fetch` brings the finished ones
+- Running on a cluster — `transfer send` puts jobs on a remote, `transfer
+  start-manager` runs them there, and `transfer fetch` brings the finished ones
   back into this workspace for `harvest`; see {doc}`workflow_cli`.
 - {doc}`taskmanager` and {doc}`workflow_cli` — running managers for real, and the
   complete command tree.

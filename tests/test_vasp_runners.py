@@ -16,8 +16,9 @@ from typing import Any
 
 import pytest
 
-from httk.workflow import JobSpec, TaskManager, WorkflowWorkspace, prepare_job_payload
-from httk.workflow.runners import PACKAGE, RUNNERS, runner_path, runner_reference
+from httk.workflow import JobSpec, TaskManager, Workspace, prepare_job_payload
+from httk.workflow.runners import RUNNERS, runner_path, runner_reference
+from httk.workflow.vasp.runners import PACKAGE
 
 _POSCAR = """silicon
 1.0
@@ -89,7 +90,7 @@ def _fake_vasp(root: Path, *, fail_once: bool) -> Path:
     return path
 
 
-def _reference(workspace: WorkflowWorkspace, runner: str, source: str) -> dict[str, object]:
+def _reference(workspace: Workspace, runner: str, source: str) -> dict[str, object]:
     """Return the job runner reference for one packaged runner."""
 
     if source == "workspace":
@@ -109,7 +110,7 @@ def _campaign(
     data_mode: str = "transactional",
     initial_step: str = "prepare",
     command: str | None = None,
-) -> tuple[WorkflowWorkspace, str]:
+) -> tuple[Workspace, str]:
     """Submit and run one job of one packaged runner, and return where it landed."""
 
     root.mkdir(parents=True)
@@ -118,7 +119,7 @@ def _campaign(
         monkeypatch.setenv("HTTK_VASP_COMMAND", str(executable))
     else:
         monkeypatch.setenv("HTTK_VASP_COMMAND", command)
-    workspace = WorkflowWorkspace.initialize(root / "workspace", extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize(root / "workspace", extensions=["transactional-data-v1"])
     reference = _reference(workspace, runner, source)
     payload = root / "payload"
     (payload / "files").mkdir(parents=True)
@@ -157,7 +158,7 @@ def _workflow_of(runner: str) -> str:
     }[runner]
 
 
-def _payload_of(workspace: WorkflowWorkspace, job_id: str) -> tuple[str, Path]:
+def _payload_of(workspace: Workspace, job_id: str) -> tuple[str, Path]:
     """Return the terminal marker kind and the payload directory of one job."""
 
     marker = workspace.find_marker_by_id(job_id)
@@ -165,7 +166,7 @@ def _payload_of(workspace: WorkflowWorkspace, job_id: str) -> tuple[str, Path]:
     return marker.kind, workspace.payload_path(marker.placement, marker.job_key)
 
 
-def _failure(workspace: WorkflowWorkspace, job_id: str) -> dict[str, Any]:
+def _failure(workspace: Workspace, job_id: str) -> dict[str, Any]:
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
     failure = workspace.read_state(marker).get("failure")

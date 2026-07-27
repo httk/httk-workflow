@@ -1,11 +1,11 @@
-"""The public name of the computer-adapter protocol implementation.
+"""The public name of the remote-adapter protocol implementation.
 
-A computer adapter is a versioned directory whose executable ``configure``,
+A remote adapter is a versioned directory whose executable ``configure``,
 ``install``, ``invoke``, ``push``, ``pull``, ``start-manager`` and ``status``
 operations each read one JSON request file and print one JSON result. The
 maintained ``local``, ``local-slurm`` and ``ssh-slurm`` templates implement that
 protocol by executing this module, which selects its behaviour from the ``kind``
-recorded in the bundle's ``computer.json`` and refuses any other kind rather
+recorded in the bundle's ``remote.json`` and refuses any other kind rather
 than running it in the wrong place.
 
 This module is the documented surface of that contract. The implementation

@@ -1,9 +1,9 @@
-"""The results-fetch loop, driven end to end over the local computer adapter.
+"""The results-fetch loop, driven end to end over the local remote adapter.
 
 Nothing here fabricates protocol state. One real campaign is run by a real
-:class:`httk.workflow.TaskManager` in a *remote* workspace — the one a computer
-adapter reaches — and every assertion reads what ``tasks offer``, ``tasks
-fetch``, ``tasks retire``, and finally ``harvest`` report about the local
+:class:`httk.workflow.TaskManager` in a *remote* workspace — the one a remote
+adapter reaches — and every assertion reads what ``transfer offer``, ``transfer
+fetch``, ``transfer retire``, and finally ``harvest`` report about the local
 workspace that asked for the results back.
 """
 
@@ -21,11 +21,11 @@ from httk.workflow import (
     HarvestRecord,
     JobSpec,
     TaskManager,
-    WorkflowWorkspace,
+    Workspace,
     harvest,
     prepare_job_payload,
 )
-from httk.workflow.adapters import add_computer
+from httk.workflow.adapters import add_remote
 from httk.workflow.projects import initialize_project
 from httk.workflow.transfers import TRANSFER_DIRECTORY, _payload_digest
 from httk.workflow.workflow_cli import command
@@ -65,12 +65,12 @@ class Pair:
     ids: dict[str, str]
 
     @property
-    def local(self) -> WorkflowWorkspace:
-        return WorkflowWorkspace(self.local_root)
+    def local(self) -> Workspace:
+        return Workspace(self.local_root)
 
     @property
-    def remote(self) -> WorkflowWorkspace:
-        return WorkflowWorkspace(self.remote_root)
+    def remote(self) -> Workspace:
+        return Workspace(self.remote_root)
 
 
 def _stage(payload: Path, *, failing: bool, runner: dict[str, object]) -> str:
@@ -99,7 +99,7 @@ def _stage(payload: Path, *, failing: bool, runner: dict[str, object]) -> str:
     return job.id
 
 
-def _plant_legacy_link(workspace: WorkflowWorkspace, job_id: str) -> None:
+def _plant_legacy_link(workspace: Workspace, job_id: str) -> None:
     """Plant the shape the v1 compatibility backend leaves inside a payload.
 
     A submission deliberately dereferences symlinks, so the relative link a v1
@@ -121,9 +121,9 @@ def _build(root: Path) -> dict[str, str]:
     remote_root = root / "remote"
     initialize_project(local_root, name="fetch-local")
     initialize_project(remote_root, name="fetch-remote")
-    add_computer("cluster", template="local", project=local_root)
+    add_remote("cluster", template="local", project=local_root)
 
-    remote = WorkflowWorkspace(remote_root)
+    remote = Workspace(remote_root)
     source = root / "runners" / "fetch.py"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(_RUNNER, encoding="utf-8")
@@ -163,7 +163,7 @@ def pair(template: Path, tmp_path: Path) -> Pair:
     local_root = root / "local"
     remote_root = root / "remote"
     # The adapter of the copy must name the remote workspace of the copy.
-    metadata_path = local_root / ".httk-project" / "computers" / "cluster" / "computer.json"
+    metadata_path = local_root / ".httk-project" / "remotes" / "cluster" / "remote.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = str(remote_root)
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
@@ -171,7 +171,7 @@ def pair(template: Path, tmp_path: Path) -> Pair:
     return Pair(local_root, remote_root, CLIContext("httk", local_root), identifiers)
 
 
-def _live_bundles(workspace: WorkflowWorkspace) -> list[Path]:
+def _live_bundles(workspace: Workspace) -> list[Path]:
     """Every sealed bundle still sitting in the job tree of *workspace*."""
 
     return [
@@ -183,7 +183,7 @@ def _live_bundles(workspace: WorkflowWorkspace) -> list[Path]:
 
 def _offer(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> dict[str, Any]:
     argv = [
-        "remote",
+        "transfer",
         "offer",
         str(pair.remote_root),
         "--destination-workspace-id",
@@ -196,7 +196,7 @@ def _offer(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> d
 
 
 def _fetch(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> dict[str, Any]:
-    argv = ["remote", "fetch", "--computer", "cluster", "--workspace", str(pair.local_root), "--json", *arguments]
+    argv = ["transfer", "fetch", "--remote", "cluster", "--workspace", str(pair.local_root), "--json", *arguments]
     assert command(argv, pair.context) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -260,7 +260,7 @@ def test_offer_refuses_a_state_no_finished_job_can_be_in(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     argv = [
-        "remote",
+        "transfer",
         "offer",
         str(pair.remote_root),
         "--destination-workspace-id",
@@ -291,7 +291,7 @@ def test_fetch_brings_the_finished_jobs_home_with_their_payloads_intact(
     for name in ("succeeded", "failed"):
         marker = local.find_marker_by_id(pair.ids[name])
         assert marker is not None and marker.kind == name
-        # The placement the job had on the computer is the placement it lands at.
+        # The placement the job had on the remote is the placement it lands at.
         assert marker.placement.as_posix() == "project/campaign"
         payload = local.payload_path(marker.placement, marker.job_key)
 
@@ -347,18 +347,18 @@ def test_fetch_resumes_after_an_interruption_between_pull_and_import(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    real_import = WorkflowWorkspace.import_bundle
+    real_import = Workspace.import_bundle
     interrupted = False
 
-    def interrupt(self: WorkflowWorkspace, bundle: object) -> dict[str, object]:
+    def interrupt(self: Workspace, bundle: object) -> dict[str, object]:
         nonlocal interrupted
         if not interrupted:
             interrupted = True
             raise RuntimeError("simulated interruption after the bundle was pulled")
         return real_import(self, bundle)  # pyright: ignore[reportArgumentType]
 
-    monkeypatch.setattr(WorkflowWorkspace, "import_bundle", interrupt)
-    argv = ["remote", "fetch", "--computer", "cluster", "--workspace", str(pair.local_root), "--json"]
+    monkeypatch.setattr(Workspace, "import_bundle", interrupt)
+    argv = ["transfer", "fetch", "--remote", "cluster", "--workspace", str(pair.local_root), "--json"]
     assert command(argv, pair.context) == 2
     assert interrupted
 
@@ -369,7 +369,7 @@ def test_fetch_resumes_after_an_interruption_between_pull_and_import(
     assert local.find_marker_by_id(pair.ids["succeeded"]) is None
     assert local.find_marker_by_id(pair.ids["failed"]) is None
 
-    monkeypatch.setattr(WorkflowWorkspace, "import_bundle", real_import)
+    monkeypatch.setattr(Workspace, "import_bundle", real_import)
     report = _fetch(pair, capsys)
     assert {str(entry["job_id"]) for entry in list(report["fetched"])} == {
         pair.ids["succeeded"],
@@ -452,7 +452,7 @@ def test_retire_is_idempotent_and_refuses_a_job_it_never_sealed(
     _offer(pair, capsys)
     local_id = pair.local.workspace_id
     argv = [
-        "remote",
+        "transfer",
         "retire",
         str(pair.remote_root),
         pair.ids["succeeded"],
@@ -472,5 +472,5 @@ def test_retire_is_idempotent_and_refuses_a_job_it_never_sealed(
 
     # The pending job was never sealed, so retiring it is an error rather than a
     # silent success.
-    assert command(["remote", "retire", str(pair.remote_root), pair.ids["pending"]], pair.context) == 2
+    assert command(["transfer", "retire", str(pair.remote_root), pair.ids["pending"]], pair.context) == 2
     assert "no detached transfer" in capsys.readouterr().err
