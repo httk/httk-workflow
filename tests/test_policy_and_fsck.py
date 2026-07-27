@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
+from conftest import register_ws
 from httk.core import CLIContext
 
 from httk.workflow import TaskManager, Workspace
@@ -185,19 +186,20 @@ def test_policy_command_shows_sets_and_refuses(tmp_path: Path, capsys) -> None:
     root = tmp_path / "workspace"
     Workspace.initialize(root)
     context = CLIContext("httk", tmp_path)
-    assert command(["workspace", "policy", "show", str(root), "--json"], context) == 0
+    ws = register_ws(context, root)
+    assert command(["workspace", "policy", "show", ws, "--json"], context) == 0
     assert json.loads(capsys.readouterr().out)["visibility_deadline_seconds"] == 5.0
-    assert command(["workspace", "policy", "set", str(root), "visibility_deadline_seconds", "60"], context) == 0
-    assert command(["workspace", "policy", "set", str(root), "retention.trash_days", "14"], context) == 0
+    assert command(["workspace", "policy", "set", ws, "visibility_deadline_seconds", "60"], context) == 0
+    assert command(["workspace", "policy", "set", ws, "retention.trash_days", "14"], context) == 0
     capsys.readouterr()
-    assert command(["workspace", "policy", "set", str(root), "lease_seconds", "0"], context) == 2
-    assert command(["workspace", "policy", "set", str(root), "no_such_key", "1"], context) == 2
-    assert command(["workspace", "policy", "set", str(root), "lease_seconds", "not-json"], context) == 2
+    assert command(["workspace", "policy", "set", ws, "lease_seconds", "0"], context) == 2
+    assert command(["workspace", "policy", "set", ws, "no_such_key", "1"], context) == 2
+    assert command(["workspace", "policy", "set", ws, "lease_seconds", "not-json"], context) == 2
     policy = Workspace(root, mutable=False).policy
     assert policy.visibility_deadline_seconds == 60.0
     assert policy.retention.trash_days == 14.0
     assert policy.lease_seconds == 900.0
-    assert command(["workspace", "policy", "show", str(root)], context) == 0
+    assert command(["workspace", "policy", "show", ws], context) == 0
     assert "visibility_deadline_seconds\t60.0" in capsys.readouterr().out
 
 
@@ -317,7 +319,7 @@ def test_both_command_line_interfaces_default_to_durable(tmp_path: Path) -> None
     assert native_cli._parser().parse_args(["--durable", "init", "x"]).no_durable is False
     assert native_cli._parser().parse_args(["--no-durable", "init", "x"]).no_durable is True
     assert v1_cli._parser().parse_args(["--no-durable", "prepare", "a", "b"]).no_durable is True
-    assert native_cli.main(["init", str(tmp_path / "workspace")]) == 0
+    assert native_cli.main(["init", "durable-ws", "--remote", "local", "--path", str(tmp_path / "workspace")]) == 0
     assert Workspace(tmp_path / "workspace", mutable=False).policy == WorkspacePolicy()
 
 
@@ -341,7 +343,7 @@ def test_fsck_reports_nothing_about_a_healthy_workspace(tmp_path: Path, capsys) 
     report = workspace.check()
     assert report.ok and report.markers_checked == 2 and report.unresolved == 0
     context = CLIContext("httk", tmp_path)
-    assert command(["workspace", "fsck", str(tmp_path / "workspace"), "--json"], context) == 0
+    assert command(["workspace", "fsck", register_ws(context, tmp_path / "workspace"), "--json"], context) == 0
     assert json.loads(capsys.readouterr().out)["findings"] == []
 
 
@@ -488,5 +490,5 @@ def test_fsck_reports_an_uninterpretable_state_entry(tmp_path: Path, capsys) -> 
     report = workspace.check()
     assert [finding.problem for finding in report.findings] == ["unparseable_name"]
     context = CLIContext("httk", tmp_path)
-    assert command(["workspace", "fsck", str(tmp_path / "workspace")], context) == 1
+    assert command(["workspace", "fsck", register_ws(context, tmp_path / "workspace")], context) == 1
     assert "unparseable_name" in capsys.readouterr().out

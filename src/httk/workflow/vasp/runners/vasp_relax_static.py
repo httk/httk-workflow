@@ -155,7 +155,7 @@ def stage_inputs(a: Attempt, *, extra_tags: Mapping[str, object] | None = None) 
         # starting point rather than a reason to refuse the job.
         (a.workdir / "INCAR").write_text("", encoding="utf-8")
     potcar = a.payload / text_input(a, "potcar", "files/POTCAR")
-    library: str | None = text_input(a, "pseudopotential_library", "") or None
+    library: str | None = str(a.setting("vasp.pseudo_library", text_input(a, "pseudopotential_library", ""))) or None
     if potcar.is_file():
         shutil.copyfile(potcar, a.workdir / "POTCAR")
         library = None
@@ -168,15 +168,20 @@ def stage_inputs(a: Attempt, *, extra_tags: Mapping[str, object] | None = None) 
 
 
 def vasp_argv(a: Attempt) -> tuple[str, ...]:
-    """Return the VASP command as an argv array, deployment first.
+    """Return the VASP command as an argv array, resolved through its layers.
 
-    ``HTTK_VASP_COMMAND`` is deployment state, so it wins over the job's own
-    ``vasp_command``: one machine's ``srun -n 32 vasp_std`` is not something a job
-    submitted somewhere else can know.
+    The command is the ``vasp.command`` application setting, so
+    :meth:`Attempt.setting` resolves it most-specific first: the job's own
+    ``vasp.command`` input, then ``HTTK_VASP_COMMAND`` in the environment, then the
+    workspace's configured command, and finally the legacy ``vasp_command`` input.
+    That keeps a machine's ``srun -n 32 vasp_std`` — deployment state a job
+    submitted elsewhere cannot know — winning over the workspace default, while
+    letting an operator configure the command once per workspace instead of
+    exporting it for every job.
     """
 
-    text = os.environ.get("HTTK_VASP_COMMAND") or text_input(a, "vasp_command", "")
-    return tuple(shlex.split(text))
+    text = a.setting("vasp.command", text_input(a, "vasp_command", ""))
+    return tuple(shlex.split(str(text)))
 
 
 def execute(a: Attempt, *, next_step: str) -> None:
@@ -192,7 +197,7 @@ def execute(a: Attempt, *, next_step: str) -> None:
         a.fail(
             "vasp.command_missing",
             "no VASP command is configured: set HTTK_VASP_COMMAND on the machine that runs this job, "
-            "or give the job a vasp_command input",
+            "configure the workspace's vasp.command setting, or give the job a vasp_command input",
         )
         return
     history = job_remedy_history_path(a.payload)

@@ -293,8 +293,25 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
     structure: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    root = tmp_path / "cli-workspace"
-    assert command(["workspace", "init", str(root), "--extension", "transactional-data-v1"], _context(tmp_path)) == 0
+    ws_name = "cli-workspace"
+    root = tmp_path / ws_name
+    assert (
+        command(
+            [
+                "workspace",
+                "init",
+                ws_name,
+                "--remote",
+                "local",
+                "--path",
+                str(root),
+                "--extension",
+                "transactional-data-v1",
+            ],
+            _context(tmp_path),
+        )
+        == 0
+    )
     capsys.readouterr()
 
     assert (
@@ -302,7 +319,7 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
             [
                 "job",
                 "new",
-                str(root),
+                ws_name,
                 "--template",
                 "vasp-relax",
                 "--from",
@@ -335,7 +352,7 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
         (directory / name).write_text(_POSCAR, encoding="utf-8")
     assert (
         command(
-            ["job", "new", str(root), "--template", "vasp-relax", "--from", str(directory), "--json"],
+            ["job", "new", ws_name, "--template", "vasp-relax", "--from", str(directory), "--json"],
             _context(tmp_path),
         )
         == 0
@@ -351,24 +368,22 @@ def test_the_command_reports_what_it_cannot_do(
     structure: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    root = tmp_path / "refusals"
-    assert command(["workspace", "init", str(root)], _context(tmp_path)) == 0
+    name = "refusals"
+    root = tmp_path / name
+    assert command(["workspace", "init", name, "--remote", "local", "--path", str(root)], _context(tmp_path)) == 0
     capsys.readouterr()
 
     # A malformed assignment, an unknown template, an empty structure directory,
     # and a template needing an extension this workspace does not have.
-    assert command(["job", "new", str(root), "--template", "vasp-relax", "--input", "bare"], _context(tmp_path)) == 2
+    assert command(["job", "new", name, "--template", "vasp-relax", "--input", "bare"], _context(tmp_path)) == 2
     assert "NAME=VALUE" in capsys.readouterr().err
-    assert command(["job", "new", str(root), "--template", "nope"], _context(tmp_path)) == 2
+    assert command(["job", "new", name, "--template", "nope"], _context(tmp_path)) == 2
     assert "unknown template" in capsys.readouterr().err
     empty = tmp_path / "empty"
     empty.mkdir()
-    assert command(["job", "new", str(root), "--template", "vasp-relax", "--from", str(empty)], _context(tmp_path)) == 2
+    assert command(["job", "new", name, "--template", "vasp-relax", "--from", str(empty)], _context(tmp_path)) == 2
     assert "POSCAR*" in capsys.readouterr().err
-    assert (
-        command(["job", "new", str(root), "--template", "vasp-relax", "--from", str(structure)], _context(tmp_path))
-        == 2
-    )
+    assert command(["job", "new", name, "--template", "vasp-relax", "--from", str(structure)], _context(tmp_path)) == 2
     assert "transactional-data-v1" in capsys.readouterr().err
 
 

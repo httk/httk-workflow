@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import FAKE_HOST, Remote, fake_remote
+from conftest import FAKE_HOST, Remote, fake_remote, register_ws
 from httk.core import CLIContext
 
 from httk.workflow import Workspace, adapter_runtime
@@ -252,7 +252,10 @@ def test_remote_status_returns_the_remote_workspace_json(tmp_path: Path, remote:
     result = run_adapter(
         bundle,
         "status",
-        {"queue": "default", "argv": ["httk", "workflow", "workspace", "status", str(workspace.root), "--json"]},
+        {
+            "queue": "default",
+            "argv": ["httk", "workflow", "workspace", "status", str(workspace.root), "--by-path", "--json"],
+        },
     )
 
     assert result["returncode"] == 0
@@ -363,15 +366,18 @@ def test_start_manager_from_the_command_line_counts_managers_and_defers_workers(
     workspace = Workspace.initialize(remote.root / "runs" / "workspace")
     fake_remote(project, workspace=str(workspace.root), workers="4")
     context = CLIContext("httk", project)
+    # `manager run` on a remote-bound workspace submits through the remote's
+    # scheduler, subsuming the retired `transfer start-manager` verb.
+    register_ws(context, workspace.root, "station", remote="cluster")
 
-    assert command(["transfer", "start-manager", "cluster", "--count", "2"], context) == 0
+    assert command(["manager", "run", "station", "--count", "2"], context) == 0
     submitted = json.loads(capsys.readouterr().out)
     assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
     # No --workers on the command line, so the queue's setting is what runs.
     script = Path(str(submitted["script"])).read_text(encoding="utf-8")
-    assert f"exec httk workflow manager run {workspace.root} --workers 4" in script
+    assert f"exec httk workflow manager run {workspace.root} --by-path --workers 4" in script
 
-    assert command(["transfer", "start-manager", "cluster", "--workers", "1"], context) == 0
+    assert command(["manager", "run", "station", "--workers", "1"], context) == 0
     explicit = json.loads(capsys.readouterr().out)
     assert explicit["count"] == 1 and len(explicit["job_ids"]) == 1
     later = Path(str(explicit["script"])).read_text(encoding="utf-8")
@@ -540,14 +546,11 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     fake_remote(source_root, workspace=str(destination.root))
     payload, job_id = _payload(tmp_path / "incoming")
     Workspace(source_root).submit(payload, "jobs")
+    context = CLIContext("httk", source_root)
+    register_ws(context, source_root, "home")
+    register_ws(context, destination.root, "station", remote="cluster")
 
-    assert (
-        command(
-            ["transfer", "send", "cluster", job_id, "--source-workspace", str(source_root)],
-            CLIContext("httk", source_root),
-        )
-        == 0
-    )
+    assert command(["transfer", "home", "station", "--job", job_id], context) == 0
 
     assert Workspace(source_root).find_marker_by_id(job_id) is None
     marker = destination.find_marker_by_id(job_id)

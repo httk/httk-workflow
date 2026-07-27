@@ -61,6 +61,7 @@ language, and compares everything both left behind.
 | `Attempt.job` | — | The immutable job definition as a typed value. | `job.json` (read-only) |
 | `Attempt.inputs` | `httk_workflow_input` | The application-defined `inputs` object of the job. | `job.json` → `inputs` |
 | `Attempt.input` | `httk_workflow_input` | One input, with an optional default; without one, a missing input raises `KeyError` in Python and exits 1 in Bash. | `job.json` → `inputs` |
+| `Attempt.setting` | `httk_workflow_setting` | One application setting, resolved most-specific first: the job's `inputs[name]`, then the environment variable `HTTK_` + the dotted name upper-cased with dots as underscores (`vasp.command` → `HTTK_VASP_COMMAND`), then the workspace settings, then the default; without one, an absent setting returns `None` in Python and exits 1 in Bash. | `job.json` → `inputs`, environment, `context.json` → `settings` |
 | `Attempt.state` | — | The job's private JSON state mapping, surviving every advance, every retry, and every isolated workdir. | `.httk-job/state.json` |
 | `JobState.read` | `httk_workflow_state_get` | Read the whole state document, or in Bash one key; an unset key exits 1. | `.httk-job/state.json` |
 | `JobState.set` | `httk_workflow_state_set` | Store one JSON value in one atomic replace. | `.httk-job/state.json` |

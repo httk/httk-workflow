@@ -14,6 +14,7 @@ from importlib import metadata
 from pathlib import Path
 
 import pytest
+from conftest import register_ws
 from httk.core import CLIContext
 
 from httk.workflow import (
@@ -445,8 +446,9 @@ def test_the_command_streams_one_record_per_line_and_round_trips(
 ) -> None:
     workspace, _ = campaign
     context = CLIContext("httk", workspace.root)
+    ws = register_ws(context, workspace.root)
 
-    assert command(["harvest", str(workspace.root)], context) == 0
+    assert command(["harvest", ws], context) == 0
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 3
     labels = []
@@ -460,7 +462,7 @@ def test_the_command_streams_one_record_per_line_and_round_trips(
         labels.append(record.job_key.split("--")[0])
     assert sorted(labels) == ["alpha", "campaign", "single"]
 
-    assert command(["harvest", str(workspace.root), "--json"], context) == 0
+    assert command(["harvest", ws, "--json"], context) == 0
     array = json.loads(capsys.readouterr().out)
     assert isinstance(array, list) and len(array) == 3
     assert {entry["state"] for entry in array} == {"succeeded"}
@@ -472,12 +474,13 @@ def test_the_command_selects_states_and_placements(
 ) -> None:
     workspace, identifiers = campaign
     context = CLIContext("httk", workspace.root)
+    ws = register_ws(context, workspace.root)
 
     assert (
         command(
             [
                 "harvest",
-                str(workspace.root),
+                ws,
                 "--state",
                 "failed",
                 "--placement",
@@ -494,7 +497,7 @@ def test_the_command_selects_states_and_placements(
     assert record.job_id == identifiers["beta"] and record.state == "failed"
 
     # An unusable state is refused by the parser rather than silently ignored.
-    assert command(["harvest", str(workspace.root), "--state", "ready"], context) == 2
+    assert command(["harvest", ws, "--state", "ready"], context) == 2
     assert "invalid choice" in capsys.readouterr().err
 
 

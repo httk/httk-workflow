@@ -27,6 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from conftest import register_ws
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow import transactions as transactions_module
@@ -598,6 +599,7 @@ def test_a_commit_resumes_after_its_registered_child_has_already_started(
 def test_a_sigkilled_manager_process_leaves_a_job_a_fresh_manager_finishes(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     Workspace.initialize(root)
+    ws = register_ws(None, root)
     payload, job_id = _payload(tmp_path / "source", _ORPHANABLE_RUNNER, tag="sigkilled")
     Workspace(root).submit(payload, "project/sigkilled")
 
@@ -606,7 +608,7 @@ def test_a_sigkilled_manager_process_leaves_a_job_a_fresh_manager_finishes(tmp_p
     existing = environment.get("PYTHONPATH", "")
     environment["PYTHONPATH"] = f"{source_root}{os.pathsep}{existing}" if existing else str(source_root)
     process = subprocess.Popen(
-        [sys.executable, "-m", "httk.workflow.cli", "run", str(root), "--until-idle", "--poll-interval", "0.05"],
+        [sys.executable, "-m", "httk.workflow.cli", "run", ws, "--until-idle", "--poll-interval", "0.05"],
         env=environment,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

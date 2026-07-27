@@ -50,9 +50,15 @@ The payload carries the structure and the INCAR it starts from:
 ```console
 mkdir -p prepared-job/files
 cp POSCAR INCAR POTCAR prepared-job/files/
+httk workflow workspace init workflow-workspace --remote local --path workflow-workspace \
+    --extension transactional-data-v1
 httk workflow job submit workflow-workspace prepared-job --placement project/si
 httk workflow manager run workflow-workspace
 ```
+
+Every `httk workflow` command names the *registered* workspace, never a path;
+`workspace init` both creates the workspace and registers the name — see
+{doc}`workflow_cli`.
 
 The same file can be published to the workspace runner store instead, which pins
 it by digest for a whole campaign:
@@ -64,15 +70,35 @@ published = workspace.publish_runner("/path/to/vasp_relax.py", name="vasp/relax.
 
 ## The command to run
 
-The VASP command is deployment state, not job state: the runners read
-`HTTK_VASP_COMMAND` from the environment of the manager and split it the way a
-shell would. A job's own `vasp_command` input is the fallback for a machine that
-sets nothing.
+The VASP command is the `vasp.command` application setting, which the runners
+resolve through `a.setting("vasp.command")` — most
+specific first: a job's own `vasp.command` input, then `HTTK_VASP_COMMAND` in the
+environment, then the workspace's `vasp.command` setting, and finally the job's
+legacy `vasp_command` input. The chosen string is split the way a shell would.
+
+Two spellings therefore both work, and mean different things. A machine that
+invokes VASP its own way still exports the environment variable, and it wins over
+everything a workspace configures — deployment state a job submitted elsewhere
+cannot know:
 
 ```console
 export HTTK_VASP_COMMAND="srun -n 32 vasp_std"
 httk workflow manager run workflow-workspace --pool vasp
 ```
+
+Or configure the command once on the workspace, so no one has to export it for
+every job — and a workspace bound to a remote is even seeded with it from the
+remote definition when it is created:
+
+```console
+httk workflow workspace settings set workflow-workspace vasp.command '"srun -n 32 vasp_std"'
+httk workflow manager run workflow-workspace --pool vasp
+```
+
+The pseudopotential library resolves the same way, as `vasp.pseudo_library`
+(environment `HTTK_VASP_PSEUDO_LIBRARY`), falling back to the job's
+`pseudopotential_library` input. See {doc}`sdk_parity` for the resolution table
+and {doc}`workflow_cli` for `workspace settings`.
 
 ## Job inputs
 
@@ -119,7 +145,7 @@ side as `relax/` and `static/`.
 
 | Code | Meaning |
 | --- | --- |
-| `vasp.command_missing` | neither `HTTK_VASP_COMMAND` nor a `vasp_command` input |
+| `vasp.command_missing` | no `vasp.command` resolved — no `HTTK_VASP_COMMAND`, no workspace `vasp.command` setting, and no `vasp_command` input |
 | `vasp.input_missing` | the structure named by `poscar` is not in the payload |
 | `vasp.no_relaxed_structure` | the chained runner's relaxation left no CONTCAR |
 | `vasp.failed` | VASP did not complete and no remedy remained |

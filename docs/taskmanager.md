@@ -9,18 +9,32 @@ Every command below is spelled the canonical way, `httk workflow …`. The
 
 ## Initialize a workspace
 
+Every `httk workflow` command names a *registered* workspace — a name bound once
+to a place — never a bare path. `workspace init` both creates the workspace and
+registers the name, and the place is always explicit: `--remote local` for this
+machine (being local is never implied), plus the `--path` the workspace lives at.
+`WORKSPACE` below is that registered name.
+
 ```console
-httk workflow workspace init WORKSPACE
+httk workflow workspace init WORKSPACE --remote local --path runs/WORKSPACE
 ```
 
-This creates a `core-v2` workspace. Optional supported extensions are enabled at
-initialization:
+This creates a `core-v2` workspace and registers the name for it. Optional
+supported extensions are enabled at initialization:
 
 ```console
-httk workflow workspace init WORKSPACE \
+httk workflow workspace init WORKSPACE --remote local --path runs/WORKSPACE \
   --extension transactional-data-v1 \
   --extension detached-transfer-v1
 ```
+
+A workspace on a cluster names the remote it lives on instead of `local`; it is
+created there over the adapter and its name is registered here. `workspace list`
+shows every registered name and where it resolves, `workspace forget` deregisters
+a name, and `workspace delete --force` destroys the workspace and deregisters it.
+A library caller still constructs `Workspace(path)` directly; the registry is the
+command-line contract. See {doc}`workflow_cli` for the whole `workspace` group and
+{doc}`campaigns` for spreading a very large run across many workspaces.
 
 Protocol publications are synchronized to storage by default. `--no-durable`
 turns that off for throwaway workspaces and makes submission and transitions
@@ -52,6 +66,25 @@ Values are given as JSON and validated on write; an unknown key is refused
 rather than stored. A change reaches a manager when it attaches, so restart
 long-running managers after changing policy. Concurrent policy writers are not
 serialized: the write itself is atomic, but the last writer wins.
+
+## Application settings
+
+Separate from that engine policy, a workspace also holds *application settings*:
+a flat, dotted-name map of small values a runner resolves at run time — the VASP
+command, a pseudopotential library — rather than tunables the scheduler reads.
+
+```console
+httk workflow workspace settings set WORKSPACE vasp.command '"srun -n 32 vasp_std"'
+httk workflow workspace settings show WORKSPACE
+```
+
+A runner reads one through `a.setting("vasp.command")`, resolved in layers — the
+job's `inputs`, then the environment (`HTTK_VASP_COMMAND`), then the workspace
+setting, then the runner's default — so an operator configures the command once
+per workspace instead of exporting it for every job, while a machine's own
+environment still wins. The manager snapshots the settings into each attempt's
+`context.json` at claim time, so a runner sees the values the workspace held when
+its job was claimed. See {doc}`vasp_runners` and {doc}`sdk_parity`.
 
 ## Freeing disk on a quota'd filesystem
 

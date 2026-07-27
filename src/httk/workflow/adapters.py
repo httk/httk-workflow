@@ -29,6 +29,8 @@ __all__ = [
     "REQUEST_FORMAT",
     "RESULT_FORMAT",
     "PERSISTABLE_QUEUE_SETTINGS",
+    "SEED_SETTING_MAP",
+    "seed_application_settings",
     "RemoteTarget",
     "metadata_path",
     "read_metadata",
@@ -93,10 +95,37 @@ PERSISTABLE_QUEUE_SETTINGS = frozenset(
         "reservation",
         "time_limit",
         "username",
+        "vasp_command",
+        "vasp_pseudo_library",
         "workers",
         "workspace",
     }
 )
+
+#: How a remote definition's queue settings seed the application settings of a
+#: workspace created against it. A workspace bound to a remote should not make
+#: every operator restate the remote's VASP command, so the whitelisted queue
+#: settings on the left become the dotted application settings on the right when
+#: the workspace is created. The map is deliberately small and explicit: a queue
+#: setting only becomes an application setting when it is named here.
+SEED_SETTING_MAP: Mapping[str, str] = {
+    "vasp_command": "vasp.command",
+    "vasp_pseudo_library": "vasp.pseudo_library",
+}
+
+
+def seed_application_settings(bundle: str | os.PathLike[str], queue: str) -> dict[str, object]:
+    """Return the application settings a remote queue seeds a workspace with."""
+
+    configured = queue_settings(bundle, queue)
+    seeds: dict[str, object] = {}
+    for source, target in SEED_SETTING_MAP.items():
+        value = configured.get(source)
+        # Only a JSON scalar seeds a setting; a container queue setting is never
+        # an application setting, which is a flat scalar map by construction.
+        if isinstance(value, (str, int, float)):
+            seeds[target] = value
+    return seeds
 
 
 @dataclass(frozen=True)
@@ -237,6 +266,11 @@ def add_remote(
 
     if not name or "/" in name or name in {".", ".."}:
         raise ValueError("invalid remote name")
+    if name == "local":
+        # `local` is the built-in remote every workspace registry resolves as
+        # "this machine". Defining one would make a binding to `local` ambiguous,
+        # so the name is reserved.
+        raise ValueError("the remote name 'local' is reserved for the built-in local remote")
     if template not in {"local", "local-slurm", "ssh-slurm"}:
         raise ValueError(f"unknown maintained remote template: {template}")
     if global_scope:

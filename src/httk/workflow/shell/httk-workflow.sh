@@ -202,6 +202,14 @@ httk_workflow_input() {
     fi
 }
 
+httk_workflow_setting() {
+    if [ "$#" -ge 2 ]; then
+        _httk_workflow_bridge setting "$1" --default "$2"
+    else
+        _httk_workflow_bridge setting "$1"
+    fi
+}
+
 httk_workflow_state_get() {
     _httk_workflow_bridge state-get "$1"
 }

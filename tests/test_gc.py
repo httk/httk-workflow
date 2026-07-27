@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
+from conftest import register_ws
 from httk.core import CLIContext
 
 from httk.workflow import TaskManager, Workspace
@@ -513,7 +514,7 @@ def test_a_concurrent_removal_or_repopulation_is_tolerated(aged: _Fixture, monke
 
 def test_the_gc_command_prints_a_table_and_json(aged: _Fixture, capsys: pytest.CaptureFixture[str]) -> None:
     context = CLIContext("httk", aged.workspace.root)
-    root = str(aged.workspace.root)
+    root = register_ws(context, aged.workspace.root)
     assert command(["workspace", "gc", root, "--dry-run"], context) == 0
     printed = capsys.readouterr().out
     assert "category" in printed and "candidates" in printed

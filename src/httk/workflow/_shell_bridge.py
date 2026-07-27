@@ -131,6 +131,9 @@ def _parser() -> argparse.ArgumentParser:
     job_input = commands.add_parser("input")
     job_input.add_argument("name")
     job_input.add_argument("--default")
+    setting = commands.add_parser("setting")
+    setting.add_argument("name")
+    setting.add_argument("--default")
     state_get = commands.add_parser("state-get")
     state_get.add_argument("name")
     state_set = commands.add_parser("state-set")
@@ -754,6 +757,16 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
                 _print(attempt.input(arguments.name, _value(arguments.default)))
         except KeyError as exc:
             raise _Absent(str(exc.args[0])) from exc
+    elif command == "setting":
+        attempt = _attempt()
+        absent = object()
+        value = attempt.setting(arguments.name, absent)
+        if value is absent:
+            if arguments.default is None:
+                raise _Absent()
+            _print(_value(arguments.default))
+        else:
+            _print(value)
     elif command == "state-get":
         state = _attempt().state.read()
         if arguments.name not in state:

@@ -39,6 +39,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 
 - {doc}`taskmanager` — workspaces, submission, managers, inspection, repair
 - {doc}`workflow_cli` — the whole `httk workflow` tree: projects, config, remotes
+- {doc}`campaigns` — partitioning a very large campaign across many workspaces
 - {doc}`harvest` — reading finished jobs back out as records
 - {doc}`adapter_authoring` — reaching a machine the packaged adapters do not cover
 - {doc}`reference/index` — the generated API reference
@@ -64,7 +65,7 @@ python -m pip install -e .
 One workspace, one job of a packaged runner, and one manager that runs it:
 
 ```console
-httk workflow workspace init workflow-workspace --extension transactional-data-v1
+httk workflow workspace init workflow-workspace --remote local --path workflow-workspace --extension transactional-data-v1
 httk workflow job new workflow-workspace --template vasp-relax --from POSCAR --tag silicon
 httk workflow manager run workflow-workspace --until-idle
 httk workflow harvest workflow-workspace
@@ -92,6 +93,7 @@ declarations
 importing_workflows
 taskmanager
 workflow_cli
+campaigns
 harvest
 adapter_authoring
 reference/index

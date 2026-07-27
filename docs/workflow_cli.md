@@ -46,31 +46,85 @@ carries the same switch on the leaf that acts on it, so both spellings work.
 ## The complete tree
 
 ```text
-httk workflow workspace  init | status | policy show | policy set | fsck | gc | upgrade | unlock
+httk workflow workspace  init | list | forget | delete | status | settings show | settings set | settings unset | policy show | policy set | fsck | gc | upgrade | unlock
 httk workflow runner     publish | describe
 httk workflow job        new | submit | request | list | show | log | why | debug
 httk workflow import     pwd | cwl
 httk workflow harvest
 httk workflow manager    run
+httk workflow campaign   init | show | submit | harvest | start-managers
 httk workflow v1         prepare | submit | run
 httk workflow config     init | show | set | unset | import-v1
 httk workflow project    init | import-v1 | show | doctor | manifest create | manifest verify
 httk workflow remote     list | add | configure | install | import-v1 | show | remove
-httk workflow transfer   send | fetch | offer | retire | start-manager | status
+httk workflow transfer   SRC DST      (plus the protocol spellings: receive | offer | retire)
 ```
+
+### Every command names a *registered* workspace
+
+A `WORKSPACE` above is always a **registered name**, never a bare path. A name is
+bound once — "init:ed" — to a place: either the built-in `local` remote, meaning
+this machine, or exactly one defined remote, plus the path the workspace lives at
+there. The binding is always explicit; being local is never implied, because a
+name that silently meant "here" would be a different workspace on a different
+machine. There is no path notation anywhere in the CLI: a command handed
+something that is not a registered name refuses and points you at
+`workspace init` or `workspace list`.
+
+A binding lives in one of two scopes — **global**
+(`$XDG_CONFIG_HOME/httk/workspaces.json`, shared by every project) or **project**
+(the `workspaces` member of `.httk-project/project.json`, travelling with the
+project). A project binding shadows a global one of the same name, exactly as a
+project-local remote shadows a global one.
+
+The registry is the CLI's contract, and a *client-side* concept: it names the
+places you address, but a remote never sees it. When a command reaches a remote
+workspace, the client resolves the name to its remote path and sends the **path**
+(with the hidden `--by-path` switch) to the far side, whose wire protocol has
+always been path-based. The Python API keeps `Workspace(path)` for library use;
+the registry is what the command line speaks.
+
+Reaching a remote binding depends on the command: the read commands
+`workspace status`, `workspace fsck`, and `workspace gc` run over the remote's
+adapter and read it exactly as they read a local one, while every command that
+only makes sense where the files are — `job …`, `harvest`, `workspace settings`,
+`upgrade`, `unlock` — refuses a remote binding with a message naming the remote
+and pointing at `transfer` and `workspace status`.
 
 ### `workspace` — the workspace itself, not its jobs
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workspace init WORKSPACE` | initialize a workspace, printing its root | `--extension`, `--no-durable` |
-| `workspace status WORKSPACE` | summarize the authoritative markers | `--json` |
-| `workspace policy show WORKSPACE` | print the shared policy | `--json` |
-| `workspace policy set WORKSPACE KEY VALUE` | store one policy member | `--json` |
-| `workspace fsck WORKSPACE` | check every marker against its journal frame | `--repair`, `--quarantine-unrepairable`, `--json` |
-| `workspace gc WORKSPACE` | collect what the retention policy allows | `--dry-run`, `--json` |
-| `workspace upgrade WORKSPACE` | enable an implemented extension | `--extension` (required) |
-| `workspace unlock WORKSPACE` | release a maintenance lock | `--force` |
+| `workspace init NAME` | create a workspace **and** register the name | `--remote` (required), `--path` (required), `--scope`, `--setting`, `--extension`, `--no-durable` |
+| `workspace list` | list the registered workspaces and where each resolves | `--json` |
+| `workspace forget NAME` | deregister a name, leaving the workspace on disk | |
+| `workspace delete NAME` | destroy the workspace and deregister it | `--force` (required) |
+| `workspace status NAME` | summarize the authoritative markers (remote: over the adapter) | `--json` |
+| `workspace settings show NAME [KEY]` | print the application settings, or one | `--json` |
+| `workspace settings set NAME KEY VALUE` | store one application setting | |
+| `workspace settings unset NAME KEY` | remove one application setting | |
+| `workspace policy show NAME` | print the shared policy | `--json` |
+| `workspace policy set NAME KEY VALUE` | store one policy member | `--json` |
+| `workspace fsck NAME` | check every marker against its journal frame (remote: over the adapter) | `--repair`, `--quarantine-unrepairable`, `--json` |
+| `workspace gc NAME` | collect what the retention policy allows (remote: over the adapter) | `--dry-run`, `--json` |
+| `workspace upgrade NAME` | enable an implemented extension | `--extension` (required) |
+| `workspace unlock NAME` | release a maintenance lock | `--force` |
+
+`workspace init` both creates the workspace and registers the name for it, so a
+first workspace on this machine is one command:
+
+```console
+httk workflow workspace init my-workspace --remote local --path runs/my-workspace \
+    --extension transactional-data-v1
+```
+
+A workspace on a cluster names the remote it lives on instead of `local`; the
+workspace is created there over the adapter, and its name is registered here.
+`--setting KEY=VALUE` seeds an application setting at creation, and a
+remote-bound workspace is *also* seeded from the remote definition's whitelisted
+queue settings — see the *Application settings* section below. `workspace
+delete` destroys the workspace (locally, or on its remote over the adapter) and
+is refused without `--force`; `workspace forget` only removes the name.
 
 ### `runner` — the shared runners a workspace publishes
 
@@ -118,7 +172,13 @@ See {doc}`importing_workflows`.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `manager run WORKSPACE` | run one task manager | `--workers`, `--pool`, `--capability`, `--until-idle`, `--idle-timeout`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--log-level`, `--log-file`, `--json-logs` |
+| `manager run WORKSPACE` | run a manager locally, or submit managers to a remote workspace's scheduler | `--workers`, `--count`, `--foreground`, `--pool`, `--capability`, `--until-idle`, `--idle-timeout`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+
+`manager run` follows the binding: a local workspace runs the manager in this
+process as before, and a remote workspace submits managers through the remote's
+scheduler over its adapter — `--count N` managers, `--workers N` workers each.
+`--foreground` asks to run here and so is refused for a remote workspace; this is
+the command that subsumed the old `transfer start-manager`.
 
 ### `v1` — *httk* v1 task templates on the v2 engine
 
@@ -171,7 +231,10 @@ provided by *httk-core*. `httk project init` creates only the anchor, whereas
 ### `remote` — the adapters that reach other machines
 
 Named after `git remote`: a *remote* is one machine this project can reach, and
-the bundle of adapter operations that reaches it.
+the bundle of adapter operations that reaches it. The name `local` is reserved
+for the built-in remote every workspace registry resolves as "this machine", so
+`remote add local` is refused — a workspace bound to `local` must be
+unambiguous.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
@@ -192,74 +255,90 @@ remote, because removing it would leave that transfer with no way home;
 `--force` skips the interactive confirmation and **nothing else** — the refusal
 stands either way. Fetch or retire the transfer first.
 
-### `transfer` — work that travels to a remote
+### `transfer` — moving jobs between two workspaces
+
+`transfer` is one verb that takes two registered workspace names — a source and a
+destination — and moves jobs between them, whichever way they point:
+
+```console
+httk workflow transfer SRC DST [--job JOB_ID …] [--state STATE …] [--placement P] \
+    [--destination-placement P] [--adapter-timeout SECONDS] [--json]
+```
+
+Both names resolve through the registry, so which legs run over an adapter and
+which stay in this filesystem follows entirely from where the two are bound:
+
+| Direction | What happens | `--job` |
+| --- | --- | --- |
+| local → remote | each named job is detached, its sealed bundle pushed to the remote, and imported there | at least one required |
+| remote → local | the jobs that have finished on the remote are offered, pulled home, imported, and their sources retired | optional; a `--state`/`--placement` filter selects them |
+| local → local | each named job is detached from the source and imported into the destination directly, in this filesystem | at least one required |
+| remote → remote | the client relays: it fetches from the source into local staging and pushes on to the destination (v1; a direct source-to-destination path is deferred) | optional |
+
+`--state` (repeatable, default `succeeded` and `failed`) chooses which finished
+kinds a fetch moves, `--placement` restricts it to one subtree,
+`--destination-placement` lands the jobs somewhere other than the placement they
+had, and `--adapter-timeout` bounds every adapter operation the move runs.
+
+### The protocol spellings, and what is gone
+
+`transfer` also carries the frozen argument vectors one machine runs on another
+over an adapter. They are path-based, because the far side keeps no registry, and
+they are protocol rather than operator interface — a local→remote move invokes
+`receive` on the destination, a fetch invokes `offer` then `retire` on the source.
+Their spelling is frozen, because the machine that answers may run an *httk* older
+or newer than yours:
+
+```text
+httk workflow transfer receive --workspace PATH --bundle BUNDLE
+httk workflow transfer offer PATH --destination-workspace-id UUID --json
+httk workflow transfer retire PATH JOB_ID … --destination-workspace-id UUID --json
+httk workflow workspace status PATH --by-path --json
+httk workflow manager run PATH --by-path
+```
+
+`receive` is an import half rather than an operator command, so it is not
+advertised in `--help`, but it is its frozen, invocable spelling. The `--by-path`
+switch is likewise hidden: it makes the workspace argument a literal path with no
+registry lookup, which is exactly what one machine needs when it addresses another
+machine's workspace.
+
+The pre-release `transfer send`, `transfer fetch`, `transfer start-manager`, and
+`transfer status` verbs are **gone** — they no longer parse. Move to the single
+`transfer SRC DST` verb, and to `manager run NAME` for starting managers (below)
+and `workspace status NAME` for reading a remote workspace's markers.
+
+| Removed | Now |
+| --- | --- |
+| `transfer send REMOTE JOB …` | `transfer LOCAL REMOTE --job JOB …` |
+| `transfer fetch --remote REMOTE --workspace LOCAL` | `transfer REMOTE LOCAL` |
+| `transfer start-manager REMOTE --count N` | `manager run REMOTE --count N` |
+| `transfer status REMOTE` | `workspace status REMOTE` |
+
+An earlier release also renamed two whole groups: `httk workflow computer …`
+became `httk workflow remote …` (git's word for the same idea), and
+`httk workflow tasks …` (once `httk workflow remote send|fetch|…`) became today's
+`httk workflow transfer`. A job whose `runner.path` pins the old
+`pkg:httk.workflow.runners/vasp_*` form breaks too: the packaged VASP runners are
+now modules of `httk.workflow.vasp.runners`, and a job pinning the old path fails
+with `runner_unavailable` naming the module it could not resolve — scaffold the
+job again, or edit the one `runner.path` member.
+
+### `campaign` — partitioning a large run across many workspaces
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `transfer send REMOTE JOB_ID …` | detach named jobs and import them on the remote | `--source-workspace`, `--destination-workspace`, `--destination-placement`, `--adapter-timeout` |
-| `transfer fetch` | bring the jobs that finished on a remote back here | `--remote` (required), `--workspace`, `--remote-workspace`, `--state`, `--placement`, `--adapter-timeout`, `--json` |
-| `transfer offer WORKSPACE` | seal the finished jobs here for a workspace that will fetch | `--destination-workspace-id` (required), `--state`, `--placement`, `--json` |
-| `transfer retire WORKSPACE JOB_ID …` | retire the sealed sources another workspace imported | `--destination-workspace-id`, `--json` |
-| `transfer start-manager REMOTE` | start managers on the remote | `--count`, `--workers`, `--remote-workspace`, `--adapter-timeout` |
-| `transfer status REMOTE` | report the status of the workspace on the remote | `--remote-workspace`, `--adapter-timeout` |
+| `campaign init` | define the project's partition map and assignment policy | `--partition NAME=WORKSPACE`, `--assignment` |
+| `campaign show` | show the partition map | `--json` |
+| `campaign submit` | assign one root job to a partition and submit it there | `--template` (required), `--key` (required), `--index`, `--input`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
+| `campaign harvest` | harvest every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--json` |
+| `campaign start-managers` | start a manager per selected partition | `--partition`, `--workers`, `--count`, `--adapter-timeout` |
 
-Every workspace option says which side of the transfer it names. `send` leaves
-`--source-workspace` here and arrives at `--destination-workspace` there;
-`fetch` leaves `--remote-workspace` there and arrives at `--workspace` here;
-`start-manager` and `status` only ever mean the far side, and say so with
-`--remote-workspace`.
-
-## Renamed and removed spellings
-
-These superseded spellings are **gone** — they no longer parse. Move to the
-canonical column:
-
-| Removed | Canonical | Note |
-| --- | --- | --- |
-| `httk workflow computer …` | `httk workflow remote …` | the group borrowed git's word for the same idea |
-| `httk workflow tasks …` | `httk workflow transfer …` | the whole group was renamed |
-| `transfer fetch --computer` | `transfer fetch --remote` | it names a remote |
-| `transfer send --workspace` | `transfer send --source-workspace` | it names the local side |
-| `transfer start-manager/status --workspace` | `--remote-workspace` | it names the far side |
-| `transfer/remote … --timeout` | `--adapter-timeout` | it bounds adapter calls, not the work |
-| `manager run --timeout` | `manager run --idle-timeout` | it is the `--until-idle` wait |
-| `v1 prepare/submit/run --set` | `--taskset` | `--set` now means `KEY=VALUE` only, on `remote configure` |
-
-`transfer fetch --workspace` is unaffected: on `fetch` that option has always
-named the local destination, which is what it still means.
-
-### Two hard breaks, and what they were
-
-`httk workflow remote send|fetch|offer|retire|start-manager|status` — the
-spelling of the transfer group in an early release — is now
-`httk workflow transfer …`, because `remote` came to mean *the machine*, as it
-does in git.
-
-A job whose `runner.path` pins the old `pkg:httk.workflow.runners/vasp_*` form
-also breaks: the packaged VASP runners are now modules of
-`httk.workflow.vasp.runners`. A job pinning the old path fails with
-`runner_unavailable` naming exactly the module it could not resolve; scaffold the
-job again, or edit the one `runner.path` member.
-
-### The spellings that are protocol, not interface
-
-`transfer send` finishes by asking the far side to import the bundle it pushed,
-and `transfer fetch` asks the far side to offer and then retire. Those argument
-vectors run on a machine whose *httk* may be older or newer than yours, so their
-spelling is frozen — this is the frozen protocol spelling from now on:
-
-```text
-httk workflow transfer receive --workspace WORKSPACE --bundle BUNDLE
-httk workflow transfer offer WORKSPACE --destination-workspace-id UUID --json
-httk workflow transfer retire WORKSPACE JOB_ID … --destination-workspace-id UUID --json
-httk workflow workspace status WORKSPACE --json
-httk workflow manager run WORKSPACE
-```
-
-They are listed once, as the `REMOTE_*_COMMAND` module constants in the CLI
-implementation. `receive` is an import half rather than an operator command, so
-it is not advertised in `--help`, but `httk workflow transfer receive` is its
-frozen, invocable spelling.
+A campaign is a thin convention over the *registered workspaces* above: a
+partition map, stored in the project, that spreads a very large body of work
+across many workspaces without a new scheduler. Each partition names one
+registered workspace, roots are assigned to partitions by policy, and spawned
+children always inherit their parent's workspace. See {doc}`campaigns`.
 
 ## Creating jobs
 
@@ -504,6 +583,36 @@ httk workflow workspace unlock WORKSPACE --force
 
 Without `--force` only a stale lock is removed.
 
+## Application settings
+
+A workspace also carries *application settings*: a flat, dotted-name map of small
+values a runner resolves when it runs — the VASP command, a pseudopotential
+library — distinct from the engine `policy` above, which tunes scheduling. They
+are stored in the workspace and edited by name:
+
+```console
+httk workflow workspace settings set my-workspace vasp.command '"srun -n 32 vasp_std"'
+httk workflow workspace settings show my-workspace
+httk workflow workspace settings unset my-workspace vasp.command
+```
+
+A value that parses as JSON is stored as that scalar; a bare word is stored as a
+string. Settings can also be seeded at creation: `workspace init --setting
+KEY=VALUE` sets them explicitly, and a workspace bound to a remote is additionally
+seeded from that remote definition's whitelisted queue settings, so a cluster's
+`vasp_command` becomes the new workspace's `vasp.command` without anyone restating
+it.
+
+A runner reads a setting through `a.setting("vasp.command")`, and the value is
+resolved in layers, most specific first: the job's own `inputs`, then the
+environment (`HTTK_VASP_COMMAND`), then the workspace setting, then the runner's
+default. The environment therefore still wins over the workspace setting — a
+machine's own `HTTK_VASP_COMMAND` is honoured exactly as before — while the
+workspace setting spares an operator from exporting it for every job. The manager
+snapshots the settings into each attempt's `context.json`, so a runner sees the
+values the workspace held when its job was claimed. See {doc}`vasp_runners` and
+{doc}`sdk_parity`.
+
 ## Workspace policy and integrity
 
 The tunables a workspace shares with every process attaching it — the
@@ -638,7 +747,7 @@ configured host, where the manager is submitted with `sbatch`. Only `ssh` and
 | `install` | checks that `httk` answers on the far side, reports its version, and creates the queue's workspace directory when it is missing | `host`, `username`, `port`, `workspace`, `httk_command`, `bootstrap` |
 | `push` / `pull` | one `rsync --archive` transfer, creating missing destination components; a `pull` is always the whole remote directory, a `push` is the whole tree or the request's explicit relative `files` batch | `host`, `username`, `port` |
 | `invoke` | runs the request's argument vector on the host, optionally in the request's directory, and returns its status, stdout and stderr | `host`, `username`, `port`, `httk_command` |
-| `status` | the same machinery running `httk workflow workspace status WORKSPACE --json` remotely | as `invoke` |
+| `status` | the same machinery running `httk workflow workspace status PATH --by-path --json` remotely | as `invoke` |
 | `start-manager` | writes a generated batch script into `WORKSPACE/.httk-workflow/batch/`, then submits it with `sbatch` once, or the request's `count` times | `account`, `partition`, `time_limit`, `nodes`, `cpus_per_task`, `reservation`, `workers`, `workspace` |
 
 The generated batch script is a `#!/bin/bash` file carrying one `#SBATCH`
@@ -650,7 +759,7 @@ the submitted job identifiers.
 
 A `start-manager` request names the workspace outright in its `workspace` field.
 When that field is absent the workspace is read back out of the request's
-`manager run WORKSPACE` argument vector, and only then from the queue's
+`manager run PATH --by-path` argument vector, and only then from the queue's
 `workspace=PATH`; the argv reading is a documented fallback for hand-written
 requests, not the normal path. `local` starts `count` detached processes and
 reports their `pids`.
@@ -690,9 +799,9 @@ A transfer fences an explicit quiescent marker, seals it in the payload,
 validates the payload digest at import, publishes the preserved UUID and prior
 state only at the destination, and retires the source only after an
 idempotent acknowledgement. Transfer UUID and digest checks suppress retries;
-sealed and retired bundles are retained for recovery. Repeating `transfer send`
-resumes the matching sealed transfer, including the copy-before-import and
-lost-acknowledgement boundaries.
+sealed and retired bundles are retained for recovery. Repeating the same
+`transfer SRC DST` resumes the matching sealed transfer, including the
+copy-before-import and lost-acknowledgement boundaries.
 
 The sealed payload digest pins every path, every file's content *and executable
 bit*, and the literal target of every symlink, so a runner that arrives without
@@ -704,54 +813,56 @@ destination.
 
 ## Running on a remote and fetching the results
 
-The complete loop is four commands. Work is sent to a remote, run there,
-fetched back once it has stopped, and harvested locally:
+Register the remote workspace once, then the complete loop is four commands. Work
+is sent to the remote, run there, fetched back once it has stopped, and harvested
+locally:
 
 ```console
-httk workflow transfer send CLUSTER JOB_ID ...          # local -> remote
-httk workflow transfer start-manager CLUSTER --count 2 --workers 4
-httk workflow transfer fetch --remote CLUSTER --workspace LOCAL_WS
-httk workflow harvest LOCAL_WS --state succeeded --state failed
+httk workflow workspace init cluster-runs --remote cluster --path /scratch/me/runs \
+    --extension detached-transfer-v1
+httk workflow transfer local-runs cluster-runs --job JOB_ID ...     # local -> remote
+httk workflow manager run cluster-runs --count 2 --workers 4
+httk workflow transfer cluster-runs local-runs                      # remote -> local
+httk workflow harvest local-runs --state succeeded --state failed
 ```
 
-`transfer send` detaches each named job from the local workspace and imports it
-on the remote. `--source-workspace` names the local workspace when it is not the
-project's, `--destination-workspace` overrides the queue's `workspace=PATH`, and
-`--destination-placement` puts the arriving jobs somewhere other than the
-placement they had here. `transfer status` reports the remote workspace status
-through the adapter, and `transfer receive` is the far-side half `send` invokes.
+`transfer local-runs cluster-runs` detaches each `--job` from the local workspace
+and imports it on the remote, at the placement it had here unless
+`--destination-placement` puts it elsewhere. Both names resolve through the
+registry, so the source being local and the destination being remote is what
+makes this the send leg — no `--source-workspace`/`--remote-workspace` flags, and
+no bare paths.
 
-`transfer start-manager` starts managers on the remote: `--count N` submits the
-generated batch script `N` times, `--workers N` fixes the workers per manager,
-and leaving `--workers` off lets the queue's configured `workers=N` decide. Both
-take `--remote-workspace` and `--adapter-timeout`.
+`manager run cluster-runs` starts managers on the remote, because the name is
+bound to one: `--count N` submits the generated batch script `N` times, `--workers
+N` fixes the workers per manager, and leaving `--workers` off lets the queue's
+configured `workers=N` decide.
 
-`transfer fetch` is the local half. It probes the remote workspace over the
-adapter's `status` operation, asks it to `offer` what has stopped, `pull`s each
-offered bundle into `.httk-workflow/transfers/incoming/`, imports it, and only
-then tells the remote to `retire` the sources it still holds. Both the remote
-and its workspace can be named explicitly:
+`transfer cluster-runs local-runs` is the fetch leg. It probes the remote
+workspace over the adapter's `status` operation, asks it to `offer` what has
+stopped, `pull`s each offered bundle into `.httk-workflow/transfers/incoming/`,
+imports it, and only then tells the remote to `retire` the sources it still
+holds:
 
 ```console
-httk workflow transfer fetch --remote CLUSTER:large --remote-workspace /scratch/me/runs \
+httk workflow transfer cluster-runs local-runs \
     --state succeeded --state failed --placement project/screening --json
 ```
 
-`--remote-workspace` defaults to the queue's configured `workspace=PATH`, the
-same setting `transfer send` uses. `--state` accepts the kinds a stopped job can
-be in and defaults to `succeeded` and `failed`; `--placement` restricts the fetch
-to one subtree; `--adapter-timeout` bounds every adapter operation the fetch runs,
-as it does for `send`, `start-manager`, and `status`. A fetched job arrives as an
-ordinary job of the local workspace, in
-the terminal state and at the placement it had on the remote, so
-`httk workflow harvest` then reports it exactly like a job that ran at home.
+`--state` accepts the kinds a stopped job can be in and defaults to `succeeded`
+and `failed`; `--placement` restricts the fetch to one subtree; `--adapter-timeout`
+bounds every adapter operation the fetch runs. A fetched job arrives as an
+ordinary job of the local workspace, in the terminal state and at the placement it
+had on the remote, so `httk workflow harvest local-runs` then reports it exactly
+like a job that ran at home.
 
-The other two commands are the far-side half, invoked over the adapter by
-`transfer fetch` but usable on their own on the remote itself:
+Under the fetch leg run the two far-side protocol commands, invoked over the
+adapter but usable on their own on the remote itself. They are path-based, because
+the far side keeps no registry:
 
 ```console
-httk workflow transfer offer WORKSPACE --destination-workspace-id UUID --json
-httk workflow transfer retire WORKSPACE JOB_ID ... --destination-workspace-id UUID
+httk workflow transfer offer PATH --destination-workspace-id UUID --json
+httk workflow transfer retire PATH JOB_ID ... --destination-workspace-id UUID
 ```
 
 `offer` detaches every finished job into its sealed bundle and prints one entry
