@@ -52,6 +52,19 @@ FORBIDDEN_GENERIC = (
     "httk.workflow.workflow_cli",
 )
 
+#: The workspace lookups that rescan every state kind when the in-memory index
+#: misses. They resolve any job from its id or key alone, but at the price of a
+#: whole-workspace scan — exactly the unbounded fallback the streaming scheduler
+#: must never take inside a tick. The manager probes each marker's exact
+#: placement instead (``find_marker_at``); these two names belong to interactive
+#: and CLI resolution only.
+FORBIDDEN_SCHEDULING_LOOKUPS = frozenset({"find_marker_by_id", "find_markers"})
+
+#: Explicit, justified exceptions to the rule above, keyed by
+#: ``(enclosing function, attribute)``. It is empty: the manager carries no
+#: interactive resolver, so every marker it resolves is resolved by placement.
+SCHEDULING_LOOKUP_ALLOW: frozenset[tuple[str, str]] = frozenset()
+
 
 def _module_name(path: Path) -> str:
     """Return the dotted module name of one file below ``src``."""
@@ -147,6 +160,29 @@ def test_consumers_do_not_reach_into_generic_or_each_other() -> None:
             for engine in CONSUMER_ENGINES:
                 if engine != own:
                     assert not _names(engine, target), f"{module} imports the {engine} consumer"
+
+
+def test_the_manager_never_falls_back_to_a_whole_workspace_lookup() -> None:
+    """No scheduling pass may resolve a marker by a whole-workspace scan.
+
+    ``find_marker_by_id`` and ``find_markers`` rescan every state kind when the
+    marker index misses — the unbounded fallback Phase 13 removed from the hot
+    path. This reads the manager's syntax tree and asserts neither name is called
+    anywhere in it, save the explicit (and currently empty) allow-list, so a
+    future pass cannot quietly reintroduce the fallback that does not scale.
+    """
+
+    tree = ast.parse((WORKFLOW / "manager.py").read_text(encoding="utf-8"), "manager.py")
+    offending: list[str] = []
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for node in ast.walk(function):
+            if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_SCHEDULING_LOOKUPS:
+                if (function.name, node.attr) in SCHEDULING_LOOKUP_ALLOW:
+                    continue
+                offending.append(f"{function.name} calls {node.attr} (line {node.lineno})")
+    assert offending == [], f"manager.py reaches for a whole-workspace lookup: {sorted(set(offending))}"
 
 
 def test_scaffold_holds_no_vasp_knowledge() -> None:

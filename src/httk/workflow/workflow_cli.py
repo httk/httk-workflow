@@ -805,6 +805,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         "request_id": str(uuid.uuid4()),
         "job_id": marker.job_id,
         "job_key": marker.job_key,
+        "placement": marker.placement.as_posix(),
         "expected_generation": marker.generation,
         "expected_record_ref": marker.record_ref,
         "action": arguments.action,
@@ -1310,6 +1311,16 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="CAPABILITY",
         help="advertise this capability to the scheduler (repeatable)",
     )
+    parser.add_argument(
+        "--placement-prefix",
+        action="append",
+        default=[],
+        metavar="PREFIX",
+        help=(
+            "restrict every scheduling scan to jobs at or below this placement subtree "
+            "(repeatable, default: the whole workspace)"
+        ),
+    )
     parser.add_argument("--workers", type=int, default=1, metavar="COUNT", help="attempts to run at once (default: 1)")
     parser.add_argument(
         "--lease-seconds",
@@ -1404,6 +1415,7 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
         workspace,
         pools=arguments.pool or ["default"],
         capabilities=arguments.capability,
+        placement_prefixes=arguments.placement_prefix,
         maximum_workers=arguments.workers,
         lease_seconds=arguments.lease_seconds,
         heartbeat_interval=arguments.heartbeat_interval,

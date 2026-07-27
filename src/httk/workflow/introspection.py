@@ -144,6 +144,7 @@ class ManagerRecord:
     pid: int | None
     pools: frozenset[str]
     capabilities: frozenset[str]
+    placement_prefixes: tuple[str, ...]
     runner_backends: frozenset[str]
     accept_any_pool: bool
     started_at: str | None
@@ -167,12 +168,14 @@ class ManagerRecord:
         where = self.hostname or "an unrecorded host"
         pools = "any pool" if self.accept_any_pool else ",".join(sorted(self.pools)) or "no pool"
         capabilities = ",".join(sorted(self.capabilities)) or "-"
+        prefixes = ",".join(self.placement_prefixes) if self.placement_prefixes else "whole workspace"
         backends = ",".join(sorted(self.runner_backends)) or "-"
         age = (
             "no heartbeat" if self.heartbeat_age_seconds is None else f"heartbeat {self.heartbeat_age_seconds:.0f}s ago"
         )
         return (
-            f"{self.manager_id} on {where} (pools {pools}, capabilities {capabilities}, " f"backends {backends}, {age})"
+            f"{self.manager_id} on {where} (pools {pools}, capabilities {capabilities}, "
+            f"placement {prefixes}, backends {backends}, {age})"
         )
 
     def as_mapping(self) -> dict[str, object]:
@@ -184,6 +187,7 @@ class ManagerRecord:
             "pid": self.pid,
             "pools": sorted(self.pools),
             "capabilities": sorted(self.capabilities),
+            "placement_prefixes": list(self.placement_prefixes),
             "runner_backends": sorted(self.runner_backends),
             "accept_any_pool": self.accept_any_pool,
             "started_at": self.started_at,
@@ -197,6 +201,14 @@ def _label_set(value: object) -> frozenset[str]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         return frozenset()
     return frozenset(item for item in value if isinstance(item, str))
+
+
+def _label_sequence(value: object) -> tuple[str, ...]:
+    """Return a manifest's ordered string list, or nothing if it has none."""
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return ()
+    return tuple(item for item in value if isinstance(item, str))
 
 
 def read_managers(workspace: Workspace) -> list[ManagerRecord]:
@@ -236,6 +248,7 @@ def read_managers(workspace: Workspace) -> list[ManagerRecord]:
                 pid=_optional_int(manifest.get("pid")),
                 pools=_label_set(manifest.get("pools")),
                 capabilities=_label_set(manifest.get("capabilities")),
+                placement_prefixes=_label_sequence(manifest.get("placement_prefixes")),
                 runner_backends=_label_set(manifest.get("runner_backends")),
                 accept_any_pool=bool(manifest.get("accept_any_pool", False)),
                 started_at=_optional_string(manifest.get("started_at")),
@@ -284,12 +297,19 @@ def claim_requirements(job: JobDefinition) -> ClaimRequirements:
     )
 
 
-def manager_refusals(record: ManagerRecord, requirements: ClaimRequirements) -> list[str]:
+def manager_refusals(
+    record: ManagerRecord,
+    requirements: ClaimRequirements,
+    *,
+    placement: str | None = None,
+) -> list[str]:
     """Return why *record* would not claim a job with *requirements*.
 
     An empty list means this manager offers everything the job demands, which is
     exactly the test :class:`~httk.workflow.manager.TaskManager` applies in its
-    own eligibility filter.
+    own eligibility filter. When *placement* is given and this manager restricts
+    its scanning to placement prefixes that exclude it, that exclusion is a
+    refusal too: the manager never even scans the job, so it can never claim it.
     """
 
     reasons: list[str] = []
@@ -300,7 +320,20 @@ def manager_refusals(record: ManagerRecord, requirements: ClaimRequirements) -> 
     missing = requirements.capabilities - record.capabilities
     if missing:
         reasons.append(f"lacks capabilities {','.join(sorted(missing))}")
+    if placement is not None and record.placement_prefixes and not _placement_covered(record, placement):
+        reasons.append(f"does not scan placement {placement} (restricted to {','.join(record.placement_prefixes)})")
     return reasons
+
+
+def _placement_covered(record: ManagerRecord, placement: str) -> bool:
+    """Whether *placement* lies at or below one of *record*'s scanned prefixes."""
+
+    parts = normalize_placement(placement).parts
+    for prefix in record.placement_prefixes:
+        prefix_parts = normalize_placement(prefix).parts
+        if parts[: len(prefix_parts)] == prefix_parts:
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -908,11 +941,16 @@ def _manager_checks(
     report: _Diagnosing,
     *,
     backend_only: bool,
+    placement: str | None = None,
 ) -> None:
     """Record which registered managers would accept one job, and why not.
 
-    Only a manager's own manifest can answer this: pools, capabilities, and
-    served backends are deployment policy of the manager, never of the job.
+    Only a manager's own manifest can answer this: pools, capabilities, served
+    backends, and the placement subtrees it restricts its scanning to are all
+    deployment policy of the manager, never of the job. A manager whose
+    placement prefixes exclude *placement* never scans the job at all, so that
+    exclusion is reported even in the backend-only phases: it stops registration
+    just as it stops a claim.
     """
 
     records = read_managers(workspace)
@@ -933,9 +971,11 @@ def _manager_checks(
         return
     accepting: list[ManagerRecord] = []
     for record in live:
-        reasons = manager_refusals(record, requirements)
+        reasons = manager_refusals(record, requirements, placement=placement)
         if backend_only:
-            reasons = [reason for reason in reasons if "runner backend" in reason]
+            reasons = [
+                reason for reason in reasons if "runner backend" in reason or "does not scan placement" in reason
+            ]
         if reasons:
             report.check("live manager", False, f"{record.describe()} {'; '.join(reasons)}")
         else:
@@ -1095,13 +1135,13 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
         served = _profile_check(workspace, report)
         if job is not None and served:
             requirements = _requirement_checks(job, report)
-            _manager_checks(workspace, requirements, report, backend_only=True)
+            _manager_checks(workspace, requirements, report, backend_only=True, placement=marker.placement.as_posix())
     elif kind == "ready":
         summary = "this job is ready and waiting to be claimed; every claim precondition is listed below"
         served = _profile_check(workspace, report)
         if job is not None and served:
             requirements = _requirement_checks(job, report)
-            _manager_checks(workspace, requirements, report, backend_only=False)
+            _manager_checks(workspace, requirements, report, backend_only=False, placement=marker.placement.as_posix())
             _budget_checks(job, state, report)
         paused = _maintenance_check(workspace, report)
         if paused:
@@ -1123,7 +1163,9 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
         )
         _owner_checks(workspace, state, report)
         if job is not None:
-            _manager_checks(workspace, claim_requirements(job), report, backend_only=True)
+            _manager_checks(
+                workspace, claim_requirements(job), report, backend_only=True, placement=marker.placement.as_posix()
+            )
     elif kind == "waiting":
         join = state.get("join")
         condition = str(join.get("condition", "-")) if isinstance(join, Mapping) else "-"
@@ -1149,7 +1191,9 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 "this job waits on a join that names no readable child, which the manager reports as a protocol error"
             )
         if job is not None:
-            _manager_checks(workspace, claim_requirements(job), report, backend_only=True)
+            _manager_checks(
+                workspace, claim_requirements(job), report, backend_only=True, placement=marker.placement.as_posix()
+            )
     elif kind == "failed":
         failure = state.get("failure")
         if isinstance(failure, Mapping):
@@ -1197,7 +1241,9 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
         if control is not None:
             report.check("attempt logs", None, f"the fenced attempt wrote {control / 'stdout.log'}")
         if job is not None:
-            _manager_checks(workspace, claim_requirements(job), report, backend_only=True)
+            _manager_checks(
+                workspace, claim_requirements(job), report, backend_only=True, placement=marker.placement.as_posix()
+            )
         if alive:
             blocked = False
             report.hint("no operator action is needed; the owning manager terminates and verifies the attempt")
@@ -1260,6 +1306,18 @@ class ScopedWorkspace(Workspace):
         for entry in super().scan_marker_entries(kinds):
             if isinstance(entry, MarkerFault) or entry.job_key in self.scope:
                 yield entry
+
+    def _scheduling_includes(self, marker: Marker) -> bool:
+        """Restrict the streaming scheduler to the scoped jobs.
+
+        The bounded and exhaustive scheduling walks surface a marker only when
+        this hook allows it, so this is the streaming counterpart of the
+        :meth:`scan_marker_entries` narrowing above: a private debug manager
+        schedules exactly the jobs it was asked to drive and never a bystander,
+        while every lookup still resolves against the whole workspace.
+        """
+
+        return marker.job_key in self.scope
 
     def _unscoped_markers(self, kinds: Iterable[str] | None = None) -> Iterator[Marker]:
         for entry in Workspace.scan_marker_entries(self, kinds):
