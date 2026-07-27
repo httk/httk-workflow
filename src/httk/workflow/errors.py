@@ -1,5 +1,16 @@
 """Exceptions raised by :mod:`httk.workflow`."""
 
+__all__ = [
+    "WorkflowError",
+    "FormatError",
+    "WorkspaceUnavailableError",
+    "WorkspaceCorruptionError",
+    "TransitionLostError",
+    "UnsupportedExtensionError",
+    "TransactionError",
+    "RunnerResolutionError",
+]
+
 
 class WorkflowError(Exception):
     """Base class for workflow protocol failures."""

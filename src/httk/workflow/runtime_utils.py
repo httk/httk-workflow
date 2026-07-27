@@ -13,6 +13,13 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+__all__ = [
+    "evaluate_expression",
+    "render_template",
+    "compress_files",
+    "decompress_files",
+]
+
 _FUNCTIONS: dict[str, Callable[..., Any]] = {
     "abs": abs,
     "ceil": math.ceil,

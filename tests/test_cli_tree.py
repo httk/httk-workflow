@@ -31,10 +31,10 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "transfer": ("send", "fetch", "offer", "retire", "start-manager", "status"),
 }
 
-#: Spellings kept alive for one release: ``tasks`` is the transfer group, which
-#: is also what the frozen protocol vectors send, and ``computer`` is the remote
-#: management group under the name it had before it borrowed git's word.
-DEPRECATED_GROUPS = ("tasks", "computer")
+#: Superseded group spellings that were removed: ``tasks`` was the transfer
+#: group and ``computer`` the remote group, both before the renames; ``internal``
+#: was the hidden home of ``receive``. None of them parses any more.
+REMOVED_GROUPS = ("tasks", "computer", "internal")
 
 
 def _context(tmp_path: Path) -> CLIContext:
@@ -100,12 +100,11 @@ def test_every_leaf_documents_every_argument_it_takes(tmp_path: Path) -> None:
     assert undocumented == []
 
 
-def test_the_deprecated_spellings_are_absent_from_the_help(tmp_path: Path, capsys) -> None:
+def test_the_removed_spellings_are_absent_from_the_help(tmp_path: Path, capsys) -> None:
     assert command(["--help"], _context(tmp_path)) == 0
     printed = capsys.readouterr().out
-    for group in DEPRECATED_GROUPS:
+    for group in REMOVED_GROUPS:
         assert group not in printed
-    assert "internal" not in printed
 
     assert command(["transfer", "--help"], _context(tmp_path)) == 0
     assert "receive" not in capsys.readouterr().out
@@ -242,49 +241,34 @@ def test_the_executables_still_take_their_durability_switch_before_the_command()
 # ---------------------------------------------------------------------------
 
 
-def test_the_deprecated_tasks_group_still_reaches_the_transfer_commands(tmp_path: Path) -> None:
-    parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    for action in ("send", "fetch", "offer", "retire", "start-manager", "status"):
-        assert (
-            parser.parse_args(["tasks", action, *_sample_arguments(action)]).handler
-            is parser.parse_args(["transfer", action, *_sample_arguments(action)]).handler
-        )
-
-
-def _sample_arguments(action: str) -> list[str]:
-    """The least a transfer subcommand needs in order to parse."""
-
-    if action == "fetch":
-        return ["--remote", "cluster"]
-    if action == "offer":
-        return ["WS", "--destination-workspace-id", "UUID"]
-    if action == "retire":
-        return ["WS", "JOB"]
-    if action == "send":
-        return ["cluster", "JOB"]
-    return ["cluster"]
-
-
-def test_the_superseded_option_spellings_still_parse(tmp_path: Path) -> None:
+def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
 
-    # The v1 task-set filter was --set before it was --taskset.
-    assert parser.parse_args(["v1", "run", "WS", "--set", "vasp"]).taskset == "vasp"
-    assert parser.parse_args(["v1", "prepare", "A", "B", "--set", "vasp"]).taskset == "vasp"
-    # ... and --set on `remote configure` is, and stays, KEY=VALUE settings.
+    # The v1 task-set filter is --taskset only; the old --set no longer parses.
+    assert parser.parse_args(["v1", "run", "WS", "--taskset", "vasp"]).taskset == "vasp"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["v1", "run", "WS", "--set", "vasp"])
+    # But --set on `remote configure` is, and stays, KEY=VALUE settings.
     assert parser.parse_args(["remote", "configure", "cluster", "--set", "host=a"]).set == ["host=a"]
 
-    # Adapter timeouts were --timeout before they were --adapter-timeout.
-    assert parser.parse_args(["transfer", "fetch", "--remote", "c", "--timeout", "5"]).adapter_timeout == 5.0
-    assert parser.parse_args(["remote", "install", "c", "--timeout", "5"]).adapter_timeout == 5.0
-    # The manager's idle wait was --timeout before it was --idle-timeout.
-    assert parser.parse_args(["manager", "run", "WS", "--timeout", "5"]).idle_timeout == 5.0
+    # Adapter timeouts are --adapter-timeout only.
+    assert parser.parse_args(["transfer", "fetch", "--remote", "c", "--adapter-timeout", "5"]).adapter_timeout == 5.0
+    with pytest.raises(SystemExit):
+        parser.parse_args(["transfer", "fetch", "--remote", "c", "--timeout", "5"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["remote", "install", "c", "--timeout", "5"])
+    # The manager's idle wait is --idle-timeout only.
+    assert parser.parse_args(["manager", "run", "WS", "--idle-timeout", "5"]).idle_timeout == 5.0
     assert parser.parse_args(["manager", "run", "WS"]).idle_timeout == 3600.0
+    with pytest.raises(SystemExit):
+        parser.parse_args(["manager", "run", "WS", "--timeout", "5"])
 
-    # The workspace direction flags were all spelled --workspace.
-    assert parser.parse_args(["transfer", "send", "c", "J", "--workspace", "/w"]).source_workspace == "/w"
-    assert parser.parse_args(["transfer", "status", "c", "--workspace", "/w"]).remote_workspace == "/w"
-    assert parser.parse_args(["transfer", "start-manager", "c", "--workspace", "/w"]).remote_workspace == "/w"
+    # The workspace direction flags no longer accept the ambiguous --workspace.
+    assert parser.parse_args(["transfer", "send", "c", "J", "--source-workspace", "/w"]).source_workspace == "/w"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["transfer", "send", "c", "J", "--workspace", "/w"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["transfer", "status", "c", "--workspace", "/w"])
     # `transfer fetch` keeps --workspace for the local destination it always meant.
     assert parser.parse_args(["transfer", "fetch", "--remote", "c", "--workspace", "/w"]).workspace == "/w"
 
@@ -306,9 +290,9 @@ def test_the_v1_siblings_default_their_task_set_differently_on_purpose(tmp_path:
 def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
     """A transfer composes commands the far side may run on an older httk."""
 
-    assert workflow_cli.REMOTE_RECEIVE_COMMAND == ("httk", "workflow", "tasks", "receive")
-    assert workflow_cli.REMOTE_OFFER_COMMAND == ("httk", "workflow", "tasks", "offer")
-    assert workflow_cli.REMOTE_RETIRE_COMMAND == ("httk", "workflow", "tasks", "retire")
+    assert workflow_cli.REMOTE_RECEIVE_COMMAND == ("httk", "workflow", "transfer", "receive")
+    assert workflow_cli.REMOTE_OFFER_COMMAND == ("httk", "workflow", "transfer", "offer")
+    assert workflow_cli.REMOTE_RETIRE_COMMAND == ("httk", "workflow", "transfer", "retire")
     assert workflow_cli.REMOTE_STATUS_COMMAND == ("httk", "workflow", "workspace", "status")
     assert workflow_cli.REMOTE_MANAGER_COMMAND == ("httk", "workflow", "manager", "run")
 
@@ -322,8 +306,11 @@ def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
         workflow_cli.REMOTE_MANAGER_COMMAND,
     ):
         assert spelling[:2] == ("httk", "workflow")
-    receive = parser.parse_args(["tasks", "receive", "--workspace", "/w", "--bundle", "/b"])
+    # ``transfer receive`` is the frozen, invocable spelling of the import half.
+    receive = parser.parse_args(["transfer", "receive", "--workspace", "/w", "--bundle", "/b"])
     assert receive.handler is workflow_cli.handle_transfer_receive
-    # The same half is reachable by its canonical, if still unadvertised, name.
-    assert parser.parse_args(["internal", "receive", "--workspace", "/w", "--bundle", "/b"]).handler is receive.handler
-    assert parser.parse_args(["transfer", "receive", "--workspace", "/w", "--bundle", "/b"]).handler is receive.handler
+    # The old ``tasks``/``internal`` spellings of it are gone.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["tasks", "receive", "--workspace", "/w", "--bundle", "/b"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["internal", "receive", "--workspace", "/w", "--bundle", "/b"])

@@ -19,14 +19,13 @@ from httk.core import CLIContext
 
 from httk.workflow import (
     HarvestRecord,
-    JobSpec,
     TaskManager,
     Workspace,
     harvest,
-    prepare_job_payload,
 )
 from httk.workflow.adapters import add_remote
 from httk.workflow.projects import initialize_project
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.transfers import TRANSFER_DIRECTORY, _payload_digest
 from httk.workflow.workflow_cli import command
 

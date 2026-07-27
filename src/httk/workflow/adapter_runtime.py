@@ -53,10 +53,8 @@ BATCH_DIRECTIVES = (
 
 SUPPORTED_KINDS = ("local", "local-slurm", "ssh-slurm")
 
-#: The bundle metadata file, and what it was called before remotes were called
-#: remotes. A bundle carrying only the old name is still read.
+#: The bundle metadata file.
 METADATA_FILE = "remote.json"
-LEGACY_METADATA_FILE = "computer.json"
 
 #: The result format one adapter operation prints. The name is protocol and
 #: keeps its historical spelling: an adapter written against an earlier release
@@ -120,8 +118,6 @@ def _adapter_kind(request: Mapping[str, object]) -> str | None:
         return None
     root = Path(adapter_dir).expanduser()
     metadata_path = root / METADATA_FILE
-    if not metadata_path.is_file():
-        metadata_path = root / LEGACY_METADATA_FILE
     if not metadata_path.is_file():
         return None
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))

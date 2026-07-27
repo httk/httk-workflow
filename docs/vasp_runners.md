@@ -140,4 +140,4 @@ it. Each runner is one self-contained file that imports nothing but an installed
 *httk-workflow*, so a copy is a complete runner, publishable as it stands. A group
 with its own reviewed remedy practice can also keep the packaged runners and
 register its own policy with
-{py:func}`httk.workflow.register_remedy_policy`.
+{py:func}`httk.workflow.vasp.register_remedy_policy`.

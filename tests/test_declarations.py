@@ -24,15 +24,13 @@ from httk.workflow import (
     ChildSpec,
     FormatError,
     HarvestRecord,
-    JobDefinition,
-    JobSpec,
     RunnerRef,
     TaskManager,
     Workspace,
     harvest,
-    prepare_job_payload,
 )
 from httk.workflow.models import MAXIMUM_DECLARATIONS_BYTES, validate_declarations
+from httk.workflow.protocol import JobDefinition, JobSpec, prepare_job_payload
 from httk.workflow.transfers import _payload_digest
 
 _SRC = str(Path(__file__).parents[1] / "src")

@@ -23,6 +23,37 @@ from ._util import json_bytes, write_json_atomic
 
 _LOGGER = logging.getLogger(__name__)
 
+__all__ = [
+    "CONFIG_FORMAT",
+    "CONFIG_FORMAT_VERSION",
+    "IDENTITY_SIGNATURE_DOMAIN",
+    "IDENTITY_KEY_MEMBER",
+    "IDENTITY_SIGNATURE_MEMBER",
+    "ConfigKey",
+    "CONFIG_KEYS",
+    "settable_config_keys",
+    "config_home",
+    "data_home",
+    "adopt_legacy_data_home",
+    "remotes_home",
+    "keys_home",
+    "config_path",
+    "read_config",
+    "write_config",
+    "set_config_key",
+    "unset_config_key",
+    "initialize_config",
+    "identity_key_paths",
+    "ensure_identity_key",
+    "identity_seed",
+    "identity_public_key",
+    "signature_digest",
+    "sign_document",
+    "DocumentSignature",
+    "verify_document",
+    "import_v1_configuration",
+]
+
 CONFIG_FORMAT = "httk-config"
 CONFIG_FORMAT_VERSION = 1
 

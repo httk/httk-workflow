@@ -17,7 +17,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from httk.workflow import JobSpec, TaskManager, Workspace, prepare_job_payload
+from httk.workflow import TaskManager, Workspace
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 
 _PYTHON_RUNNER = '''#!/usr/bin/env python3
 """Defect campaign: characterize, relax every site, aggregate, triage."""

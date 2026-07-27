@@ -22,9 +22,8 @@ from collections.abc import Mapping
 from dataclasses import replace
 
 try:
-    from httk.workflow import (
-        Attempt,
-        Runner,
+    from httk.workflow import Attempt, Runner
+    from httk.workflow.vasp import (
         VaspPreparationOptions,
         apply_vasp_remedy,
         clean_vasp_outputs,

@@ -10,9 +10,9 @@ existing `ht_steps` files can source the exact old names through the
 `HTTK_DIR` environment variable supplied by `httk-v1-taskmanager`.
 
 The compatibility functions retain their httk v1 behavior. Native v2 runners
-instead use `httk.workflow.AttemptRuntime` and the data-oriented helpers in
-`httk.workflow.vasp`; these are independent interfaces, not renamed v1 API
-methods.
+instead use `httk.workflow.Runner` and `httk.workflow.Attempt` together with the
+data-oriented helpers in `httk.workflow.vasp`; these are independent interfaces,
+not renamed v1 API methods.
 
 See `NOTICE` for the v1 contributor history, including Henrik Levämäki's
 authorship of the separate v1 Python APIs. The compatibility files are

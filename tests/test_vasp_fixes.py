@@ -12,10 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from httk.workflow import (
+from httk.workflow.supervision import Diagnostic
+from httk.workflow.vasp import (
     DEFAULT_KPOINT_CENTERING,
+    DEFAULT_REMEDY_HISTORY,
     VASP_RESTART_ARTIFACTS,
-    Diagnostic,
     VaspPreparationOptions,
     VaspRemedyDecision,
     apply_vasp_remedy,
@@ -33,7 +34,6 @@ from httk.workflow import (
     update_incar,
     write_automatic_kpoints,
 )
-from httk.workflow.vasp import DEFAULT_REMEDY_HISTORY
 
 _POSCAR = """silicon
 1.0

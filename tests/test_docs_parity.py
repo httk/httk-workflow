@@ -18,6 +18,7 @@ an authoring feature to the code without documenting it fails here.
 
 import ast
 import dataclasses
+import importlib
 import inspect
 import re
 from pathlib import Path
@@ -147,19 +148,49 @@ def test_the_table_has_rows() -> None:
     assert all(any(cell not in {"", "—"} for cell in row) for row in rows)
 
 
+def _reach(obj: object, part: str) -> object | None:
+    """Return the attribute *part* of *obj*, importing it as a submodule if need be."""
+
+    reached = getattr(obj, part, None)
+    if reached is None:
+        module_name = getattr(obj, "__name__", None)
+        if module_name is not None:
+            try:
+                reached = importlib.import_module(f"{module_name}.{part}")
+            except ModuleNotFoundError:
+                reached = None
+    return reached
+
+
+def _resolve(dotted: str) -> bool:
+    """Report whether *dotted* resolves by attribute walk from ``httk.workflow``.
+
+    A name is either a bare root export (``Runner``), a member of a root class
+    (``Attempt.run``), or a name reached through a named submodule
+    (``protocol.JobSpec``, ``runtime_utils.render_template``). A submodule that is
+    not yet imported is imported on demand, so the table may spell a name at its
+    real home without the test importing every submodule up front. The final
+    component is checked against the owner's whole surface, so an instance
+    attribute a class binds in ``__init__`` (``Runner.workflow``) resolves too.
+    """
+
+    parts = dotted.split(".")
+    owner: object = httk.workflow
+    for part in parts[:-1]:
+        owner = _reach(owner, part)
+        if owner is None:
+            return False
+    last = parts[-1]
+    if _reach(owner, last) is not None:
+        return True
+    return isinstance(owner, type) and last in _surface(owner)
+
+
 def test_every_documented_python_member_exists() -> None:
     """(a) Nothing in the Python column is a name that was renamed or removed."""
 
     for name in _python_names():
-        parts = name.split(".")
-        assert len(parts) in {1, 2}, f"{name!r} is not a bare export or a Class.member name"
-        head = parts[0]
-        assert hasattr(httk.workflow, head), f"httk.workflow exports no {head!r}, but {_DOCS.name} lists {name!r}"
-        if len(parts) == 1:
-            continue
-        owner = getattr(httk.workflow, head)
-        assert isinstance(owner, type), f"{head!r} is not a class, so {name!r} cannot name a member of it"
-        assert parts[1] in _surface(owner) or hasattr(owner, parts[1]), f"{head} has no member {parts[1]!r}"
+        assert _resolve(name), f"{name!r} does not resolve from httk.workflow, but {_DOCS.name} lists it"
 
 
 def test_every_documented_bash_function_is_defined() -> None:

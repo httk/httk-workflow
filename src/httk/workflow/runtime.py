@@ -1,13 +1,11 @@
-"""Attempt identity, supervised commands, and the superseded runtime class.
+"""Attempt identity and supervised commands.
 
 The attempt context and :func:`run_command` are protocol-level facilities every
-native runner uses. :class:`AttemptRuntime` is the first-generation outcome
-publication API, superseded by :class:`httk.workflow.Runner` and
-:class:`httk.workflow.Attempt`.
+native runner uses; the environment-binding helper below is what the authoring
+SDK and the Bash bridge both recover an attempt through.
 """
 
 import os
-import shutil
 import signal
 import subprocess
 from collections.abc import Mapping, Sequence
@@ -16,16 +14,12 @@ from pathlib import Path
 from typing import Any, Self
 
 from ._util import read_json
-from .models import Failure
-from .runtime_builders import (
-    OutcomeBuilder,
-    ReplayableWorkdirBatch,
-    RunLog,
-    WorkdirState,
-    _warn_deprecated,
-)
 
-_OUTCOME_ACTIONS = frozenset({"advance", "retry", "succeed", "fail", "pause", "wait"})
+__all__ = [
+    "AttemptContext",
+    "CommandResult",
+    "run_command",
+]
 
 
 @dataclass(frozen=True)
@@ -215,143 +209,3 @@ def run_command(
                 pass
             stdout, stderr = process.communicate()
     return CommandResult(command, process.returncode, stdout, stderr, timed_out)
-
-
-@dataclass(frozen=True)
-class AttemptRuntime:
-    """Paths and outcome publication methods exposed to a native v2 runner.
-
-    .. deprecated:: 0.2
-       Use :class:`httk.workflow.Runner` and the :class:`httk.workflow.Attempt`
-       it dispatches to. The replacement dispatches steps, keeps one implicit
-       outcome draft per attempt, enforces that exactly one outcome is published,
-       and reads job state and spawned children as typed values.
-    """
-
-    context: AttemptContext
-    control: Path
-    job: Path
-    workdir: Path
-    workspace: Path
-    data: Path | None = None
-
-    def __post_init__(self) -> None:
-        _warn_deprecated("AttemptRuntime", "httk.workflow.Runner and httk.workflow.Attempt")
-
-    @classmethod
-    def from_environment(cls, environment: Mapping[str, str] | None = None) -> Self:
-        """Bind the runtime without recovering an interrupted attempt.
-
-        Applications use :class:`httk.workflow.Attempt`, whose only constructor
-        recovers; this classmethod disappears together with the class.
-        """
-
-        bound = _read_environment(environment)
-        return cls(
-            context=bound.context,
-            control=bound.control,
-            job=bound.payload,
-            workdir=bound.workdir,
-            workspace=bound.workspace,
-            data=bound.data,
-        )
-
-    @classmethod
-    def initialize(cls, environment: Mapping[str, str] | None = None) -> Self:
-        """Construct the runtime and replay every sealed workdir batch."""
-
-        result = cls.from_environment(environment)
-        ReplayableWorkdirBatch.recover(result.workdir)
-        return result
-
-    @property
-    def state(self) -> WorkdirState:
-        """Return the application state associated with this workdir."""
-
-        return WorkdirState(self.workdir)
-
-    @property
-    def runlog(self) -> RunLog:
-        """Return the structured application run log."""
-
-        return RunLog(self.workdir)
-
-    def outcome(self) -> OutcomeBuilder:
-        """Start a composable unpublished outcome."""
-
-        return OutcomeBuilder(self)
-
-    def workdir_batch(self) -> ReplayableWorkdirBatch:
-        """Start a replayable group of workdir changes."""
-
-        return ReplayableWorkdirBatch.create(self.workdir)
-
-    def publish(
-        self,
-        action: str,
-        *,
-        next_step: str | None = None,
-        priority: int | None = None,
-        failure: Mapping[str, object] | None = None,
-        retry: Mapping[str, object] | None = None,
-        join: Mapping[str, object] | None = None,
-        pause: Mapping[str, object] | None = None,
-        expected_data_generation: int | None = None,
-    ) -> Path:
-        """Atomically publish one authoritative request for the manager."""
-
-        if action not in _OUTCOME_ACTIONS:
-            raise ValueError(f"unsupported workflow outcome action: {action!r}")
-        builder = self.outcome()
-        try:
-            return builder.publish(
-                action,  # type: ignore[arg-type]
-                next_step=next_step,
-                priority=priority,
-                failure=failure,
-                retry=retry,
-                join=join,
-                pause=pause,
-                expected_data_generation=expected_data_generation,
-            )
-        except Exception:
-            if builder.root.exists():
-                shutil.rmtree(builder.root)
-            raise
-
-    def advance(self, next_step: str, *, priority: int | None = None) -> Path:
-        """Request a new activation at *next_step*."""
-
-        return self.publish("advance", next_step=next_step, priority=priority)
-
-    def succeed(self) -> Path:
-        """Mark the job successful."""
-
-        return self.publish("succeed")
-
-    def fail(
-        self,
-        code: str,
-        message: str,
-        *,
-        details: Mapping[str, object] | None = None,
-        retryable: bool = False,
-    ) -> Path:
-        """Publish a structured terminal failure.
-
-        ``retryable`` is advisory evidence for an operator or a later report.
-        Manager retry policy is keyed on ``code`` through ``retry_on``.
-        """
-
-        failure = Failure(code, message, details=details, retryable=retryable)
-        return self.publish("fail", failure=failure.as_mapping())
-
-    def retry(self, reason: str) -> Path:
-        """Request another attempt of the current activation."""
-
-        return self.publish("retry", retry={"reason": reason})
-
-    def pause(self, reason: str) -> Path:
-        """Pause the job for operator action."""
-
-        return self.publish("pause", pause={"reason": reason})

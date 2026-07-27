@@ -64,7 +64,7 @@ strings, so a Bash runner and a Python runner read one contract.
   total before it fails. The ladder is bounded per problem as well.
 * ``remedy_policy`` (default ``reviewed-v1``) — the registered remedy policy the
   runner plans with, so a group with its own reviewed practice registers a policy
-  with :func:`httk.workflow.register_remedy_policy` and names it here instead of
+  with :func:`httk.workflow.vasp.register_remedy_policy` and names it here instead of
   editing a runner.
 * ``rattle_amplitude`` (default ``0.0``) — when positive, the POSCAR is rattled by
   this amplitude after every applied remedy, with a seed derived from the attempt,

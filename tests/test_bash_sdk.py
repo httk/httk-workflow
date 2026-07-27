@@ -18,12 +18,10 @@ from pathlib import Path
 from typing import Any
 
 from httk.workflow import (
-    JobSpec,
-    ReplayableWorkdirBatch,
     TaskManager,
     Workspace,
-    prepare_job_payload,
 )
+from httk.workflow.protocol import JobSpec, ReplayableWorkdirBatch, prepare_job_payload
 
 _SHELL = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "shell" / "httk-workflow.sh"
 

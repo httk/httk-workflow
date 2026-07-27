@@ -52,7 +52,7 @@ from .configuration import (
 )
 from .errors import WorkflowError
 from .gc import iter_report_rows
-from .harvest import DEFAULT_HARVEST_STATES, HARVESTABLE_KINDS, harvest
+from .harvesting import DEFAULT_HARVEST_STATES, HARVESTABLE_KINDS, harvest
 from .hygiene import (
     describe_project,
     describe_remote,
@@ -109,14 +109,13 @@ _ERRORS = (WorkflowError, OSError, ValueError, RuntimeError, TimeoutError)
 #: The command vectors one machine runs on another over a remote adapter.
 #:
 #: These are *protocol*, not user interface. The far side may run an older or a
-#: newer *httk* than the side that composed the vector, so the superseded
-#: ``tasks`` spelling is kept here deliberately and must keep working as a
-#: hidden alias for at least as long as any reachable installation predates the
-#: ``transfer`` rename. Only add a spelling here once every supported release
-#: understands it.
-REMOTE_RECEIVE_COMMAND = ("httk", "workflow", "tasks", "receive")
-REMOTE_OFFER_COMMAND = ("httk", "workflow", "tasks", "offer")
-REMOTE_RETIRE_COMMAND = ("httk", "workflow", "tasks", "retire")
+#: newer *httk* than the side that composed the vector, so this is the frozen
+#: spelling both ends agree on: the ``transfer`` group commands, plus the two
+#: workspace/manager commands the transfer choreography reads. Only add a
+#: spelling here once every supported release understands it.
+REMOTE_RECEIVE_COMMAND = ("httk", "workflow", "transfer", "receive")
+REMOTE_OFFER_COMMAND = ("httk", "workflow", "transfer", "offer")
+REMOTE_RETIRE_COMMAND = ("httk", "workflow", "transfer", "retire")
 REMOTE_STATUS_COMMAND = ("httk", "workflow", "workspace", "status")
 REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
 
@@ -182,25 +181,19 @@ def _group(
     *,
     description: str,
     summary: str,
-    hidden: bool = False,
 ) -> tuple[argparse.ArgumentParser, "argparse._SubParsersAction[argparse.ArgumentParser]"]:
     """Add one command group, and return it with its subcommand action.
 
     A group invoked with no subcommand prints its own help and exits zero, which
-    is what an operator exploring the tree means by typing it. A *hidden* group
-    is declared without a help string at all, which is the only way argparse
-    leaves a choice out of the listing it prints.
+    is what an operator exploring the tree means by typing it.
     """
 
-    if hidden:
-        parser = subparsers.add_parser(name, description=description, formatter_class=HelpFormatter)
-    else:
-        parser = subparsers.add_parser(
-            name,
-            help=summary,
-            description=description,
-            formatter_class=HelpFormatter,
-        )
+    parser = subparsers.add_parser(
+        name,
+        help=summary,
+        description=description,
+        formatter_class=HelpFormatter,
+    )
     parser.set_defaults(handler=None, help_parser=parser)
     return parser, parser.add_subparsers(metavar="COMMAND")
 
@@ -227,17 +220,6 @@ def _leaf(
         )
     parser.set_defaults(handler=handler)
     return parser
-
-
-def _deprecated(parser: argparse.ArgumentParser, *flags: str, dest: str, **kwargs: Any) -> None:
-    """Accept one superseded spelling of an option without advertising it.
-
-    The alias suppresses both its help and its default, so the canonical option
-    keeps ownership of the default value: an alias that carried one would
-    silently overwrite the canonical default with its own.
-    """
-
-    parser.add_argument(*flags, dest=dest, help=argparse.SUPPRESS, default=argparse.SUPPRESS, **kwargs)
 
 
 def add_durability_arguments(parser: argparse.ArgumentParser) -> None:
@@ -1353,7 +1335,6 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="SECONDS",
         help="with --until-idle, give up waiting for work after this long (default: 3600)",
     )
-    _deprecated(parser, "--timeout", dest="idle_timeout", type=float, metavar="SECONDS")
     parser.add_argument(
         "--unsafe-persistent-takeover",
         action="store_true",
@@ -1492,7 +1473,6 @@ def add_v1_job_arguments(parser: argparse.ArgumentParser) -> None:
         default="default",
         help="the httk v1 task set this task belongs to (default: default)",
     )
-    _deprecated(parser, "--set", dest="taskset", metavar="TASKSET")
     parser.add_argument(
         "--priority",
         type=int,
@@ -1607,7 +1587,6 @@ def add_v1_run_arguments(parser: argparse.ArgumentParser) -> None:
         default="any",
         help="run only the jobs of this httk v1 task set (default: any = accept all)",
     )
-    _deprecated(parser, "--set", dest="taskset", metavar="TASKSET")
     parser.add_argument("--wrap", "-w", metavar="COMMAND", help="wrap each task launch in this command")
     parser.add_argument(
         "--task-timeout",
@@ -2274,23 +2253,14 @@ def handle_remote_remove(arguments: argparse.Namespace, context: CLIContext) -> 
 
 def build_remote_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
-    *,
-    name: str = "remote",
-    hidden: bool = False,
 ) -> None:
-    """Declare the ``remote`` group: the adapters that reach other machines.
-
-    The group is declared twice: once as ``remote``, which is canonical and
-    mirrors ``git remote``, and once as the superseded ``computer``, which is
-    hidden from the help but still parses.
-    """
+    """Declare the ``remote`` group: the adapters that reach other machines."""
 
     _, group = _group(
         subparsers,
-        name,
+        "remote",
         summary="define, configure, describe, and remove remotes",
         description="Define, configure, describe, and remove the remote adapters of this project",
-        hidden=hidden,
     )
 
     _leaf(
@@ -2344,7 +2314,6 @@ def build_remote_parser(
             metavar="SECONDS",
             help="bound this adapter operation (default: the remote's timeout_seconds)",
         )
-        _deprecated(parser, "--timeout", dest="adapter_timeout", type=float, metavar="SECONDS")
 
     imported = _leaf(
         group,
@@ -2699,7 +2668,6 @@ def _add_adapter_timeout(parser: argparse.ArgumentParser) -> None:
         metavar="SECONDS",
         help="bound every adapter operation this command runs (default: the remote's timeout_seconds)",
     )
-    _deprecated(parser, "--timeout", dest="adapter_timeout", type=float, metavar="SECONDS")
 
 
 def _add_transfer_receive(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
@@ -2722,25 +2690,19 @@ def _add_transfer_receive(subparsers: "argparse._SubParsersAction[argparse.Argum
 
 def build_transfer_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
-    *,
-    name: str = "transfer",
-    hidden: bool = False,
 ) -> None:
     """Declare the ``transfer`` group: work that travels to a remote.
 
-    The group is declared twice: once as ``transfer``, which is canonical, and
-    once as the superseded ``tasks``, which is hidden from the help but still
-    parses — an installation on the far side of an adapter and an operator's
-    muscle memory both outlive a rename, and ``tasks`` is the spelling the
-    protocol vectors above still send.
+    Its ``receive``, ``offer``, and ``retire`` commands are also the frozen
+    protocol spelling one machine invokes on another over an adapter, named by
+    the ``REMOTE_*_COMMAND`` vectors above.
     """
 
     _, group = _group(
         subparsers,
-        name,
+        "transfer",
         summary="send work to a remote, run it there, and fetch it back",
         description="Send workflow jobs to a remote, run them there, and fetch the finished ones back",
-        hidden=hidden,
     )
 
     send = _leaf(
@@ -2757,7 +2719,6 @@ def build_transfer_parser(
         metavar="WORKSPACE",
         help="the local workspace the jobs leave from (default: the project's)",
     )
-    _deprecated(send, "--workspace", dest="source_workspace", metavar="WORKSPACE")
     send.add_argument(
         "--destination-workspace",
         metavar="WORKSPACE",
@@ -2777,15 +2738,13 @@ def build_transfer_parser(
         description="Fetch the jobs that finished on one remote into a local workspace",
         handler=handle_transfer_fetch,
     )
-    # Required in effect rather than by argparse: the option carries a
-    # superseded spelling, and an argparse-required option would refuse a command
-    # line that named the remote by its old flag.
+    # Not argparse-required: the handler validates it and raises a ValueError
+    # that names the option, which is friendlier than argparse's usage exit.
     fetch.add_argument(
         "--remote",
         metavar="REMOTE",
         help="the remote to fetch from, as NAME or NAME:QUEUE (required)",
     )
-    _deprecated(fetch, "--computer", dest="remote", metavar="REMOTE")
     fetch.add_argument(
         "--workspace",
         metavar="WORKSPACE",
@@ -2872,7 +2831,6 @@ def build_transfer_parser(
             metavar="WORKSPACE",
             help="the workspace on the remote (default: its queue workspace=PATH)",
         )
-        _deprecated(parser, "--workspace", dest="remote_workspace", metavar="WORKSPACE")
         _add_adapter_timeout(parser)
         if operation == "start-manager":
             parser.add_argument(
@@ -2883,19 +2841,6 @@ def build_transfer_parser(
             )
             parser.add_argument("--count", type=int, default=1, metavar="COUNT", help="managers to start (default: 1)")
 
-    _add_transfer_receive(group)
-
-
-def build_internal_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
-    """Declare the hidden ``internal`` group: halves of protocols, not commands."""
-
-    _, group = _group(
-        subparsers,
-        "internal",
-        summary="the far-side halves of protocols, invoked rather than typed",
-        description="The far-side halves of httk protocols. These are invoked by other httk commands",
-        hidden=True,
-    )
     _add_transfer_receive(group)
 
 
@@ -2925,11 +2870,6 @@ def build_parser(program: str, context: CLIContext) -> argparse.ArgumentParser:
     build_project_parser(groups, context)
     build_remote_parser(groups)
     build_transfer_parser(groups)
-    # The superseded spellings of the same two groups, parsed but never
-    # advertised. `tasks` is also what the protocol vectors above still send.
-    build_remote_parser(groups, name="computer", hidden=True)
-    build_transfer_parser(groups, name="tasks", hidden=True)
-    build_internal_parser(groups)
     return parser
 
 

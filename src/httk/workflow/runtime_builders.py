@@ -19,7 +19,6 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, Self
 
 from ._util import (
-    _warn_deprecated,
     json_bytes,
     read_json,
     sha256_file,
@@ -41,7 +40,7 @@ from .models import (
 from .transactions import replay_transaction
 
 if TYPE_CHECKING:
-    from .runtime import AttemptContext, AttemptRuntime
+    from .runtime import AttemptContext
 
 type OutcomeAction = Literal["advance", "retry", "wait", "succeed", "fail", "pause"]
 type JoinCondition = Literal["all_succeeded", "all_terminal", "any_succeeded", "at_least"]
@@ -107,27 +106,6 @@ def join_mapping(
     if on_impossible_step is not None:
         result["on_impossible"] = {"action": "advance", "next_step": validate_step(on_impossible_step)}
     return result
-
-
-@dataclass(frozen=True)
-class JoinSpec:
-    """An explicit set of children and its completion condition.
-
-    .. deprecated:: 0.2
-       Use :meth:`httk.workflow.Attempt.gather`, which joins exactly the children
-       spawned on the publishing attempt.
-    """
-
-    children: tuple[ChildReference, ...]
-    condition: JoinCondition = "all_succeeded"
-    count: int | None = None
-    on_impossible_step: str | None = None
-
-    def __post_init__(self) -> None:
-        _warn_deprecated("JoinSpec", "Attempt.gather")
-
-    def as_mapping(self) -> dict[str, object]:
-        return join_mapping(self.children, self.condition, self.count, self.on_impossible_step)
 
 
 @dataclass(frozen=True)
@@ -521,7 +499,7 @@ class OutcomeDraft:
         priority: int | None = None,
         failure: Mapping[str, object] | None = None,
         retry: Mapping[str, object] | None = None,
-        join: JoinSpec | Mapping[str, object] | None = None,
+        join: Mapping[str, object] | None = None,
         pause: Mapping[str, object] | None = None,
         message: str | None = None,
         expected_data_generation: int | None = None,
@@ -578,7 +556,7 @@ class OutcomeDraft:
             "priority": priority,
             "failure": None if failure is None else dict(failure),
             "retry": None if retry is None else dict(retry),
-            "join": join.as_mapping() if isinstance(join, JoinSpec) else join,
+            "join": join,
             "pause": None if pause is None else dict(pause),
             "message": message,
             "expected_data_generation": expected_data_generation,
@@ -590,32 +568,6 @@ class OutcomeDraft:
         write_json_atomic(self.root / "outcome.json", body)
         os.rename(self.root, ready)
         return ready
-
-
-class OutcomeBuilder(OutcomeDraft):
-    """Compose and atomically publish one native outcome.
-
-    .. deprecated:: 0.2
-       Use :class:`httk.workflow.Attempt`, which owns one implicit draft per
-       attempt and publishes it through :meth:`~httk.workflow.Attempt.advance`,
-       :meth:`~httk.workflow.Attempt.gather`, and the other outcome methods.
-    """
-
-    runtime: "AttemptRuntime"
-
-    def __init__(self, runtime: "AttemptRuntime", root: Path | None = None) -> None:
-        _warn_deprecated("OutcomeBuilder", "the outcome methods of httk.workflow.Attempt")
-        self.runtime = runtime
-        super().__init__(runtime.context, runtime.control, root)
-
-    @classmethod
-    def resume(cls, runtime: "AttemptRuntime", root: str | os.PathLike[str]) -> "OutcomeBuilder":
-        """Reattach to a draft created earlier in this attempt."""
-
-        _warn_deprecated("OutcomeBuilder", "the outcome methods of httk.workflow.Attempt")
-        result = cls._resume(runtime.context, runtime.control, root)
-        result.runtime = runtime
-        return result
 
 
 class ReplayableWorkdirBatch:
@@ -750,39 +702,6 @@ def _check_state_item(name: str, value: object) -> None:
         json.dumps(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"job state value for {name!r} must be JSON: {exc}") from exc
-
-
-class WorkdirState:
-    """Atomic JSON application state stored below the current workdir.
-
-    .. deprecated:: 0.2
-       Use :class:`JobState` through :attr:`httk.workflow.Attempt.state`, which
-       survives isolated workdirs and step advances.
-    """
-
-    def __init__(self, workdir: str | os.PathLike[str]) -> None:
-        self.path = Path(workdir).resolve() / ".httk-runner" / "state.json"
-
-    def read(self) -> dict[str, object]:
-        return {} if not self.path.exists() else read_json(self.path)
-
-    def get(self, name: str, default: object = None) -> object:
-        return self.read().get(name, default)
-
-    def set(self, name: str, value: object) -> None:
-        if not name or "\x00" in name:
-            raise ValueError("state key must be a nonempty string without NUL")
-        state = self.read()
-        state[name] = value
-        write_json_atomic(self.path, state)
-
-    def delete(self, name: str) -> bool:
-        state = self.read()
-        if name not in state:
-            return False
-        del state[name]
-        write_json_atomic(self.path, state)
-        return True
 
 
 class RunLog:

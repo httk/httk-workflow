@@ -559,5 +559,5 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     # Every step of the flow really crossed the stand-in transport.
     commands = [json.loads(line)["command"] for line in remote.log.read_text(encoding="utf-8").splitlines()]
     assert any("workspace status" in item for item in commands)
-    assert any("tasks receive" in item for item in commands)
+    assert any("transfer receive" in item for item in commands)
     assert any(item.startswith("rsync ") or " rsync " in item for item in commands)
