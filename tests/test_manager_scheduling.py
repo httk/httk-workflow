@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow._logging import reset_logging
 from httk.workflow._util import tree_digest
 from httk.workflow.journal import JournalWriter
@@ -176,7 +176,7 @@ def _payload(
     return payload, job_id
 
 
-def _drive_until(workspace: WorkflowWorkspace, manager: TaskManager, job_id: str, kinds: set[str]) -> Marker:
+def _drive_until(workspace: Workspace, manager: TaskManager, job_id: str, kinds: set[str]) -> Marker:
     """Tick until one job reaches any of *kinds*, returning its marker."""
 
     deadline = time.monotonic() + 30.0
@@ -189,7 +189,7 @@ def _drive_until(workspace: WorkflowWorkspace, manager: TaskManager, job_id: str
     raise AssertionError(f"job {job_id} never reached {sorted(kinds)}")
 
 
-def _publish_cancel(workspace: WorkflowWorkspace, marker: Marker, **overrides: object) -> Path:
+def _publish_cancel(workspace: Workspace, marker: Marker, **overrides: object) -> Path:
     request: dict[str, object] = {
         "format": "httk-workflow-request",
         "format_version": 1,
@@ -207,7 +207,7 @@ def _publish_cancel(workspace: WorkflowWorkspace, marker: Marker, **overrides: o
     return workspace.publish_request(request)
 
 
-def _fake_manager(workspace: WorkflowWorkspace, *, heartbeat_age: float | None) -> str:
+def _fake_manager(workspace: Workspace, *, heartbeat_age: float | None) -> str:
     """Publish one foreign manager record, optionally with a stale heartbeat."""
 
     manager_id = str(uuid.uuid4())
@@ -228,7 +228,7 @@ def _fake_manager(workspace: WorkflowWorkspace, *, heartbeat_age: float | None) 
 
 
 def _fake_running_attempt(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     payload: Path,
     placement: str,
     *,
@@ -363,7 +363,7 @@ def test_a_state_frame_refuses_path_components_it_would_otherwise_join() -> None
 
 
 def test_a_path_traversing_attempt_control_fails_only_its_own_job(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="hostile")
     marker, _ = _fake_running_attempt(
         workspace,
@@ -403,7 +403,7 @@ def test_a_long_tick_heartbeats_while_it_scans_and_reports_its_own_slowness(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     running_payload, running_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="slow-runner")
     workspace.submit(running_payload, "project/running")
     # A crowd of submitted jobs this manager cannot register: they are scanned
@@ -412,13 +412,13 @@ def test_a_long_tick_heartbeats_while_it_scans_and_reports_its_own_slowness(
         crowd, _ = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag=f"crowd-{index}", backend="foreign")
         workspace.submit(crowd, f"project/crowd/{index}")
 
-    real_validate = WorkflowWorkspace.validate_job_payload
+    real_validate = Workspace.validate_job_payload
 
-    def slow_validate(self: WorkflowWorkspace, marker: Marker):
+    def slow_validate(self: Workspace, marker: Marker):
         time.sleep(0.025)
         return real_validate(self, marker)
 
-    monkeypatch.setattr(WorkflowWorkspace, "validate_job_payload", slow_validate)
+    monkeypatch.setattr(Workspace, "validate_job_payload", slow_validate)
 
     lease_seconds = 0.5
     manager = TaskManager(workspace, lease_seconds=lease_seconds, heartbeat_interval=0.0)
@@ -464,7 +464,7 @@ def test_a_long_tick_heartbeats_while_it_scans_and_reports_its_own_slowness(
 
 
 def test_a_bounded_pass_resumes_where_it_stopped_instead_of_starving_the_tail(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     submitted: list[str] = []
     for index in range(6):
         payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag=f"bounded-{index}")
@@ -494,7 +494,7 @@ def test_an_isolated_attempt_is_taken_over_only_against_evidence(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     lease = 10.0
 
     def running_job(tag: str, *, heartbeat_age: float | None, pid: int) -> tuple[Marker, str]:
@@ -544,7 +544,7 @@ def test_an_isolated_attempt_is_taken_over_only_against_evidence(
 
 
 def test_a_dead_writer_is_taken_over_at_once_without_waiting_out_the_grace(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     finished = subprocess.Popen([sys.executable, "-c", "pass"])
     finished.wait(timeout=30)
     payload, job_id = _payload(
@@ -581,7 +581,7 @@ def test_cancelling_a_running_job_fences_it_then_proves_its_process_is_gone(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="cancelled")
     workspace.submit(payload, "project/cancelled")
 
@@ -620,7 +620,7 @@ def test_cancelling_a_running_job_fences_it_then_proves_its_process_is_gone(
 
 
 def test_a_manager_that_dies_mid_cancellation_leaves_it_to_the_next_one(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="crashed")
     workspace.submit(payload, "project/crashed")
 
@@ -655,7 +655,7 @@ def test_a_manager_that_dies_mid_cancellation_leaves_it_to_the_next_one(tmp_path
 
 
 def test_cancelling_a_job_with_no_live_attempt_is_terminal_at_once(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="quiet", pool="elsewhere")
     workspace.submit(payload, "project/quiet")
 
@@ -680,7 +680,7 @@ def test_a_request_that_can_never_apply_is_retired_once_and_never_reread(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="stale-request", pool="elsewhere")
     workspace.submit(payload, "project/stale-request")
 
@@ -713,7 +713,7 @@ def test_a_request_for_an_unserved_backend_is_left_for_another_manager(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="foreign", backend="foreign")
     marker = workspace.submit(payload, "project/foreign")
 
@@ -740,7 +740,7 @@ def test_a_normal_run_never_reports_an_orphaned_attempt(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     for index in range(3):
         payload, _ = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag=f"clean-{index}")
         workspace.submit(payload, f"project/clean/{index}")
@@ -764,7 +764,7 @@ def test_a_registered_child_bundle_is_not_hashed_again_after_it_is_published(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(
         tmp_path / "source",
         _SPAWNING_RUNNER.format(child=_SUCCEED_RUNNER),

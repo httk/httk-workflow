@@ -21,13 +21,14 @@ from httk.workflow import (
     HarvestRecord,
     JobSpec,
     TaskManager,
-    WorkflowWorkspace,
+    Workspace,
     harvest,
     prepare_job_payload,
 )
 from httk.workflow._util import sha256_file
 from httk.workflow.harvest import HARVEST_FORMAT, module_distribution
-from httk.workflow.runners import PACKAGE, runner_path, runner_reference
+from httk.workflow.runners import runner_path, runner_reference
+from httk.workflow.vasp.runners import PACKAGE
 from httk.workflow.workflow_cli import command
 
 _SRC = str(Path(__file__).parents[1] / "src")
@@ -104,7 +105,7 @@ raise SystemExit(run.main())
 _CAMPAIGN_STEPS = ("branch", "calculate", "collect")
 
 
-def _publish(workspace: WorkflowWorkspace, source: Path, text: str, name: str) -> dict[str, object]:
+def _publish(workspace: Workspace, source: Path, text: str, name: str) -> dict[str, object]:
     """Publish one runner into the workspace store and return its reference."""
 
     source.parent.mkdir(parents=True, exist_ok=True)
@@ -113,11 +114,11 @@ def _publish(workspace: WorkflowWorkspace, source: Path, text: str, name: str) -
 
 
 @pytest.fixture(scope="module")
-def campaign(tmp_path_factory: pytest.TempPathFactory) -> tuple[WorkflowWorkspace, dict[str, str]]:
+def campaign(tmp_path_factory: pytest.TempPathFactory) -> tuple[Workspace, dict[str, str]]:
     """Run one complete campaign and return its finished workspace."""
 
     root = tmp_path_factory.mktemp("harvest")
-    workspace = WorkflowWorkspace.initialize(root / "workspace")
+    workspace = Workspace.initialize(root / "workspace")
     identifiers: dict[str, str] = {}
 
     campaign_runner = _publish(workspace, root / "runners" / "campaign.py", _CAMPAIGN_RUNNER, "campaign/run.py")
@@ -196,7 +197,7 @@ def _by_label(records: list[HarvestRecord]) -> dict[str, HarvestRecord]:
 
 
 def test_a_default_harvest_yields_only_the_succeeded_jobs(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
 ) -> None:
     workspace, identifiers = campaign
     records = _by_label(list(harvest(workspace)))
@@ -226,7 +227,7 @@ def test_a_default_harvest_yields_only_the_succeeded_jobs(
 
 
 def test_a_record_pins_the_job_digest_and_the_runner_that_executed_it(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
 ) -> None:
     workspace, identifiers = campaign
     parent = _by_label(list(harvest(workspace)))["campaign"]
@@ -264,7 +265,7 @@ def test_a_record_pins_the_job_digest_and_the_runner_that_executed_it(
 
 
 def test_harvesting_several_states_includes_the_failure_of_a_failed_job(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
 ) -> None:
     workspace, identifiers = campaign
     records = _by_label(list(harvest(workspace, states=("succeeded", "failed"))))
@@ -289,7 +290,7 @@ def test_harvesting_several_states_includes_the_failure_of_a_failed_job(
 
 
 def test_a_harvest_refuses_a_state_no_finished_job_can_be_in(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
 ) -> None:
     workspace, _ = campaign
     with pytest.raises(ValueError, match="cannot be harvested"):
@@ -299,7 +300,7 @@ def test_a_harvest_refuses_a_state_no_finished_job_can_be_in(
 
 
 def test_a_harvest_is_a_lazy_iterator_over_one_scan(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
 ) -> None:
     workspace, _ = campaign
     records = harvest(workspace)
@@ -315,7 +316,7 @@ def test_a_harvest_is_a_lazy_iterator_over_one_scan(
 
 
 def test_the_provenance_timeline_lists_activations_and_attempts_in_order(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
 ) -> None:
     workspace, _ = campaign
     parent = _by_label(list(harvest(workspace)))["campaign"]
@@ -345,7 +346,7 @@ def test_the_provenance_timeline_lists_activations_and_attempts_in_order(
 
 
 def test_the_provenance_of_a_failed_attempt_records_the_outcome_and_the_failure(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
 ) -> None:
     workspace, _ = campaign
     failed = _by_label(list(harvest(workspace, states=("failed",))))["beta"]
@@ -368,7 +369,7 @@ def test_the_provenance_of_a_failed_attempt_records_the_outcome_and_the_failure(
 
 
 def test_children_carry_their_spawn_labels_so_a_campaign_harvests_as_a_tree(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
 ) -> None:
     workspace, identifiers = campaign
     records = _by_label(list(harvest(workspace, states=("succeeded", "failed"))))
@@ -388,7 +389,7 @@ def test_children_carry_their_spawn_labels_so_a_campaign_harvests_as_a_tree(
 
 
 def test_the_placement_filter_harvests_one_subtree(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
 ) -> None:
     workspace, _ = campaign
     children = list(harvest(workspace, states=("succeeded", "failed"), placement="project/children"))
@@ -406,7 +407,7 @@ def test_the_placement_filter_harvests_one_subtree(
 
 
 def test_a_packaged_runner_record_names_the_distribution_that_installs_it(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
 ) -> None:
     workspace, _ = campaign
     packaged = _by_label(list(harvest(workspace, states=("failed",))))["packaged"]
@@ -440,7 +441,7 @@ def test_a_module_no_installed_distribution_owns_has_no_provenance() -> None:
 
 
 def test_the_command_streams_one_record_per_line_and_round_trips(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     workspace, _ = campaign
@@ -467,7 +468,7 @@ def test_the_command_streams_one_record_per_line_and_round_trips(
 
 
 def test_the_command_selects_states_and_placements(
-    campaign: tuple[WorkflowWorkspace, dict[str, str]],
+    campaign: tuple[Workspace, dict[str, str]],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     workspace, identifiers = campaign

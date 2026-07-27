@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow._logging import reset_logging
 from httk.workflow.cli import main as taskmanager_main
 from httk.workflow.journal import JournalWriter
@@ -88,7 +88,7 @@ def _payload(root: Path, runner_source: str, *, tag: str) -> tuple[Path, str]:
     return payload, job_id
 
 
-def _register(workspace: WorkflowWorkspace, placement: str, payload: Path):
+def _register(workspace: Workspace, placement: str, payload: Path):
     """Move one submitted job to ready without running it."""
 
     marker = workspace.submit(payload, placement)
@@ -111,7 +111,7 @@ def _register(workspace: WorkflowWorkspace, placement: str, payload: Path):
         )
 
 
-def _write_lock(workspace: WorkflowWorkspace, *, pid: int, age: timedelta = timedelta()) -> Path:
+def _write_lock(workspace: Workspace, *, pid: int, age: timedelta = timedelta()) -> Path:
     lock = workspace.control / "maintenance.lock"
     created = (datetime.now(UTC) - age).isoformat(timespec="microseconds").replace("+00:00", "Z")
     lock.write_text(
@@ -122,7 +122,7 @@ def _write_lock(workspace: WorkflowWorkspace, *, pid: int, age: timedelta = time
 
 
 def test_tick_survives_a_corrupt_ready_job_and_foreign_state_entries(tmp_path: Path, caplog) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     broken_payload, broken_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="broken")
     healthy_payload, healthy_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="healthy")
     broken = _register(workspace, "project/broken", broken_payload)
@@ -151,7 +151,7 @@ def test_tick_survives_a_corrupt_ready_job_and_foreign_state_entries(tmp_path: P
 
 
 def test_unpreparable_attempt_fails_only_its_own_job(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     blocked_payload, blocked_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="blocked")
     # A regular file where the persistent workdir belongs makes attempt
     # preparation fail after the claim has already been committed.
@@ -171,7 +171,7 @@ def test_unpreparable_attempt_fails_only_its_own_job(tmp_path: Path) -> None:
 
 
 def test_serve_drains_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="draining")
     workspace.submit(payload, "project/draining")
 
@@ -210,7 +210,7 @@ def test_serve_drains_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
 
 
 def test_maintenance_lock_defers_claiming_until_it_is_released(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="locked")
     workspace.submit(payload, "project/locked")
     lock = _write_lock(workspace, pid=os.getpid())
@@ -228,7 +228,7 @@ def test_maintenance_lock_defers_claiming_until_it_is_released(tmp_path: Path) -
 
 
 def test_stale_maintenance_lock_is_ignored_with_a_warning(tmp_path: Path, caplog) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="stale")
     workspace.submit(payload, "project/stale")
     _write_lock(workspace, pid=os.getpid(), age=timedelta(days=2))
@@ -244,7 +244,7 @@ def test_stale_maintenance_lock_is_ignored_with_a_warning(tmp_path: Path, caplog
 
 
 def test_claimed_job_is_released_when_the_lock_appears(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="racing")
     marker = _register(workspace, "project/racing", payload)
     assert marker.kind == "ready"
@@ -267,7 +267,7 @@ def test_claimed_job_is_released_when_the_lock_appears(tmp_path: Path) -> None:
 
 
 def test_json_log_records_carry_structured_fields(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="logged")
     workspace.submit(payload, "project/logged")
 

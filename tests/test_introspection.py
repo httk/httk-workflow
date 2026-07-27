@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from httk.core import CLIContext
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow._logging import reset_logging
 from httk.workflow._util import utc_now
 from httk.workflow.introspection import (
@@ -259,16 +259,16 @@ def _payload(
     return payload, job_id
 
 
-def _workspace(tmp_path: Path) -> WorkflowWorkspace:
-    return WorkflowWorkspace.initialize(tmp_path / "workspace")
+def _workspace(tmp_path: Path) -> Workspace:
+    return Workspace.initialize(tmp_path / "workspace")
 
 
-def _run(workspace: WorkflowWorkspace, *, pools: tuple[str, ...] = ("default",)) -> None:
+def _run(workspace: Workspace, *, pools: tuple[str, ...] = ("default",)) -> None:
     with TaskManager(workspace, pools=pools, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=60.0)
 
 
-def _register(workspace: WorkflowWorkspace, *, pools: tuple[str, ...] = ("default",)) -> None:
+def _register(workspace: Workspace, *, pools: tuple[str, ...] = ("default",)) -> None:
     """Register every submission without waiting for anything to be claimable.
 
     A ready job whose pool no manager serves is never idle work for
@@ -281,7 +281,7 @@ def _register(workspace: WorkflowWorkspace, *, pools: tuple[str, ...] = ("defaul
         manager.tick()
 
 
-def _hold_maintenance_lock(workspace: WorkflowWorkspace) -> None:
+def _hold_maintenance_lock(workspace: Workspace) -> None:
     """Write a live maintenance lock held by this very process."""
 
     (workspace.control / MAINTENANCE_LOCK_FILE).write_text(

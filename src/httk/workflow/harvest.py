@@ -71,7 +71,7 @@ from .models import (
     validate_failure,
     validate_label,
 )
-from .workspace import WorkflowWorkspace
+from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -616,7 +616,7 @@ def _children(value: object) -> dict[str, Mapping[str, object]]:
     }
 
 
-def record_of(workspace: WorkflowWorkspace, marker: Marker) -> HarvestRecord | None:
+def record_of(workspace: Workspace, marker: Marker) -> HarvestRecord | None:
     """Return the harvest record of the one job *marker* names.
 
     ``None`` means this job has no readable ``job.json`` and therefore no
@@ -684,7 +684,7 @@ def harvest_kinds(states: Iterable[str]) -> tuple[str, ...]:
 
 
 def harvest(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     *,
     states: Iterable[str] = DEFAULT_HARVEST_STATES,
     placement: str | PurePosixPath | None = None,
@@ -700,7 +700,7 @@ def harvest(
     The result is a lazy iterator over one scan of the requested state
     directories. Nothing is materialized, and building a record reads only that
     job's own ``job.json`` and journal chain, so harvesting is a single pass over
-    a workspace of any size. Attach read-only — ``WorkflowWorkspace(root,
+    a workspace of any size. Attach read-only — ``Workspace(root,
     mutable=False)`` — when nothing else in the process needs to write.
     """
 

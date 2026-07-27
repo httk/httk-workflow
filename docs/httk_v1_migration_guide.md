@@ -124,7 +124,7 @@ published *httk* v1 atomic sections after interruption. See
 [*httk* v1 task compatibility](v1_compatibility.md) for the precise
 compatibility boundary.
 
-## 4. Migrate project, configuration, and computers separately
+## 4. Migrate project, configuration, and remotes separately
 
 These imports do not migrate workflow code or task queues.
 
@@ -146,12 +146,13 @@ keys or the *httk* v1 queue. Imported project metadata records
 transfer, not transactional data. Use persistent `data.mode: "none"` jobs
 there, or initialize a separate transactional workspace before submission.
 
-Recognized *httk* v1 computer definitions can be mapped explicitly:
+Recognized *httk* v1 computer definitions can be mapped explicitly into
+*httk₂* remotes:
 
 ```console
-httk workflow computer import-v1 ~/.httk/computers/cluster-a \
+httk workflow remote import-v1 ~/.httk/computers/cluster-a \
   --name cluster-a
-httk workflow computer configure cluster-a:default \
+httk workflow remote configure cluster-a:default \
   --set workspace=/remote/path/to/workflow-workspace
 ```
 
@@ -720,7 +721,7 @@ read-only according to the project's provenance and retention policy.
 ## Migration checklist
 
 - [ ] An instantiated *httk* v1 task runs successfully through compatibility.
-- [ ] Project/configuration/computer imports were reviewed separately.
+- [ ] Project/configuration/remote imports were reviewed separately.
 - [ ] No live *httk* v1 queue is being treated as an *httk₂* workspace.
 - [ ] Persistent scratch and committed result files are distinguished.
 - [ ] The workspace's extensions match the native job's data model.

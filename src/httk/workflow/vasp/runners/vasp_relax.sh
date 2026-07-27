@@ -6,7 +6,7 @@
 # the same job inputs, the same job state, the same failure codes, and the same
 # files in the workdir and in the published data — because they call the same
 # helpers through the Bash bridge. The job inputs are documented in
-# httk.workflow.runners; a job may run either file and get the same result.
+# httk.workflow.vasp.runners; a job may run either file and get the same result.
 set -euo pipefail
 source "$HTTK_WORKFLOW_BASH_API"
 source "$HTTK_WORKFLOW_VASP_BASH_API"

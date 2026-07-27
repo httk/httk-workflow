@@ -16,7 +16,7 @@ from httk.workflow import (
     Runner,
     RunnerRef,
     TaskManager,
-    WorkflowWorkspace,
+    Workspace,
     prepare_job_payload,
 )
 
@@ -105,7 +105,7 @@ raise SystemExit(run.main())
 _CAMPAIGN_STEPS = ["aggregate", "characterize", "relax", "triage"]
 
 
-def _publish_campaign(workspace: WorkflowWorkspace, root: Path) -> dict[str, object]:
+def _publish_campaign(workspace: Workspace, root: Path) -> dict[str, object]:
     """Publish the campaign runner and return its job runner reference."""
 
     source = root / "campaign.py"
@@ -115,7 +115,7 @@ def _publish_campaign(workspace: WorkflowWorkspace, root: Path) -> dict[str, obj
 
 
 def _submit_campaign(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     root: Path,
     inputs: dict[str, object],
     *,
@@ -143,25 +143,25 @@ def _submit_campaign(
     return job.id
 
 
-def _run(workspace: WorkflowWorkspace) -> None:
+def _run(workspace: Workspace) -> None:
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=120.0)
 
 
-def _state(workspace: WorkflowWorkspace, job_id: str) -> dict[str, Any]:
+def _state(workspace: Workspace, job_id: str) -> dict[str, Any]:
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
     return dict(workspace.read_state(marker))
 
 
-def _workdir(workspace: WorkflowWorkspace, job_id: str) -> Path:
+def _workdir(workspace: Workspace, job_id: str) -> Path:
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
     return workspace.payload_path(marker.placement, marker.job_key) / "run"
 
 
 def test_a_dynamic_campaign_spawns_gathers_and_aggregates(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     job_id = _submit_campaign(workspace, tmp_path / "source", {"sites": 3})
     _run(workspace)
 
@@ -189,7 +189,7 @@ def test_a_dynamic_campaign_spawns_gathers_and_aggregates(tmp_path: Path) -> Non
 
 
 def test_a_failing_child_is_observed_and_triaged_by_a_later_step(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     job_id = _submit_campaign(workspace, tmp_path / "source", {"sites": 3, "failing": [1]})
     _run(workspace)
 
@@ -212,7 +212,7 @@ def test_a_failing_child_is_observed_and_triaged_by_a_later_step(tmp_path: Path)
 
 
 def test_an_impossible_join_advances_to_the_step_it_names(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     job_id = _submit_campaign(
         workspace,
         tmp_path / "source",
@@ -232,7 +232,7 @@ def test_an_impossible_join_advances_to_the_step_it_names(tmp_path: Path) -> Non
 
 
 def test_an_unregistered_step_fails_the_job_with_unknown_step(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     job_id = _submit_campaign(workspace, tmp_path / "source", {"sites": 1}, initial_step="charaterize")
     _run(workspace)
 
@@ -591,7 +591,7 @@ raise SystemExit(run.main())
 
 
 def test_job_state_survives_retries_advances_and_isolated_workdirs(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload = tmp_path / "source" / "payload"
     files = payload / "files"
     files.mkdir(parents=True)

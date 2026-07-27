@@ -9,10 +9,10 @@ runner reads, writes the ``job.json``, and submits the result, all in one call.
 
 .. code-block:: python
 
-    from httk.workflow import WorkflowWorkspace
+    from httk.workflow import Workspace
     from httk.workflow.scaffold import new_job
 
-    workspace = WorkflowWorkspace.initialize("workflow-workspace", extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize("workflow-workspace", extensions=["transactional-data-v1"])
     job = new_job(workspace, "vasp-relax", files={"POSCAR": "POSCAR"}, tag="silicon")
     print(job.job_key, job.payload)
 
@@ -53,7 +53,7 @@ from .models import (
 )
 from .runners import runner_path, runner_reference
 from .runtime_builders import JobSpec, prepare_job_payload
-from .workspace import WorkflowWorkspace
+from .workspace import Workspace
 
 #: The format of the machine-readable report :meth:`ScaffoldedJob.as_mapping` returns.
 JOB_SCAFFOLD_FORMAT = "httk-workflow-job-scaffold"
@@ -434,7 +434,7 @@ def structure_tag(path: str | os.PathLike[str]) -> str | None:
 
 
 def new_job(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     template: str | os.PathLike[str],
     *,
     inputs: Mapping[str, object] | None = None,
@@ -481,7 +481,7 @@ def new_job(
 
 
 def new_jobs(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     template: str | os.PathLike[str],
     items: Iterable[JobItem],
     *,
@@ -537,7 +537,7 @@ def new_jobs(
 
 
 def _prepare(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     template: str | os.PathLike[str],
     *,
     publish: PublishMode,
@@ -575,7 +575,7 @@ def _prepare(
 
 
 def _submit(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     prepared: _Prepared,
     *,
     inputs: Mapping[str, object] | None,

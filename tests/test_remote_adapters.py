@@ -13,11 +13,11 @@ import uuid
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import FAKE_HOST, Remote, fake_computer
+from conftest import FAKE_HOST, Remote, fake_remote
 from httk.core import CLIContext
 
-from httk.workflow import WorkflowWorkspace, adapter_runtime
-from httk.workflow.adapters import add_computer, run_adapter
+from httk.workflow import Workspace, adapter_runtime
+from httk.workflow.adapters import add_remote, run_adapter
 from httk.workflow.manager import TaskManager
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import command
@@ -103,7 +103,7 @@ def _payload(root: Path) -> tuple[Path, str]:
 def test_ssh_push_and_pull_round_trip_a_real_tree(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="push-pull")
-    bundle = fake_computer(project)
+    bundle = fake_remote(project)
     source = _tree(tmp_path / "source")
     destination = remote.root / "runs" / "incoming"
 
@@ -129,7 +129,7 @@ def test_ssh_push_and_pull_round_trip_a_real_tree(tmp_path: Path, remote: Remote
 def test_ssh_push_transfers_only_the_requested_files(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="batched")
-    bundle = fake_computer(project)
+    bundle = fake_remote(project)
     source = _tree(tmp_path / "source")
     destination = remote.root / "runs" / "batched"
 
@@ -151,7 +151,7 @@ def test_ssh_push_transfers_only_the_requested_files(tmp_path: Path, remote: Rem
 def test_ssh_push_refuses_a_path_that_escapes_the_transfer(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="escape")
-    bundle = fake_computer(project)
+    bundle = fake_remote(project)
     source = _tree(tmp_path / "source")
     with pytest.raises(RuntimeError, match="not workspace relative"):
         run_adapter(
@@ -192,7 +192,7 @@ def test_ssh_push_creates_the_destination_without_rsync_mkpath(
 def test_remote_invoke_keeps_quoting_hostile_arguments_intact(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="quoting")
-    bundle = fake_computer(project)
+    bundle = fake_remote(project)
     hostile = ["a b", "$HOME", "`id`", "'single'", '"double"', "semi;colon", "star*", "new\nline", "back\\slash"]
     sentinel = remote.root / "must-not-exist"
 
@@ -219,7 +219,7 @@ def test_remote_invoke_keeps_quoting_hostile_arguments_intact(tmp_path: Path, re
 def test_remote_invoke_honours_the_requested_directory(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="cwd")
-    bundle = fake_computer(project)
+    bundle = fake_remote(project)
     directory = remote.root / "a directory"
     directory.mkdir()
 
@@ -236,7 +236,7 @@ def test_remote_invoke_honours_the_requested_directory(tmp_path: Path, remote: R
 def test_remote_invoke_reports_a_failing_remote_command(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="failing")
-    bundle = fake_computer(project)
+    bundle = fake_remote(project)
 
     invoked = run_adapter(bundle, "invoke", {"queue": "default", "argv": ["false"]})
 
@@ -246,8 +246,8 @@ def test_remote_invoke_reports_a_failing_remote_command(tmp_path: Path, remote: 
 def test_remote_status_returns_the_remote_workspace_json(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="status")
-    workspace = WorkflowWorkspace.initialize(remote.root / "runs" / "workspace")
-    bundle = fake_computer(project, workspace=str(workspace.root))
+    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
+    bundle = fake_remote(project, workspace=str(workspace.root))
 
     result = run_adapter(
         bundle,
@@ -264,8 +264,8 @@ def test_remote_status_returns_the_remote_workspace_json(tmp_path: Path, remote:
 def test_ssh_start_manager_generates_and_submits_the_batch_script(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="submit")
-    workspace = WorkflowWorkspace.initialize(remote.root / "runs" / "workspace")
-    bundle = fake_computer(
+    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
+    bundle = fake_remote(
         project,
         workspace=str(workspace.root),
         account="p2026-1",
@@ -311,8 +311,8 @@ def test_ssh_start_manager_generates_and_submits_the_batch_script(tmp_path: Path
 def test_start_manager_keeps_an_explicit_worker_count(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="explicit-workers")
-    workspace = WorkflowWorkspace.initialize(remote.root / "runs" / "workspace")
-    bundle = fake_computer(project, workspace=str(workspace.root), workers="4")
+    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
+    bundle = fake_remote(project, workspace=str(workspace.root), workers="4")
 
     result = run_adapter(
         bundle,
@@ -333,8 +333,8 @@ def test_start_manager_prefers_the_stated_workspace_over_the_argv_heuristic(
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="stated-workspace")
-    workspace = WorkflowWorkspace.initialize(remote.root / "runs" / "workspace")
-    bundle = fake_computer(project, workspace=str(remote.root / "runs" / "configured"))
+    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
+    bundle = fake_remote(project, workspace=str(remote.root / "runs" / "configured"))
 
     result = run_adapter(
         bundle,
@@ -360,18 +360,18 @@ def test_start_manager_from_the_command_line_counts_managers_and_defers_workers(
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="cli-start-manager")
-    workspace = WorkflowWorkspace.initialize(remote.root / "runs" / "workspace")
-    fake_computer(project, workspace=str(workspace.root), workers="4")
+    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
+    fake_remote(project, workspace=str(workspace.root), workers="4")
     context = CLIContext("httk", project)
 
-    assert command(["remote", "start-manager", "cluster", "--count", "2"], context) == 0
+    assert command(["transfer", "start-manager", "cluster", "--count", "2"], context) == 0
     submitted = json.loads(capsys.readouterr().out)
     assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
     # No --workers on the command line, so the queue's setting is what runs.
     script = Path(str(submitted["script"])).read_text(encoding="utf-8")
     assert f"exec httk workflow manager run {workspace.root} --workers 4" in script
 
-    assert command(["remote", "start-manager", "cluster", "--workers", "1"], context) == 0
+    assert command(["transfer", "start-manager", "cluster", "--workers", "1"], context) == 0
     explicit = json.loads(capsys.readouterr().out)
     assert explicit["count"] == 1 and len(explicit["job_ids"]) == 1
     later = Path(str(explicit["script"])).read_text(encoding="utf-8")
@@ -382,8 +382,8 @@ def test_start_manager_from_the_command_line_counts_managers_and_defers_workers(
 def test_local_slurm_start_manager_submits_with_the_local_sbatch(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="local-batch")
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
-    bundle = fake_computer(
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    bundle = fake_remote(
         project,
         template="local-slurm",
         name="batch",
@@ -403,14 +403,14 @@ def test_local_slurm_start_manager_submits_with_the_local_sbatch(tmp_path: Path,
     assert "#SBATCH --partition=devel" in script_path.read_text(encoding="utf-8")
     assert result["job_ids"] == ["4201", "4202"]
     assert len(list(remote.spool.glob("*.json"))) == 2
-    # Nothing went over the transport for a computer that is not remote.
+    # Nothing went over the transport for a remote that is not remote at all.
     assert not remote.log.exists()
 
 
 def test_local_slurm_transfers_stay_in_this_filesystem(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="local-copy")
-    bundle = fake_computer(project, template="local-slurm", name="batch")
+    bundle = fake_remote(project, template="local-slurm", name="batch")
     source = _tree(tmp_path / "source")
 
     pushed = run_adapter(
@@ -427,7 +427,7 @@ def test_local_slurm_transfers_stay_in_this_filesystem(tmp_path: Path, remote: R
 def test_install_reports_a_missing_remote_httk_with_the_packaging_hint(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="install-missing")
-    bundle = fake_computer(project, httk_command=str(tmp_path / "nowhere" / "httk"))
+    bundle = fake_remote(project, httk_command=str(tmp_path / "nowhere" / "httk"))
 
     with pytest.raises(RuntimeError, match="pipx install httk-workflow"):
         run_adapter(bundle, "install", {"queue": "default"})
@@ -437,7 +437,7 @@ def test_install_finds_the_remote_httk_and_creates_the_workspace(tmp_path: Path,
     project = tmp_path / "project"
     initialize_project(project, name="install-found")
     workspace = remote.root / "runs" / "fresh"
-    bundle = fake_computer(project, workspace=str(workspace))
+    bundle = fake_remote(project, workspace=str(workspace))
 
     result = run_adapter(bundle, "install", {"queue": "default"})
 
@@ -453,7 +453,7 @@ def test_install_finds_the_remote_httk_and_creates_the_workspace(tmp_path: Path,
 def test_install_refuses_an_unreachable_host(tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="install-unreachable")
-    bundle = fake_computer(project)
+    bundle = fake_remote(project)
     monkeypatch.setenv("HTTK_FAKE_SSH_REFUSE", "1")
 
     with pytest.raises(RuntimeError, match=f"cannot reach someone@{FAKE_HOST}"):
@@ -472,12 +472,12 @@ def test_install_attempts_pip_only_when_bootstrap_opts_in(
     monkeypatch.setenv("HTTK_FAKE_PIP_LOG", str(log))
     absent = str(tmp_path / "nowhere" / "httk")
 
-    without = fake_computer(project, name="plain", httk_command=absent)
+    without = fake_remote(project, name="plain", httk_command=absent)
     with pytest.raises(RuntimeError, match="pipx install httk-workflow"):
         run_adapter(without, "install", {"queue": "default"})
     assert not log.exists()
 
-    opted_in = fake_computer(project, name="opted-in", httk_command=absent, bootstrap="pip")
+    opted_in = fake_remote(project, name="opted-in", httk_command=absent, bootstrap="pip")
     with pytest.raises(RuntimeError, match="pipx install httk-workflow"):
         run_adapter(opted_in, "install", {"queue": "default"})
     assert json.loads(log.read_text(encoding="utf-8").splitlines()[0]) == [
@@ -489,14 +489,14 @@ def test_install_attempts_pip_only_when_bootstrap_opts_in(
     ]
 
 
-def test_configure_verifies_connectivity_for_ssh_computers(
+def test_configure_verifies_connectivity_for_ssh_remotes(
     tmp_path: Path,
     remote: Remote,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="configure")
-    bundle = fake_computer(project)
+    bundle = fake_remote(project)
 
     assert run_adapter(bundle, "configure", {"queue": "default", "settings": {}})["connectivity"] == "ok"
 
@@ -510,7 +510,7 @@ def test_configure_verifies_connectivity_for_ssh_computers(
 def test_configure_checks_the_host_the_command_line_is_about_to_store(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="pending")
-    bundle = add_computer("cluster", template="ssh-slurm", project=project)
+    bundle = add_remote("cluster", template="ssh-slurm", project=project)
 
     assert run_adapter(bundle, "configure", {"queue": "default", "settings": {}})["connectivity"] == "skipped"
     pending = {"host": FAKE_HOST, "username": "someone"}
@@ -520,10 +520,10 @@ def test_configure_checks_the_host_the_command_line_is_about_to_store(tmp_path: 
 def test_an_unrecognized_adapter_kind_still_refuses(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="unknown")
-    bundle = fake_computer(project)
-    metadata = json.loads((bundle / "computer.json").read_text(encoding="utf-8"))
+    bundle = fake_remote(project)
+    metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     metadata["kind"] = "torque"
-    (bundle / "computer.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+    (bundle / "remote.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="'torque' is not implemented"):
         run_adapter(bundle, "status", {"queue": "default", "argv": ["true"]})
@@ -532,24 +532,24 @@ def test_an_unrecognized_adapter_kind_still_refuses(tmp_path: Path, remote: Remo
 def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote: Remote) -> None:
     source_root = tmp_path / "project"
     initialize_project(source_root, name="end-to-end")
-    WorkflowWorkspace(source_root).upgrade(["detached-transfer-v1"])
-    destination = WorkflowWorkspace.initialize(
+    Workspace(source_root).upgrade(["detached-transfer-v1"])
+    destination = Workspace.initialize(
         remote.root / "runs" / "workspace",
         extensions=["detached-transfer-v1"],
     )
-    fake_computer(source_root, workspace=str(destination.root))
+    fake_remote(source_root, workspace=str(destination.root))
     payload, job_id = _payload(tmp_path / "incoming")
-    WorkflowWorkspace(source_root).submit(payload, "jobs")
+    Workspace(source_root).submit(payload, "jobs")
 
     assert (
         command(
-            ["remote", "send", "cluster", job_id, "--source-workspace", str(source_root)],
+            ["transfer", "send", "cluster", job_id, "--source-workspace", str(source_root)],
             CLIContext("httk", source_root),
         )
         == 0
     )
 
-    assert WorkflowWorkspace(source_root).find_marker_by_id(job_id) is None
+    assert Workspace(source_root).find_marker_by_id(job_id) is None
     marker = destination.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "submitted"
     with TaskManager(destination, heartbeat_interval=0.01) as manager:

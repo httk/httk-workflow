@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from ._util import (
+    _warn_deprecated,
     fsync_directory,
     read_json,
     sha256_file,
@@ -86,7 +87,7 @@ def _marker_shaped(name: str) -> bool:
     return not name.startswith(".") and _MARKER_SHAPE_PATTERN.search(name) is not None
 
 
-class WorkflowWorkspace:
+class Workspace:
     """One self-contained httk workflow filesystem workspace."""
 
     def __init__(self, root: str | os.PathLike[str], *, mutable: bool = True, durable: bool = True) -> None:
@@ -155,7 +156,7 @@ class WorkflowWorkspace:
         extensions: Iterable[str] = (),
         durable: bool = True,
         policy: Mapping[str, object] | None = None,
-    ) -> "WorkflowWorkspace":
+    ) -> "Workspace":
         """Create and return a new workspace."""
 
         root_path = Path(root).resolve()
@@ -559,7 +560,7 @@ class WorkflowWorkspace:
 
         index: dict[str, _IndexEntry] = {}
         duplicates: set[str] = set()
-        for entry in WorkflowWorkspace.scan_marker_entries(self, CORE_STATE_KINDS):
+        for entry in Workspace.scan_marker_entries(self, CORE_STATE_KINDS):
             if isinstance(entry, MarkerFault):
                 self.report_marker_fault(entry)
                 continue
@@ -887,7 +888,7 @@ class WorkflowWorkspace:
                 os.rename(source_path, staging)
             except OSError as exc:
                 if exc.errno == errno.EXDEV:
-                    raise WorkflowWorkspaceError("move submission must remain on one filesystem") from exc
+                    raise WorkspaceOperationError("move submission must remain on one filesystem") from exc
                 raise
         else:
             shutil.copytree(source_path, staging, symlinks=False)
@@ -955,5 +956,24 @@ class WorkflowWorkspace:
         return ready
 
 
-class WorkflowWorkspaceError(WorkspaceUnavailableError):
+class WorkspaceOperationError(WorkspaceUnavailableError):
     """A workspace operation could not be completed."""
+
+
+if TYPE_CHECKING:  # pragma: no cover - the alias is served at runtime below
+    #: Deprecated spelling of :class:`Workspace`, kept for one release.
+    WorkflowWorkspace = Workspace
+
+
+def __getattr__(name: str) -> Any:
+    """Serve the deprecated ``WorkflowWorkspace`` spelling, with a warning.
+
+    The alias is the class itself rather than a subclass of it, so every
+    ``isinstance`` check and every annotation keeps meaning what it meant, and
+    only naming the old spelling is deprecated.
+    """
+
+    if name == "WorkflowWorkspace":
+        _warn_deprecated("WorkflowWorkspace", "httk.workflow.Workspace")
+        return Workspace
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

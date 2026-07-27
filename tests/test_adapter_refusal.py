@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest  # pyright: ignore[reportMissingImports]
 from httk.core import CLIContext
 
-from httk.workflow.adapters import ADAPTER_OPERATIONS, add_computer, run_adapter
+from httk.workflow.adapters import ADAPTER_OPERATIONS, add_remote, run_adapter
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import command
 
@@ -20,10 +20,10 @@ def _request(operation: str, root: Path) -> dict[str, object]:
 def _unrecognized(project: Path, name: str = "elsewhere") -> Path:
     """Return a bundle whose kind no maintained implementation claims."""
 
-    bundle = add_computer(name, template="local", project=project)
-    metadata = json.loads((bundle / "computer.json").read_text(encoding="utf-8"))
+    bundle = add_remote(name, template="local", project=project)
+    metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     metadata["kind"] = "torque"
-    (bundle / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
+    (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
     return bundle
 
 
@@ -50,10 +50,10 @@ def test_refusal_reaches_the_cli_without_a_traceback(tmp_path: Path, capsys) -> 
     project = tmp_path / "project"
     initialize_project(project, name="refusal-cli")
     bundle = _unrecognized(project, "remote")
-    metadata = json.loads((bundle / "computer.json").read_text(encoding="utf-8"))
+    metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = "/remote/runs"
-    (bundle / "computer.json").write_text(json.dumps(metadata), encoding="utf-8")
-    assert command(["remote", "status", "remote"], CLIContext("httk", project)) == 2
+    (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
+    assert command(["transfer", "status", "remote"], CLIContext("httk", project)) == 2
     captured = capsys.readouterr()
     assert "is not implemented" in captured.err
     assert "Traceback" not in captured.err
@@ -63,7 +63,7 @@ def test_refusal_reaches_the_cli_without_a_traceback(tmp_path: Path, capsys) -> 
 def test_local_adapter_keeps_working(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="local-still-works")
-    bundle = add_computer("here", template="local", project=project)
+    bundle = add_remote("here", template="local", project=project)
     source = tmp_path / "source"
     (source / "files").mkdir(parents=True)
     (source / "files" / "content").write_text("payload", encoding="utf-8")

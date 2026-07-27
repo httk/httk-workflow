@@ -4,7 +4,7 @@ import time
 import uuid
 from pathlib import Path
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow.errors import TransitionLostError
 from httk.workflow.journal import JournalWriter, read_record
 from httk.workflow.models import StateFrame
@@ -88,7 +88,7 @@ def test_journal_round_trip(tmp_path: Path) -> None:
 
 
 def test_transition_verifies_destination_after_ambiguous_rename(tmp_path: Path, monkeypatch) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, _ = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
     marker = workspace.submit(payload, "project/rename")
     real_rename = os.rename
@@ -122,7 +122,7 @@ def test_transition_verifies_destination_after_ambiguous_rename(tmp_path: Path, 
 
 
 def test_submit_and_run_multistep_persistent_job(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
     workspace.submit(payload, "project/a")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
@@ -135,7 +135,7 @@ def test_submit_and_run_multistep_persistent_job(tmp_path: Path) -> None:
 
 
 def test_new_manager_replays_published_outcome(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(
         tmp_path / "source",
         _TWO_STEP_RUNNER.replace('"action": "advance", "next_step": "collect"', '"action": "succeed"'),
@@ -168,7 +168,7 @@ def test_lost_running_transition_does_not_execute_runner(tmp_path: Path, monkeyp
 from pathlib import Path
 Path("runner-executed").write_text("unsafe")
 """
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", runner)
     workspace.submit(payload, "project/gated")
     real_transition = workspace.transition
@@ -217,7 +217,7 @@ temporary.mkdir()
 }))
 os.rename(temporary, control / "outcome.ready")
 """
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", runner, retry_on=["process_failure"])
     workspace.submit(payload, "project/restart")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
@@ -266,7 +266,7 @@ content = b"complete\\n"
 }))
 os.rename(temporary, control / "outcome.ready")
 """
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
     payload, job_id = _payload(tmp_path / "source", runner, data_mode="transactional")
     workspace.submit(payload, "project/transaction")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
@@ -370,7 +370,7 @@ os.rename(temporary, control / "outcome.ready")
 (temporary / "outcome.json").write_text(json.dumps(outcome))
 os.rename(temporary, control / "outcome.ready")
 """
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", runner)
     workspace.submit(payload, "project/parent")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
@@ -382,7 +382,7 @@ os.rename(temporary, control / "outcome.ready")
 
 
 def test_invalid_submission_moves_to_failed(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
     (payload / "files" / "runner").unlink()
     workspace.submit(payload, "project/invalid")
@@ -394,7 +394,7 @@ def test_invalid_submission_moves_to_failed(tmp_path: Path) -> None:
 
 
 def test_priority_request_renames_authoritative_marker(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _TWO_STEP_RUNNER)
     submitted = workspace.submit(payload, "project/request")
     with TaskManager(workspace, pools=("other",)) as manager:

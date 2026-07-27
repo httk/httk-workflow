@@ -5,13 +5,14 @@ import re
 import socket
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
 from httk.core import CLIContext
 
-from httk.workflow import WorkflowWorkspace
-from httk.workflow.adapters import add_computer, queue_settings, run_adapter
+from httk.workflow import Workspace
+from httk.workflow.adapters import add_remote, queue_settings, run_adapter
 from httk.workflow.manifests import (
     MAINTENANCE_LOCK_FILE,
     MAINTENANCE_LOCK_MAX_AGE_SECONDS,
@@ -46,10 +47,11 @@ def _write_lock(project: Path, value: object) -> Path:
 
 
 def _lock_json(**overrides: object) -> dict[str, object]:
+    created = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     record: dict[str, object] = {
         "pid": _dead_pid(),
         "hostname": socket.gethostname(),
-        "created": "2026-07-26T00:00:00.000000Z",
+        "created": created,
     }
     record.update(overrides)
     return record
@@ -57,7 +59,7 @@ def _lock_json(**overrides: object) -> dict[str, object]:
 
 def test_guard_records_json_and_removes_it(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch)
-    workspace = WorkflowWorkspace(project)
+    workspace = Workspace(project)
     path = project / ".httk-workflow" / MAINTENANCE_LOCK_FILE
     with workspace_maintenance_guard(workspace):
         holder = read_maintenance_lock(workspace)
@@ -81,7 +83,7 @@ def test_guard_records_json_and_removes_it(tmp_path: Path, monkeypatch) -> None:
 )
 def test_stale_lock_is_reclaimed_by_the_guard(tmp_path: Path, monkeypatch, content) -> None:
     project = _project(tmp_path, monkeypatch)
-    workspace = WorkflowWorkspace(project)
+    workspace = Workspace(project)
     path = _write_lock(project, content())
     with workspace_maintenance_guard(workspace):
         holder = read_maintenance_lock(workspace)
@@ -91,7 +93,7 @@ def test_stale_lock_is_reclaimed_by_the_guard(tmp_path: Path, monkeypatch, conte
 
 def test_live_lock_refuses_with_holder_information(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch)
-    workspace = WorkflowWorkspace(project)
+    workspace = Workspace(project)
     path = _write_lock(project, _lock_json(pid=os.getpid()))
     expected = re.escape(f"pid {os.getpid()} on host {socket.gethostname()}")
     with pytest.raises(ValueError, match=expected):
@@ -105,7 +107,7 @@ def test_live_lock_refuses_with_holder_information(tmp_path: Path, monkeypatch) 
 
 def test_lock_age_bound_is_one_day(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch)
-    workspace = WorkflowWorkspace(project)
+    workspace = Workspace(project)
     assert MAINTENANCE_LOCK_MAX_AGE_SECONDS == 24 * 60 * 60
     _write_lock(project, _lock_json(pid=os.getpid(), hostname="another-host.example.test"))
     holder = read_maintenance_lock(workspace)
@@ -137,47 +139,47 @@ def test_workspace_unlock_clears_stale_and_needs_force_for_live(tmp_path: Path, 
 
 
 def _configured(project: Path, *settings: str) -> tuple[Path, int]:
-    computer = add_computer("local", template="local", project=project)
+    remote = add_remote("local", template="local", project=project)
     code = command(
-        ["computer", "configure", "local", *[argument for value in settings for argument in ("--set", value)]],
+        ["remote", "configure", "local", *[argument for value in settings for argument in ("--set", value)]],
         CLIContext("httk", project),
     )
-    return computer, code
+    return remote, code
 
 
-def test_secret_setting_avoids_computer_json_and_manifests(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_secret_setting_avoids_remote_json_and_manifests(tmp_path: Path, monkeypatch, capsys) -> None:
     project = _project(tmp_path, monkeypatch, name="secrets")
-    computer, code = _configured(project, "password=hunter2", "token=abc")
+    remote, code = _configured(project, "password=hunter2", "token=abc")
     assert code == 0
     notice = capsys.readouterr().err
     assert "password, token" in notice and "credentials.json" in notice and "manifest" in notice
 
-    metadata = json.loads((computer / "computer.json").read_text(encoding="utf-8"))
+    metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
     assert "password" not in json.dumps(metadata) and "hunter2" not in json.dumps(metadata)
     assert metadata["queues"]["default"] == {}
 
-    credentials = computer / "credentials.json"
+    credentials = remote / "credentials.json"
     assert json.loads(credentials.read_text(encoding="utf-8")) == {"default": {"password": "hunter2", "token": "abc"}}
     assert credentials.stat().st_mode & 0o777 == 0o600
 
     manifest = create_manifest(project)
     body = bz2.decompress(manifest.read_bytes()).decode("utf-8")
     relative = credentials.relative_to(project).as_posix()
-    assert relative == ".httk-project/computers/local/credentials.json"
+    assert relative == ".httk-project/remotes/local/credentials.json"
     assert relative not in body and "hunter2" not in body
-    assert ".httk-project/computers/local/computer.json" in body
+    assert ".httk-project/remotes/local/remote.json" in body
 
 
 def test_secret_setting_remains_visible_to_the_adapter(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch, name="visible")
-    computer, code = _configured(project, "password=hunter2", "host=login.example.test")
+    remote, code = _configured(project, "password=hunter2", "host=login.example.test")
     assert code == 0
-    assert queue_settings(computer, "default") == {
+    assert queue_settings(remote, "default") == {
         "host": "login.example.test",
         "password": "hunter2",
     }
     echo = tmp_path / "request.json"
-    operation = computer / "invoke"
+    operation = remote / "invoke"
     operation.write_text(
         f"""#!/usr/bin/env python3
 import json, shutil, sys
@@ -188,16 +190,16 @@ print(json.dumps({{"format":"httk-computer-result","format_version":1,
         encoding="utf-8",
     )
     operation.chmod(0o755)
-    run_adapter(computer, "invoke", {"queue": "default", "argv": ["true"]})
+    run_adapter(remote, "invoke", {"queue": "default", "argv": ["true"]})
     assert json.loads(echo.read_text(encoding="utf-8"))["queue_settings"]["password"] == "hunter2"
 
 
-def test_whitelisted_setting_still_lands_in_computer_json(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_whitelisted_setting_still_lands_in_remote_json(tmp_path: Path, monkeypatch, capsys) -> None:
     project = _project(tmp_path, monkeypatch, name="whitelisted")
     destination = tmp_path / "elsewhere"
-    computer, code = _configured(project, f"workspace={destination}", "username=someone")
+    remote, code = _configured(project, f"workspace={destination}", "username=someone")
     assert code == 0
     assert "credentials.json" not in capsys.readouterr().err
-    metadata = json.loads((computer / "computer.json").read_text(encoding="utf-8"))
+    metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
     assert metadata["queues"]["default"] == {"workspace": str(destination), "username": "someone"}
-    assert not (computer / "credentials.json").exists()
+    assert not (remote / "credentials.json").exists()

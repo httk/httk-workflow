@@ -20,7 +20,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 from httk.core import CLIContext
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow.integrations import PACKAGE, runner_path
 from httk.workflow.integrations.cwl import (
     DOCKER_CAPABILITY,
@@ -123,8 +123,8 @@ steps:
 
 
 @pytest.fixture()
-def workspace(tmp_path: Path) -> Iterator[WorkflowWorkspace]:
-    yield WorkflowWorkspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
+def workspace(tmp_path: Path) -> Iterator[Workspace]:
+    yield Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
 
 
 @pytest.fixture()
@@ -162,7 +162,7 @@ def _inputs(flows: Path, values: dict[str, object], name: str = "job.yml") -> Pa
     return path
 
 
-def _drive(workspace: WorkflowWorkspace) -> None:
+def _drive(workspace: Workspace) -> None:
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=300.0)
 
@@ -213,7 +213,7 @@ def test_a_workflow_is_normalized_into_one_self_contained_plan(flows: Path) -> N
 # ---------------------------------------------------------------------------
 
 
-def test_a_scattered_workflow_runs_to_success_with_labeled_children(flows: Path, workspace: WorkflowWorkspace) -> None:
+def test_a_scattered_workflow_runs_to_success_with_labeled_children(flows: Path, workspace: Workspace) -> None:
     workflow = _write(flows, "flow.cwl", _SCATTER_WORKFLOW)
     inputs = _inputs(flows, {"messages": ["alpha", "beta", "gamma"]})
 
@@ -237,9 +237,7 @@ def test_a_scattered_workflow_runs_to_success_with_labeled_children(flows: Path,
     assert [path.name for path in published] == ["0000-joined.txt"]
 
 
-def test_a_subworkflow_runs_as_one_child_carrying_its_position_in_the_plan(
-    flows: Path, workspace: WorkflowWorkspace
-) -> None:
+def test_a_subworkflow_runs_as_one_child_carrying_its_position_in_the_plan(flows: Path, workspace: Workspace) -> None:
     workflow = _write(flows, "nested.cwl", _SUBWORKFLOW)
     inputs = _inputs(flows, {"message": "nested"})
 
@@ -261,7 +259,7 @@ def test_a_subworkflow_runs_as_one_child_carrying_its_position_in_the_plan(
     assert definition.inputs["cwl_document"] == "files/workflow.cwl.json"
 
 
-def test_a_single_command_line_tool_is_a_workflow_of_one(flows: Path, workspace: WorkflowWorkspace) -> None:
+def test_a_single_command_line_tool_is_a_workflow_of_one(flows: Path, workspace: Workspace) -> None:
     inputs = _inputs(flows, {"message": "solo"})
 
     imported = import_cwl(workspace, flows / "echo.cwl", inputs, tag="solo")
@@ -274,7 +272,7 @@ def test_a_single_command_line_tool_is_a_workflow_of_one(flows: Path, workspace:
     assert outputs["spoken"]["checksum"].startswith("sha1$")
 
 
-def test_a_staged_file_input_travels_with_the_job(flows: Path, workspace: WorkflowWorkspace, tmp_path: Path) -> None:
+def test_a_staged_file_input_travels_with_the_job(flows: Path, workspace: Workspace, tmp_path: Path) -> None:
     source = tmp_path / "letters.txt"
     source.write_text("one\ntwo\n", encoding="utf-8")
     document = _write(
@@ -294,7 +292,7 @@ def test_a_staged_file_input_travels_with_the_job(flows: Path, workspace: Workfl
     assert Path(str(outputs["joined"]["path"])).read_text(encoding="utf-8") == "one\ntwo\n"
 
 
-def test_a_v1_0_document_is_read_and_normalized_to_one_shape(flows: Path, workspace: WorkflowWorkspace) -> None:
+def test_a_v1_0_document_is_read_and_normalized_to_one_shape(flows: Path, workspace: Workspace) -> None:
     """An older document runs without the operator having to convert it first."""
 
     document = _write(flows, "old.cwl", _ECHO_TOOL.replace("cwlVersion: v1.2", "cwlVersion: v1.0"))
@@ -310,7 +308,7 @@ def test_a_v1_0_document_is_read_and_normalized_to_one_shape(flows: Path, worksp
     assert Path(str(outputs["spoken"]["path"])).read_text(encoding="utf-8").strip() == "vintage"
 
 
-def test_a_tool_that_exits_nonzero_fails_the_job_with_what_it_said(flows: Path, workspace: WorkflowWorkspace) -> None:
+def test_a_tool_that_exits_nonzero_fails_the_job_with_what_it_said(flows: Path, workspace: Workspace) -> None:
     document = _write(
         flows,
         "broken.cwl",
@@ -336,9 +334,7 @@ def test_a_tool_that_exits_nonzero_fails_the_job_with_what_it_said(flows: Path, 
 # ---------------------------------------------------------------------------
 
 
-def test_an_imported_job_references_the_packaged_runner_and_stages_the_plan(
-    flows: Path, workspace: WorkflowWorkspace
-) -> None:
+def test_an_imported_job_references_the_packaged_runner_and_stages_the_plan(flows: Path, workspace: Workspace) -> None:
     imported = import_cwl(
         workspace,
         _write(flows, "flow.cwl", _SCATTER_WORKFLOW),
@@ -356,7 +352,7 @@ def test_an_imported_job_references_the_packaged_runner_and_stages_the_plan(
     assert staged == ["files/inputs.json", "files/workflow.cwl.json", "job.json"]
 
 
-def test_a_docker_requirement_becomes_a_capability_and_a_warning(flows: Path, workspace: WorkflowWorkspace) -> None:
+def test_a_docker_requirement_becomes_a_capability_and_a_warning(flows: Path, workspace: Workspace) -> None:
     document = _write(
         flows,
         "docker.cwl",
@@ -483,9 +479,7 @@ expression: "${return {out: inputs.message};}"
 # ---------------------------------------------------------------------------
 
 
-def test_the_import_command_submits_a_cwl_job(
-    flows: Path, workspace: WorkflowWorkspace, tmp_path: Path, capsys
-) -> None:
+def test_the_import_command_submits_a_cwl_job(flows: Path, workspace: Workspace, tmp_path: Path, capsys) -> None:
     workflow = _write(flows, "flow.cwl", _SCATTER_WORKFLOW)
     inputs = _inputs(flows, {"messages": ["one", "two"]})
 

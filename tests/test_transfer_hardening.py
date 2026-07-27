@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from httk.workflow import FormatError, WorkflowWorkspace
+from httk.workflow import FormatError, Workspace
 from httk.workflow import transfers as transfers_module
 from httk.workflow.transfers import (
     TRANSFER_DIRECTORY,
@@ -53,9 +53,9 @@ def _payload(root: Path, *, tag: str = "test") -> tuple[Path, str]:
     return payload, job_id
 
 
-def _pair(tmp_path: Path) -> tuple[WorkflowWorkspace, WorkflowWorkspace]:
-    source = WorkflowWorkspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
-    destination = WorkflowWorkspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+def _pair(tmp_path: Path) -> tuple[Workspace, Workspace]:
+    source = Workspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
+    destination = Workspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
     return source, destination
 
 

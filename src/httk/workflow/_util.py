@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import time
+import warnings
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,16 @@ FIRST_RETRY_DELAY_SECONDS = 0.01
 #: The longest single sleep in a visibility retry schedule, so that even a
 #: minute-long deadline keeps re-probing instead of blocking on one long sleep.
 MAXIMUM_RETRY_DELAY_SECONDS = 5.0
+
+
+def _warn_deprecated(name: str, replacement: str) -> None:
+    """Announce one superseded interface that still works this release."""
+
+    warnings.warn(
+        f"{name} is deprecated and will be removed in a later release; use {replacement} instead",
+        DeprecationWarning,
+        stacklevel=3,
+    )
 
 
 def utc_now() -> str:

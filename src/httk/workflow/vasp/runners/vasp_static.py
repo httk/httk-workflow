@@ -8,9 +8,9 @@ static tags â€” ``IBRION = -1`` and ``NSW = 0`` unless the job says otherwise â€
 the result. The structure may be a POSCAR or the CONTCAR of an earlier
 relaxation, staged as an input file of this job and named by the ``poscar`` input.
 
-The job inputs are documented in :mod:`httk.workflow.runners`. Nothing here
+The job inputs are documented in :mod:`httk.workflow.vasp.runners`. Nothing here
 imports anything but an installed *httk-workflow*, so this one file is the whole
-runner: reference it as ``pkg:httk.workflow.runners/vasp_static.py``, publish it to
+runner: reference it as ``pkg:httk.workflow.vasp.runners/vasp_static.py``, publish it to
 a workspace runner store, or copy it and edit it.
 """
 

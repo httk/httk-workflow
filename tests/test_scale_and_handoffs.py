@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow import _util as util_module
 from httk.workflow.errors import UnsupportedExtensionError
 from httk.workflow.introspection import explain_job
@@ -93,7 +93,7 @@ def _progress(**extra: object) -> dict[str, object]:
     }
 
 
-def _chain(workspace: WorkflowWorkspace, marker: Marker, kinds: list[tuple[str, dict[str, object]]]) -> Marker:
+def _chain(workspace: Workspace, marker: Marker, kinds: list[tuple[str, dict[str, object]]]) -> Marker:
     """Advance one job through *kinds* with a single journal writer."""
 
     with workspace.open_journal_writer() as writer:
@@ -121,7 +121,7 @@ class _RglobCounter:
         return seen
 
 
-def _scan_cost(workspace: WorkflowWorkspace) -> int:
+def _scan_cost(workspace: Workspace) -> int:
     """Return the tree walks one complete scan of this workspace performs.
 
     A scan walks the state kinds that exist, so this is what a lookup that
@@ -139,7 +139,7 @@ def _scan_cost(workspace: WorkflowWorkspace) -> int:
 def test_marker_lookup_answers_from_the_index_instead_of_rescanning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     kinds = ("submitted", "ready", "waiting", "succeeded", "failed")
     job_ids: list[str] = []
     for index in range(300):
@@ -172,13 +172,13 @@ def test_marker_lookup_answers_from_the_index_instead_of_rescanning(
 
 
 def test_a_stale_index_entry_falls_back_to_the_placement_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", "payload")
     marker = workspace.submit(payload, "project/probe")
     assert workspace.find_marker_by_id(job_id) is not None
 
     # Another actor moves the marker: the cached entry now names nothing.
-    other = WorkflowWorkspace(workspace.root)
+    other = Workspace(workspace.root)
     moved = _chain(other, other.find_marker_by_id(job_id) or marker, [("ready", _progress(reason="submitted"))])
     counter = _RglobCounter(monkeypatch)
     found = workspace.find_marker_by_id(job_id)
@@ -189,7 +189,7 @@ def test_a_stale_index_entry_falls_back_to_the_placement_probe(tmp_path: Path, m
 
 
 def test_a_relocated_job_still_resolves_after_the_index_misses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", "payload")
     marker = workspace.submit(payload, "project/first")
     assert workspace.find_marker_by_id(job_id) is not None
@@ -206,10 +206,10 @@ def test_a_relocated_job_still_resolves_after_the_index_misses(tmp_path: Path, m
     assert counter.reset() == scan
 
 
-def _waiting_campaign(root: Path, children: int) -> tuple[WorkflowWorkspace, str]:
+def _waiting_campaign(root: Path, children: int) -> tuple[Workspace, str]:
     """Build one waiting parent whose join names *children* unhinted children."""
 
-    workspace = WorkflowWorkspace.initialize(root / "workspace")
+    workspace = Workspace.initialize(root / "workspace")
     references: list[dict[str, object]] = []
     for index in range(children):
         payload, child_id = _payload(root / "source", f"child-{index}", tag="child")
@@ -236,7 +236,7 @@ def _waiting_campaign(root: Path, children: int) -> tuple[WorkflowWorkspace, str
     return workspace, parent_id
 
 
-def _steady_tick_cost(workspace: WorkflowWorkspace, counter: _RglobCounter) -> int:
+def _steady_tick_cost(workspace: Workspace, counter: _RglobCounter) -> int:
     """Return the tree walks one steady-state tick of a waiting parent costs."""
 
     with TaskManager(workspace, pools=("nothing-runs-here",), heartbeat_interval=600.0) as manager:
@@ -278,7 +278,7 @@ def test_a_waiting_parent_costs_the_same_per_tick_however_many_children_it_has(
 def test_a_placement_hint_is_resolved_before_the_index_or_a_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", "payload")
     marker = workspace.submit(payload, "project/hinted")
     counter = _RglobCounter(monkeypatch)
@@ -294,21 +294,21 @@ def test_a_placement_hint_is_resolved_before_the_index_or_a_scan(
 
 def test_priority_bands_cannot_be_enabled_and_such_a_workspace_is_refused(tmp_path: Path) -> None:
     with pytest.raises(UnsupportedExtensionError) as enabling:
-        WorkflowWorkspace.initialize(tmp_path / "banded", extensions=["priority-bands-v1"])
+        Workspace.initialize(tmp_path / "banded", extensions=["priority-bands-v1"])
     assert "priority-bands-v1" in str(enabling.value)
 
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
     stored["extensions"] = ["priority-bands-v1"]
     (workspace.control / "format.json").write_text(json.dumps(stored), encoding="utf-8")
     for mutable in (True, False):
         with pytest.raises(UnsupportedExtensionError) as attaching:
-            WorkflowWorkspace(workspace.root, mutable=mutable)
+            Workspace(workspace.root, mutable=mutable)
         assert "re-initialized" in str(attaching.value)
 
 
 def test_registration_accepts_a_submitted_marker_an_operator_already_repriced(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", "payload")
     submitted = workspace.submit(payload, "project/repriced")
     assert submitted.path.name.endswith(".g0.init")
@@ -342,7 +342,7 @@ def test_registration_accepts_a_submitted_marker_an_operator_already_repriced(tm
 
 
 def test_a_ready_marker_carries_its_exact_priority_without_a_band_directory(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", "payload")
     workspace.submit(payload, "project/plain")
     with TaskManager(workspace, pools=("other",)) as manager:
@@ -357,7 +357,7 @@ def test_a_ready_marker_carries_its_exact_priority_without_a_band_directory(tmp_
 # ---------------------------------------------------------------------------
 
 
-def _cancelling_job(workspace: WorkflowWorkspace, tmp_path: Path, manager_id: str) -> tuple[Marker, str]:
+def _cancelling_job(workspace: Workspace, tmp_path: Path, manager_id: str) -> tuple[Marker, str]:
     """Leave one job fenced in ``cancelling`` by a named manager."""
 
     payload, job_id = _payload(tmp_path / "source", f"payload-{uuid.uuid4()}")
@@ -383,7 +383,7 @@ def _cancelling_job(workspace: WorkflowWorkspace, tmp_path: Path, manager_id: st
     return marker, job_id
 
 
-def _heartbeat(workspace: WorkflowWorkspace, manager_id: str, *, updated_at: str) -> Path:
+def _heartbeat(workspace: Workspace, manager_id: str, *, updated_at: str) -> Path:
     path = workspace.control / "managers" / manager_id
     path.mkdir(parents=True, exist_ok=True)
     (path / "manager.json").write_text(
@@ -410,7 +410,7 @@ def _heartbeat(workspace: WorkflowWorkspace, manager_id: str, *, updated_at: str
 
 
 def test_job_why_explains_a_cancelling_job_instead_of_calling_it_unknown(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     manager_id = str(uuid.uuid4())
     marker, _ = _cancelling_job(workspace, tmp_path, manager_id)
     _heartbeat(workspace, manager_id, updated_at=util_module.utc_now())
@@ -433,7 +433,7 @@ def test_job_why_explains_a_cancelling_job_instead_of_calling_it_unknown(tmp_pat
 
 
 def test_fsck_never_repoints_a_cancelling_marker_owned_by_a_live_manager(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     manager_id = str(uuid.uuid4())
     marker, _ = _cancelling_job(workspace, tmp_path, manager_id)
     _heartbeat(workspace, manager_id, updated_at=util_module.utc_now())
@@ -457,7 +457,7 @@ def test_fsck_never_repoints_a_cancelling_marker_owned_by_a_live_manager(tmp_pat
 
 
 def test_collection_removes_month_old_retired_requests(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     retired = workspace.control / "requests" / "retired"
     retired.mkdir(parents=True)
     old = retired / "old.json"
@@ -478,7 +478,7 @@ def test_collection_removes_month_old_retired_requests(tmp_path: Path) -> None:
 
 
 def test_a_manager_collects_in_the_background_only_when_asked(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
 
     def abandoned(name: str) -> Path:
         entry = workspace.control / "tmp" / name
@@ -514,10 +514,10 @@ def test_a_manager_collects_in_the_background_only_when_asked(tmp_path: Path) ->
 # ---------------------------------------------------------------------------
 
 
-def _consumed_child(tmp_path: Path) -> tuple[WorkflowWorkspace, Marker, Marker]:
+def _consumed_child(tmp_path: Path) -> tuple[Workspace, Marker, Marker]:
     """Return a workspace whose parent already decided a join on a failed child."""
 
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     parent_payload, parent_id = _payload(tmp_path / "source", "parent", tag="parent")
     parent = workspace.submit(parent_payload, "project/parent")
     child_payload, child_id = _payload(
@@ -558,7 +558,7 @@ def _consumed_child(tmp_path: Path) -> tuple[WorkflowWorkspace, Marker, Marker]:
     return workspace, parent, child
 
 
-def _continue_request(workspace: WorkflowWorkspace, marker: Marker, *, force: bool = False) -> None:
+def _continue_request(workspace: Workspace, marker: Marker, *, force: bool = False) -> None:
     request: dict[str, object] = {
         "format": "httk-workflow-request",
         "format_version": 1,
@@ -605,7 +605,7 @@ def test_a_forced_revival_journals_the_hazard_it_accepted(tmp_path: Path) -> Non
 
 
 def test_an_ordinary_child_is_continued_without_a_hazard(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, _ = _payload(tmp_path / "source", "solitary")
     marker = _chain(
         workspace,

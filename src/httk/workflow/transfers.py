@@ -24,7 +24,7 @@ from .models import (
     validate_runner_path,
     validate_sha256,
 )
-from .workspace import WorkflowWorkspace
+from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ def _payload_digest(payload: Path) -> str:
     return digest.hexdigest()
 
 
-def _bundled_runners(workspace: WorkflowWorkspace, payload: Path, transfer_dir: Path) -> list[dict[str, str]]:
+def _bundled_runners(workspace: Workspace, payload: Path, transfer_dir: Path) -> list[dict[str, str]]:
     """Copy the workspace runners one job references into its bundle.
 
     A detached job must remain runnable at its destination, so a runner it only
@@ -155,7 +155,7 @@ def _bundled_runners(workspace: WorkflowWorkspace, payload: Path, transfer_dir: 
     return [{"path": relative.as_posix(), "sha256": digest}]
 
 
-def _install_bundled_runners(workspace: WorkflowWorkspace, bundle: Path, manifest: Mapping[str, Any]) -> None:
+def _install_bundled_runners(workspace: Workspace, bundle: Path, manifest: Mapping[str, Any]) -> None:
     """Install every runner a bundle carries into the destination store.
 
     Installation is content addressed and therefore idempotent: an entry whose
@@ -197,15 +197,15 @@ def _manifest_runners(manifest: Mapping[str, Any]) -> list[dict[str, str]]:
     return result
 
 
-def _ledger_path(workspace: WorkflowWorkspace, transfer_id: str) -> Path:
+def _ledger_path(workspace: Workspace, transfer_id: str) -> Path:
     return workspace.control / "transfers" / f"{transfer_id}.json"
 
 
-def _all_markers(workspace: WorkflowWorkspace) -> list[Marker]:
+def _all_markers(workspace: Workspace) -> list[Marker]:
     return list(workspace.scan_markers(STATE_KINDS))
 
 
-def _unresolved_join_reference(workspace: WorkflowWorkspace, marker: Marker) -> bool:
+def _unresolved_join_reference(workspace: Workspace, marker: Marker) -> bool:
     if marker.kind == "waiting":
         return True
     for waiting in workspace.scan_markers(("waiting",)):
@@ -223,7 +223,7 @@ def _unresolved_join_reference(workspace: WorkflowWorkspace, marker: Marker) -> 
     return False
 
 
-def _seal_transferring(workspace: WorkflowWorkspace, marker: Marker, state: Mapping[str, Any]) -> Path:
+def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str, Any]) -> Path:
     payload = workspace.payload_path(marker.placement, marker.job_key)
     transfer_dir = payload / TRANSFER_DIRECTORY
     transfer_dir.mkdir(exist_ok=True)
@@ -271,7 +271,7 @@ def _seal_transferring(workspace: WorkflowWorkspace, marker: Marker, state: Mapp
 
 
 def detach_job(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     job_id: str,
     *,
     destination_workspace_id: str,
@@ -360,11 +360,11 @@ def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
     return manifest
 
 
-def _ack_path(workspace: WorkflowWorkspace, transfer_id: str) -> Path:
+def _ack_path(workspace: Workspace, transfer_id: str) -> Path:
     return workspace.control / "transfers" / "acks" / f"{transfer_id}.json"
 
 
-def import_bundle(workspace: WorkflowWorkspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
+def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
     """Idempotently import a sealed bundle and publish its prior state."""
 
     if "detached-transfer-v1" not in workspace.extensions:
@@ -521,7 +521,7 @@ def import_bundle(workspace: WorkflowWorkspace, bundle: str | os.PathLike[str]) 
 
 
 def _retire_sealed_bundle(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     transfer_id: str,
     *,
     provenance: Mapping[str, object],
@@ -553,7 +553,7 @@ def _retire_sealed_bundle(
     return retired
 
 
-def acknowledge_transfer(workspace: WorkflowWorkspace, acknowledgement: Mapping[str, object]) -> Path:
+def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, object]) -> Path:
     """Validate an acknowledgement and retire the sealed source bundle.
 
     An acknowledgement that carries an identity signature must carry a valid
@@ -583,7 +583,7 @@ def acknowledge_transfer(workspace: WorkflowWorkspace, acknowledgement: Mapping[
     return _retire_sealed_bundle(workspace, transfer_id, provenance={"acknowledgement": dict(acknowledgement)})
 
 
-def recover_transfers(workspace: WorkflowWorkspace) -> list[dict[str, object]]:
+def recover_transfers(workspace: Workspace) -> list[dict[str, object]]:
     """Finish source sealing and inventory every retained bundle."""
 
     results: list[dict[str, object]] = []
@@ -613,7 +613,7 @@ def recover_transfers(workspace: WorkflowWorkspace) -> list[dict[str, object]]:
 # ---------------------------------------------------------------------------
 
 
-def _ledgers(workspace: WorkflowWorkspace) -> list[dict[str, Any]]:
+def _ledgers(workspace: Workspace) -> list[dict[str, Any]]:
     """Read every transfer ledger of *workspace*, in a stable order."""
 
     directory = workspace.control / "transfers"
@@ -636,7 +636,7 @@ def _offer_record(ledger: Mapping[str, Any], bundle: Path) -> dict[str, object]:
 
 
 def offer_transfers(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     *,
     destination_workspace_id: str,
     states: Iterable[str] = DEFAULT_OFFER_STATES,
@@ -644,7 +644,7 @@ def offer_transfers(
 ) -> list[dict[str, object]]:
     """Seal every finished job of *workspace* into a bundle for one destination.
 
-    This is the far side of a results fetch: the computer that ran the work
+    This is the far side of a results fetch: the remote that ran the work
     offers what stopped there, and the workspace that asked pulls each bundle
     and imports it. Offering is idempotent because a sealed bundle is reported
     from its ledger rather than sealed again, so the jobs a first call detached
@@ -702,7 +702,7 @@ def offer_transfers(
 
 
 def retire_transfers(
-    workspace: WorkflowWorkspace,
+    workspace: Workspace,
     job_ids: Sequence[str],
     *,
     destination_workspace_id: str | None = None,
@@ -750,7 +750,7 @@ def retire_transfers(
     return results
 
 
-def discard_staged_bundle(workspace: WorkflowWorkspace, staging: Path) -> None:
+def discard_staged_bundle(workspace: Workspace, staging: Path) -> None:
     """Drop a staged incoming bundle whose payload the workspace now owns.
 
     The staging tree is renamed out of the incoming directory before it is

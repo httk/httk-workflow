@@ -1,7 +1,8 @@
-"""Versioned JSON computer-adapter bundles."""
+"""Versioned JSON remote-adapter bundles."""
 
 import importlib.resources
 import json
+import logging
 import os
 import re
 import shlex
@@ -14,8 +15,10 @@ from pathlib import Path
 from typing import Any
 
 from ._util import write_json_atomic
-from .configuration import data_home
+from .configuration import remotes_home
 from .projects import discover_project, read_project
+
+_LOGGER = logging.getLogger(__name__)
 
 ADAPTER_OPERATIONS = (
     "configure",
@@ -29,8 +32,25 @@ ADAPTER_OPERATIONS = (
 
 CREDENTIALS_FILE = "credentials.json"
 
+#: The metadata file of one adapter bundle.
+METADATA_FILE = "remote.json"
+#: What the same file was called before remotes were called remotes. A bundle
+#: that still carries only the old name is read, so an installation does not
+#: have to be migrated to keep working; everything written is written as
+#: :data:`METADATA_FILE`.
+LEGACY_METADATA_FILE = "computer.json"
+
+#: The format of the metadata file, and of the request and result documents that
+#: cross the adapter boundary. These three names are *protocol* and deliberately
+#: keep their historical spelling: a bundle or an adapter implementation written
+#: against an earlier release is still a valid one, and renaming the identifier
+#: would refuse it for no reason. Only the file *name* changed.
+ADAPTER_FORMAT = "httk-computer-adapter"
+REQUEST_FORMAT = "httk-computer-request"
+RESULT_FORMAT = "httk-computer-result"
+
 #: Queue settings that may be persisted in the signed, shareable
-#: ``computer.json``. Everything else is treated as a credential and is written
+#: ``remote.json``. Everything else is treated as a credential and is written
 #: to the manifest-excluded ``credentials.json`` instead.
 PERSISTABLE_QUEUE_SETTINGS = frozenset(
     {
@@ -54,13 +74,41 @@ PERSISTABLE_QUEUE_SETTINGS = frozenset(
 
 
 @dataclass(frozen=True)
-class ComputerTarget:
-    """Resolved computer bundle and queue."""
+class RemoteTarget:
+    """Resolved remote bundle and queue."""
 
     name: str
     queue: str
     bundle: Path
     project_local: bool
+
+
+#: Deprecated spelling of :class:`RemoteTarget`.
+ComputerTarget = RemoteTarget
+
+
+def metadata_path(bundle: str | os.PathLike[str]) -> Path:
+    """Return the metadata file of one adapter bundle, new name preferred.
+
+    A bundle written by this release carries ``remote.json``. One written before
+    the rename carries ``computer.json`` and is read where it lies, which is
+    what keeps an existing definition usable without being touched.
+    """
+
+    root = Path(bundle).expanduser()
+    current = root / METADATA_FILE
+    if current.exists():
+        return current
+    legacy = root / LEGACY_METADATA_FILE
+    if legacy.exists():
+        _LOGGER.debug(
+            "reading legacy adapter metadata %s; %s is the current name",
+            legacy,
+            METADATA_FILE,
+            extra={"event": "adapter_metadata_legacy", "path": str(legacy)},
+        )
+        return legacy
+    return current
 
 
 def _read_object(path: Path) -> dict[str, Any]:
@@ -73,18 +121,24 @@ def _read_object(path: Path) -> dict[str, Any]:
     return value
 
 
+def read_metadata(bundle: str | os.PathLike[str]) -> dict[str, Any]:
+    """Read the metadata of one adapter bundle, under either of its names."""
+
+    return _read_object(metadata_path(bundle))
+
+
 def validate_adapter_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
     """Validate static adapter metadata and executable operation files."""
 
     root = Path(bundle).expanduser().resolve()
-    metadata = _read_object(root / "computer.json")
-    if metadata.get("format") != "httk-computer-adapter" or metadata.get("format_version") != 1:
-        raise ValueError("computer.json must use httk-computer-adapter format version 1")
+    metadata = read_metadata(root)
+    if metadata.get("format") != ADAPTER_FORMAT or metadata.get("format_version") != 1:
+        raise ValueError(f"{METADATA_FILE} must use {ADAPTER_FORMAT} format version 1")
     if metadata.get("adapter_version") != 1:
-        raise ValueError(f"unsupported computer adapter version: {metadata.get('adapter_version')!r}")
+        raise ValueError(f"unsupported remote adapter version: {metadata.get('adapter_version')!r}")
     operations = metadata.get("operations")
     if not isinstance(operations, Mapping):
-        raise ValueError("computer adapter operations must be an object")
+        raise ValueError("remote adapter operations must be an object")
     for operation in ADAPTER_OPERATIONS:
         relative = operations.get(operation)
         if (
@@ -99,9 +153,9 @@ def validate_adapter_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
             raise ValueError(f"adapter operation is not executable: {executable}")
     queues = metadata.get("queues", {"default": {}})
     if not isinstance(queues, Mapping) or not queues:
-        raise ValueError("computer adapter must configure at least one queue")
+        raise ValueError("remote adapter must configure at least one queue")
     if not all(isinstance(name, str) and isinstance(value, Mapping) for name, value in queues.items()):
-        raise ValueError("computer adapter queues must map names to objects")
+        raise ValueError("remote adapter queues must map names to objects")
     timeout = metadata.get("timeout_seconds", 60.0)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
         raise ValueError("adapter timeout_seconds must be positive")
@@ -116,31 +170,31 @@ def validate_adapter_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
     return metadata
 
 
-def split_computer(value: str) -> tuple[str, str | None]:
+def split_remote(value: str) -> tuple[str, str | None]:
     name, separator, queue = value.partition(":")
     if not name:
-        raise ValueError("computer name cannot be empty")
+        raise ValueError("remote name cannot be empty")
     if separator and not queue:
         raise ValueError("queue name cannot be empty")
     return name, queue if separator else None
 
 
-def resolve_computer(
+def resolve_remote(
     value: str,
     *,
     project: str | os.PathLike[str] | None = None,
-) -> ComputerTarget:
-    """Resolve project-local before global computer definitions."""
+) -> RemoteTarget:
+    """Resolve project-local before global remote definitions."""
 
-    name, explicit_queue = split_computer(value)
+    name, explicit_queue = split_remote(value)
     project_root = discover_project(project)
     candidates: list[tuple[Path, bool]] = []
     default_queue: str | None = None
     if project_root is not None:
-        candidates.append((project_root / ".httk-project" / "computers" / name, True))
+        candidates.extend((root / name, True) for root in project_remote_roots(project_root))
         raw_default = read_project(project_root).get("default_queue")
         default_queue = raw_default if isinstance(raw_default, str) and raw_default else None
-    candidates.append((data_home() / "computers" / name, False))
+    candidates.append((remotes_home() / name, False))
     for bundle, local in candidates:
         if bundle.is_dir():
             metadata = validate_adapter_bundle(bundle)
@@ -148,31 +202,42 @@ def resolve_computer(
             queues = metadata.get("queues", {})
             assert isinstance(queues, Mapping)
             if queue not in queues:
-                raise ValueError(f"computer {name!r} does not configure queue {queue!r}")
-            return ComputerTarget(name, queue, bundle, local)
-    raise ValueError(f"unknown computer: {name}")
+                raise ValueError(f"remote {name!r} does not configure queue {queue!r}")
+            return RemoteTarget(name, queue, bundle, local)
+    raise ValueError(f"unknown remote: {name}")
 
 
-def list_computers(project: str | os.PathLike[str] | None = None) -> list[dict[str, object]]:
+def project_remote_roots(project_root: Path) -> tuple[Path, ...]:
+    """Return where one project keeps its remotes, current name first.
+
+    A project initialized before the rename holds them below ``computers/``, and
+    that directory is still read so an existing project keeps working.
+    """
+
+    control = project_root / ".httk-project"
+    return (control / "remotes", control / "computers")
+
+
+def list_remotes(project: str | os.PathLike[str] | None = None) -> list[dict[str, object]]:
     """List definitions with project entries shadowing global entries."""
 
     rows: dict[str, dict[str, object]] = {}
-    global_root = data_home() / "computers"
+    global_root = remotes_home()
     if global_root.is_dir():
         for path in sorted(global_root.iterdir()):
             if path.is_dir():
                 rows[path.name] = {"name": path.name, "scope": "global", "path": str(path)}
     project_root = discover_project(project)
     if project_root is not None:
-        local_root = project_root / ".httk-project" / "computers"
-        if local_root.is_dir():
-            for path in sorted(local_root.iterdir()):
-                if path.is_dir():
-                    rows[path.name] = {"name": path.name, "scope": "project", "path": str(path)}
+        for local_root in reversed(project_remote_roots(project_root)):
+            if local_root.is_dir():
+                for path in sorted(local_root.iterdir()):
+                    if path.is_dir():
+                        rows[path.name] = {"name": path.name, "scope": "project", "path": str(path)}
     return [rows[name] for name in sorted(rows)]
 
 
-def add_computer(
+def add_remote(
     name: str,
     *,
     template: str,
@@ -182,21 +247,22 @@ def add_computer(
     """Copy one maintained adapter template into user/project data."""
 
     if not name or "/" in name or name in {".", ".."}:
-        raise ValueError("invalid computer name")
+        raise ValueError("invalid remote name")
     if template not in {"local", "local-slurm", "ssh-slurm"}:
-        raise ValueError(f"unknown maintained computer template: {template}")
+        raise ValueError(f"unknown maintained remote template: {template}")
     if global_scope:
-        destination = data_home() / "computers" / name
+        destination = remotes_home() / name
     else:
         project_root = discover_project(project)
         if project_root is None:
             raise ValueError("a project is required unless --global is used")
-        destination = project_root / ".httk-project" / "computers" / name
+        destination = project_remote_roots(project_root)[0] / name
     if destination.exists():
         raise FileExistsError(destination)
     source = importlib.resources.files("httk.workflow").joinpath("adapter_templates", template)
     with importlib.resources.as_file(source) as template_path:
         validate_adapter_bundle(template_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(template_path, destination)
     validate_adapter_bundle(destination)
     return destination
@@ -243,7 +309,7 @@ def queue_settings(bundle: str | os.PathLike[str], queue: str) -> dict[str, Any]
     """Return persisted queue settings with credentials merged back in."""
 
     root = Path(bundle).expanduser().resolve()
-    queues = _read_object(root / "computer.json").get("queues", {})
+    queues = read_metadata(root).get("queues", {})
     scoped = queues.get(queue) if isinstance(queues, Mapping) else None
     settings: dict[str, Any] = dict(scoped) if isinstance(scoped, Mapping) else {}
     settings.update(read_credentials(root, queue))
@@ -272,7 +338,7 @@ def _legacy_settings(path: Path) -> dict[str, str]:
     return settings
 
 
-def import_v1_computer(
+def import_v1_remote(
     source: str | os.PathLike[str],
     *,
     name: str | None = None,
@@ -283,7 +349,8 @@ def import_v1_computer(
 
     Legacy shell programs are never copied or executed. Only their simple
     assignment-only ``config`` files are read, and the result uses a maintained
-    v2 adapter implementation.
+    v2 adapter implementation. What is read is an *httk v1* computer definition,
+    so the legacy names below are the names that tree really uses.
     """
 
     legacy = Path(source).expanduser().resolve()
@@ -307,14 +374,14 @@ def import_v1_computer(
             raise ValueError(f"invalid legacy queue name: {queue!r}")
         queue_settings[queue] = {**base, **_legacy_settings(queue_file)}
 
-    computer_name = legacy.name if name is None else name
-    destination = add_computer(
-        computer_name,
+    remote_name = legacy.name if name is None else name
+    destination = add_remote(
+        remote_name,
         template=template,
         global_scope=global_scope,
         project=project,
     )
-    metadata = _read_object(destination / "computer.json")
+    metadata = read_metadata(destination)
     queues: dict[str, dict[str, object]] = {}
     for queue, settings in queue_settings.items():
         row: dict[str, object] = {"legacy_settings": settings}
@@ -329,13 +396,16 @@ def import_v1_computer(
             row["username"] = settings.get("USERNAME", "")
         queues[queue] = row
     metadata["queues"] = queues
+    # The provenance format keeps its historical name: it records that this
+    # bundle was mapped from an httk v1 *computer* definition, which is what
+    # that tree calls the thing.
     metadata["legacy_import"] = {
         "format": "httk-v1-computer-import",
         "source": str(legacy),
         "legacy_executables_copied": False,
     }
-    write_path = destination / "computer.json"
-    descriptor, temporary_name = tempfile.mkstemp(prefix=".computer.json.", dir=destination)
+    write_path = metadata_path(destination)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{write_path.name}.", dir=destination)
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
@@ -366,7 +436,7 @@ def run_adapter(
     executable = root / str(operations[operation])
     requested_queue = request.get("queue")
     payload = {
-        "format": "httk-computer-request",
+        "format": REQUEST_FORMAT,
         "format_version": 1,
         "operation": operation,
         "adapter_dir": str(root),
@@ -403,7 +473,7 @@ def run_adapter(
         raise ValueError(f"adapter {operation} did not emit exactly one JSON result") from exc
     if not isinstance(result, dict):
         raise ValueError(f"adapter {operation} result must be a JSON object")
-    if result.get("format") != "httk-computer-result" or result.get("format_version") != 1:
+    if result.get("format") != RESULT_FORMAT or result.get("format_version") != 1:
         raise ValueError(f"adapter {operation} returned an unsupported result")
     if result.get("operation") != operation:
         raise ValueError(f"adapter result operation disagrees with request: {operation}")
@@ -412,3 +482,12 @@ def run_adapter(
     if completed.stderr:
         result["diagnostics"] = completed.stderr
     return result
+
+
+#: Deprecated spellings of the functions above, kept for one release. A remote
+#: was called a computer before this package borrowed git's word for it.
+add_computer = add_remote
+import_v1_computer = import_v1_remote
+list_computers = list_remotes
+resolve_computer = resolve_remote
+split_computer = split_remote

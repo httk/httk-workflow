@@ -3,7 +3,7 @@
 
 The same path as ``docs/quickstart.md``, one call per command:
 
-* :meth:`httk.workflow.WorkflowWorkspace.initialize` creates the workspace;
+* :meth:`httk.workflow.Workspace.initialize` creates the workspace;
 * :func:`httk.workflow.scaffold.new_job` builds and submits one job of the
   packaged ``vasp-relax`` template;
 * :class:`httk.workflow.TaskManager` runs everything that is ready;
@@ -23,7 +23,7 @@ to use the real thing.
 import os
 from pathlib import Path
 
-from httk.workflow import TaskManager, WorkflowWorkspace, harvest
+from httk.workflow import TaskManager, Workspace, harvest
 from httk.workflow.scaffold import new_job
 
 POSCAR = """silicon
@@ -48,7 +48,7 @@ def main() -> int:
 
     # One workspace is the whole state of the work. The extension lets its jobs
     # publish results as transactional data.
-    workspace = WorkflowWorkspace.initialize(
+    workspace = Workspace.initialize(
         Path("example-workflow-workspace"),
         extensions=["transactional-data-v1"],
     )

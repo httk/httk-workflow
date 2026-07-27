@@ -93,9 +93,9 @@ httk workflow runner publish defects.py --workspace workflow-workspace --name de
 ```
 
 ```python
-from httk.workflow import JobSpec, WorkflowWorkspace, prepare_job_payload
+from httk.workflow import JobSpec, Workspace, prepare_job_payload
 
-workspace = WorkflowWorkspace("workflow-workspace")
+workspace = Workspace("workflow-workspace")
 reference = workspace.publish_runner("defects.py", name="defects/run.py")
 job = prepare_job_payload(
     "prepared-job",
@@ -238,7 +238,7 @@ sha256)`, which is what a campaign whose steps all live in one published runner
 wants; `RunnerRef.workspace(path, sha256)` and `RunnerRef.installed(path,
 sha256)` name another shared runner. A payload runner cannot be inherited,
 because a synthesized child has no payload to copy it into: publish it with
-`WorkflowWorkspace.publish_runner`, or spawn a prepared payload directory
+`Workspace.publish_runner`, or spawn a prepared payload directory
 instead:
 
 ```python
@@ -292,8 +292,9 @@ does not reproduce the *httk* v1 exit-code and `ht.nextstep` interface.
 
 ## Superseded interfaces
 
-`AttemptRuntime`, `OutcomeBuilder`, `JoinSpec`, and `WorkdirState` still work in
-this release and emit a `DeprecationWarning`. Their replacements:
+`AttemptRuntime`, `OutcomeBuilder`, `JoinSpec`, `WorkdirState`, and the name
+`WorkflowWorkspace` still work in this release and emit a
+`DeprecationWarning`. Their replacements:
 
 | Superseded | Replacement |
 | --- | --- |
@@ -303,6 +304,11 @@ this release and emit a `DeprecationWarning`. Their replacements:
 | `runtime.outcome()` with `OutcomeBuilder` | the one implicit draft of an `Attempt` |
 | `JoinSpec(children, condition, ...)` | `Attempt.gather(step, when=..., count=...)` |
 | `WorkdirState` | `Attempt.state`, which is per job rather than per workdir |
+| `WorkflowWorkspace` | `Workspace`, the same class under a shorter name |
+
+`WorkflowWorkspace` is an alias of `Workspace` rather than a subclass of it, so
+every `isinstance` check and every annotation keeps meaning what it meant; only
+naming the old spelling is deprecated.
 
 Native Bash runners use the same protocol through {doc}`native_bash_api`.
 

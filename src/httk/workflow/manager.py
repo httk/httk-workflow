@@ -57,7 +57,7 @@ from .models import (
     validate_step,
 )
 from .transactions import replay_transaction
-from .workspace import WorkflowWorkspace
+from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
 _DRAIN_SIGNALS = (signal.SIGTERM, signal.SIGINT)
@@ -131,7 +131,7 @@ class TaskManager:
 
     def __init__(
         self,
-        workspace: WorkflowWorkspace,
+        workspace: Workspace,
         *,
         pools: Sequence[str] = ("default",),
         capabilities: Sequence[str] = (),

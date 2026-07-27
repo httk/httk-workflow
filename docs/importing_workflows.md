@@ -51,10 +51,10 @@ input node by name, so one document runs with values it does not itself carry.
 From Python:
 
 ```python
-from httk.workflow import WorkflowWorkspace
+from httk.workflow import Workspace
 from httk.workflow.integrations.pwd import import_pwd
 
-workspace = WorkflowWorkspace("workflow-workspace")
+workspace = Workspace("workflow-workspace")
 job = import_pwd(workspace, "workflow.json", modules=["workflow.py"], workflow_inputs={"x": 3})
 print(job.job_key, job.payload)
 ```
@@ -215,10 +215,10 @@ process — is handled by the manager without any failure being published at all
 ### From Python
 
 ```python
-from httk.workflow import WorkflowWorkspace
+from httk.workflow import Workspace
 from httk.workflow.integrations.cwl import import_cwl
 
-workspace = WorkflowWorkspace("workflow-workspace")
+workspace = Workspace("workflow-workspace")
 imported = import_cwl(workspace, "flow.cwl", "job.yml", tag="echo", data_mode="transactional")
 for warning in imported.warnings:
     print(warning)

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest  # pyright: ignore[reportMissingImports]
 from httk.core import CLIContext
 
-from httk.workflow import TaskManager, WorkflowWorkspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow import _util as util_module
 from httk.workflow.errors import FormatError, WorkspaceUnavailableError
 from httk.workflow.journal import (
@@ -98,7 +98,7 @@ def _progress(step: str = "run") -> dict[str, object]:
     }
 
 
-def _chain(workspace: WorkflowWorkspace, marker: Marker, kinds: list[tuple[str, dict[str, object]]]) -> Marker:
+def _chain(workspace: Workspace, marker: Marker, kinds: list[tuple[str, dict[str, object]]]) -> Marker:
     """Advance one job through *kinds* with a single journal writer."""
 
     progress = _progress()
@@ -108,7 +108,7 @@ def _chain(workspace: WorkflowWorkspace, marker: Marker, kinds: list[tuple[str, 
     return marker
 
 
-def _corrupt_frame(workspace: WorkflowWorkspace, marker: Marker) -> None:
+def _corrupt_frame(workspace: Workspace, marker: Marker) -> None:
     """Flip one payload byte of the frame *marker* references."""
 
     writer_id, segment, offset, _, _ = parse_record_ref(marker.record_ref)
@@ -126,7 +126,7 @@ def _corrupt_frame(workspace: WorkflowWorkspace, marker: Marker) -> None:
 
 
 def test_policy_is_written_at_initialization_and_round_trips(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
     assert stored["policy"] == {
         "visibility_deadline_seconds": 5.0,
@@ -139,7 +139,7 @@ def test_policy_is_written_at_initialization_and_round_trips(tmp_path: Path) -> 
     assert updated.visibility_deadline_seconds == 90.0
     # Another implementation attaching the same workspace sees the same policy,
     # and the unrelated members of format.json survived the read-modify-write.
-    attached = WorkflowWorkspace(tmp_path / "workspace", mutable=False)
+    attached = Workspace(tmp_path / "workspace", mutable=False)
     assert attached.policy == updated
     assert attached.visibility_deadline == 90.0
     assert attached.policy.retention.journal_days == 30.0
@@ -149,11 +149,11 @@ def test_policy_is_written_at_initialization_and_round_trips(tmp_path: Path) -> 
 
 
 def test_a_workspace_written_before_the_policy_section_reads_as_the_defaults(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
     del stored["policy"]
     (workspace.control / "format.json").write_text(json.dumps(stored), encoding="utf-8")
-    assert WorkflowWorkspace(tmp_path / "workspace").policy == WorkspacePolicy()
+    assert Workspace(tmp_path / "workspace").policy == WorkspacePolicy()
 
 
 @pytest.mark.parametrize(
@@ -174,16 +174,16 @@ def test_a_workspace_written_before_the_policy_section_reads_as_the_defaults(tmp
     ],
 )
 def test_policy_refuses_unknown_keys_and_impossible_values(tmp_path: Path, changes: dict[str, object]) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     with pytest.raises(FormatError):
         workspace.set_policy(changes)
     # A refused change never reaches the workspace.
-    assert WorkflowWorkspace(tmp_path / "workspace", mutable=False).policy == WorkspacePolicy()
+    assert Workspace(tmp_path / "workspace", mutable=False).policy == WorkspacePolicy()
 
 
 def test_policy_command_shows_sets_and_refuses(tmp_path: Path, capsys) -> None:
     root = tmp_path / "workspace"
-    WorkflowWorkspace.initialize(root)
+    Workspace.initialize(root)
     context = CLIContext("httk", tmp_path)
     assert command(["workspace", "policy", "show", str(root), "--json"], context) == 0
     assert json.loads(capsys.readouterr().out)["visibility_deadline_seconds"] == 5.0
@@ -193,7 +193,7 @@ def test_policy_command_shows_sets_and_refuses(tmp_path: Path, capsys) -> None:
     assert command(["workspace", "policy", "set", str(root), "lease_seconds", "0"], context) == 2
     assert command(["workspace", "policy", "set", str(root), "no_such_key", "1"], context) == 2
     assert command(["workspace", "policy", "set", str(root), "lease_seconds", "not-json"], context) == 2
-    policy = WorkflowWorkspace(root, mutable=False).policy
+    policy = Workspace(root, mutable=False).policy
     assert policy.visibility_deadline_seconds == 60.0
     assert policy.retention.trash_days == 14.0
     assert policy.lease_seconds == 900.0
@@ -202,7 +202,7 @@ def test_policy_command_shows_sets_and_refuses(tmp_path: Path, capsys) -> None:
 
 
 def test_the_manager_takes_its_lease_from_policy_unless_it_is_overridden(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", policy={"lease_seconds": 42.0})
+    workspace = Workspace.initialize(tmp_path / "workspace", policy={"lease_seconds": 42.0})
     with TaskManager(workspace) as manager:
         assert manager.lease_seconds == 42.0
     with TaskManager(workspace, lease_seconds=7.0) as manager:
@@ -210,7 +210,7 @@ def test_the_manager_takes_its_lease_from_policy_unless_it_is_overridden(tmp_pat
 
 
 def test_the_journal_rotates_at_the_configured_segment_size(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", policy={"journal_segment_bytes": 4096})
+    workspace = Workspace.initialize(tmp_path / "workspace", policy={"journal_segment_bytes": 4096})
     with workspace.open_journal_writer() as writer:
         assert writer.maximum_segment_bytes == 4096
         references = [writer.append({"filler": "x" * 900, "index": index}) for index in range(10)]
@@ -239,7 +239,7 @@ def test_the_visibility_schedule_spends_exactly_the_configured_deadline() -> Non
 def test_a_state_read_retries_until_the_configured_deadline(tmp_path: Path, monkeypatch) -> None:
     """The old fixed budget of seven probes was ~0.63s; policy now decides."""
 
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", policy={"visibility_deadline_seconds": 45.0})
+    workspace = Workspace.initialize(tmp_path / "workspace", policy={"visibility_deadline_seconds": 45.0})
     payload, _ = _payload(tmp_path)
     marker = _chain(workspace, workspace.submit(payload, "jobs"), [("ready", {"reason": "submitted"})])
     writer_id, segment, _, _, _ = parse_record_ref(marker.record_ref)
@@ -255,7 +255,7 @@ def test_a_state_read_retries_until_the_configured_deadline(tmp_path: Path, monk
 
 
 def test_a_short_visibility_deadline_is_honored_in_real_time(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", policy={"visibility_deadline_seconds": 0.75})
+    workspace = Workspace.initialize(tmp_path / "workspace", policy={"visibility_deadline_seconds": 0.75})
     payload, _ = _payload(tmp_path)
     marker = _chain(workspace, workspace.submit(payload, "jobs"), [("ready", {"reason": "submitted"})])
     writer_id, segment, _, _, _ = parse_record_ref(marker.record_ref)
@@ -267,7 +267,7 @@ def test_a_short_visibility_deadline_is_honored_in_real_time(tmp_path: Path) -> 
 
 
 def test_a_visible_frame_costs_no_backoff_at_all(tmp_path: Path, monkeypatch) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace", policy={"visibility_deadline_seconds": 3600.0})
+    workspace = Workspace.initialize(tmp_path / "workspace", policy={"visibility_deadline_seconds": 3600.0})
     payload, _ = _payload(tmp_path)
     marker = _chain(workspace, workspace.submit(payload, "jobs"), [("ready", {"reason": "submitted"})])
     slept: list[float] = []
@@ -282,10 +282,10 @@ def test_a_visible_frame_costs_no_backoff_at_all(tmp_path: Path, monkeypatch) ->
 
 
 def test_workspaces_are_durable_by_default_and_opt_out_explicitly(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     assert workspace.durable is True
-    assert WorkflowWorkspace(tmp_path / "workspace").durable is True
-    assert WorkflowWorkspace(tmp_path / "workspace", durable=False).durable is False
+    assert Workspace(tmp_path / "workspace").durable is True
+    assert Workspace(tmp_path / "workspace", durable=False).durable is False
 
 
 def test_the_default_write_path_synchronizes_and_no_durable_does_not(tmp_path: Path, monkeypatch) -> None:
@@ -297,13 +297,13 @@ def test_the_default_write_path_synchronizes_and_no_durable_does_not(tmp_path: P
         real_fsync(descriptor)
 
     monkeypatch.setattr(os, "fsync", counting_fsync)
-    durable = WorkflowWorkspace.initialize(tmp_path / "durable")
+    durable = Workspace.initialize(tmp_path / "durable")
     payload, _ = _payload(tmp_path)
     _chain(durable, durable.submit(payload, "jobs"), [("ready", {"reason": "submitted"})])
     assert counted
 
     counted.clear()
-    relaxed = WorkflowWorkspace.initialize(tmp_path / "relaxed", durable=False)
+    relaxed = Workspace.initialize(tmp_path / "relaxed", durable=False)
     payload, _ = _payload(tmp_path)
     _chain(relaxed, relaxed.submit(payload, "jobs"), [("ready", {"reason": "submitted"})])
     assert not counted
@@ -318,7 +318,7 @@ def test_both_command_line_interfaces_default_to_durable(tmp_path: Path) -> None
     assert native_cli._parser().parse_args(["--no-durable", "init", "x"]).no_durable is True
     assert v1_cli._parser().parse_args(["--no-durable", "prepare", "a", "b"]).no_durable is True
     assert native_cli.main(["init", str(tmp_path / "workspace")]) == 0
-    assert WorkflowWorkspace(tmp_path / "workspace", mutable=False).policy == WorkspacePolicy()
+    assert Workspace(tmp_path / "workspace", mutable=False).policy == WorkspacePolicy()
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +327,7 @@ def test_both_command_line_interfaces_default_to_durable(tmp_path: Path) -> None
 
 
 def test_fsck_reports_nothing_about_a_healthy_workspace(tmp_path: Path, capsys) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, _ = _payload(tmp_path)
     _chain(
         workspace,
@@ -346,7 +346,7 @@ def test_fsck_reports_nothing_about_a_healthy_workspace(tmp_path: Path, capsys) 
 
 
 def test_fsck_detects_a_corrupted_frame_and_a_deleted_segment(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     corrupt_payload, corrupt_id = _payload(tmp_path)
     corrupt = _chain(
         workspace,
@@ -371,7 +371,7 @@ def test_fsck_detects_a_corrupted_frame_and_a_deleted_segment(tmp_path: Path) ->
 
 
 def test_fsck_reports_a_marker_that_names_the_wrong_frame(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, _ = _payload(tmp_path)
     marker = _chain(
         workspace,
@@ -385,7 +385,7 @@ def test_fsck_reports_a_marker_that_names_the_wrong_frame(tmp_path: Path) -> Non
 
 
 def test_fsck_repairs_a_damaged_marker_and_the_job_runs_again(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path)
     marker = _chain(
         workspace,
@@ -424,7 +424,7 @@ def test_fsck_repairs_a_damaged_marker_and_the_job_runs_again(tmp_path: Path) ->
 
 
 def test_fsck_leaves_an_unrepairable_marker_alone_and_can_quarantine_it(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path)
     marker = _chain(workspace, workspace.submit(payload, "jobs"), [("ready", {"reason": "submitted"})])
     # The only frame of this job is its first: nothing older can be recovered.
@@ -443,7 +443,7 @@ def test_fsck_leaves_an_unrepairable_marker_alone_and_can_quarantine_it(tmp_path
 
 
 def test_fsck_never_touches_a_marker_whose_manager_is_still_alive(tmp_path: Path) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path)
     manager_id = str(uuid.uuid4())
     marker = _chain(
@@ -480,7 +480,7 @@ def test_fsck_never_touches_a_marker_whose_manager_is_still_alive(tmp_path: Path
 
 
 def test_fsck_reports_an_uninterpretable_state_entry(tmp_path: Path, capsys) -> None:
-    workspace = WorkflowWorkspace.initialize(tmp_path / "workspace")
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, _ = _payload(tmp_path)
     marker = workspace.submit(payload, "jobs")
     broken = marker.path.with_name("not-a-job-key.p500.g1.init")

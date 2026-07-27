@@ -27,12 +27,14 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "v1": ("prepare", "submit", "run"),
     "config": ("init", "show", "set", "unset", "import-v1"),
     "project": ("init", "import-v1", "show", "doctor", "manifest"),
-    "computer": ("list", "add", "configure", "install", "import-v1", "show", "remove"),
-    "remote": ("send", "fetch", "offer", "retire", "start-manager", "status"),
+    "remote": ("list", "add", "configure", "install", "import-v1", "show", "remove"),
+    "transfer": ("send", "fetch", "offer", "retire", "start-manager", "status"),
 }
 
-#: Spellings kept alive for one release, and what replaced each of them.
-DEPRECATED_GROUPS = ("tasks",)
+#: Spellings kept alive for one release: ``tasks`` is the transfer group, which
+#: is also what the frozen protocol vectors send, and ``computer`` is the remote
+#: management group under the name it had before it borrowed git's word.
+DEPRECATED_GROUPS = ("tasks", "computer")
 
 
 def _context(tmp_path: Path) -> CLIContext:
@@ -105,7 +107,7 @@ def test_the_deprecated_spellings_are_absent_from_the_help(tmp_path: Path, capsy
         assert group not in printed
     assert "internal" not in printed
 
-    assert command(["remote", "--help"], _context(tmp_path)) == 0
+    assert command(["transfer", "--help"], _context(tmp_path)) == 0
     assert "receive" not in capsys.readouterr().out
 
     assert command(["v1", "run", "--help"], _context(tmp_path)) == 0
@@ -126,7 +128,7 @@ def test_an_unknown_action_under_a_known_group_names_that_group(tmp_path: Path, 
     assert "httk workflow workspace" in captured
     assert "invalid choice: 'frobnicate'" in captured
     # The group's own actions are what it offers instead, not the tree's groups.
-    assert "'fsck'" in captured and "'computer'" not in captured
+    assert "'fsck'" in captured and "'remote'" not in captured
 
 
 def test_an_unknown_action_under_a_nested_group_names_that_nested_group(tmp_path: Path, capsys) -> None:
@@ -240,20 +242,20 @@ def test_the_executables_still_take_their_durability_switch_before_the_command()
 # ---------------------------------------------------------------------------
 
 
-def test_the_deprecated_tasks_group_still_reaches_the_remote_commands(tmp_path: Path) -> None:
+def test_the_deprecated_tasks_group_still_reaches_the_transfer_commands(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
     for action in ("send", "fetch", "offer", "retire", "start-manager", "status"):
         assert (
             parser.parse_args(["tasks", action, *_sample_arguments(action)]).handler
-            is parser.parse_args(["remote", action, *_sample_arguments(action)]).handler
+            is parser.parse_args(["transfer", action, *_sample_arguments(action)]).handler
         )
 
 
 def _sample_arguments(action: str) -> list[str]:
-    """The least a remote subcommand needs in order to parse."""
+    """The least a transfer subcommand needs in order to parse."""
 
     if action == "fetch":
-        return ["--computer", "cluster"]
+        return ["--remote", "cluster"]
     if action == "offer":
         return ["WS", "--destination-workspace-id", "UUID"]
     if action == "retire":
@@ -269,22 +271,22 @@ def test_the_superseded_option_spellings_still_parse(tmp_path: Path) -> None:
     # The v1 task-set filter was --set before it was --taskset.
     assert parser.parse_args(["v1", "run", "WS", "--set", "vasp"]).taskset == "vasp"
     assert parser.parse_args(["v1", "prepare", "A", "B", "--set", "vasp"]).taskset == "vasp"
-    # ... and --set on `computer configure` is, and stays, KEY=VALUE settings.
-    assert parser.parse_args(["computer", "configure", "cluster", "--set", "host=a"]).set == ["host=a"]
+    # ... and --set on `remote configure` is, and stays, KEY=VALUE settings.
+    assert parser.parse_args(["remote", "configure", "cluster", "--set", "host=a"]).set == ["host=a"]
 
     # Adapter timeouts were --timeout before they were --adapter-timeout.
-    assert parser.parse_args(["remote", "fetch", "--computer", "c", "--timeout", "5"]).adapter_timeout == 5.0
-    assert parser.parse_args(["computer", "install", "c", "--timeout", "5"]).adapter_timeout == 5.0
+    assert parser.parse_args(["transfer", "fetch", "--remote", "c", "--timeout", "5"]).adapter_timeout == 5.0
+    assert parser.parse_args(["remote", "install", "c", "--timeout", "5"]).adapter_timeout == 5.0
     # The manager's idle wait was --timeout before it was --idle-timeout.
     assert parser.parse_args(["manager", "run", "WS", "--timeout", "5"]).idle_timeout == 5.0
     assert parser.parse_args(["manager", "run", "WS"]).idle_timeout == 3600.0
 
     # The workspace direction flags were all spelled --workspace.
-    assert parser.parse_args(["remote", "send", "c", "J", "--workspace", "/w"]).source_workspace == "/w"
-    assert parser.parse_args(["remote", "status", "c", "--workspace", "/w"]).remote_workspace == "/w"
-    assert parser.parse_args(["remote", "start-manager", "c", "--workspace", "/w"]).remote_workspace == "/w"
-    # `remote fetch` keeps --workspace for the local destination it always meant.
-    assert parser.parse_args(["remote", "fetch", "--computer", "c", "--workspace", "/w"]).workspace == "/w"
+    assert parser.parse_args(["transfer", "send", "c", "J", "--workspace", "/w"]).source_workspace == "/w"
+    assert parser.parse_args(["transfer", "status", "c", "--workspace", "/w"]).remote_workspace == "/w"
+    assert parser.parse_args(["transfer", "start-manager", "c", "--workspace", "/w"]).remote_workspace == "/w"
+    # `transfer fetch` keeps --workspace for the local destination it always meant.
+    assert parser.parse_args(["transfer", "fetch", "--remote", "c", "--workspace", "/w"]).workspace == "/w"
 
 
 def test_the_v1_siblings_default_their_task_set_differently_on_purpose(tmp_path: Path) -> None:
@@ -321,7 +323,7 @@ def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
     ):
         assert spelling[:2] == ("httk", "workflow")
     receive = parser.parse_args(["tasks", "receive", "--workspace", "/w", "--bundle", "/b"])
-    assert receive.handler is workflow_cli.handle_remote_receive
+    assert receive.handler is workflow_cli.handle_transfer_receive
     # The same half is reachable by its canonical, if still unadvertised, name.
     assert parser.parse_args(["internal", "receive", "--workspace", "/w", "--bundle", "/b"]).handler is receive.handler
-    assert parser.parse_args(["remote", "receive", "--workspace", "/w", "--bundle", "/b"]).handler is receive.handler
+    assert parser.parse_args(["transfer", "receive", "--workspace", "/w", "--bundle", "/b"]).handler is receive.handler
