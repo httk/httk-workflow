@@ -1,17 +1,18 @@
-"""Importing workflows written in another language into *httk₂* jobs.
+"""Shared tail for importing workflows written in another language.
 
-This package is the one-way door through which a workflow that was authored
-somewhere else becomes an ordinary *httk₂* job. Two languages are understood:
+This module is the compat-internal home the language importers share. Two
+languages are understood, each living in its own consumer package under
+:mod:`httk.workflow.compat`:
 
 ``pwd``
     The `Python Workflow Definition
     <https://github.com/pythonworkflow/python-workflow-definition>`_ exchange
     format: a JSON graph of Python function nodes, literal input nodes and named
-    output nodes. :func:`httk.workflow.integrations.pwd.import_pwd` turns one
+    output nodes. :func:`httk.workflow.compat.pwd.import_pwd` turns one
     document into one job that runs the packaged ``pwd_runner.py``.
 ``cwl``
     The `Common Workflow Language <https://www.commonwl.org/>`_, supported as a
-    workflow *language* only. :func:`httk.workflow.integrations.cwl.import_cwl`
+    workflow *language* only. :func:`httk.workflow.compat.cwl.import_cwl`
     parses and normalizes a document with *cwl-utils* and turns it into one job
     that runs the packaged ``cwl_runner.py``. **cwltool is neither used, bundled
     nor invoked**: the normalized document is executed entirely on *httk₂*'s own
@@ -23,12 +24,12 @@ happens to contain the document it came from; nothing translates a job back into
 the language it was written in, and nothing keeps an imported job in sync with a
 document that changes afterwards. Import again to pick up a new revision.
 
-Neither importer writes a runner file per workflow. Both reference the packaged
-runner beside this module through the reserved installed form —
-``pkg:httk.workflow.integrations/pwd_runner.py`` and
-``pkg:httk.workflow.integrations/cwl_runner.py`` — which the manager resolves
-inside its own module allowlist, whose default ``httk.workflow`` covers this
-package. The document is data in the payload; the program that executes it is
+Neither importer writes a runner file per workflow. Each references the runner
+it ships beside its own package through the reserved installed form —
+``pkg:httk.workflow.compat.pwd/pwd_runner.py`` and
+``pkg:httk.workflow.compat.cwl/cwl_runner.py`` — which the manager resolves
+inside its own module allowlist, whose default ``httk.workflow`` covers those
+packages. The document is data in the payload; the program that executes it is
 the same installed bytes for every imported job.
 
 :func:`runner_reference` builds the ``runner`` member of one ``job.json`` for
@@ -42,34 +43,28 @@ import os
 import shutil
 import uuid
 from collections.abc import Mapping
+from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from .._util import sha256_file
-from ..models import normalize_placement, validate_inputs
-from ..runtime_builders import JobSpec, prepare_job_payload
-from ..scaffold import (
+from httk.workflow import Workspace
+from httk.workflow._util import sha256_file
+from httk.workflow.protocol import (
+    JobSpec,
+    normalize_placement,
+    prepare_job_payload,
+    validate_inputs,
+)
+from httk.workflow.scaffold import (
     DEFAULT_PLACEMENT,
     FILES_DIRECTORY,
     ScaffoldedJob,
     payload_relative,
 )
-from ..workspace import Workspace
-
-#: The module the reserved ``pkg:`` runner form names for these runners.
-PACKAGE = "httk.workflow.integrations"
-
-#: Every packaged runner of this package, in the order they are documented.
-RUNNERS = (
-    "cwl_runner.py",
-    "pwd_runner.py",
-)
 
 __all__ = [
     "DEFAULT_PLACEMENT",
     "FILES_DIRECTORY",
-    "PACKAGE",
-    "RUNNERS",
     "ScaffoldedJob",
     "runner_path",
     "runner_reference",
@@ -77,26 +72,31 @@ __all__ = [
 ]
 
 
-def runner_path(name: str) -> Path:
-    """Return the installed file of one packaged integration runner."""
+def runner_path(package: str, name: str) -> Path:
+    """Return the installed file of one packaged compat runner.
 
-    if name not in RUNNERS:
-        raise ValueError(f"unknown packaged runner {name!r}; packaged runners: {', '.join(RUNNERS)}")
-    return Path(__file__).with_name(name)
+    *package* is the importable package the runner file lives beside — its own
+    consumer package, e.g. ``httk.workflow.compat.cwl`` — so a compat engine
+    resolves and digest-pins the exact bytes it ships rather than a runner owned
+    by some shared module.
+    """
+
+    return Path(str(files(package).joinpath(name)))
 
 
-def runner_reference(name: str) -> dict[str, object]:
+def runner_reference(package: str, name: str) -> dict[str, object]:
     """Return the ``runner`` member of a ``job.json`` running one packaged runner.
 
-    The digest is taken from the installed bytes, which is exactly what the
+    The reserved ``pkg:`` form names the runner inside its own consumer package,
+    and the digest is taken from the installed bytes, which is exactly what the
     manager verifies before it stages and executes them.
     """
 
-    path = runner_path(name)
+    path = runner_path(package, name)
     return {
         "backend": "path",
         "source": "installed",
-        "path": f"pkg:{PACKAGE}/{PurePosixPath(name)}",
+        "path": f"pkg:{package}/{PurePosixPath(name)}",
         "sha256": sha256_file(path),
         "arguments": [],
     }
@@ -105,6 +105,7 @@ def runner_reference(name: str) -> dict[str, object]:
 def submit_integration_job(
     workspace: Workspace,
     *,
+    runner_package: str,
     runner: str,
     workflow: str,
     initial_step: str,
@@ -132,7 +133,7 @@ def submit_integration_job(
     """
 
     normalized = normalize_placement(placement)
-    reference = runner_reference(runner)
+    reference = runner_reference(runner_package, runner)
     staging = workspace.control / "tmp" / f"import.{uuid.uuid4()}"
     try:
         staging.mkdir(parents=True, exist_ok=False)

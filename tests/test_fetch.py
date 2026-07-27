@@ -103,7 +103,7 @@ def _plant_legacy_link(workspace: Workspace, job_id: str) -> None:
 
     A submission deliberately dereferences symlinks, so the relative link a v1
     parent carries only ever appears in the live payload, exactly as
-    ``httk.workflow.v1`` writes it once the job is in the workspace.
+    ``httk.workflow.compat.v1`` writes it once the job is in the workspace.
     """
 
     marker = workspace.find_marker_by_id(job_id)

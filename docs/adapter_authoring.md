@@ -9,24 +9,34 @@ operator-facing description of the same adapters — what each maintained kind
 does, and which command-line options drive it — is in
 {doc}`workflow_cli`.
 
-A *remote adapter* is a versioned directory of executables. Everything
-*httk-workflow* does on another machine — push a job bundle, run a command,
-submit a manager, pull results back — goes through one of them. The engine never
-opens an ssh connection, never spells out a scheduler command, and never parses
-anything but the one JSON document an operation prints.
+A *remote adapter* is a versioned directory with one dispatcher executable.
+Everything *httk-workflow* does on another machine — push a job bundle, run a
+command, submit a manager, pull results back — is one *operation*, and every
+operation runs the bundle's single `adapter` program. The engine never opens an
+ssh connection, never spells out a scheduler command, and never parses anything
+but the one JSON document that program prints.
+
+## One executable, seven operations
+
+There is one executable per bundle, not one per operation. The operation to run
+is named inside the request JSON (`"operation": …`), so a single program serves
+all seven. Earlier releases carried seven wrapper files —
+`configure`, `install`, `invoke`, `push`, `pull`, `start-manager`, `status` —
+but they were byte-identical two-line thin execs that differed only in the
+operation word they passed along. There was no security boundary between them:
+the operation name is already stated, and cross-checked, *inside* the request,
+so which file was executed proved nothing the request did not already carry.
+Collapsing them to one `adapter` removes a maintenance burden and a false
+signal without giving up anything. The operation *names* are unchanged — they
+are {py:data}`httk.workflow.adapters.ADAPTER_OPERATIONS` and the value of the
+request's `operation` member — only the file layout changed.
 
 ## The bundle
 
 ```text
 my-cluster/
 ├── remote.json          # the only member the engine reads directly
-├── configure
-├── install
-├── invoke
-├── push
-├── pull
-├── start-manager
-├── status
+├── adapter              # the one dispatcher, executable, run for every operation
 └── credentials.json     # written by the CLI, never by you, mode 0600
 ```
 
@@ -64,15 +74,6 @@ satisfying it stops being usable, which is the point.
   "format": "httk-computer-adapter",
   "format_version": 1,
   "kind": "pbs",
-  "operations": {
-    "configure": "configure",
-    "install": "install",
-    "invoke": "invoke",
-    "pull": "pull",
-    "push": "push",
-    "start-manager": "start-manager",
-    "status": "status"
-  },
   "queues": {
     "default": {"host": "login.example.org", "workspace": "/scratch/me/runs"},
     "large": {"host": "login.example.org", "workspace": "/scratch/me/runs", "nodes": "16"}
@@ -82,24 +83,31 @@ satisfying it stops being usable, which is the point.
 }
 ```
 
+There is no `operations` member. The bundle carries one executable named
+`adapter`, which validation requires to exist and be executable; the operation
+is selected by the request, not by a per-operation path.
+
 | Member | Required | Meaning |
 | --- | --- | --- |
 | `format` | yes | must be `httk-computer-adapter` (the historical spelling; see above) |
 | `format_version` | yes | must be `1` |
 | `adapter_version` | yes | must be `1`; the version of the operation contract below |
-| `operations` | yes | one bundle-relative path per operation in {py:data}`httk.workflow.adapters.ADAPTER_OPERATIONS`. All seven must be present, none may be absolute or contain `..`, and each must exist and be executable |
 | `queues` | no | maps queue name to a settings object; defaults to `{"default": {}}` and must not be empty |
 | `timeout_seconds` | no | positive number, default `60`; the wall-clock bound on one operation |
 | `required_binaries` | no | array of program names that must be on `PATH` **of the machine running the adapter**, checked with `shutil.which` at every validation |
 | `kind` | no | free-form; see below |
 
+Beside `remote.json` the bundle must contain one executable file named
+{py:data}`httk.workflow.adapters.ADAPTER_EXECUTABLE` (`adapter`); validation
+refuses a bundle whose `adapter` is missing or not runnable.
+
 `kind` is *not* interpreted by the loader. It is read only by
 {py:mod}`httk.workflow.adapter_protocol` — the packaged implementation the
 maintained templates execute — which dispatches on it and refuses any value
 outside `local`, `local-slurm`, `ssh-slurm` rather than running the wrong code in
-the wrong place. A custom adapter whose wrappers execute your own program may put
-whatever it likes there; setting a distinctive value is still worth doing,
-because a wrapper accidentally repointed at the packaged implementation then
+the wrong place. A custom adapter whose `adapter` executes your own program may
+put whatever it likes there; setting a distinctive value is still worth doing,
+because an `adapter` accidentally repointed at the packaged implementation then
 refuses instead of, say, copying a cluster job into the local filesystem.
 
 `required_binaries` is what makes `local-slurm` unusable on a machine without
@@ -109,34 +117,35 @@ local requirement, the remote `qsub` is not.
 
 ## The seven operations
 
-Each operation is a separate executable. It is started as
+Every operation runs the same `adapter` executable. It is started as
 
 ```text
-OPERATION_EXECUTABLE  /tmp/httk-adapter-XXXX.json
+adapter  /tmp/httk-adapter-XXXX.json
 ```
 
-with no shell, no environment contract, and no stdin. It must:
+with no shell, no environment contract, and no stdin — one argument, the request
+file. The program must:
 
 1. read the one JSON request file named by `argv[1]`;
-2. do the work;
-3. print **exactly one** JSON result object on stdout;
-4. exit `0`.
+2. read `request["operation"]` to learn which operation to perform;
+3. do the work;
+4. print **exactly one** JSON result object on stdout;
+5. exit `0`.
 
 Diagnostics belong on stderr, where they are attached to the result as
 `diagnostics` when the call otherwise succeeds.
 
-The maintained templates are seven two-line wrappers that all execute the same
-module, passing the operation name themselves:
+The maintained template is a one-line dispatcher that executes the packaged
+module:
 
 ```sh
 #!/bin/sh
-exec python3 -m httk.workflow.adapter_runtime start-manager "$@"
+exec python3 -m httk.workflow.adapter_runtime "$@"
 ```
 
-Which operation is running is therefore fixed by *which file was executed*, per
-the `operations` map — never by anything in the request. The packaged
-implementation still cross-checks the request's `operation` member against the
-name it was invoked with and refuses a mismatch.
+Which operation is running is fixed by the request's `operation` member and
+nothing else; the module dispatches on it. A result whose `operation` disagrees
+with the request is rejected by {py:func}`httk.workflow.adapters.run_adapter`.
 
 ### The request envelope
 
@@ -482,22 +491,22 @@ for `local`.
 What follows is the *skeleton* of a custom bundle, not a working PBS
 implementation. Everything specific to the site — how `qsub` is spelled, which
 directives the queue wants, whether files travel by `rsync` or by a staging
-service — lives in one Python module of yours, and the bundle is seven wrappers
-that call it.
+service — lives in one Python module of yours, and the bundle is one `adapter`
+dispatcher that calls it.
 
-### The wrappers
+### The dispatcher
 
-All seven are identical but for the operation name:
+The bundle's `adapter` is one trivial script:
 
 ```sh
 #!/bin/sh
-# my-cluster/start-manager
-exec python3 -m mysite.httk_pbs start-manager "$@"
+# my-cluster/adapter
+exec python3 -m mysite.httk_pbs "$@"
 ```
 
-Make each executable (`chmod +x`); the bundle validator refuses one that is not.
-Nothing else may live in a wrapper: keeping them trivial is what makes the
-"no shell" rule cheap to hold, because no request value is ever visible to `sh`.
+Make it executable (`chmod +x`); the bundle validator refuses one that is not.
+Nothing else may live in it: keeping it trivial is what makes the "no shell"
+rule cheap to hold, because no request value is ever visible to `sh`.
 
 ### The metadata
 
@@ -507,11 +516,6 @@ Nothing else may live in a wrapper: keeping them trivial is what makes the
   "format": "httk-computer-adapter",
   "format_version": 1,
   "kind": "pbs",
-  "operations": {
-    "configure": "configure", "install": "install", "invoke": "invoke",
-    "pull": "pull", "push": "push", "start-manager": "start-manager",
-    "status": "status"
-  },
   "queues": {
     "default": {"host": "login.hpc.example.org", "workspace": "/scratch/me/runs"},
     "wide": {"host": "login.hpc.example.org", "workspace": "/scratch/me/runs",
@@ -525,7 +529,7 @@ Nothing else may live in a wrapper: keeping them trivial is what makes the
 ### The module
 
 ```python
-"""A site PBS adapter for httk-workflow. Seven wrappers execute this module."""
+"""A site PBS adapter for httk-workflow. The bundle's `adapter` executes this module."""
 
 import json
 import shlex
@@ -575,14 +579,15 @@ def batch_script(argv: Sequence[str], settings: dict, workspace: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
-    if len(arguments) != 2:
-        print("adapter operation expects OPERATION REQUEST.json", file=sys.stderr)
+    if len(arguments) != 1:
+        print("adapter dispatcher expects one REQUEST.json path", file=sys.stderr)
         return 2
-    operation, request_path = arguments
+    (request_path,) = arguments
     try:
         request = json.loads(Path(request_path).read_text(encoding="utf-8"))
-        if not isinstance(request, dict) or request.get("operation") != operation:
-            raise ValueError("request operation mismatch")
+        operation = request.get("operation") if isinstance(request, dict) else None
+        if not isinstance(operation, str) or not operation:
+            raise ValueError("request carries no operation")
         settings = request.get("queue_settings") or {}
         if operation == "configure":
             pending = {**settings, **(request.get("settings") or {})}
@@ -638,6 +643,7 @@ above.
 The definitive worked example is the shipped one.
 {py:mod}`httk.workflow.adapter_protocol` is its public name and carries the
 contract in its docstring; {py:mod}`httk.workflow.adapter_runtime` is the
-implementation the wrappers execute. Both names refer to the same objects. Read
+implementation the `adapter` dispatcher executes. Both names refer to the same
+objects. Read
 `_shell_command`, `_rsync`, and `_batch_script` there before writing any code
 that composes a command for another machine.

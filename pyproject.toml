@@ -48,7 +48,7 @@ Issues = "https://github.com/httk/httk-workflow/issues"
 
 [project.scripts]
 httk-taskmanager = "httk.workflow.cli:main"
-httk-v1-taskmanager = "httk.workflow.v1_cli:main"
+httk-v1-taskmanager = "httk.workflow.compat.v1.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -95,21 +95,20 @@ namespaces = true
 [tool.setuptools.package-data]
 "httk.workflow" = [
   "py.typed",
+  "shell/*.sh",
+  "adapter_templates/*/remote.json",
+  "adapter_templates/*/adapter",
+]
+# The bundled legacy shell runtime is data of the v1 compatibility package it now
+# lives in, so a job whose httk-v1 backend points HTTK_DIR at it finds it wherever
+# httk.workflow.compat.v1 was installed.
+"httk.workflow.compat.v1" = [
   "v1_runtime/Execution/tasks/*.sh",
   "v1_runtime/Execution/tasks/vasp/*.sh",
   "v1_runtime/LICENSE",
   "v1_runtime/NOTICE",
   "v1_runtime/README.md",
   "v1_runtime/compat/*.sh",
-  "shell/*.sh",
-  "adapter_templates/*/remote.json",
-  "adapter_templates/*/configure",
-  "adapter_templates/*/install",
-  "adapter_templates/*/invoke",
-  "adapter_templates/*/push",
-  "adapter_templates/*/pull",
-  "adapter_templates/*/start-manager",
-  "adapter_templates/*/status",
 ]
 # The Python runners are modules of the package and ship with it; the Bash runner
 # beside them is data, and a job referencing pkg:httk.workflow.vasp.runners/...
@@ -117,10 +116,11 @@ namespaces = true
 "httk.workflow.vasp.runners" = [
   "*.sh",
 ]
-# httk.workflow.integrations follows the same rule and needs no entry of its own:
-# pwd_runner.py and cwl_runner.py are modules of that package, so a job
-# referencing pkg:httk.workflow.integrations/... finds them wherever the package
-# was installed. Nothing beside them is data.
+# httk.workflow.compat.cwl and httk.workflow.compat.pwd follow the same rule and
+# need no entry of their own: cwl_runner.py and pwd_runner.py are modules of those
+# packages, so a job referencing pkg:httk.workflow.compat.cwl/... or
+# pkg:httk.workflow.compat.pwd/... finds them wherever the package was installed.
+# Nothing beside them is data.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

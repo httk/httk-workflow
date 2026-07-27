@@ -21,6 +21,7 @@ from .projects import discover_project, read_project
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
+    "ADAPTER_EXECUTABLE",
     "ADAPTER_OPERATIONS",
     "CREDENTIALS_FILE",
     "METADATA_FILE",
@@ -54,6 +55,11 @@ ADAPTER_OPERATIONS = (
     "start-manager",
     "status",
 )
+
+#: The single dispatcher executable every bundle carries. One program serves
+#: every operation; the operation name travels inside the request JSON, so the
+#: seven historical per-operation wrappers collapsed into this one file.
+ADAPTER_EXECUTABLE = "adapter"
 
 CREDENTIALS_FILE = "credentials.json"
 
@@ -126,7 +132,7 @@ def read_metadata(bundle: str | os.PathLike[str]) -> dict[str, Any]:
 
 
 def validate_adapter_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
-    """Validate static adapter metadata and executable operation files."""
+    """Validate static adapter metadata and the single dispatcher executable."""
 
     root = Path(bundle).expanduser().resolve()
     metadata = read_metadata(root)
@@ -134,21 +140,11 @@ def validate_adapter_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
         raise ValueError(f"{METADATA_FILE} must use {ADAPTER_FORMAT} format version 1")
     if metadata.get("adapter_version") != 1:
         raise ValueError(f"unsupported remote adapter version: {metadata.get('adapter_version')!r}")
-    operations = metadata.get("operations")
-    if not isinstance(operations, Mapping):
-        raise ValueError("remote adapter operations must be an object")
-    for operation in ADAPTER_OPERATIONS:
-        relative = operations.get(operation)
-        if (
-            not isinstance(relative, str)
-            or not relative
-            or Path(relative).is_absolute()
-            or ".." in Path(relative).parts
-        ):
-            raise ValueError(f"invalid adapter operation path for {operation}")
-        executable = root / relative
-        if not executable.is_file() or not os.access(executable, os.X_OK):
-            raise ValueError(f"adapter operation is not executable: {executable}")
+    # One executable dispatches every operation; the operation name travels in the
+    # request JSON, so there is nothing per-operation to resolve or validate here.
+    executable = root / ADAPTER_EXECUTABLE
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ValueError(f"adapter executable is not runnable: {executable}")
     queues = metadata.get("queues", {"default": {}})
     if not isinstance(queues, Mapping) or not queues:
         raise ValueError("remote adapter must configure at least one queue")
@@ -424,9 +420,7 @@ def run_adapter(
         raise ValueError(f"unknown adapter operation: {operation}")
     root = Path(bundle).expanduser().resolve()
     metadata = validate_adapter_bundle(root)
-    operations = metadata["operations"]
-    assert isinstance(operations, Mapping)
-    executable = root / str(operations[operation])
+    executable = root / ADAPTER_EXECUTABLE
     requested_queue = request.get("queue")
     payload = {
         "format": REQUEST_FORMAT,

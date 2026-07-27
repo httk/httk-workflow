@@ -10,7 +10,7 @@ engines read and write it — and this module is *httk₂* reading it.
 .. code-block:: python
 
     from httk.workflow import Workspace
-    from httk.workflow.integrations.pwd import import_pwd
+    from httk.workflow.compat.pwd import import_pwd
 
     workspace = Workspace.initialize("workflow-workspace")
     job = import_pwd(workspace, "workflow.json", modules=["workflow.py"], tag="arithmetic")
@@ -46,9 +46,15 @@ from importlib.util import find_spec
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
-from ..models import MAXIMUM_INPUTS_BYTES
-from ..workspace import Workspace
-from . import DEFAULT_PLACEMENT, FILES_DIRECTORY, ScaffoldedJob, submit_integration_job
+from httk.workflow import Workspace
+from httk.workflow.models import MAXIMUM_INPUTS_BYTES
+
+from .._integration import (
+    DEFAULT_PLACEMENT,
+    FILES_DIRECTORY,
+    ScaffoldedJob,
+    submit_integration_job,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,6 +62,8 @@ _LOGGER = logging.getLogger(__name__)
 WORKFLOW = "pwd.workflow"
 #: The one step the packaged PWD runner registers.
 INITIAL_STEP = "execute"
+#: The package the packaged runner is resolved and digest-pinned within.
+PACKAGE = __name__
 #: The packaged runner an imported PWD job runs.
 RUNNER = "pwd_runner.py"
 #: The document versions this importer was written against.
@@ -360,6 +368,7 @@ def import_pwd(
         inputs["pwd_allowed_modules"] = [str(item) for item in allowed_modules]
     return submit_integration_job(
         workspace,
+        runner_package=PACKAGE,
         runner=RUNNER,
         workflow=WORKFLOW,
         initial_step=INITIAL_STEP,

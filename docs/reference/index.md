@@ -15,8 +15,10 @@ in its `__all__` — rather than every source object. The three layers are:
   `httk.workflow.supervision`, `httk.workflow.transfers`,
   `httk.workflow.manifests`, `httk.workflow.hygiene`, `httk.workflow.adapters`,
   `httk.workflow.adapter_protocol`, `httk.workflow.configuration`, and
-  `httk.workflow.projects`, plus the compatibility and integration surfaces
-  `httk.workflow.v1`, `httk.workflow.vasp`, and `httk.workflow.integrations`.
+  `httk.workflow.projects`, plus the domain and compatibility consumers
+  `httk.workflow.vasp` and the `httk.workflow.compat` engines
+  (`httk.workflow.compat.v1`, `httk.workflow.compat.cwl`,
+  `httk.workflow.compat.pwd`).
 
 ```{toctree}
 :maxdepth: 2
