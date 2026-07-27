@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import Remote, fake_remote
+from conftest import Remote, fake_remote, register_ws
 from httk.core import CLIContext
 
 from httk.workflow import (
@@ -101,7 +101,12 @@ def _campaign(tmp_path: Path, remote: Remote) -> Campaign:
     helper.write_text("#!/bin/sh\necho helper\n", encoding="utf-8")
     helper.chmod(0o755)
     local.submit(payload, _PLACEMENT)
-    return Campaign(cluster=remote, local=local, station=station, context=CLIContext("httk", local_root), job_id=job.id)
+    context = CLIContext("httk", local_root)
+    # Every command names a registered workspace: "home" is local, "station" is
+    # the workspace on the "cluster" remote the transfers cross to.
+    register_ws(context, local_root, "home")
+    register_ws(context, station.root, "station", remote="cluster")
+    return Campaign(cluster=remote, local=local, station=station, context=context, job_id=job.id)
 
 
 def _payload_of(workspace: Workspace, job_id: str) -> Path:
@@ -111,14 +116,14 @@ def _payload_of(workspace: Workspace, job_id: str) -> Path:
 
 
 def _send(campaign: Campaign, capsys: pytest.CaptureFixture[str]) -> None:
-    argv = ["transfer", "send", "cluster", campaign.job_id, "--source-workspace", str(campaign.local.root)]
+    argv = ["transfer", "home", "station", "--job", campaign.job_id, "--json"]
     assert command(argv, campaign.context) == 0
-    acknowledgements = json.loads(capsys.readouterr().out)
-    assert [str(entry["job_id"]) for entry in acknowledgements] == [campaign.job_id]
+    report = json.loads(capsys.readouterr().out)
+    assert [str(entry["job_id"]) for entry in report["moved"]] == [campaign.job_id]
 
 
 def _fetch(campaign: Campaign, capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
-    argv = ["transfer", "fetch", "--remote", "cluster", "--workspace", str(campaign.local.root), "--json"]
+    argv = ["transfer", "station", "home", "--json"]
     assert command(argv, campaign.context) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -157,7 +162,7 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     # (c) The managers the operator would start really are submitted, with a
     # script that runs this workspace's manager, and the work itself is then
     # done by the manager that batch script would have exec'd.
-    assert command(["transfer", "start-manager", "cluster", "--count", "2"], campaign.context) == 0
+    assert command(["manager", "run", "station", "--count", "2"], campaign.context) == 0
     submitted = json.loads(capsys.readouterr().out)
     assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
     spooled = sorted(remote.spool.glob("*.sbatch"))
@@ -165,14 +170,14 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     script = spooled[0].read_text(encoding="utf-8")
     assert script.startswith("#!/bin/bash\n")
     assert f"#SBATCH --chdir={campaign.station.root}" in script
-    assert f"exec httk workflow manager run {campaign.station.root} --workers 2" in script
+    assert f"exec httk workflow manager run {campaign.station.root} --by-path --workers 2" in script
     _run_there(campaign)
     finished = campaign.station.find_marker_by_id(campaign.job_id)
     assert finished is not None and finished.kind == "succeeded"
 
     # (d) Home again over the same adapter.
     report = _fetch(campaign, capsys)
-    fetched = list(report["fetched"])
+    fetched = list(report["moved"])
     assert len(fetched) == 1 and fetched[0]["job_id"] == campaign.job_id
     assert [str(entry["status"]) for entry in list(report["retired"])] == ["retired"]
 
@@ -188,7 +193,7 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     assert campaign.local.runner_store_path(job.runner_path).is_file()
 
     # (e) An ordinary harvest of the local workspace reports it.
-    assert command(["harvest", str(campaign.local.root), "--state", "succeeded"], campaign.context) == 0
+    assert command(["harvest", "home", "--state", "succeeded"], campaign.context) == 0
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 1
     record = HarvestRecord.from_mapping(json.loads(lines[0]))
@@ -204,7 +209,7 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     assert (retired[0] / "bundle" / TRANSFER_DIRECTORY / "manifest.json").is_file()
     assert campaign.station.find_marker_by_id(campaign.job_id) is None
     assert _staged(campaign.local) == []
-    assert _fetch(campaign, capsys) == {"fetched": [], "retired": []}
+    assert _fetch(campaign, capsys) == {"moved": [], "retired": []}
     assert campaign.local.find_marker_by_id(campaign.job_id) is not None
 
     # Every leg really used the stand-in transport rather than this filesystem.
@@ -233,7 +238,7 @@ def test_a_banner_on_the_remote_stdout_stops_the_fetch_before_anything_is_import
     monkeypatch.setenv("HTTK_FAKE_SSH_BANNER", "*** Welcome to the fake cluster ***")
     monkeypatch.setenv("HTTK_FAKE_SSH_BANNER_WHEN", "transfer offer")
 
-    argv = ["transfer", "fetch", "--remote", "cluster", "--workspace", str(campaign.local.root), "--json"]
+    argv = ["transfer", "station", "home", "--json"]
     assert command(argv, campaign.context) == 2
     captured = capsys.readouterr()
     assert "remote offer did not return a transfer offer document" in captured.err
@@ -249,7 +254,7 @@ def test_a_banner_on_the_remote_stdout_stops_the_fetch_before_anything_is_import
     # offered again rather than sealed twice, and the job comes home.
     monkeypatch.delenv("HTTK_FAKE_SSH_BANNER")
     report = _fetch(campaign, capsys)
-    assert [str(entry["job_id"]) for entry in list(report["fetched"])] == [campaign.job_id]
+    assert [str(entry["job_id"]) for entry in list(report["moved"])] == [campaign.job_id]
     marker = campaign.local.find_marker_by_id(campaign.job_id)
     assert marker is not None and marker.kind == "succeeded"
     assert len(_retired(campaign.station)) == 1

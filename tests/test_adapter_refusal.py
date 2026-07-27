@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
+from conftest import register_ws
 from httk.core import CLIContext
 
 from httk.workflow.adapters import ADAPTER_OPERATIONS, add_remote, run_adapter
@@ -49,11 +50,16 @@ def test_the_refusal_names_the_kinds_that_are_implemented(tmp_path: Path) -> Non
 def test_refusal_reaches_the_cli_without_a_traceback(tmp_path: Path, capsys) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="refusal-cli")
-    bundle = _unrecognized(project, "remote")
+    bundle = _unrecognized(project, "cluster")
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = "/remote/runs"
     (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
-    assert command(["transfer", "status", "remote"], CLIContext("httk", project)) == 2
+    # `workspace status` on a remote-bound workspace reaches the far side over the
+    # adapter; an unrecognized kind refuses there, and that refusal must arrive at
+    # the CLI as a clean error rather than a traceback.
+    context = CLIContext("httk", project)
+    register_ws(context, "/remote/runs", "station", remote="cluster")
+    assert command(["workspace", "status", "station"], context) == 2
     captured = capsys.readouterr()
     assert "is not implemented" in captured.err
     assert "Traceback" not in captured.err

@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from conftest import register_ws
 from httk.core import CLIContext
 
 from httk.workflow import TaskManager, Workspace
@@ -224,9 +225,10 @@ def test_publish_refuses_a_different_digest_without_replace(tmp_path: Path) -> N
 def test_runner_publish_command_prints_the_job_reference(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     context = CLIContext("httk", tmp_path)
+    ws = register_ws(context, workspace.root)
     runner = _runner_file(tmp_path / "source")
     code = workflow_command(
-        ["runner", "publish", str(runner), "--workspace", str(workspace.root), "--name", "campaign/step.py"],
+        ["runner", "publish", str(runner), "--workspace", ws, "--name", "campaign/step.py"],
         context,
     )
     assert code == 0
@@ -238,7 +240,7 @@ def test_runner_publish_command_prints_the_job_reference(tmp_path: Path, capsys)
     }
     changed = _runner_file(tmp_path / "other", _OTHER_RUNNER, name="step.py")
     conflict = workflow_command(
-        ["runner", "publish", str(changed), "--workspace", str(workspace.root), "--name", "campaign/step.py"],
+        ["runner", "publish", str(changed), "--workspace", ws, "--name", "campaign/step.py"],
         context,
     )
     assert conflict == 2
@@ -250,7 +252,7 @@ def test_runner_publish_command_prints_the_job_reference(tmp_path: Path, capsys)
                 "publish",
                 str(changed),
                 "--workspace",
-                str(workspace.root),
+                ws,
                 "--name",
                 "campaign/step.py",
                 "--replace",
@@ -318,23 +320,24 @@ def test_core_v1_workspaces_are_readable_but_never_mutated(tmp_path: Path) -> No
 def test_runner_describe_reports_every_published_reference(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     context = CLIContext("httk", tmp_path)
+    ws = register_ws(context, workspace.root)
     first = workspace.publish_runner(_runner_file(tmp_path / "source"))
     second = workspace.publish_runner(
         _runner_file(tmp_path / "other", _OTHER_RUNNER, name="step.py"),
         name="campaign/step.py",
     )
 
-    assert workflow_command(["runner", "describe", "--workspace", str(workspace.root), "--json"], context) == 0
+    assert workflow_command(["runner", "describe", "--workspace", ws, "--json"], context) == 0
     described = json.loads(capsys.readouterr().out)
     assert described == sorted([first, second], key=lambda reference: str(reference["path"]))
 
-    assert workflow_command(["runner", "describe", "--workspace", str(workspace.root)], context) == 0
+    assert workflow_command(["runner", "describe", "--workspace", ws], context) == 0
     lines = capsys.readouterr().out.splitlines()
     assert lines == [f"{reference['path']}\t{reference['sha256']}" for reference in described]
 
     # One name at a time, and a name that was never published is an error.
-    argv = ["runner", "describe", "campaign/step.py", "--workspace", str(workspace.root), "--json"]
+    argv = ["runner", "describe", "campaign/step.py", "--workspace", ws, "--json"]
     assert workflow_command(argv, context) == 0
     assert json.loads(capsys.readouterr().out) == [second]
-    assert workflow_command(["runner", "describe", "absent.py", "--workspace", str(workspace.root)], context) == 2
+    assert workflow_command(["runner", "describe", "absent.py", "--workspace", ws], context) == 2
     assert "no such workspace runner" in capsys.readouterr().err

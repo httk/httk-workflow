@@ -4,6 +4,7 @@ import uuid
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
+from conftest import register_ws
 from httk.core import CLIContext
 
 from httk.workflow import Workspace
@@ -188,19 +189,16 @@ def test_tasks_send_uses_adapter_status_push_import_and_ack(tmp_path: Path) -> N
     destination_root = tmp_path / "destination"
     initialize_project(source_root, name="source")
     initialize_project(destination_root, name="destination")
-    remote = add_remote("local", template="local", project=source_root)
+    remote = add_remote("cluster", template="local", project=source_root)
     metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = str(destination_root)
     (remote / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
     payload, job_id = _payload(tmp_path)
     Workspace(source_root).submit(payload, "jobs")
-    assert (
-        command(
-            ["transfer", "send", "local", job_id, "--source-workspace", str(source_root)],
-            CLIContext("httk", source_root),
-        )
-        == 0
-    )
+    context = CLIContext("httk", source_root)
+    register_ws(context, source_root, "home")
+    register_ws(context, destination_root, "station", remote="cluster")
+    assert command(["transfer", "home", "station", "--job", job_id], context) == 0
     imported = Workspace(destination_root).find_marker_by_id(job_id)
     assert imported is not None and imported.kind == "submitted"
     assert Workspace(source_root).find_marker_by_id(job_id) is None
@@ -211,12 +209,15 @@ def test_transfer_send_resumes_after_copy_before_import(tmp_path: Path, monkeypa
     destination_root = tmp_path / "destination"
     initialize_project(source_root, name="source")
     initialize_project(destination_root, name="destination")
-    remote = add_remote("local", template="local", project=source_root)
+    remote = add_remote("cluster", template="local", project=source_root)
     metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = str(destination_root)
     (remote / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
     payload, job_id = _payload(tmp_path)
     Workspace(source_root).submit(payload, "jobs")
+    context = CLIContext("httk", source_root)
+    register_ws(context, source_root, "home")
+    register_ws(context, destination_root, "station", remote="cluster")
 
     from httk.workflow import workflow_cli
 
@@ -233,9 +234,9 @@ def test_transfer_send_resumes_after_copy_before_import(tmp_path: Path, monkeypa
     monkeypatch.setattr(workflow_cli, "run_adapter", interrupt_import)
     # A resumed transfer: an interrupted send, retyped, must pick up where it
     # stopped rather than start a second copy.
-    arguments = ["transfer", "send", "local", job_id, "--source-workspace", str(source_root)]
-    assert command(arguments, CLIContext("httk", source_root)) == 2
+    arguments = ["transfer", "home", "station", "--job", job_id]
+    assert command(arguments, context) == 2
     assert Workspace(source_root).find_marker_by_id(job_id) is None
     monkeypatch.setattr(workflow_cli, "run_adapter", real_run_adapter)
-    assert command(arguments, CLIContext("httk", source_root)) == 0
+    assert command(arguments, context) == 0
     assert Workspace(destination_root).find_marker_by_id(job_id) is not None

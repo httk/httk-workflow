@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from conftest import register_ws
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._logging import reset_logging
@@ -172,6 +173,7 @@ def test_unpreparable_attempt_fails_only_its_own_job(tmp_path: Path) -> None:
 
 def test_serve_drains_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
+    ws = register_ws(None, workspace.root)
     payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="draining")
     workspace.submit(payload, "project/draining")
 
@@ -189,7 +191,7 @@ def test_serve_drains_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
     code = taskmanager_main(
         [
             "run",
-            str(workspace.root),
+            ws,
             "--poll-interval",
             "0.05",
             "--drain-timeout",
@@ -268,13 +270,14 @@ def test_claimed_job_is_released_when_the_lock_appears(tmp_path: Path) -> None:
 
 def test_json_log_records_carry_structured_fields(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
+    ws = register_ws(None, workspace.root)
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="logged")
     workspace.submit(payload, "project/logged")
 
     code = taskmanager_main(
         [
             "run",
-            str(workspace.root),
+            ws,
             "--until-idle",
             "--poll-interval",
             "0.02",

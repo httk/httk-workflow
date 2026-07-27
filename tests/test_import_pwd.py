@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from conftest import register_ws
 from httk.core import CLIContext
 
 from httk.workflow import TaskManager, Workspace
@@ -389,13 +390,14 @@ def test_the_import_command_submits_a_job_and_reports_it(
 ) -> None:
     document = _document(tmp_path, _ARITHMETIC)
     context = CLIContext("httk", tmp_path)
+    ws = register_ws(context, workspace.root)
 
     assert (
         command(
             [
                 "import",
                 "pwd",
-                str(workspace.root),
+                ws,
                 str(document),
                 "--module",
                 str(module),

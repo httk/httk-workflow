@@ -1148,6 +1148,11 @@ class TaskManager:
             # publishes is synchronized to the same standard as the marker and
             # journal that will reference it.
             "durable": self.workspace.durable,
+            # The workspace application settings, snapshotted at claim time, so a
+            # runner resolves a.setting("vasp.command") without the operator
+            # re-exporting it for every job. This is the workspace layer of the
+            # inputs → environment → workspace → default resolution.
+            "settings": self.workspace.settings,
             "resources": dict(job.resources),
             "join": claimed_state.join_summary,
             # The enriched, labeled observations of this activation's join, or an

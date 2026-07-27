@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import register_ws
 from httk.core import CLIContext
 
 from httk.workflow import (
@@ -167,7 +168,10 @@ def pair(template: Path, tmp_path: Path) -> Pair:
     metadata["queues"]["default"]["workspace"] = str(remote_root)
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     identifiers = json.loads((root / "ids.json").read_text(encoding="utf-8"))
-    return Pair(local_root, remote_root, CLIContext("httk", local_root), identifiers)
+    context = CLIContext("httk", local_root)
+    register_ws(context, local_root, "home")
+    register_ws(context, remote_root, "station", remote="cluster")
+    return Pair(local_root, remote_root, context, identifiers)
 
 
 def _live_bundles(workspace: Workspace) -> list[Path]:
@@ -195,7 +199,7 @@ def _offer(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> d
 
 
 def _fetch(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> dict[str, Any]:
-    argv = ["transfer", "fetch", "--remote", "cluster", "--workspace", str(pair.local_root), "--json", *arguments]
+    argv = ["transfer", "station", "home", "--json", *arguments]
     assert command(argv, pair.context) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -281,7 +285,7 @@ def test_fetch_brings_the_finished_jobs_home_with_their_payloads_intact(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     report = _fetch(pair, capsys)
-    fetched = {str(entry["job_id"]): entry for entry in list(report["fetched"])}
+    fetched = {str(entry["job_id"]): entry for entry in list(report["moved"])}
     assert set(fetched) == {pair.ids["succeeded"], pair.ids["failed"]}
     assert fetched[pair.ids["succeeded"]]["state"] == "succeeded"
     assert fetched[pair.ids["failed"]]["state"] == "failed"
@@ -318,7 +322,7 @@ def test_fetch_retires_the_remote_sources_and_repeating_it_does_nothing(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     first = _fetch(pair, capsys)
-    assert len(list(first["fetched"])) == 2
+    assert len(list(first["moved"])) == 2
     assert {str(entry["status"]) for entry in list(first["retired"])} == {"retired"}
 
     remote = pair.remote
@@ -335,7 +339,7 @@ def test_fetch_retires_the_remote_sources_and_repeating_it_does_nothing(
 
     # A retired source is not offered again, so a second fetch is a no-op and
     # the imported jobs are not duplicated.
-    assert _fetch(pair, capsys) == {"fetched": [], "retired": []}
+    assert _fetch(pair, capsys) == {"moved": [], "retired": []}
     local = pair.local
     for name in ("succeeded", "failed"):
         assert local.find_marker_by_id(pair.ids[name]) is not None
@@ -357,7 +361,7 @@ def test_fetch_resumes_after_an_interruption_between_pull_and_import(
         return real_import(self, bundle)  # pyright: ignore[reportArgumentType]
 
     monkeypatch.setattr(Workspace, "import_bundle", interrupt)
-    argv = ["transfer", "fetch", "--remote", "cluster", "--workspace", str(pair.local_root), "--json"]
+    argv = ["transfer", "station", "home", "--json"]
     assert command(argv, pair.context) == 2
     assert interrupted
 
@@ -370,7 +374,7 @@ def test_fetch_resumes_after_an_interruption_between_pull_and_import(
 
     monkeypatch.setattr(Workspace, "import_bundle", real_import)
     report = _fetch(pair, capsys)
-    assert {str(entry["job_id"]) for entry in list(report["fetched"])} == {
+    assert {str(entry["job_id"]) for entry in list(report["moved"])} == {
         pair.ids["succeeded"],
         pair.ids["failed"],
     }
@@ -382,13 +386,13 @@ def test_fetch_resumes_after_an_interruption_between_pull_and_import(
 
 def test_fetch_selects_states_and_placements(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
     report = _fetch(pair, capsys, "--state", "failed")
-    fetched = list(report["fetched"])
+    fetched = list(report["moved"])
     assert len(fetched) == 1 and fetched[0]["job_id"] == pair.ids["failed"]
     # The succeeded job was never offered, so it is still schedulable remotely.
     assert pair.remote.find_marker_by_id(pair.ids["succeeded"]) is not None
     assert pair.local.find_marker_by_id(pair.ids["succeeded"]) is None
 
-    assert _fetch(pair, capsys, "--placement", "project/later")["fetched"] == []
+    assert _fetch(pair, capsys, "--placement", "project/later")["moved"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -416,7 +420,7 @@ def test_a_fetched_job_harvests_locally_as_an_ordinary_result(
     assert failed.failure.details == {"cycles": 3}
 
     # The same thing through the command, which is the documented pipeline.
-    assert command(["harvest", str(pair.local_root), "--state", "succeeded", "--state", "failed"], pair.context) == 0
+    assert command(["harvest", "home", "--state", "succeeded", "--state", "failed"], pair.context) == 0
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 2
     assert {HarvestRecord.from_mapping(json.loads(line)).job_id for line in lines} == set(records)

@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+from conftest import register_ws
 from httk.core import CLIContext
 
 from httk.workflow import TaskManager, Workspace
@@ -333,14 +334,15 @@ def test_show_prints_a_human_report_and_a_single_json_object(tmp_path: Path, cap
     workspace.submit(payload, "project/human")
     _run(workspace)
     context = CLIContext("httk", tmp_path)
+    ws = register_ws(context, workspace.root)
 
-    assert command(["job", "show", str(workspace.root), job_id], context) == 0
+    assert command(["job", "show", ws, job_id], context) == 0
     text = capsys.readouterr().out
     assert f"job example--{job_id} (succeeded)" in text
     assert "runner                 payload:files/runner (backend path)" in text
     assert "attempts this activation 1/3" in text
 
-    assert command(["job", "show", str(workspace.root), job_id, "--json"], context) == 0
+    assert command(["job", "show", ws, job_id, "--json"], context) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["format"] == "httk-workflow-job-report"
     assert report["job_id"] == job_id
@@ -352,10 +354,11 @@ def test_show_refuses_an_ambiguous_or_unknown_selector(tmp_path: Path, capsys) -
         payload, _ = _payload(tmp_path / f"source{index}", _THREE_STEP_RUNNER)
         workspace.submit(payload, "project/many")
     context = CLIContext("httk", tmp_path)
+    ws = register_ws(context, workspace.root)
 
-    assert command(["job", "show", str(workspace.root), "example"], context) == 2
+    assert command(["job", "show", ws, "example"], context) == 2
     assert "matches 2 jobs" in capsys.readouterr().err
-    assert command(["job", "show", str(workspace.root), "0" * 36], context) == 2
+    assert command(["job", "show", ws, "0" * 36], context) == 2
     assert "no job in" in capsys.readouterr().err
 
 
@@ -364,6 +367,7 @@ def test_log_renders_every_transition_oldest_first(tmp_path: Path, capsys) -> No
     payload, job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER)
     workspace.submit(payload, "project/log")
     _run(workspace)
+    ws = register_ws(CLIContext("httk", tmp_path), workspace.root)
 
     marker = resolve_job(workspace, job_id)
     frames = job_frames(workspace, marker)
@@ -377,10 +381,7 @@ def test_log_renders_every_transition_oldest_first(tmp_path: Path, capsys) -> No
     assert "step=prepare" in rendered and "step=collect" in rendered
     assert "reason=advance" in rendered
 
-    assert (
-        command(["job", "log", str(workspace.root), job_id, "--limit", "2", "--json"], CLIContext("httk", tmp_path))
-        == 0
-    )
+    assert command(["job", "log", ws, job_id, "--limit", "2", "--json"], CLIContext("httk", tmp_path)) == 0
     payload_json = json.loads(capsys.readouterr().out)
     assert payload_json["format"] == "httk-workflow-job-history"
     assert [frame["kind"] for frame in payload_json["frames"]] == ["committing", "succeeded"]
@@ -424,11 +425,12 @@ def test_list_reports_one_row_per_job_and_filters_by_kind(tmp_path: Path, capsys
     assert by_id[fresh_id]["step"] is None
 
     context = CLIContext("httk", tmp_path)
-    assert command(["job", "list", str(workspace.root), "--kind", "submitted"], context) == 0
+    ws = register_ws(context, workspace.root)
+    assert command(["job", "list", ws, "--kind", "submitted"], context) == 0
     table = capsys.readouterr().out
     assert "JOB" in table and fresh_id in table and finished_id not in table
 
-    assert command(["job", "list", str(workspace.root), "--placement", "project/list/done", "--json"], context) == 0
+    assert command(["job", "list", ws, "--placement", "project/list/done", "--json"], context) == 0
     listed = json.loads(capsys.readouterr().out)
     assert [row["job_id"] for row in listed["jobs"]] == [finished_id]
 
@@ -472,7 +474,8 @@ def test_why_names_the_claim_pool_no_live_manager_serves(tmp_path: Path, capsys)
     )
     assert any("--pool gpu --capability cuda" in hint for hint in diagnosis.hints)
 
-    assert command(["job", "why", str(workspace.root), job_id], CLIContext("httk", tmp_path)) == 0
+    ws = register_ws(CLIContext("httk", tmp_path), workspace.root)
+    assert command(["job", "why", ws, job_id], CLIContext("httk", tmp_path)) == 0
     rendered = capsys.readouterr().out
     assert f"job example--{job_id} is ready" in rendered
     assert "no  eligible manager" in rendered
@@ -490,7 +493,8 @@ def test_why_reports_a_live_maintenance_lock(tmp_path: Path, capsys) -> None:
     lock = next(check for check in diagnosis.checks if check.name == "maintenance lock")
     assert lock.satisfied is False and "launching is paused" in lock.detail
 
-    assert command(["job", "why", str(workspace.root), job_id, "--json"], CLIContext("httk", tmp_path)) == 0
+    ws = register_ws(CLIContext("httk", tmp_path), workspace.root)
+    assert command(["job", "why", ws, job_id, "--json"], CLIContext("httk", tmp_path)) == 0
     reported = json.loads(capsys.readouterr().out)
     assert reported["format"] == "httk-workflow-job-diagnosis"
     assert reported["blocked"] is True
@@ -737,8 +741,9 @@ def test_debug_runs_from_the_command_line(tmp_path: Path, capsys) -> None:
     workspace = _workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER)
     context = CLIContext("httk", tmp_path)
+    ws = register_ws(context, workspace.root)
 
-    assert command(["job", "debug", str(workspace.root), str(payload), "--placement", "cli/debug"], context) == 0
+    assert command(["job", "debug", ws, str(payload), "--placement", "cli/debug"], context) == 0
     text = capsys.readouterr().out
     assert "[prepare] runner is working on prepare" in text
     assert resolve_job(workspace, job_id).kind == "succeeded"

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
+from conftest import register_ws
 from httk.core import CLIContext
 
 from httk.workflow import Workspace
@@ -119,29 +120,30 @@ def test_lock_age_bound_is_one_day(tmp_path: Path, monkeypatch) -> None:
 def test_workspace_unlock_clears_stale_and_needs_force_for_live(tmp_path: Path, monkeypatch, capsys) -> None:
     project = _project(tmp_path, monkeypatch)
     context = CLIContext("httk", project)
-    assert command(["workspace", "unlock", str(project)], context) == 0
+    ws = register_ws(context, project)
+    assert command(["workspace", "unlock", ws], context) == 0
     assert "no maintenance lock" in capsys.readouterr().out
 
     path = _write_lock(project, _lock_json())
-    assert command(["workspace", "unlock", str(project)], context) == 0
+    assert command(["workspace", "unlock", ws], context) == 0
     assert "removed stale maintenance lock" in capsys.readouterr().out
     assert not path.exists()
 
     path = _write_lock(project, _lock_json(pid=os.getpid()))
-    assert command(["workspace", "unlock", str(project)], context) == 2
+    assert command(["workspace", "unlock", ws], context) == 2
     captured = capsys.readouterr()
     assert f"pid {os.getpid()}" in captured.err and "--force" in captured.err
     assert path.is_file()
 
-    assert command(["workspace", "unlock", str(project), "--force"], context) == 0
+    assert command(["workspace", "unlock", ws, "--force"], context) == 0
     assert "removed live maintenance lock" in capsys.readouterr().out
     assert not path.exists()
 
 
 def _configured(project: Path, *settings: str) -> tuple[Path, int]:
-    remote = add_remote("local", template="local", project=project)
+    remote = add_remote("cluster", template="local", project=project)
     code = command(
-        ["remote", "configure", "local", *[argument for value in settings for argument in ("--set", value)]],
+        ["remote", "configure", "cluster", *[argument for value in settings for argument in ("--set", value)]],
         CLIContext("httk", project),
     )
     return remote, code
@@ -165,9 +167,9 @@ def test_secret_setting_avoids_remote_json_and_manifests(tmp_path: Path, monkeyp
     manifest = create_manifest(project)
     body = bz2.decompress(manifest.read_bytes()).decode("utf-8")
     relative = credentials.relative_to(project).as_posix()
-    assert relative == ".httk-project/remotes/local/credentials.json"
+    assert relative == ".httk-project/remotes/cluster/credentials.json"
     assert relative not in body and "hunter2" not in body
-    assert ".httk-project/remotes/local/remote.json" in body
+    assert ".httk-project/remotes/cluster/remote.json" in body
 
 
 def test_secret_setting_remains_visible_to_the_adapter(tmp_path: Path, monkeypatch) -> None:

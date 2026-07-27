@@ -37,8 +37,12 @@ Direct
 0.5000000000 0.5000000000 0.5000000000
 END
 
-# 1. A workspace whose jobs may publish their results as transactional data.
-httk_workflow workspace init quickstart-workspace --extension transactional-data-v1
+# 1. A workspace whose jobs may publish their results as transactional data,
+#    created here on this machine and registered under a name every later command
+#    addresses it by. Being local is never implied, so --remote local is explicit.
+httk_workflow workspace init quickstart-workspace \
+    --remote local --path quickstart-workspace \
+    --extension transactional-data-v1
 
 # 2. One job of the packaged relaxation runner, starting from that structure. The
 #    command prints one tab-separated line per job: its key and its payload.
