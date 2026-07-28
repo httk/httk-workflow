@@ -171,7 +171,7 @@ def vasp_argv(a: Attempt) -> tuple[str, ...]:
     """Return the VASP command as an argv array, resolved through its layers.
 
     The command is the ``vasp.command`` application setting, so
-    :meth:`Attempt.setting` resolves it most-specific first: the job's own
+    :meth:`~httk.workflow.sdk.Attempt.setting` resolves it most-specific first: the job's own
     ``vasp.command`` input, then ``HTTK_VASP_COMMAND`` in the environment, then the
     workspace's configured command, and finally the legacy ``vasp_command`` input.
     That keeps a machine's ``srun -n 32 vasp_std`` — deployment state a job
