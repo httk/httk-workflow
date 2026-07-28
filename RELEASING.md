@@ -27,59 +27,51 @@ reserve the project name before then.
 
 ## Prepare and check a release
 
-Update `project.version` in `pyproject.toml`. From a Python 3.12 environment,
+Update `project.version` in `pyproject.toml`. After making dependency changes,
+regenerate and commit the documentation lock:
+
+```console
+make docs-lock
+```
+
+`make docs-lock` requires every internal `httk-*` dependency to be published
+and resolvable on PyPI at a version satisfying this project's dependency floors.
+`make release-check` only verifies an existing lock offline, so it remains
+hard-gated until that lock has been generated and committed. Until the
+dependencies are published, the development docs workflow uses its explicit
+bootstrap-fallback mode: it clones internal dependencies first, emits a warning,
+installs those checkouts, and then performs fresh external docs dependency
+resolution. Releases remain impossible by design until the lock can be
+generated and committed.
+
+Before tagging, refresh and commit the dependency inventories from the exact
+versions pinned by that lock:
+
+```console
+make docs-inventories
+```
+
+The dependency release documentation must already be published at those
+versions. `make release-check` validates lock freshness; the workflow's
+`check-release` validates the inventory headers against the lock pins. From a
+Python 3.12 environment,
 install the development tools and run the complete local check:
 
 ```console
-python -m pip install -e ".[dev,docs,release,cwl]"
+python -m pip install -e ".[dev,docs,release]"
 make release-check
 ```
 
-This runs formatting, static analysis, tests, strict documentation, an isolated
-sdist/wheel build, and strict package-metadata checks. The resulting files are
-written to `dist/`.
-
-The `cwl` extra is optional for a release check: the CWL importer tests skip
-themselves without a CWL parser, and every other test runs regardless. Install
-it to exercise them.
+`make release-check` includes the offline documentation lock-freshness check,
+in addition to formatting, static analysis, tests, strict documentation, an
+isolated sdist/wheel build, and strict package-metadata checks. Before tagging,
+run `make docs-lock-check` for the required full clean-environment locked
+installation and strict docs build; this is a network check. The resulting
+package files are written to `dist/`.
 
 Versions on package indexes are immutable. Use a new development or release
-candidate version when repeating an upload, for example `2.0.0rc1` followed by
-`2.0.0`.
-
-## Packages and data that must be in the wheel
-
-This package is not Python modules alone. Its split Python packages and several
-shipped data files must be present in the wheel; the data files are declared in
-`[tool.setuptools.package-data]`. A wheel that silently lost one of them
-installs and imports cleanly while failing at run time:
-
-- `workflow_cli/*.py`, `introspection/*.py`, and `_manager_*.py` — split
-  implementation modules that must remain discoverable alongside their public
-  package entrypoints;
-
-- `shell/*.sh` — the native Bash authoring libraries, whose absolute paths the
-  manager exports to every Bash runner;
-- `adapter_templates/*/…` — the `remote.json` of each maintained remote
-  adapter **and its seven executable operations**, which must arrive executable
-  or `httk workflow remote add` refuses the bundle it just copied;
-- `v1_runtime/…` — the *httk* v1 task templates and compatibility shell;
-- `vasp/runners/*.sh` — the packaged Bash VASP runner beside its Python
-  siblings. The Python runners and everything under `integrations/` are modules
-  of their packages and need no entry.
-
-After a build, confirm they are there rather than assuming:
-
-```console
-python -m zipfile -l dist/httk_workflow-*.whl | grep -E 'shell/|adapter_templates/|vasp/runners/.*\.sh|v1_runtime/'
-```
-
-A fresh install is the stronger check, because it also proves the executable bit
-survived:
-
-```console
-/tmp/httk-workflow-test/bin/httk workflow remote add probe --template local --global
-```
+candidate version when repeating an upload, for example `0.1.0rc1` followed by
+`0.1.0`.
 
 ## TestPyPI
 
@@ -94,13 +86,16 @@ in a fresh environment:
 ```console
 python -m venv /tmp/httk-workflow-test
 /tmp/httk-workflow-test/bin/python -m pip install \
-  --index-url https://test.pypi.org/simple/ --no-deps httk-workflow==0.1.0
-/tmp/httk-workflow-test/bin/python -c "import httk.workflow"
+  --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple/ httk-workflow==0.1.0
+/tmp/httk-workflow-test/bin/python -c "import httk.atomistic"
 ```
 
-Replace `0.1.0` with the version being tested. `--no-deps` keeps the isolation
-test focused on the wheel itself; installing without it would also pull
-`httk-core` (this module's runtime dependency) from the index.
+Replace `0.1.0` with the version being tested. Unlike `httk-core`, `httk-workflow`
+has a runtime dependency (`httk-core`), so `--no-deps` is not appropriate here:
+`import httk.atomistic` pulls in `httk.core` at import time. The
+`--extra-index-url` lets pip resolve that dependency (once it is published to the
+real PyPI) while the package under test comes from TestPyPI.
 
 ## PyPI
 

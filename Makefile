@@ -9,7 +9,7 @@ export BLACK_NUM_WORKERS = 1
 # between httk repositories (read by docs/conf.py via HTTK_DOCS_BASE_URL).
 DOCS_BASE_URL ?= https://docs.httk.org
 
-.PHONY: docs docs-live docs-clean docs-inventories clean dist-clean dist dist-check release-check format format-check typecheck typecheck_pyright lint test test-extended test_fastfail test-extended-fastfail audit
+.PHONY: docs docs-live docs-clean docs-inventories docs-lock docs-lock-check clean dist-clean dist dist-check release-check format format-check typecheck typecheck_pyright lint test test-extended test_fastfail test-extended-fastfail audit
 
 docs: docs-clean
 	HTTK_DOCS_BASE_URL=$(DOCS_BASE_URL) $(PYTHON) -m sphinx -E -a -b html -W --keep-going docs docs/_build/html
@@ -24,7 +24,25 @@ docs-clean:
 # network); docs builds themselves resolve against these vendored files offline.
 docs-inventories:
 	curl -fsSL https://docs.python.org/3/objects.inv -o docs/_inventories/python.inv
-	curl -fsSL $(DOCS_BASE_URL)/httk-core/objects.inv -o docs/_inventories/httk-core.inv
+	# Requires a committed, current docs/requirements.lock; dependency release docs must be published.
+	$(PYTHON) -m httk.core.docs lock-check
+	$(PYTHON) -m httk.core.docs refresh-inventories --base-url $(DOCS_BASE_URL) --channel release
+# Regenerate the portable documentation lock (network target).
+docs-lock:
+	$(PYTHON) -m httk.core.docs lock
+
+# Verify the lock in a clean environment and run the strict documentation build
+# (network target; the lock installation and build are intentionally transparent).
+docs-lock-check:
+	@set -eu; \
+	check_dir=$$(mktemp -d "${TMPDIR:-/tmp}/httk-workflow-docs-lock-check.XXXXXX"); \
+	trap 'rm -rf "$$check_dir"' EXIT; \
+	env -u PYTHONPATH -u PYTHONHOME $(PYTHON) -m venv "$$check_dir/venv"; \
+	env -u PYTHONPATH -u PYTHONHOME "$$check_dir/venv/bin/python" -m pip install -r docs/requirements.lock; \
+	env -u PYTHONPATH -u PYTHONHOME "$$check_dir/venv/bin/python" -m pip check; \
+	env -u PYTHONPATH -u PYTHONHOME "$$check_dir/venv/bin/python" -m pip install . --no-deps --no-build-isolation; \
+	env -u HTTK_DOCS_VERSION -u PYTHONPATH -u PYTHONHOME HTTK_DOCS_BASE_URL="$(DOCS_BASE_URL)" \
+		"$$check_dir/venv/bin/python" -m sphinx -E -a -b html -W --keep-going docs "$$check_dir/html"
 
 dist-clean:
 	rm -rf build $(DIST_DIR) src/httk_workflow.egg-info
@@ -78,3 +96,4 @@ dist-check: dist
 	$(PYTHON) -m twine check --strict $(DIST_DIR)/*
 
 release-check: ci docs dist-check
+	$(PYTHON) -m httk.core.docs lock-check
