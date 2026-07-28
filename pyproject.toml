@@ -53,6 +53,7 @@ httk-v1-taskmanager = "httk.workflow.compat.v1.cli:main"
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  "pytest-xdist>=3.6",
   "black",
   "ruff",
   "isort",
@@ -124,10 +125,16 @@ namespaces = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# The default run includes everything; `-m "not slow"` deselects the handful of
-# tests that drive real subprocesses through timing-tolerant waits.
+# The suite launches Python runner subprocesses, so 28 workers would multiply
+# their import-time native thread pools.  Sixteen workers complete the full
+# suite's assertion phase faster than eight while keeping that pressure bounded.
+# An
+# extended run overrides the marker selection with `-m ""`.
+addopts = "-n 16 --dist loadgroup -m 'not extended'"
 markers = [
   "slow: drives real processes and waits on them; deselect with -m 'not slow'",
+  "extended: full-depth test case; selected only by the extended test profile",
+  "xdist_group(name): schedule related timing-sensitive tests on one worker",
 ]
 
 [tool.isort]

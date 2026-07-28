@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import TestProfile as _TestProfile
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._logging import reset_logging
@@ -22,6 +23,8 @@ from httk.workflow._util import tree_digest
 from httk.workflow.journal import JournalWriter
 from httk.workflow.manager import RunningAttempt
 from httk.workflow.models import CARRIED_STATE_MEMBERS, Marker, StateFrame
+
+pytestmark = pytest.mark.xdist_group("heartbeat-timing")
 
 _SUCCEED_RUNNER = """#!/usr/bin/env python3
 import json
@@ -403,20 +406,23 @@ def test_a_long_tick_heartbeats_while_it_scans_and_reports_its_own_slowness(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
+    test_profile: _TestProfile,
 ) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     running_payload, running_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="slow-runner")
     workspace.submit(running_payload, "project/running")
     # A crowd of submitted jobs this manager cannot register: they are scanned
     # on every tick, which is exactly the pass that must not hold a heartbeat.
-    for index in range(40):
+    crowd_size = test_profile.scale(normal=12, extended=40)
+    validation_pause = test_profile.scale(normal=0.05, extended=0.025)
+    for index in range(crowd_size):
         crowd, _ = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag=f"crowd-{index}", backend="foreign")
         workspace.submit(crowd, f"project/crowd/{index}")
 
     real_validate = Workspace.validate_job_payload
 
     def slow_validate(self: Workspace, marker: Marker):
-        time.sleep(0.025)
+        time.sleep(validation_pause)
         return real_validate(self, marker)
 
     monkeypatch.setattr(Workspace, "validate_job_payload", slow_validate)

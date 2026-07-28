@@ -31,6 +31,8 @@ from httk.workflow.runners import runner_path, runner_reference
 from httk.workflow.vasp.runners import PACKAGE
 from httk.workflow.workflow_cli import command
 
+pytestmark = pytest.mark.xdist_group("harvest-campaign")
+
 _SRC = str(Path(__file__).parents[1] / "src")
 
 # One published runner implements the whole campaign: the children are

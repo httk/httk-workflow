@@ -34,6 +34,8 @@ from httk.workflow.journal import JournalWriter, read_record
 from httk.workflow.models import Marker
 from httk.workflow.workspace import _IndexEntry
 
+pytestmark = pytest.mark.xdist_group("concurrency-timing")
+
 # ---------------------------------------------------------------------------
 # Runners
 # ---------------------------------------------------------------------------

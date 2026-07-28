@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
+from conftest import TestProfile as _TestProfile
 
 from httk.workflow.supervision import (
     CheckerSpec,
@@ -25,6 +26,8 @@ from httk.workflow.supervision import (
     ProcessSupervisor,
     SourceEvent,
 )
+
+pytestmark = pytest.mark.xdist_group("process-timing")
 
 _SLEEPER = """import os, sys, time
 sys.stdout.write(str(os.getpid()) + "\\n")
@@ -139,9 +142,19 @@ def test_exception_mid_run_reaps_the_group_and_restores_handlers(tmp_path: Path)
     assert not _alive(pid), "the supervised process group outlived the failed run"
 
 
-def test_checker_input_is_serialized_under_concurrent_event_storms(tmp_path: Path) -> None:
+def test_checker_input_is_serialized_under_concurrent_event_storms(tmp_path: Path, test_profile: _TestProfile) -> None:
     checker = _script(tmp_path, "checker.py", _CHECKER)
-    sources = [tmp_path / f"source-{index}.log" for index in range(4)]
+    source_count = test_profile.scale(normal=2, extended=4)
+    output_lines = test_profile.scale(normal=80, extended=200)
+    tick_interval = 0.02
+    run_seconds = 0.6
+    output_event_count = source_count * output_lines
+    # Each profile emits one output line for every source/output-line pair.
+    # The floor therefore keeps the same all-output-lines plus ten-ticks
+    # contract at either scale, rather than loosening the normal assertion.
+    expected_tick_events = int(run_seconds / tick_interval) // 3
+    minimum_monitor_events = output_event_count + expected_tick_events
+    sources = [tmp_path / f"source-{index}.log" for index in range(source_count)]
     for path in sources:
         path.write_text("", encoding="utf-8")
     stop = threading.Event()
@@ -172,9 +185,9 @@ def test_checker_input_is_serialized_under_concurrent_event_storms(tmp_path: Pat
             [
                 sys.executable,
                 "-c",
-                "import time\nfor i in range(200):\n    print('out %d ' % i + 'o' * 20000)\ntime.sleep(0.6)\n",
+                f"import time\nfor i in range({output_event_count}):\n    print('out %d ' % i + 'o' * 20000)\ntime.sleep({run_seconds})\n",
             ],
-            tick_interval=0.02,
+            tick_interval=tick_interval,
             follow_interval=0.005,
         )
     finally:
@@ -186,8 +199,8 @@ def test_checker_input_is_serialized_under_concurrent_event_storms(tmp_path: Pat
     assert not torn, torn[:3]
     assert not [item for item in report.diagnostics if item.code == "checker_protocol_error"]
     totals = [int(item.summary) for item in report.diagnostics if item.code == "line_total"]
-    assert totals and totals[0] >= 300, f"the checker only saw {totals} line events"
-    assert monitor.calls >= 300
+    assert totals and totals[0] >= output_event_count, f"the checker only saw {totals} line events"
+    assert monitor.calls >= minimum_monitor_events
     assert monitor.overlaps == 0, f"{monitor.overlaps} of {monitor.calls} dispatches overlapped"
 
 
