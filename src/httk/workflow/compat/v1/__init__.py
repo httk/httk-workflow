@@ -571,7 +571,7 @@ def _reconcile_legacy_link(workspace: Workspace, marker: Marker, link: Mapping[s
     priority = V2_TO_V1_PRIORITY.get(marker.priority, int(field_values["priority"]))
     parent_payload = workspace.payload_path(parent_placement, parent_key)
     directory = parent_payload / link_directory
-    prefix = f"ht.task.{field_values['taskset']}.{field_values['task_id']}.{step}." f"{restarts}.{owner}.{priority}."
+    prefix = f"ht.task.{field_values['taskset']}.{field_values['task_id']}.{step}.{restarts}.{owner}.{priority}."
     desired = directory / f"{prefix}{_legacy_status(marker, state)}"
     target = workspace.payload_path(marker.placement, marker.job_key)
     candidates = []

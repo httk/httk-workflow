@@ -1,10 +1,6 @@
 PYTHON ?= python3
 DIST_DIR ?= dist
 
-# black's default process pool can hang in constrained sandboxes; keep it
-# single-worker everywhere (equivalent to passing --workers 1).
-export BLACK_NUM_WORKERS = 1
-
 # Base URL of the published httk documentation site, used for cross-linking docs
 # between httk repositories (read by docs/conf.py via HTTK_DOCS_BASE_URL).
 DOCS_BASE_URL ?= https://docs.httk.org
@@ -52,15 +48,15 @@ clean: docs-clean dist-clean
 	find . -name "*~" -print0 | xargs -0 rm -f
 	find . -name "__pycache__" -print0 | xargs -0 rm -rf
 
-# ruff and black walk the same three roots recursively, so a new subpackage
+# ruff walks the same three roots recursively, so a new subpackage
 # (runners/, integrations/, ...) is covered the day it is created rather than
 # the day someone remembers to extend a glob.
 format:
 	$(PYTHON) -m ruff check src examples tests --fix
-	$(PYTHON) -m black --workers 1 src examples tests
+	$(PYTHON) -m ruff format src examples tests
 
 format-check: lint
-	$(PYTHON) -m black --workers 1 --check src examples tests
+	$(PYTHON) -m ruff format --check src examples tests
 
 lint:
 	$(PYTHON) -m ruff check src examples tests

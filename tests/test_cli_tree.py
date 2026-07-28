@@ -255,9 +255,7 @@ def test_the_executables_still_take_their_durability_switch_before_the_command()
     assert parser.parse_args(["--no-durable", "init", "WS"]).no_durable is True
     # And after it, which the canonical tree is what makes possible.
     assert parser.parse_args(["init", "WS", "--no-durable"]).no_durable is True
-    assert (
-        v1_cli._parser().parse_args(["--no-durable", "run", "WS"]).no_durable is True
-    )  # pyright: ignore[reportPrivateUsage]
+    assert v1_cli._parser().parse_args(["--no-durable", "run", "WS"]).no_durable is True  # pyright: ignore[reportPrivateUsage]
 
 
 # ---------------------------------------------------------------------------

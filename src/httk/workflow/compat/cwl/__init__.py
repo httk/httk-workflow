@@ -248,7 +248,7 @@ def _normalize_type(value: object, where: str) -> dict[str, object]:
         optional = len(members) != len(list(value))
         if len(members) != 1:
             raise UnsupportedCwlError(
-                f"unsupported CWL feature union type at {where}: {value!r}; " "httk supports one type, optionally null"
+                f"unsupported CWL feature union type at {where}: {value!r}; httk supports one type, optionally null"
             )
         normalized = _normalize_type(members[0], where)
         normalized["optional"] = True

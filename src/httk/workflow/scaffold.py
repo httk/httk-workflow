@@ -420,8 +420,7 @@ def resolve_template(
         if not path.is_file():
             known = ", ".join(registered_templates()) or "none registered"
             raise ValueError(
-                f"unknown template {text!r}: it is neither a registered template "
-                f"({known}) nor an existing runner file"
+                f"unknown template {text!r}: it is neither a registered template ({known}) nor an existing runner file"
             )
         described = describe_runner(path)
         steps = tuple(cast(list[str], described["steps"]))
