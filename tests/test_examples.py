@@ -19,6 +19,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from conftest import TestProfile as _TestProfile
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.scaffold import new_job
@@ -189,13 +190,14 @@ def test_the_python_api_tour_runs(work: Path, tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("runner", ["defect_campaign.py", "defect_campaign.sh"])
-def test_the_campaign_examples_run_in_either_language(runner: str, tmp_path: Path) -> None:
+def test_the_campaign_examples_run_in_either_language(runner: str, tmp_path: Path, test_profile: _TestProfile) -> None:
+    sites = test_profile.scale(normal=2, extended=3)
     workspace = Workspace.initialize(tmp_path / runner, extensions=["transactional-data-v1"])
     parent = new_job(
         workspace,
         _EXAMPLES / runner,
         step="characterize",
-        inputs={"sites": 3, "diverging": "1"},
+        inputs={"sites": sites, "diverging": "1"},
         tag="campaign",
     )
     assert parent.workflow == "examples.defects"
@@ -203,17 +205,17 @@ def test_the_campaign_examples_run_in_either_language(runner: str, tmp_path: Pat
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=300.0)
 
-    # The documented campaign happened: three children, the diverging one failed by
-    # its own code, and the parent triaged the result rather than hiding it.
+    # The documented campaign happened: representative normal runs retain one
+    # success and one failure, while extended also covers the third child.
     states = {marker.job_key.split("--")[0]: marker.kind for marker in workspace.scan_markers()}
     assert states == {
         "campaign": "failed",
-        "site-0": "succeeded",
-        "site-1": "failed",
-        "site-2": "succeeded",
+        **{f"site-{site}": "failed" if site == 1 else "succeeded" for site in range(sites)},
     }
     campaign = workspace.payload_path(parent.placement, parent.job_key)
-    assert (campaign / "run" / "report.tsv").read_text(encoding="utf-8") == "site-0\t0\nsite-2\t2\n"
+    assert (campaign / "run" / "report.tsv").read_text(encoding="utf-8") == "".join(
+        f"site-{site}\t{site}\n" for site in range(sites) if site != 1
+    )
     assert (campaign / "run" / "triage.txt").read_text(encoding="utf-8") == "site-1\n"
     marker = workspace.find_marker_by_id(parent.job_id)
     assert marker is not None

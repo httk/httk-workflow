@@ -30,6 +30,8 @@ from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.transfers import TRANSFER_DIRECTORY, _payload_digest
 from httk.workflow.workflow_cli import command
 
+pytestmark = pytest.mark.xdist_group("fetch-template")
+
 _SRC = str(Path(__file__).parents[1] / "src")
 
 _RUNNER = f'''#!/usr/bin/env python3

@@ -36,6 +36,8 @@ from httk.workflow.errors import TransitionLostError, WorkspaceUnavailableError
 from httk.workflow.journal import read_record
 from httk.workflow.models import Marker
 
+pytestmark = pytest.mark.xdist_group("crash-recovery")
+
 # ---------------------------------------------------------------------------
 # Runners
 # ---------------------------------------------------------------------------
@@ -457,7 +459,11 @@ _EXPECTED_CHAIN = [
 ]
 
 
-@pytest.mark.parametrize("interruption", _INTERRUPTIONS, ids=lambda item: item.name)
+@pytest.mark.parametrize(
+    "interruption",
+    _INTERRUPTIONS,
+    ids=lambda item: item.name,
+)
 def test_a_fresh_manager_completes_an_interrupted_commit_exactly_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

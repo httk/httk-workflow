@@ -9,7 +9,7 @@ export BLACK_NUM_WORKERS = 1
 # between httk repositories (read by docs/conf.py via HTTK_DOCS_BASE_URL).
 DOCS_BASE_URL ?= https://docs.httk.org
 
-.PHONY: docs docs-live docs-clean docs-inventories clean dist-clean dist dist-check release-check format format-check typecheck typecheck_pyright lint test test_fastfail audit
+.PHONY: docs docs-live docs-clean docs-inventories clean dist-clean dist dist-check release-check format format-check typecheck typecheck_pyright lint test test-extended test_fastfail test-extended-fastfail audit
 
 docs: docs-clean
 	HTTK_DOCS_BASE_URL=$(DOCS_BASE_URL) $(PYTHON) -m sphinx -E -a -b html -W --keep-going docs docs/_build/html
@@ -56,14 +56,20 @@ typecheck:
 	$(PYTHON) -m mypy
 
 test:
-	PYTHONPATH=src $(PYTHON) -m pytest
+	HTTK_TEST_PROFILE=normal PYTHONPATH=src $(PYTHON) -m pytest -q
+
+test-extended:
+	HTTK_TEST_PROFILE=extended PYTHONPATH=src $(PYTHON) -m pytest -q -m ""
 
 test_fastfail:
-	PYTHONPATH=src $(PYTHON) -m pytest -q -x
+	HTTK_TEST_PROFILE=normal PYTHONPATH=src $(PYTHON) -m pytest -q -x
+
+test-extended-fastfail:
+	HTTK_TEST_PROFILE=extended PYTHONPATH=src $(PYTHON) -m pytest -q -m "" -x
 
 check: format-check typecheck typecheck_pyright test
 
-ci: format-check typecheck typecheck_pyright test_fastfail
+ci: format-check typecheck typecheck_pyright test-extended-fastfail
 
 dist: dist-clean
 	$(PYTHON) -m build --outdir $(DIST_DIR)

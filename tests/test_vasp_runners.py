@@ -270,49 +270,49 @@ def test_a_diagnosed_failure_is_remedied_and_the_rerun_succeeds(
     assert not (workdir / ".httk-vasp").exists()
 
 
+@pytest.mark.parametrize(
+    ("label", "fail_once"),
+    (
+        ("plain", False),
+        ("remedied", True),
+    ),
+)
 def test_the_bash_runner_and_the_python_runner_publish_the_same_result(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, label: str, fail_once: bool
 ) -> None:
     """Parity: one workflow, two languages, the same job state and the same files."""
 
-    observed: dict[str, list[Any]] = {}
+    observed: dict[str, dict[str, Any]] = {}
     for runner in ("vasp_relax.py", "vasp_relax.sh"):
-        rows: list[Any] = []
-        for label, fail_once in (("plain", False), ("remedied", True)):
-            workspace, job_id = _campaign(
-                tmp_path / f"{label}-{runner}",
-                monkeypatch,
-                runner,
-                fail_once=fail_once,
-                inputs={"kpoint_density": 15.0, "incar_tags": {"NELM": 40}},
-            )
-            kind, payload = _payload_of(workspace, job_id)
-            state = _job_state(payload)
-            state["energy"] = round(float(str(state["energy"])), 9)
-            history = payload / ".httk-job" / "vasp-remedies.json"
-            ladder = {} if not history.is_file() else json.loads(history.read_text(encoding="utf-8"))["attempts"]
-            rows.append(
-                {
-                    "kind": kind,
-                    "state": state,
-                    "ladder": ladder,
-                    "workdir": _files(payload / "run"),
-                    "data": _files(payload / "data"),
-                    "inputs": [
-                        (payload / "run" / name).read_text(encoding="utf-8") for name in ("INCAR", "KPOINTS", "POSCAR")
-                    ],
-                    "outputs": [
-                        (payload / "data" / "vasp" / name).read_text(encoding="utf-8")
-                        for name in ("CONTCAR", "OUTCAR", "OSZICAR")
-                    ],
-                }
-            )
-        observed[runner] = rows
+        workspace, job_id = _campaign(
+            tmp_path / f"{label}-{runner}",
+            monkeypatch,
+            runner,
+            fail_once=fail_once,
+            inputs={"kpoint_density": 15.0, "incar_tags": {"NELM": 40}},
+        )
+        kind, payload = _payload_of(workspace, job_id)
+        state = _job_state(payload)
+        state["energy"] = round(float(str(state["energy"])), 9)
+        history = payload / ".httk-job" / "vasp-remedies.json"
+        ladder = {} if not history.is_file() else json.loads(history.read_text(encoding="utf-8"))["attempts"]
+        observed[runner] = {
+            "kind": kind,
+            "state": state,
+            "ladder": ladder,
+            "workdir": _files(payload / "run"),
+            "data": _files(payload / "data"),
+            "inputs": [(payload / "run" / name).read_text(encoding="utf-8") for name in ("INCAR", "KPOINTS", "POSCAR")],
+            "outputs": [
+                (payload / "data" / "vasp" / name).read_text(encoding="utf-8")
+                for name in ("CONTCAR", "OUTCAR", "OSZICAR")
+            ],
+        }
 
-    # The campaign really did both things: a plain run and a remedied one.
-    assert [row["kind"] for row in observed["vasp_relax.py"]] == ["succeeded", "succeeded"]
-    assert observed["vasp_relax.py"][1]["state"]["remedies"] == 1
-    assert "NELM = 40" in observed["vasp_relax.py"][0]["inputs"][0]
+    assert observed["vasp_relax.py"]["kind"] == "succeeded"
+    if fail_once:
+        assert observed["vasp_relax.py"]["state"]["remedies"] == 1
+    assert "NELM = 40" in observed["vasp_relax.py"]["inputs"][0]
     assert observed["vasp_relax.py"] == observed["vasp_relax.sh"]
 
 
