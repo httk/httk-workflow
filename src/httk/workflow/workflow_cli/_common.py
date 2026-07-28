@@ -19,7 +19,6 @@ installed than the machine that composed them.
 
 # ruff: noqa: F401
 
-
 import argparse
 import json
 import logging

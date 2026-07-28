@@ -838,8 +838,7 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
         registered = ", ".join(sorted(runner.steps)) or "none"
         attempt.fail(
             "unknown_step",
-            f"step {attempt.step!r} is not implemented by the {runner.workflow} runner; "
-            f"registered steps: {registered}",
+            f"step {attempt.step!r} is not implemented by the {runner.workflow} runner; registered steps: {registered}",
         )
     elif command == "fail-no-outcome":
         attempt = _publishing()

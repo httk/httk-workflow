@@ -314,8 +314,7 @@ def _main(runner: Runner, attempt: Attempt) -> int:
         registered = ", ".join(sorted(runner.steps)) or "none"
         attempt.fail(
             "unknown_step",
-            f"step {attempt.step!r} is not implemented by the {runner.workflow} runner; "
-            f"registered steps: {registered}",
+            f"step {attempt.step!r} is not implemented by the {runner.workflow} runner; registered steps: {registered}",
         )
         return 0
     try:

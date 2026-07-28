@@ -377,8 +377,10 @@ def test_two_interleaved_managers_claim_every_ready_job_exactly_once(tmp_path: P
     ):
         _interleave(
             (manager_a, manager_b),
-            until=lambda: all(kind == "succeeded" for kind in _kinds(workspace_a).values())
-            and len(_kinds(workspace_a)) == len(job_ids),
+            until=lambda: (
+                all(kind == "succeeded" for kind in _kinds(workspace_a).values())
+                and len(_kinds(workspace_a)) == len(job_ids)
+            ),
         )
 
     assert sorted(path.name for path in (log / "claims").iterdir()) == sorted(job_ids)
