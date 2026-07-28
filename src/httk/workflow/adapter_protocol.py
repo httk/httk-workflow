@@ -13,7 +13,8 @@ the wrong place.
 This module is the documented surface of that contract. The implementation
 lives in :mod:`httk.workflow.adapter_runtime`, which is what the packaged
 ``adapter`` dispatcher executes; both names refer to the same objects. See
-:doc:`/workflow_cli` for the operations and the settings each one uses.
+the workflow CLI guide in the httk-workflow documentation for the operations and
+the settings each one uses.
 
 Every subprocess started by the implementation is an argument vector, so no
 shell ever parses a value that came from a request or from settings. ``ssh`` is

@@ -146,7 +146,7 @@ def write_automatic_kpoints(
     """Write a standard automatic KPOINTS file.
 
     The centering defaults to :data:`DEFAULT_KPOINT_CENTERING` here, in
-    :class:`VaspPreparationOptions`, and in the Bash bridge, so a workflow that
+    :class:`~httk.workflow.vasp.inputs.VaspPreparationOptions`, and in the Bash bridge, so a workflow that
     hits a k-point failure class still has the ``Gamma`` remedy available.
     """
 

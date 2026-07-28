@@ -10,7 +10,8 @@ implementation.
 This module is the documented surface of that contract. The implementation lives
 in the private ``httk.workflow._shell_bridge``, which is what the shell library
 still executes; both names refer to the same objects, and the private one keeps
-working. See :doc:`/native_bash_api` for the subcommands themselves.
+working. See the native Bash API guide in the httk-workflow documentation for
+the subcommands themselves.
 
 Exit codes are uniform across every subcommand: ``0`` when the call succeeded,
 ``1`` when the answer is legitimately absent — an unset state key, a missing

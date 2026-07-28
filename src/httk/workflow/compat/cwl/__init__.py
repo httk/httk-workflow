@@ -864,10 +864,10 @@ def import_cwl(
     through the reserved installed form, so no runner file is written per
     workflow.
 
-    Anything outside the subset raises :exc:`UnsupportedCwlError` naming the
+    Anything outside the subset raises :exc:`~httk.workflow.compat.cwl.UnsupportedCwlError` naming the
     feature and where it was found; anything accepted with a caveat — a
     ``DockerRequirement``, an ignored hint — is reported in
-    :attr:`ImportedCwl.warnings`.
+    :attr:`~httk.workflow.compat.cwl.ImportedCwl.warnings`.
     """
 
     plan, context = load_cwl_plan(workflow_path)

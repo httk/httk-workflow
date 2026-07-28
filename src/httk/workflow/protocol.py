@@ -3,7 +3,7 @@
 This module is the one deliberate public home of the on-disk protocol: the
 shapes, validators, and primitives an implementation in any language reads and
 writes to interoperate through a workspace. The normative specification is
-:doc:`the filesystem protocol reference </workflow_filesystem_api>`; everything
+the filesystem protocol reference in the httk-workflow documentation; everything
 named here is what that document describes, and an independent inspection or
 verification tool should be able to work from this namespace and that document
 alone.

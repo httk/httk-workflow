@@ -885,7 +885,7 @@ class JobDefinition:
     def digest(self) -> str:
         """Return the immutable job digest.
 
-        Normatively the digest is :func:`job_digest` over the stored ``job.json``
+        Normatively the digest is :func:`~httk.workflow.models.job_digest` over the stored ``job.json``
         file bytes exactly as submitted, which is what every definition read
         through :meth:`from_bytes` carries. A definition composed in memory has
         no stored bytes yet, so its canonical serialization is hashed instead;
