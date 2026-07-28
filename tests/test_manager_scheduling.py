@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -782,9 +782,9 @@ def test_a_registered_child_bundle_is_not_hashed_again_after_it_is_published(
 
     hashed: list[str] = []
 
-    def counting_digest(path: Path, **keywords: object) -> str:
+    def counting_digest(path: Path, *, skip: Callable[[str], bool] | None = None) -> str:
         hashed.append(str(path))
-        return tree_digest(path, **keywords)  # pyright: ignore[reportArgumentType]
+        return tree_digest(path, skip=skip)
 
     monkeypatch.setattr("httk.workflow.manager.tree_digest", counting_digest)
 
