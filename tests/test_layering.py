@@ -137,9 +137,7 @@ def _consumer_modules() -> list[Path]:
     the very declarations the canonical tree uses is exactly its job.
     """
 
-    paths: list[Path] = []
-    for path in sorted((WORKFLOW / "vasp").rglob("*.py")):
-        paths.append(path)
+    paths: list[Path] = sorted((WORKFLOW / "vasp").rglob("*.py"))
     for path in sorted((WORKFLOW / "compat").rglob("*.py")):
         if path.name == "cli.py":
             continue

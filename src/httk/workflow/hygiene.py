@@ -53,17 +53,17 @@ from .workspace import Workspace
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
+    "DOCTOR_FRAME_FORMAT",
+    "DOCTOR_REPORT_FORMAT",
     "PROJECT_DESCRIPTION_FORMAT",
     "REMOTE_DESCRIPTION_FORMAT",
-    "DOCTOR_REPORT_FORMAT",
-    "DOCTOR_FRAME_FORMAT",
     "TMP_MAXIMUM_AGE_SECONDS",
-    "describe_project",
-    "workflow_show_section",
-    "describe_remote",
-    "remove_remote",
     "Finding",
+    "describe_project",
+    "describe_remote",
     "project_doctor",
+    "remove_remote",
+    "workflow_show_section",
 ]
 
 PROJECT_DESCRIPTION_FORMAT = "httk-project-description"

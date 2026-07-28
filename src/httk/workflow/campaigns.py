@@ -39,18 +39,18 @@ from .scaffold import JobItem, ScaffoldedJob, new_job, new_jobs
 from .workspace import Workspace
 
 __all__ = [
-    "CAMPAIGN_SECTION",
     "ASSIGNMENT_POLICIES",
+    "CAMPAIGN_SECTION",
     "CampaignConfig",
-    "read_campaign",
-    "write_campaign",
-    "campaign_partitions",
     "assign_partition",
-    "partition_workspace",
-    "campaign_submit",
-    "campaign_submit_many",
     "campaign_harvest",
     "campaign_managers",
+    "campaign_partitions",
+    "campaign_submit",
+    "campaign_submit_many",
+    "partition_workspace",
+    "read_campaign",
+    "write_campaign",
 ]
 
 #: The ``project.json`` member the campaign map lives in.

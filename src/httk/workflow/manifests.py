@@ -35,22 +35,22 @@ from .projects import (
 from .workspace import Workspace
 
 __all__ = [
+    "INVALID",
     "MAINTENANCE_LOCK_FILE",
     "MAINTENANCE_LOCK_MAX_AGE_SECONDS",
     "VALID_TRUSTED",
     "VALID_UNKNOWN_KEY",
-    "INVALID",
     "VERDICT_EXIT_CODES",
     "MaintenanceLock",
+    "ManifestVerification",
+    "create_manifest",
     "read_maintenance_lock",
     "release_maintenance_lock",
-    "workspace_maintenance_guard",
-    "create_manifest",
-    "ManifestVerification",
     "resolve_trusted_keys",
-    "verify_v2_manifest",
     "verify_legacy_manifest",
     "verify_manifest",
+    "verify_v2_manifest",
+    "workspace_maintenance_guard",
 ]
 
 _DOMAIN = b"httk-project-manifest-v2\0"

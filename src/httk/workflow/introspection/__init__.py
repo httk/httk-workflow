@@ -2,7 +2,6 @@
 
 # The imports below deliberately preserve the complete historical module surface.
 # ruff cannot infer names exported by the whitespace-based __all__ assembly.
-# ruff: noqa: F401
 
 import json
 import shutil
@@ -99,17 +98,97 @@ from ._rendering import (
     render_rows,
 )
 
-__all__ = """
-JOB_REPORT_FORMAT JOB_HISTORY_FORMAT JOB_DIAGNOSIS_FORMAT JOB_LIST_FORMAT
-DEBUG_EXIT_SUCCEEDED DEBUG_EXIT_FAILED DEBUG_EXIT_UNFINISHED resolve_job read_managers
-ManagerRecord ClaimRequirements claim_requirements manager_refusals BudgetStatus budget_status observe_join
-read_error_breadcrumb describe_job render_job job_frames render_frames list_jobs render_rows Check Diagnosis explain_job
-ScopedWorkspace DebugOutcome debug_job _Tail _drive _drive_children _exit_code _frame_summary _print_line _pump
-_stage_payload_with_step _Diagnosing _describe_child _label_sequence _label_set _maintenance_check _manager_checks
-_owner_checks _placement_covered _profile_check _requirement_checks _budget_checks _breadcrumb_check _continue_checks
-_HISTORY_READ_DEADLINE_SECONDS _attempt_control _job_of _optional_float _optional_int _optional_string _state_of
-_workdir_relative _pair Any Callable Iterable Iterator Mapping Sequence Path PurePosixPath dataclass field json shutil
-tempfile time read_json timestamp_seconds WorkflowError WorkspaceCorruptionError read_record TaskManager read_maintenance_lock
-CORE_PROFILE CORE_STATE_KINDS DEFAULT_LEASE_SECONDS QUIESCENT_KINDS STATE_KINDS TERMINAL_KINDS JobDefinition Marker
-normalize_placement validate_step MarkerFault Workspace
-""".split()  # pyright: ignore[reportUnsupportedDunderAll]
+__all__ = [
+    "CORE_PROFILE",
+    "CORE_STATE_KINDS",
+    "DEBUG_EXIT_FAILED",
+    "DEBUG_EXIT_SUCCEEDED",
+    "DEBUG_EXIT_UNFINISHED",
+    "DEFAULT_LEASE_SECONDS",
+    "JOB_DIAGNOSIS_FORMAT",
+    "JOB_HISTORY_FORMAT",
+    "JOB_LIST_FORMAT",
+    "JOB_REPORT_FORMAT",
+    "QUIESCENT_KINDS",
+    "STATE_KINDS",
+    "TERMINAL_KINDS",
+    "_HISTORY_READ_DEADLINE_SECONDS",
+    "Any",
+    "BudgetStatus",
+    "Callable",
+    "Check",
+    "ClaimRequirements",
+    "DebugOutcome",
+    "Diagnosis",
+    "Iterable",
+    "Iterator",
+    "JobDefinition",
+    "ManagerRecord",
+    "Mapping",
+    "Marker",
+    "MarkerFault",
+    "Path",
+    "PurePosixPath",
+    "ScopedWorkspace",
+    "Sequence",
+    "TaskManager",
+    "WorkflowError",
+    "Workspace",
+    "WorkspaceCorruptionError",
+    "_Diagnosing",
+    "_Tail",
+    "_attempt_control",
+    "_breadcrumb_check",
+    "_budget_checks",
+    "_continue_checks",
+    "_describe_child",
+    "_drive",
+    "_drive_children",
+    "_exit_code",
+    "_frame_summary",
+    "_job_of",
+    "_label_sequence",
+    "_label_set",
+    "_maintenance_check",
+    "_manager_checks",
+    "_optional_float",
+    "_optional_int",
+    "_optional_string",
+    "_owner_checks",
+    "_pair",
+    "_placement_covered",
+    "_print_line",
+    "_profile_check",
+    "_pump",
+    "_requirement_checks",
+    "_stage_payload_with_step",
+    "_state_of",
+    "_workdir_relative",
+    "budget_status",
+    "claim_requirements",
+    "dataclass",
+    "debug_job",
+    "describe_job",
+    "explain_job",
+    "field",
+    "job_frames",
+    "json",
+    "list_jobs",
+    "manager_refusals",
+    "normalize_placement",
+    "observe_join",
+    "read_error_breadcrumb",
+    "read_json",
+    "read_maintenance_lock",
+    "read_managers",
+    "read_record",
+    "render_frames",
+    "render_job",
+    "render_rows",
+    "resolve_job",
+    "shutil",
+    "tempfile",
+    "time",
+    "timestamp_seconds",
+    "validate_step",
+]  # pyright: ignore[reportUnsupportedDunderAll]

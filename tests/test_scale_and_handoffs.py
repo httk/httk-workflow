@@ -248,7 +248,7 @@ def _waiting_campaign(root: Path, children: int, *, hint: bool = True) -> tuple[
     workspace = Workspace.initialize(root / "workspace")
     references: list[dict[str, object]] = []
     for index in range(children):
-        payload, child_id = _payload(root / "source", f"child-{index}", tag="child")
+        payload, _child_id = _payload(root / "source", f"child-{index}", tag="child")
         child = workspace.submit(payload, f"project/children/{index}")
         reference: dict[str, object] = {
             "workspace_id": workspace.workspace_id,

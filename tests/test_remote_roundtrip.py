@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import Remote, fake_remote, register_ws
 from httk.core import CLIContext
 
+from conftest import Remote, fake_remote, register_ws
 from httk.workflow import (
     HarvestRecord,
     TaskManager,

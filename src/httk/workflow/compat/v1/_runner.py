@@ -204,7 +204,7 @@ def _freeze(
         elif status != 0:
             _note(f"the legacy freeze step returned exit status {status}", log_path=log_path)
         replay_v1_atomic(cwd)
-    except Exception as exc:  # noqa: BLE001 - a failing freeze must not replace the outcome
+    except Exception as exc:
         _note(f"the legacy freeze step could not be completed: {exc!r}", log_path=log_path)
         return
 
@@ -247,7 +247,7 @@ def _task_directories(payload: Path) -> list[Path]:
         kept: list[str] = []
         for name in directories:
             path = root_path / name
-            if name.startswith(".httk-attempt.") or name.startswith(".httk-v1-"):
+            if name.startswith((".httk-attempt.", ".httk-v1-")):
                 continue
             if path.is_symlink():
                 continue

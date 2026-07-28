@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import register_ws
 from httk.core import CLIContext
 
+from conftest import register_ws
 from httk.workflow.adapters import ADAPTER_OPERATIONS, add_remote, run_adapter
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import command

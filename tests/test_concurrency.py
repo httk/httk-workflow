@@ -327,7 +327,7 @@ def _launched_by(caplog: pytest.LogCaptureFixture) -> dict[str, str]:
     """Return which manager launched each job, from the structured log records."""
 
     return {
-        str(getattr(record, "job_key")): str(getattr(record, "manager_id"))
+        str(getattr(record, "job_key")): str(getattr(record, "manager_id"))  # noqa: B009 - LogRecord fields are dynamic
         for record in caplog.records
         if getattr(record, "event", None) == "launch"
     }
@@ -371,13 +371,15 @@ def test_two_interleaved_managers_claim_every_ready_job_exactly_once(tmp_path: P
         job_ids.append(job_id)
 
     workspace_a, workspace_b = _attached(root), _attached(root)
-    with TaskManager(workspace_a, heartbeat_interval=0.01, maximum_workers=3) as manager_a:
-        with TaskManager(workspace_b, heartbeat_interval=0.01, maximum_workers=3) as manager_b:
-            _interleave(
-                (manager_a, manager_b),
-                until=lambda: all(kind == "succeeded" for kind in _kinds(workspace_a).values())
-                and len(_kinds(workspace_a)) == len(job_ids),
-            )
+    with (
+        TaskManager(workspace_a, heartbeat_interval=0.01, maximum_workers=3) as manager_a,
+        TaskManager(workspace_b, heartbeat_interval=0.01, maximum_workers=3) as manager_b,
+    ):
+        _interleave(
+            (manager_a, manager_b),
+            until=lambda: all(kind == "succeeded" for kind in _kinds(workspace_a).values())
+            and len(_kinds(workspace_a)) == len(job_ids),
+        )
 
     assert sorted(path.name for path in (log / "claims").iterdir()) == sorted(job_ids)
     assert list((log / "duplicates").iterdir()) == []
@@ -397,36 +399,38 @@ def test_a_lost_claim_race_leaves_exactly_one_winner_and_a_clean_loser(tmp_path:
     _attached(root).submit(payload, "project/raced")
 
     workspace_a, workspace_b = _attached(root), _attached(root)
-    with TaskManager(workspace_a, heartbeat_interval=0.01) as manager_a:
-        with TaskManager(workspace_b, heartbeat_interval=0.01) as manager_b:
-            # Both managers register submissions and then scan for ready work
-            # before either of them acts on what it saw.
-            manager_a._register_submissions()
-            eligible_a = manager_a._eligible_ready()
-            eligible_b = manager_b._eligible_ready()
-            assert len(eligible_a) == len(eligible_b) == 1
-            assert eligible_a[0].path == eligible_b[0].path
+    with (
+        TaskManager(workspace_a, heartbeat_interval=0.01) as manager_a,
+        TaskManager(workspace_b, heartbeat_interval=0.01) as manager_b,
+    ):
+        # Both managers register submissions and then scan for ready work
+        # before either of them acts on what it saw.
+        manager_a._register_submissions()
+        eligible_a = manager_a._eligible_ready()
+        eligible_b = manager_b._eligible_ready()
+        assert len(eligible_a) == len(eligible_b) == 1
+        assert eligible_a[0].path == eligible_b[0].path
 
-            lost: list[TransitionLostError] = []
-            won: list[TaskManager] = []
-            for manager, marker in ((manager_a, eligible_a[0]), (manager_b, eligible_b[0])):
-                try:
-                    manager._claim_and_launch(marker)
-                except TransitionLostError as exc:
-                    lost.append(exc)
-                else:
-                    won.append(manager)
+        lost: list[TransitionLostError] = []
+        won: list[TaskManager] = []
+        for manager, marker in ((manager_a, eligible_a[0]), (manager_b, eligible_b[0])):
+            try:
+                manager._claim_and_launch(marker)
+            except TransitionLostError as exc:
+                lost.append(exc)
+            else:
+                won.append(manager)
 
-            assert len(won) == 1 and len(lost) == 1
-            # The loser holds nothing: no local attempt, no half-written state.
-            loser = manager_b if won[0] is manager_a else manager_a
-            assert loser._running == {}
-            # And it keeps working: its very next tick is an ordinary one.
-            loser.tick()
-            _interleave(
-                (manager_a, manager_b),
-                until=lambda: _kinds(workspace_a).get(job_id) == "succeeded",
-            )
+        assert len(won) == 1 and len(lost) == 1
+        # The loser holds nothing: no local attempt, no half-written state.
+        loser = manager_b if won[0] is manager_a else manager_a
+        assert loser._running == {}
+        # And it keeps working: its very next tick is an ordinary one.
+        loser.tick()
+        _interleave(
+            (manager_a, manager_b),
+            until=lambda: _kinds(workspace_a).get(job_id) == "succeeded",
+        )
 
     assert len(list((log / "claims").iterdir())) == 1
     assert list((log / "duplicates").iterdir()) == []
@@ -492,50 +496,52 @@ def test_an_operator_request_is_applied_by_exactly_one_manager(
         submitting.submit(payload, f"project/requested/{index}")
 
     workspace_a, workspace_b = _attached(root), _attached(root)
-    with TaskManager(workspace_a, heartbeat_interval=0.01) as manager_a:
-        with TaskManager(workspace_b, heartbeat_interval=0.01) as manager_b:
-            manager_a._register_submissions()
-            ready = sorted(workspace_a.scan_markers(("ready",)), key=lambda item: item.job_key)
-            assert len(ready) == 6
-            for marker in ready:
-                submitting.publish_request(
-                    {
-                        "format": "httk-workflow-request",
-                        "format_version": 1,
-                        "request_id": str(uuid.uuid4()),
-                        "job_id": marker.job_id,
-                        "job_key": marker.job_key,
-                        "placement": marker.placement.as_posix(),
-                        "expected_generation": marker.generation,
-                        "expected_record_ref": marker.record_ref,
-                        "action": "pause",
-                        "operator": "tester",
-                        "reason": "contended request",
-                        "created_at": datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z"),
-                    }
-                )
+    with (
+        TaskManager(workspace_a, heartbeat_interval=0.01) as manager_a,
+        TaskManager(workspace_b, heartbeat_interval=0.01) as manager_b,
+    ):
+        manager_a._register_submissions()
+        ready = sorted(workspace_a.scan_markers(("ready",)), key=lambda item: item.job_key)
+        assert len(ready) == 6
+        for marker in ready:
+            submitting.publish_request(
+                {
+                    "format": "httk-workflow-request",
+                    "format_version": 1,
+                    "request_id": str(uuid.uuid4()),
+                    "job_id": marker.job_id,
+                    "job_key": marker.job_key,
+                    "placement": marker.placement.as_posix(),
+                    "expected_generation": marker.generation,
+                    "expected_record_ref": marker.record_ref,
+                    "action": "pause",
+                    "operator": "tester",
+                    "reason": "contended request",
+                    "created_at": datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z"),
+                }
+            )
 
-            with caplog.at_level(logging.INFO, logger="httk.workflow"):
-                barrier = threading.Barrier(2)
+        with caplog.at_level(logging.INFO, logger="httk.workflow"):
+            barrier = threading.Barrier(2)
 
-                def handle(manager: TaskManager) -> None:
-                    barrier.wait(timeout=30.0)
-                    for _ in range(20):
-                        manager._handle_requests()
+            def handle(manager: TaskManager) -> None:
+                barrier.wait(timeout=30.0)
+                for _ in range(20):
+                    manager._handle_requests()
 
-                threads = [threading.Thread(target=handle, args=(manager,)) for manager in (manager_a, manager_b)]
-                for thread in threads:
-                    thread.start()
-                for thread in threads:
-                    thread.join(timeout=60.0)
-                    assert not thread.is_alive()
+            threads = [threading.Thread(target=handle, args=(manager,)) for manager in (manager_a, manager_b)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=60.0)
+                assert not thread.is_alive()
 
     handled = [record for record in caplog.records if getattr(record, "event", None) == "request_handled"]
     # Each request was claimed by exactly one manager and applied exactly once:
     # six handled records for six requests, and every job exactly one
     # generation beyond the ready state it was paused from.
     assert len(handled) == 6
-    assert len({getattr(record, "request") for record in handled}) == 6
+    assert len({getattr(record, "request") for record in handled}) == 6  # noqa: B009 - LogRecord fields are dynamic
     paused = sorted(workspace_a.scan_markers(("paused",)), key=lambda item: item.job_key)
     assert len(paused) == 6
     for marker, before in zip(paused, ready, strict=True):
@@ -561,14 +567,16 @@ def test_a_join_resolves_when_the_children_run_on_the_other_manager(
     _attached(root).submit(payload, "project/parent")
 
     workspace_a, workspace_b = _attached(root), _attached(root)
-    with caplog.at_level(logging.INFO, logger="httk.workflow"):
-        with TaskManager(workspace_a, heartbeat_interval=0.01, pools=("alpha",)) as manager_a:
-            with TaskManager(workspace_b, heartbeat_interval=0.01, pools=("beta",)) as manager_b:
-                _interleave(
-                    (manager_a, manager_b),
-                    until=lambda: _kinds(workspace_a).get(parent_id) == "succeeded",
-                )
-                alpha, beta = manager_a.manager_id, manager_b.manager_id
+    with (
+        caplog.at_level(logging.INFO, logger="httk.workflow"),
+        TaskManager(workspace_a, heartbeat_interval=0.01, pools=("alpha",)) as manager_a,
+        TaskManager(workspace_b, heartbeat_interval=0.01, pools=("beta",)) as manager_b,
+    ):
+        _interleave(
+            (manager_a, manager_b),
+            until=lambda: _kinds(workspace_a).get(parent_id) == "succeeded",
+        )
+        alpha, beta = manager_a.manager_id, manager_b.manager_id
 
     parent = workspace_a.find_marker_by_id(parent_id)
     assert parent is not None and parent.kind == "succeeded"
@@ -596,19 +604,21 @@ def test_both_managers_drain_without_stranding_the_work_they_started(tmp_path: P
         job_ids.append(job_id)
 
     workspace_a, workspace_b = _attached(root), _attached(root)
-    with TaskManager(workspace_a, heartbeat_interval=0.01) as manager_a:
-        with TaskManager(workspace_b, heartbeat_interval=0.01) as manager_b:
-            _interleave(
-                (manager_a, manager_b),
-                until=lambda: bool(manager_a._running) and bool(manager_b._running),
-            )
-            manager_a._draining = True
-            manager_b._draining = True
-            _interleave(
-                (manager_a, manager_b),
-                until=lambda: not manager_a._running and not manager_b._running,
-            )
-            assert not manager_a._running and not manager_b._running
+    with (
+        TaskManager(workspace_a, heartbeat_interval=0.01) as manager_a,
+        TaskManager(workspace_b, heartbeat_interval=0.01) as manager_b,
+    ):
+        _interleave(
+            (manager_a, manager_b),
+            until=lambda: bool(manager_a._running) and bool(manager_b._running),
+        )
+        manager_a._draining = True
+        manager_b._draining = True
+        _interleave(
+            (manager_a, manager_b),
+            until=lambda: not manager_a._running and not manager_b._running,
+        )
+        assert not manager_a._running and not manager_b._running
 
     kinds = _kinds(workspace_a)
     assert set(kinds) == set(job_ids)
@@ -642,34 +652,36 @@ def test_a_claim_abandoned_mid_launch_is_recovered_by_the_other_manager(
     _attached(root).submit(payload, "project/abandoned")
 
     workspace_a, workspace_b = _attached(root), _attached(root)
-    with TaskManager(workspace_a, heartbeat_interval=0.01) as manager_a:
-        with TaskManager(workspace_b, heartbeat_interval=0.01) as manager_b:
-            # Manager A stops existing between the claim rename and the launch.
-            monkeypatch.setattr(TaskManager, "_launch_claimed", _stop_before_launching)
-            with pytest.raises(_StoppedManager):
-                manager_a.tick()
-            monkeypatch.undo()
+    with (
+        TaskManager(workspace_a, heartbeat_interval=0.01) as manager_a,
+        TaskManager(workspace_b, heartbeat_interval=0.01) as manager_b,
+    ):
+        # Manager A stops existing between the claim rename and the launch.
+        monkeypatch.setattr(TaskManager, "_launch_claimed", _stop_before_launching)
+        with pytest.raises(_StoppedManager):
+            manager_a.tick()
+        monkeypatch.undo()
 
-            claimed = workspace_b.find_marker_by_id(job_id)
-            assert claimed is not None and claimed.kind == "claimed"
-            assert workspace_b.read_state(claimed)["manager_id"] == manager_a.manager_id
+        claimed = workspace_b.find_marker_by_id(job_id)
+        assert claimed is not None and claimed.kind == "claimed"
+        assert workspace_b.read_state(claimed)["manager_id"] == manager_a.manager_id
 
-            # Nothing is taken from a manager that is still heartbeating.
-            manager_b.tick()
-            still = workspace_b.find_marker_by_id(job_id)
-            assert still is not None and still.kind == "claimed"
+        # Nothing is taken from a manager that is still heartbeating.
+        manager_b.tick()
+        still = workspace_b.find_marker_by_id(job_id)
+        assert still is not None and still.kind == "claimed"
 
-            _backdate_heartbeat(workspace_b, manager_a.manager_id, age=10.0)
-            manager_b._recover_abandoned_claims()
-            released = workspace_b.find_marker_by_id(job_id)
-            assert released is not None and released.kind == "ready"
-            state = workspace_b.read_state(released)
-            assert state["reason"] == "claim_abandoned"
-            # The abandoned claim consumed no budget: the recovered job is at
-            # the attempt ordinal it had before manager A ever touched it.
-            assert state["attempt_ordinal"] == 0 and state["total_attempts"] == 0
+        _backdate_heartbeat(workspace_b, manager_a.manager_id, age=10.0)
+        manager_b._recover_abandoned_claims()
+        released = workspace_b.find_marker_by_id(job_id)
+        assert released is not None and released.kind == "ready"
+        state = workspace_b.read_state(released)
+        assert state["reason"] == "claim_abandoned"
+        # The abandoned claim consumed no budget: the recovered job is at
+        # the attempt ordinal it had before manager A ever touched it.
+        assert state["attempt_ordinal"] == 0 and state["total_attempts"] == 0
 
-            _interleave((manager_b,), until=lambda: _kinds(workspace_b).get(job_id) == "succeeded")
+        _interleave((manager_b,), until=lambda: _kinds(workspace_b).get(job_id) == "succeeded")
 
     assert len(list((log / "claims").iterdir())) == 1
     assert list((log / "duplicates").iterdir()) == []
@@ -692,24 +704,26 @@ def test_a_persistent_attempt_is_adopted_only_once_its_writer_is_proven_gone(tmp
     _attached(root).submit(payload, "project/persistent-writer")
 
     workspace_a, workspace_b = _attached(root), _attached(root)
-    with TaskManager(workspace_a, heartbeat_interval=0.01, pools=("alpha",)) as manager_a:
-        with TaskManager(
+    with (
+        TaskManager(workspace_a, heartbeat_interval=0.01, pools=("alpha",)) as manager_a,
+        TaskManager(
             workspace_b,
             heartbeat_interval=0.01,
             pools=("beta",),
             takeover_grace_factor=1.0,
-        ) as manager_b:
-            _interleave((manager_a,), until=lambda: _kinds(workspace_a).get(job_id) == "running")
-            _backdate_heartbeat(workspace_b, manager_a.manager_id, age=600.0)
+        ) as manager_b,
+    ):
+        _interleave((manager_a,), until=lambda: _kinds(workspace_a).get(job_id) == "running")
+        _backdate_heartbeat(workspace_b, manager_a.manager_id, age=600.0)
 
-            # A silent lease is not evidence that a persistent workdir is free:
-            # a second writer there would corrupt it, so B leaves it alone.
-            manager_b.tick()
-            running = workspace_b.find_marker_by_id(job_id)
-            assert running is not None and running.kind == "running"
+        # A silent lease is not evidence that a persistent workdir is free:
+        # a second writer there would corrupt it, so B leaves it alone.
+        manager_b.tick()
+        running = workspace_b.find_marker_by_id(job_id)
+        assert running is not None and running.kind == "running"
 
-            _stop_attempts(manager_a)
-            manager_b.tick()
+        _stop_attempts(manager_a)
+        manager_b.tick()
 
     adopted = workspace_b.find_marker_by_id(job_id)
     assert adopted is not None and adopted.kind == "ready"
@@ -732,72 +746,74 @@ def test_an_isolated_attempt_is_adopted_on_the_grace_and_its_zombie_is_fenced(tm
     _attached(root).submit(payload, "project/isolated-writer")
 
     workspace_a, workspace_b = _attached(root), _attached(root)
-    with TaskManager(workspace_a, heartbeat_interval=0.01) as manager_a:
-        with TaskManager(workspace_b, heartbeat_interval=0.01, takeover_grace_factor=2.0) as manager_b:
-            _interleave((manager_a,), until=lambda: _kinds(workspace_a).get(job_id) == "running")
-            zombie = workspace_a.find_marker_by_id(job_id)
-            assert zombie is not None
-            zombie_state = workspace_a.read_state(zombie)
-            zombie_attempt = str(zombie_state["attempt_id"])
-            zombie_activation = str(zombie_state["activation_id"])
-            zombie_control = workspace_a.payload_path(zombie.placement, zombie.job_key) / str(
-                zombie_state["attempt_control"]
-            )
+    with (
+        TaskManager(workspace_a, heartbeat_interval=0.01) as manager_a,
+        TaskManager(workspace_b, heartbeat_interval=0.01, takeover_grace_factor=2.0) as manager_b,
+    ):
+        _interleave((manager_a,), until=lambda: _kinds(workspace_a).get(job_id) == "running")
+        zombie = workspace_a.find_marker_by_id(job_id)
+        assert zombie is not None
+        zombie_state = workspace_a.read_state(zombie)
+        zombie_attempt = str(zombie_state["attempt_id"])
+        zombie_activation = str(zombie_state["activation_id"])
+        zombie_control = workspace_a.payload_path(zombie.placement, zombie.job_key) / str(
+            zombie_state["attempt_control"]
+        )
 
-            # Manager A stops heartbeating. One expired lease is not yet enough:
-            # the takeover grace is what an isolated attempt is left alone for.
-            _backdate_heartbeat(workspace_b, manager_a.manager_id, age=3.0)
-            manager_b._poll_running()
-            waited = workspace_b.find_marker_by_id(job_id)
-            assert waited is not None and waited.kind == "running"
+        # Manager A stops heartbeating. One expired lease is not yet enough:
+        # the takeover grace is what an isolated attempt is left alone for.
+        _backdate_heartbeat(workspace_b, manager_a.manager_id, age=3.0)
+        manager_b._poll_running()
+        waited = workspace_b.find_marker_by_id(job_id)
+        assert waited is not None and waited.kind == "running"
 
-            _backdate_heartbeat(workspace_b, manager_a.manager_id, age=600.0)
-            manager_b._poll_running()
-            adopted = workspace_b.find_marker_by_id(job_id)
-            assert adopted is not None and adopted.kind == "ready"
-            assert workspace_b.read_state(adopted)["takeover_evidence"]["evidence"] == "lease_grace_expired"
+        _backdate_heartbeat(workspace_b, manager_a.manager_id, age=600.0)
+        manager_b._poll_running()
+        adopted = workspace_b.find_marker_by_id(job_id)
+        assert adopted is not None and adopted.kind == "ready"
+        assert workspace_b.read_state(adopted)["takeover_evidence"]["evidence"] == "lease_grace_expired"
 
-            # The zombie attempt of manager A now publishes what it computed.
-            temporary = zombie_control / "outcome.tmp.zombie"
-            temporary.mkdir()
-            (temporary / "outcome.json").write_text(
-                json.dumps(
-                    {
-                        "format": "httk-workflow-outcome",
-                        "format_version": 1,
-                        "job_id": zombie.job_id,
-                        "activation_id": zombie_activation,
-                        "attempt_id": zombie_attempt,
-                        "action": "succeed",
-                    }
-                ),
-                encoding="utf-8",
-            )
-            os.rename(temporary, zombie_control / "outcome.ready")
+        # The zombie attempt of manager A now publishes what it computed.
+        temporary = zombie_control / "outcome.tmp.zombie"
+        temporary.mkdir()
+        (temporary / "outcome.json").write_text(
+            json.dumps(
+                {
+                    "format": "httk-workflow-outcome",
+                    "format_version": 1,
+                    "job_id": zombie.job_id,
+                    "activation_id": zombie_activation,
+                    "attempt_id": zombie_attempt,
+                    "action": "succeed",
+                }
+            ),
+            encoding="utf-8",
+        )
+        os.rename(temporary, zombie_control / "outcome.ready")
 
-            try:
-                _interleave((manager_b,), until=lambda: _kinds(workspace_b).get(job_id) == "succeeded")
-            finally:
-                _stop_attempts(manager_a)
-                _stop_attempts(manager_b)
+        try:
+            _interleave((manager_b,), until=lambda: _kinds(workspace_b).get(job_id) == "succeeded")
+        finally:
+            _stop_attempts(manager_a)
+            _stop_attempts(manager_b)
 
-            final = workspace_b.find_marker_by_id(job_id)
-            assert final is not None
-            live = manager_b._read_frame(final)
-            assert live.attempt_id != zombie_attempt
+        final = workspace_b.find_marker_by_id(job_id)
+        assert final is not None
+        live = manager_b._read_frame(final)
+        assert live.attempt_id != zombie_attempt
 
-            # The commit path itself refuses the zombie's outcome: the attempt
-            # identity in it names an attempt no marker points at any more.
-            with pytest.raises(FormatError, match="attempt_id"):
-                manager_b._read_outcome(zombie_control / "outcome.ready" / "outcome.json", final, live)
+        # The commit path itself refuses the zombie's outcome: the attempt
+        # identity in it names an attempt no marker points at any more.
+        with pytest.raises(FormatError, match="attempt_id"):
+            manager_b._read_outcome(zombie_control / "outcome.ready" / "outcome.json", final, live)
 
-            # And no frame of the job's own history was ever built from it: the
-            # succeeded state descends from the attempt manager B launched.
-            chain = _walk_chain(workspace_b, final)
-            attempts = {frame.get("attempt_id") for frame in chain} - {None}
-            assert zombie_attempt in attempts and live.attempt_id in attempts
-            assert [frame["kind"] for frame in chain[:2]] == ["succeeded", "committing"]
-            assert all(frame.get("attempt_id") == live.attempt_id for frame in chain[:2])
+        # And no frame of the job's own history was ever built from it: the
+        # succeeded state descends from the attempt manager B launched.
+        chain = _walk_chain(workspace_b, final)
+        attempts = {frame.get("attempt_id") for frame in chain} - {None}
+        assert zombie_attempt in attempts and live.attempt_id in attempts
+        assert [frame["kind"] for frame in chain[:2]] == ["succeeded", "committing"]
+        assert all(frame.get("attempt_id") == live.attempt_id for frame in chain[:2])
 
     assert workspace_b.check().ok
 

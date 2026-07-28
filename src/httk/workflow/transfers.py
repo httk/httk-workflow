@@ -29,22 +29,22 @@ from .workspace import Workspace
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_OFFER_STATES",
     "TRANSFER_DIRECTORY",
-    "TRANSFER_MANIFEST",
-    "TRANSFER_RUNNERS",
     "TRANSFER_FORMAT",
     "TRANSFER_FORMAT_VERSION",
+    "TRANSFER_MANIFEST",
     "TRANSFER_OFFER_FORMAT",
     "TRANSFER_RETIREMENT_FORMAT",
-    "DEFAULT_OFFER_STATES",
-    "detach_job",
-    "validate_bundle",
-    "import_bundle",
+    "TRANSFER_RUNNERS",
     "acknowledge_transfer",
-    "recover_transfers",
-    "offer_transfers",
-    "retire_transfers",
+    "detach_job",
     "discard_staged_bundle",
+    "import_bundle",
+    "offer_transfers",
+    "recover_transfers",
+    "retire_transfers",
+    "validate_bundle",
 ]
 
 TRANSFER_DIRECTORY = ".httk-transfer"
@@ -236,9 +236,12 @@ def _unresolved_join_reference(workspace: Workspace, marker: Marker) -> bool:
         if not isinstance(children, list):
             continue
         for child in children:
-            if isinstance(child, Mapping) and child.get("workspace_id") == workspace.workspace_id:
-                if child.get("job_id") == marker.job_id:
-                    return True
+            if (
+                isinstance(child, Mapping)
+                and child.get("workspace_id") == workspace.workspace_id
+                and child.get("job_id") == marker.job_id
+            ):
+                return True
     return False
 
 

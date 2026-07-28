@@ -11,9 +11,9 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from conftest import register_ws
 from httk.core import CLIContext
 
+from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.compat._integration import runner_path, runner_reference
 from httk.workflow.compat.pwd import (

@@ -280,7 +280,7 @@ def render_rows(rows: Sequence[Mapping[str, Any]]) -> str:
     lines = [f"{'JOB':{width}s} {'STATE':<11s} {'STEP':<16s} {'PRI':>3s} PLACEMENT"]
     for row in rows:
         lines.append(
-            f"{str(row['job_key']):{width}s} {str(row['state']):<11s} "
-            f"{str(row['step'] or '-'):<16s} {int(row['priority']):>3d} {row['placement']}"
+            f"{row['job_key']!s:{width}s} {row['state']!s:<11s} "
+            f"{row['step'] or '-'!s:<16s} {int(row['priority']):>3d} {row['placement']}"
         )
     return "\n".join(lines)

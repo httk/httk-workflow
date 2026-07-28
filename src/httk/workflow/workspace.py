@@ -254,7 +254,7 @@ class Workspace:
         # capped, so it tracks the working set rather than the whole history: a
         # job that reaches a terminal kind is evicted, and interactive lookups of
         # a finished job pay one exhaustive scan instead.
-        self._marker_index: "OrderedDict[str, _IndexEntry] | None" = None
+        self._marker_index: OrderedDict[str, _IndexEntry] | None = None
         # Job ids the last complete scan found more than one marker for. That is
         # workspace corruption, and the lookup that meets one must say so rather
         # than pick a winner.
@@ -848,7 +848,7 @@ class Workspace:
         never carries the history of a workspace that has run for years.
         """
 
-        index: "OrderedDict[str, _IndexEntry]" = OrderedDict()
+        index: OrderedDict[str, _IndexEntry] = OrderedDict()
         duplicates: set[str] = set()
         seen: set[str] = set()
         found: Marker | None = None

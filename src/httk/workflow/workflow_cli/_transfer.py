@@ -1,7 +1,6 @@
 """Remote and transfer command groups."""
 
-# ruff: noqa: F405
-from ._common import *  # noqa: F401,F403
+from ._common import *
 from ._common import (
     _TRANSFER_PROTOCOL,
     _add_adapter_timeout,
@@ -9,11 +8,9 @@ from ._common import (
     _group,
     _leaf,
     _required,
-)
-from ._common import _run_adapter as run_adapter
-from ._common import (
     _settings,
 )
+from ._common import _run_adapter as run_adapter
 
 # ---------------------------------------------------------------------------
 # remote

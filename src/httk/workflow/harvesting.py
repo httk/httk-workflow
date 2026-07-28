@@ -40,7 +40,7 @@ import json
 import logging
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 from importlib import metadata
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -76,19 +76,19 @@ from .workspace import Workspace
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_HARVEST_STATES",
+    "HARVESTABLE_KINDS",
     "HARVEST_FORMAT",
     "HARVEST_FORMAT_VERSION",
-    "HARVESTABLE_KINDS",
-    "DEFAULT_HARVEST_STATES",
+    "HarvestRecord",
+    "children_of",
+    "declarations_of",
+    "harvest",
+    "harvest_kinds",
     "module_distribution",
+    "record_of",
     "runner_provenance",
     "timeline",
-    "children_of",
-    "HarvestRecord",
-    "declarations_of",
-    "record_of",
-    "harvest_kinds",
-    "harvest",
 ]
 
 HARVEST_FORMAT = "httk-workflow-harvest"
@@ -144,7 +144,7 @@ def _provides_module(root: Path, relative: PurePosixPath) -> bool:
     return False
 
 
-@lru_cache(maxsize=None)
+@cache
 def module_distribution(module: str) -> tuple[str, str] | None:
     """Return the ``(name, version)`` of the distribution installing *module*.
 

@@ -8,9 +8,9 @@ import uuid
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import register_ws
 from httk.core import CLIContext
 
+from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow import _util as util_module
 from httk.workflow.errors import FormatError, WorkspaceUnavailableError
@@ -399,7 +399,7 @@ def test_fsck_repairs_a_damaged_marker_and_the_job_runs_again(tmp_path: Path) ->
         ],
     )
     _corrupt_frame(workspace, marker)
-    with pytest.raises(Exception):
+    with pytest.raises(Exception):  # noqa: B017 - this API deliberately raises plain Exception subclasses
         workspace.read_state(marker)
 
     report = workspace.check(repair=True)

@@ -17,8 +17,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
-from conftest import TestProfile as _TestProfile
 
+from conftest import TestProfile as _TestProfile
 from httk.workflow.supervision import (
     CheckerSpec,
     Diagnostic,

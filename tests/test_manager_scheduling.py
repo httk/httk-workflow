@@ -11,12 +11,13 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import TestProfile as _TestProfile
 
+from conftest import TestProfile as _TestProfile
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._logging import reset_logging
 from httk.workflow._util import tree_digest
@@ -441,7 +442,7 @@ def test_a_long_tick_heartbeats_while_it_scans_and_reports_its_own_slowness(
             if manager._last_heartbeat != previous:
                 beats.append(time.monotonic())
 
-        setattr(manager, "heartbeat", recording)
+        setattr(manager, "heartbeat", recording)  # noqa: B010 - test replaces a method deliberately
         with caplog.at_level(logging.WARNING, logger="httk.workflow"):
             started = time.monotonic()
             manager.tick()
@@ -458,7 +459,7 @@ def test_a_long_tick_heartbeats_while_it_scans_and_reports_its_own_slowness(
     assert finished - started > lease_seconds
     assert len(beats) >= 3
     instants = [started, *beats, finished]
-    longest_gap = max(second - first for first, second in zip(instants, instants[1:]))
+    longest_gap = max(second - first for first, second in pairwise(instants))
     assert longest_gap < lease_seconds
 
     # Its own attempt was never taken over, and the slow tick was reported.
@@ -529,9 +530,11 @@ def test_an_isolated_attempt_is_taken_over_only_against_evidence(
     _, inside_grace_id = running_job("inside-grace", heartbeat_age=lease * 1.5, pid=os.getpid())
     _, past_grace_id = running_job("past-grace", heartbeat_age=lease * 3.0, pid=os.getpid())
 
-    with caplog.at_level(logging.INFO, logger="httk.workflow"):
-        with TaskManager(workspace, heartbeat_interval=0.01, takeover_grace_factor=2.0) as manager:
-            manager.tick()
+    with (
+        caplog.at_level(logging.INFO, logger="httk.workflow"),
+        TaskManager(workspace, heartbeat_interval=0.01, takeover_grace_factor=2.0) as manager,
+    ):
+        manager.tick()
 
     live = workspace.find_marker_by_id(live_id)
     assert live is not None and live.kind == "running"
@@ -593,22 +596,24 @@ def test_cancelling_a_running_job_fences_it_then_proves_its_process_is_gone(
     workspace.submit(payload, "project/cancelled")
 
     observed: list[str] = []
-    with caplog.at_level(logging.WARNING, logger="httk.workflow"):
-        with TaskManager(workspace, heartbeat_interval=0.01, cancel_grace_seconds=2.0) as manager:
-            running = _drive_until(workspace, manager, job_id, {"running"})
-            attempt: RunningAttempt = next(iter(manager._running.values()))
-            pid = attempt.process.pid
-            _publish_cancel(workspace, running)
-            deadline = time.monotonic() + 30.0
-            while time.monotonic() < deadline:
-                manager.tick()
-                marker = workspace.find_marker_by_id(job_id)
-                assert marker is not None
-                if not observed or observed[-1] != marker.kind:
-                    observed.append(marker.kind)
-                if marker.kind == "cancelled":
-                    break
-                time.sleep(0.02)
+    with (
+        caplog.at_level(logging.WARNING, logger="httk.workflow"),
+        TaskManager(workspace, heartbeat_interval=0.01, cancel_grace_seconds=2.0) as manager,
+    ):
+        running = _drive_until(workspace, manager, job_id, {"running"})
+        attempt: RunningAttempt = next(iter(manager._running.values()))
+        pid = attempt.process.pid
+        _publish_cancel(workspace, running)
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            manager.tick()
+            marker = workspace.find_marker_by_id(job_id)
+            assert marker is not None
+            if not observed or observed[-1] != marker.kind:
+                observed.append(marker.kind)
+            if marker.kind == "cancelled":
+                break
+            time.sleep(0.02)
 
     assert observed[-1] == "cancelled", observed
     # The fence came first: the attempt could no longer commit anything before
@@ -752,9 +757,11 @@ def test_a_normal_run_never_reports_an_orphaned_attempt(
         payload, _ = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag=f"clean-{index}")
         workspace.submit(payload, f"project/clean/{index}")
 
-    with caplog.at_level(logging.WARNING, logger="httk.workflow"):
-        with TaskManager(workspace, heartbeat_interval=0.01, maximum_workers=2) as manager:
-            manager.run_until_idle(timeout=60.0)
+    with (
+        caplog.at_level(logging.WARNING, logger="httk.workflow"),
+        TaskManager(workspace, heartbeat_interval=0.01, maximum_workers=2) as manager,
+    ):
+        manager.run_until_idle(timeout=60.0)
 
     assert all(marker.kind == "succeeded" for marker in workspace.scan_markers())
     messages = [record.getMessage() for record in caplog.records]

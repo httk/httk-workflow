@@ -18,8 +18,8 @@ import uuid
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import fake_remote
 
+from conftest import fake_remote
 from httk.workflow import Workspace
 from httk.workflow.adapters import SEED_SETTING_MAP, seed_application_settings
 from httk.workflow.projects import initialize_project

@@ -13,9 +13,9 @@ import uuid
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import FAKE_HOST, Remote, fake_remote, register_ws
 from httk.core import CLIContext
 
+from conftest import FAKE_HOST, Remote, fake_remote, register_ws
 from httk.workflow import Workspace, adapter_runtime
 from httk.workflow.adapters import add_remote, run_adapter
 from httk.workflow.manager import TaskManager

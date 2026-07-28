@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 __all__ = [
     "AttemptLaunch",
     "OutcomeCommit",
-    "RunnerBackend",
     "PathRunnerBackend",
+    "RunnerBackend",
 ]
 
 

@@ -1,14 +1,14 @@
 """Exceptions raised by :mod:`httk.workflow`."""
 
 __all__ = [
-    "WorkflowError",
     "FormatError",
-    "WorkspaceUnavailableError",
-    "WorkspaceCorruptionError",
+    "RunnerResolutionError",
+    "TransactionError",
     "TransitionLostError",
     "UnsupportedExtensionError",
-    "TransactionError",
-    "RunnerResolutionError",
+    "WorkflowError",
+    "WorkspaceCorruptionError",
+    "WorkspaceUnavailableError",
 ]
 
 

@@ -2,9 +2,9 @@
 
 import logging
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ._util import read_json, require_int, require_string
 from .errors import FormatError, TransactionError, UnsupportedExtensionError
