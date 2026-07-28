@@ -14,10 +14,10 @@ from pathlib import Path
 from typing import Any
 
 __all__ = [
-    "evaluate_expression",
-    "render_template",
     "compress_files",
     "decompress_files",
+    "evaluate_expression",
+    "render_template",
 ]
 
 _FUNCTIONS: dict[str, Callable[..., Any]] = {

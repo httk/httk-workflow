@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 import tempfile
 import time
@@ -37,7 +38,7 @@ def timestamp_seconds(value: str) -> float:
 
     from datetime import datetime
 
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    return datetime.fromisoformat(value).timestamp()
 
 
 def json_bytes(value: object) -> bytes:
@@ -190,7 +191,7 @@ def require_number(value: object, name: str, *, minimum: float = 0.0, maximum: f
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise FormatError(f"{name} must be a number")
     number = float(value)
-    if number != number or number in (float("inf"), float("-inf")):
+    if math.isnan(number) or number in (float("inf"), float("-inf")):
         raise FormatError(f"{name} must be a finite number")
     if number < minimum or (maximum is not None and number > maximum):
         limit = f"..{maximum}" if maximum is not None else " or greater"

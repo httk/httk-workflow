@@ -26,17 +26,17 @@ from ._util import utc_now, write_json_atomic
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
-    "DEFAULT_TICK_INTERVAL",
-    "DEFAULT_FOLLOW_INTERVAL",
     "DEFAULT_CAPTURE_LIMIT",
-    "DEFAULT_TAIL_LIMIT",
     "DEFAULT_DIAGNOSTIC_LIMIT",
-    "SourceEvent",
+    "DEFAULT_FOLLOW_INTERVAL",
+    "DEFAULT_TAIL_LIMIT",
+    "DEFAULT_TICK_INTERVAL",
+    "CheckerSpec",
     "Diagnostic",
     "FollowSource",
-    "CheckerSpec",
     "ProcessReport",
     "ProcessSupervisor",
+    "SourceEvent",
 ]
 
 type DiagnosticSeverity = Literal["info", "warning", "error", "fatal"]
@@ -570,19 +570,21 @@ class ProcessSupervisor:
                             last_activity = time.monotonic()
                     if finishing:
                         break
-                    if spec.inactivity_timeout is not None:
-                        if time.monotonic() - last_activity >= spec.inactivity_timeout:
-                            log.add(
-                                Diagnostic(
-                                    "source_inactive",
-                                    "fatal",
-                                    f"{name} produced no data for {spec.inactivity_timeout:g} seconds",
-                                    name,
-                                    stop=True,
-                                )
+                    if (
+                        spec.inactivity_timeout is not None
+                        and time.monotonic() - last_activity >= spec.inactivity_timeout
+                    ):
+                        log.add(
+                            Diagnostic(
+                                "source_inactive",
+                                "fatal",
+                                f"{name} produced no data for {spec.inactivity_timeout:g} seconds",
+                                name,
+                                stop=True,
                             )
-                            stop_requested.set()
-                            break
+                        )
+                        stop_requested.set()
+                        break
                     time.sleep(follow_interval)
             finally:
                 if handle is not None:
@@ -605,9 +607,9 @@ class ProcessSupervisor:
                     signal.signal(signum, forward)
             dispatch(SourceEvent("start", "process", timestamp=started_at))
             if stdout_path is not None:
-                output_handles[0] = Path(stdout_path).open("ab")
+                output_handles[0] = Path(stdout_path).open("ab")  # noqa: SIM115 - handle escapes to the reader thread
             if stderr_path is not None:
-                output_handles[1] = Path(stderr_path).open("ab")
+                output_handles[1] = Path(stderr_path).open("ab")  # noqa: SIM115 - handle escapes to the reader thread
             process = subprocess.Popen(
                 command,
                 cwd=cwd,

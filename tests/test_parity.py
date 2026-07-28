@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any
 
 from conftest import TestProfile as _TestProfile
-
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 

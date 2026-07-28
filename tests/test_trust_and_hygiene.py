@@ -11,9 +11,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import register_ws
 from httk.core import CLIContext, ed25519_generate_seed, ed25519_public_key
 
+from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow import cli as native_cli
 from httk.workflow.adapters import add_remote, store_credentials

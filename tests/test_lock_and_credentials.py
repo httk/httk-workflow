@@ -5,13 +5,13 @@ import re
 import socket
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import register_ws
 from httk.core import CLIContext
 
+from conftest import register_ws
 from httk.workflow import Workspace
 from httk.workflow.adapters import add_remote, queue_settings, run_adapter
 from httk.workflow.manifests import (
@@ -48,7 +48,7 @@ def _write_lock(project: Path, value: object) -> Path:
 
 
 def _lock_json(**overrides: object) -> dict[str, object]:
-    created = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    created = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     record: dict[str, object] = {
         "pid": _dead_pid(),
         "hostname": socket.gethostname(),
@@ -97,9 +97,8 @@ def test_live_lock_refuses_with_holder_information(tmp_path: Path, monkeypatch) 
     workspace = Workspace(project)
     path = _write_lock(project, _lock_json(pid=os.getpid()))
     expected = re.escape(f"pid {os.getpid()} on host {socket.gethostname()}")
-    with pytest.raises(ValueError, match=expected):
-        with workspace_maintenance_guard(workspace):
-            pass
+    with pytest.raises(ValueError, match=expected), workspace_maintenance_guard(workspace):
+        pass
     assert path.is_file()
     with pytest.raises(ValueError, match="maintenance"):
         create_manifest(project)

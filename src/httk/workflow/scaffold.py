@@ -64,25 +64,25 @@ from .runtime_builders import JobSpec, prepare_job_payload
 from .workspace import Workspace
 
 __all__ = [
-    "JOB_SCAFFOLD_FORMAT",
     "DEFAULT_PLACEMENT",
     "FILES_DIRECTORY",
+    "JOB_SCAFFOLD_FORMAT",
     "STRUCTURE_PATTERNS",
     "JobItem",
     "JobTemplate",
-    "TemplateProvider",
     "ScaffoldedJob",
+    "TemplateProvider",
     "describe_runner",
+    "new_job",
+    "new_jobs",
+    "packaged_template",
+    "payload_relative",
     "register_template",
     "registered_templates",
-    "template_provider",
-    "packaged_template",
     "resolve_template",
     "structure_files",
     "structure_tag",
-    "new_job",
-    "new_jobs",
-    "payload_relative",
+    "template_provider",
 ]
 
 #: The format of the machine-readable report :meth:`ScaffoldedJob.as_mapping` returns.

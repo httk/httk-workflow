@@ -7,7 +7,7 @@ resolve the command and its handlers from this module.
 """
 
 # This module intentionally consists largely of compatibility re-exports.
-# ruff: noqa: F401,F405
+# ruff: noqa: F401
 
 import argparse
 import sys
@@ -27,8 +27,8 @@ from ._campaign import (
 # Private names were attributes of the old flat module too. Keep them
 # available for code that imported them deliberately, without making them part
 # of the package's command assembly.
-from ._common import *  # noqa: F401,F403
-from ._common import (  # noqa: E402,F401
+from ._common import *
+from ._common import (
     _ERRORS,
     _LOGGER,
     _TRANSFER_PROTOCOL,
@@ -49,7 +49,7 @@ from ._common import (  # noqa: E402,F401
     _settings,
     _vasp,
 )
-from ._compat import (  # noqa: E402,F401
+from ._compat import (
     _add_import_arguments,
     _print_imported,
     _v1_pool,
@@ -66,8 +66,8 @@ from ._compat import (  # noqa: E402,F401
     handle_v1_submit,
 )
 from ._harvest import build_harvest_parser, handle_harvest
-from ._job import _add_job_selector  # noqa: E402,F401
 from ._job import (
+    _add_job_selector,
     add_job_request_arguments,
     add_job_submit_arguments,
     build_job_parser,
@@ -83,14 +83,14 @@ from ._job import (
     handle_runner_describe,
     handle_runner_publish,
 )
-from ._manager import _submit_remote_manager  # noqa: E402,F401
 from ._manager import (
+    _submit_remote_manager,
     add_manager_run_arguments,
     build_manager_parser,
     handle_manager_run,
 )
-from ._project import _render_project  # noqa: E402,F401
 from ._project import (
+    _render_project,
     add_project_doctor_arguments,
     add_project_manifest_create_arguments,
     add_project_manifest_verify_arguments,
@@ -110,7 +110,7 @@ from ._project import (
     handle_project_manifest_verify,
     handle_project_show,
 )
-from ._transfer import (  # noqa: E402,F401
+from ._transfer import (
     _add_adapter_timeout,
     _dispatch_transfer_protocol,
     _fetch_jobs_from_remote,
@@ -136,7 +136,7 @@ from ._transfer import (  # noqa: E402,F401
     handle_transfer_receive,
     handle_transfer_retire,
 )
-from ._workspace import (  # noqa: E402,F401
+from ._workspace import (
     _init_settings,
     _policy_value,
     _print_policy,

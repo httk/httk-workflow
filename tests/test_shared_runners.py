@@ -6,9 +6,9 @@ import uuid
 from pathlib import Path
 
 import pytest
-from conftest import register_ws
 from httk.core import CLIContext
 
+from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._util import tree_digest
 from httk.workflow.errors import UnsupportedExtensionError, WorkspaceCorruptionError

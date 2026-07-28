@@ -45,20 +45,20 @@ from .workspace import Workspace
 
 __all__ = [
     "LOCAL_REMOTE",
+    "REMOTE_WORKSPACE_DELETE_COMMAND",
+    "REMOTE_WORKSPACE_INIT_COMMAND",
     "WORKSPACES_FILE",
     "WORKSPACE_SECTION",
-    "REMOTE_WORKSPACE_INIT_COMMAND",
-    "REMOTE_WORKSPACE_DELETE_COMMAND",
     "WorkspaceBinding",
-    "workspaces_path",
-    "valid_workspace_name",
-    "register_workspace",
-    "forget_workspace",
-    "resolve_workspace",
-    "list_workspaces",
     "create_workspace",
     "delete_workspace",
+    "forget_workspace",
+    "list_workspaces",
+    "register_workspace",
     "remove_local_workspace",
+    "resolve_workspace",
+    "valid_workspace_name",
+    "workspaces_path",
 ]
 
 #: The reserved name of the built-in remote that means "this machine". It is a

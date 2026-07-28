@@ -16,9 +16,9 @@ import uuid
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import register_ws
 from httk.core import CLIContext
 
+from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow import gc as gc_module
 from httk.workflow._util import read_json, tree_digest, utc_now, write_json_atomic

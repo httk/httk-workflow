@@ -42,8 +42,7 @@ def test_every_publication_write_names_its_durability() -> None:
     safety on a durable workspace.
     """
 
-    import httk.workflow.runtime_builders as runtime_builders
-    import httk.workflow.sdk as sdk
+    from httk.workflow import runtime_builders, sdk
 
     for module in (runtime_builders, sdk):
         tree = ast.parse(Path(str(module.__file__)).read_text(encoding="utf-8"))
@@ -66,7 +65,7 @@ def test_transaction_replay_accepts_a_durability_argument() -> None:
     dropped in a refactor.
     """
 
-    import httk.workflow.transactions as transactions
+    from httk.workflow import transactions
 
     tree = ast.parse(Path(str(transactions.__file__)).read_text(encoding="utf-8"))
     replay = next(

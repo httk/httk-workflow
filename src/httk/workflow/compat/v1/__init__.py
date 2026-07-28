@@ -25,16 +25,16 @@ from httk.workflow.protocol import (
 __all__ = [
     "V1_BACKEND",
     "V1_CAPABILITY",
-    "V1_WORKFLOW",
     "V1_PRIORITY_MAP",
+    "V1_WORKFLOW",
     "V2_TO_V1_PRIORITY",
-    "bundled_v1_root",
-    "legacy_priority",
-    "prepare_v1_payload",
-    "submit_v1_task",
-    "parse_v1_task_name",
     "V1RunnerBackend",
     "V1TaskManager",
+    "bundled_v1_root",
+    "legacy_priority",
+    "parse_v1_task_name",
+    "prepare_v1_payload",
+    "submit_v1_task",
 ]
 
 V1_BACKEND = "httk-v1"
@@ -173,7 +173,7 @@ def _execute_instantiator(payload: Path, globals_: Mapping[str, object]) -> None
         os.chdir(payload)
         sys.argv = [str(script)]
         code = compile(script.read_bytes(), str(script), "exec")
-        exec(code, namespace, namespace)
+        exec(code, namespace, namespace)  # noqa: S102 - v1 workflow definitions are intentionally executed
     finally:
         sys.argv = old_argv
         os.chdir(old_cwd)

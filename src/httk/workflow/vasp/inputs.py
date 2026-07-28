@@ -248,8 +248,7 @@ def _read_potential(path: Path) -> bytes:
         completed = subprocess.run(
             [executable, "-cd", str(path)],
             check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
         )
         if completed.returncode:
             raise ValueError(f"cannot decompress {path}: {completed.stderr.decode(errors='replace').strip()}")
@@ -610,7 +609,7 @@ class VaspPreparationOptions:
 
 
 def prepare_vasp_inputs(
-    options: VaspPreparationOptions = VaspPreparationOptions(),
+    options: VaspPreparationOptions | None = None,
     *,
     directory: str | os.PathLike[str] = ".",
 ) -> dict[str, object]:
@@ -621,6 +620,9 @@ def prepare_vasp_inputs(
     so an explicit ``EDIFF``, ``MAGMOM``, or ``NBANDS`` survives preparation, and
     an explicit ``ISPIN`` is what the band-count heuristic reads.
     """
+
+    if options is None:
+        options = VaspPreparationOptions()
 
     # Imported lazily to keep the input helpers a leaf module: ``diagnostics``
     # imports :func:`_write_text_atomic` from here, so importing it at module

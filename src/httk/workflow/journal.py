@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Self
 
 from ._util import fsync_directory, json_bytes, visibility_attempts
 from .errors import FormatError, WorkspaceCorruptionError, WorkspaceUnavailableError
@@ -109,7 +109,7 @@ class JournalWriter:
     def close(self) -> None:
         self._handle.close()
 
-    def __enter__(self) -> "JournalWriter":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:

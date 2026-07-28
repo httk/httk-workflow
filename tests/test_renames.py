@@ -281,11 +281,11 @@ def test_the_workflow_workspace_alias_is_gone() -> None:
     assert "WorkflowWorkspace" not in httk.workflow.__all__
     assert "Workspace" in httk.workflow.__all__
     with pytest.raises(AttributeError):
-        getattr(httk.workflow, "WorkflowWorkspace")
+        getattr(httk.workflow, "WorkflowWorkspace")  # noqa: B009 - test probes a removed compatibility alias
     from httk.workflow import workspace
 
     with pytest.raises(AttributeError):
-        getattr(workspace, "WorkflowWorkspace")
+        getattr(workspace, "WorkflowWorkspace")  # noqa: B009 - test probes a removed compatibility alias
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +294,7 @@ def test_the_workflow_workspace_alias_is_gone() -> None:
 
 
 def test_the_vasp_helpers_live_only_in_the_vasp_package() -> None:
-    import httk.workflow.vasp as vasp
+    from httk.workflow import vasp
 
     for name in ("prepare_vasp_inputs", "read_poscar_header", "run_vasp"):
         assert callable(getattr(vasp, name))

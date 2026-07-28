@@ -45,29 +45,29 @@ from .sdk import (
 from .workspace import Workspace
 
 __all__ = [
-    # Orchestration and management entry points.
-    "Workspace",
-    "TaskManager",
-    "harvest",
+    "Attempt",
+    "ChildResult",
+    "ChildSpec",
+    "ChildrenView",
+    "FormatError",
     "HarvestRecord",
+    "JobState",
     # Execution / authoring surface.
     "Runner",
-    "Attempt",
-    "ChildSpec",
     "RunnerRef",
-    "ChildResult",
-    "ChildrenView",
-    "JobState",
-    "new_job",
-    "new_jobs",
+    "RunnerResolutionError",
     "ScaffoldedJob",
-    # The public exception family.
-    "WorkflowError",
-    "FormatError",
-    "WorkspaceUnavailableError",
-    "WorkspaceCorruptionError",
+    "TaskManager",
+    "TransactionError",
     "TransitionLostError",
     "UnsupportedExtensionError",
-    "TransactionError",
-    "RunnerResolutionError",
+    # The public exception family.
+    "WorkflowError",
+    # Orchestration and management entry points.
+    "Workspace",
+    "WorkspaceCorruptionError",
+    "WorkspaceUnavailableError",
+    "harvest",
+    "new_job",
+    "new_jobs",
 ]

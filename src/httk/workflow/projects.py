@@ -29,10 +29,6 @@ from httk.core.project import (
     canonical_public_key,
     discover_project,
     format_public_key,
-)
-from httk.core.project import import_v1_project as _import_v1_anchor
-from httk.core.project import initialize_project as _initialize_anchor
-from httk.core.project import (
     key_fingerprint,
     parse_public_key,
     pin_project_key,
@@ -46,15 +42,17 @@ from httk.core.project import (
     trusted_project_keys,
     write_project_section,
 )
+from httk.core.project import import_v1_project as _import_v1_anchor
+from httk.core.project import initialize_project as _initialize_anchor
 
 from ._util import write_json_atomic
 from .workspace import Workspace
 
 __all__ = [
+    "DEFAULT_MANIFEST_EXCLUSIONS",
     "PROJECT_DIRECTORY",
     "PROJECT_FILE",
     "PUBLIC_KEY_PREFIX",
-    "DEFAULT_MANIFEST_EXCLUSIONS",
     "canonical_public_key",
     "discover_project",
     "format_public_key",

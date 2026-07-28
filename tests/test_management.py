@@ -4,9 +4,9 @@ import uuid
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from conftest import register_ws
 from httk.core import CLIContext
 
+from conftest import register_ws
 from httk.workflow import Workspace
 from httk.workflow.adapters import add_remote, import_v1_remote, run_adapter
 from httk.workflow.configuration import identity_key_paths

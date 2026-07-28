@@ -17,7 +17,8 @@ top, because the machine that runs them may have an older or newer *httk*
 installed than the machine that composed them.
 """
 
-# ruff: noqa: F401,F405
+# ruff: noqa: F401
+
 
 import argparse
 import json
@@ -34,7 +35,7 @@ from httk.core import CLIContext
 # The packaged domains register their templates as an import side effect, so the
 # CLI resolves `job new --template NAME` against a populated registry. The generic
 # execution layer never imports a domain; the CLI does, exactly here.
-from .. import vasp as _vasp  # noqa: F401
+from .. import vasp as _vasp
 from .._logging import LOG_LEVELS, add_log_file, configure_logging
 from .._util import read_json, sha256_file, utc_now, write_json_atomic
 from ..adapters import (

@@ -11,8 +11,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from conftest import register_ws
 
+from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._logging import reset_logging
 from httk.workflow.cli import main as taskmanager_main
@@ -134,9 +134,11 @@ def test_tick_survives_a_corrupt_ready_job_and_foreign_state_entries(tmp_path: P
     damaged_marker = broken.path.parent / "garbage.p500.g1.init"
     damaged_marker.write_text("", encoding="utf-8")
 
-    with caplog.at_level(logging.DEBUG, logger="httk.workflow"):
-        with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-            manager.run_until_idle(timeout=30.0)
+    with (
+        caplog.at_level(logging.DEBUG, logger="httk.workflow"),
+        TaskManager(workspace, heartbeat_interval=0.01) as manager,
+    ):
+        manager.run_until_idle(timeout=30.0)
 
     finished = workspace.find_marker_by_id(healthy_id)
     assert finished is not None and finished.kind == "succeeded"
@@ -235,9 +237,11 @@ def test_stale_maintenance_lock_is_ignored_with_a_warning(tmp_path: Path, caplog
     workspace.submit(payload, "project/stale")
     _write_lock(workspace, pid=os.getpid(), age=timedelta(days=2))
 
-    with caplog.at_level(logging.WARNING, logger="httk.workflow"):
-        with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-            manager.run_until_idle(timeout=30.0)
+    with (
+        caplog.at_level(logging.WARNING, logger="httk.workflow"),
+        TaskManager(workspace, heartbeat_interval=0.01) as manager,
+    ):
+        manager.run_until_idle(timeout=30.0)
 
     finished = workspace.find_marker_by_id(job_id)
     assert finished is not None and finished.kind == "succeeded"
@@ -260,7 +264,7 @@ def test_claimed_job_is_released_when_the_lock_appears(tmp_path: Path) -> None:
                 _write_lock(workspace, pid=os.getpid())
             return moved
 
-        setattr(manager.workspace, "transition", lock_after_claim)
+        setattr(manager.workspace, "transition", lock_after_claim)  # noqa: B010 - test replaces a method deliberately
         manager.tick()
         released = workspace.find_marker_by_id(job_id)
         assert released is not None and released.kind == "ready"

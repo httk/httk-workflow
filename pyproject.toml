@@ -55,8 +55,7 @@ dev = [
   "pytest>=8.0",
   "pytest-xdist>=3.6",
   "black",
-  "ruff",
-  "isort",
+  "ruff>=0.16,<0.17",
   "pyright",
   "mypy"
 ]
@@ -137,12 +136,16 @@ markers = [
   "xdist_group(name): schedule related timing-sensitive tests on one worker",
 ]
 
-[tool.isort]
-profile = "black"
-
 [tool.ruff]
 target-version = "py312"
 src = ["src", "examples", "tests"]
+line-length = 120
+
+[tool.ruff.lint]
+# TRY002: raising plain Exception is accepted httk style.
+# TRY004: the ValueError/TypeError choice is public API; do not churn it.
+# BLE001: broad excepts deliberately isolate plugin/loader/handler failures.
+ignore = ["TRY002", "TRY004", "BLE001"]
 
 [tool.black]
 target-version = ["py312"]

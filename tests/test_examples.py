@@ -19,8 +19,8 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from conftest import TestProfile as _TestProfile
 
+from conftest import TestProfile as _TestProfile
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.scaffold import new_job
 
@@ -47,7 +47,7 @@ def _documented_commands(document: Path) -> list[str]:
         if inside:
             # A prompt marks a command; anything else inside these blocks is the
             # body of a here-document and belongs to the command before it.
-            lines.append(line[2:] if line.startswith("$ ") else line)
+            lines.append(line.removeprefix("$ "))
     return lines
 
 

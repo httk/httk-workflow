@@ -27,8 +27,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from conftest import register_ws
 
+from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow import transactions as transactions_module
 from httk.workflow._logging import reset_logging

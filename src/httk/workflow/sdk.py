@@ -72,12 +72,12 @@ _LOGGER = logging.getLogger(__name__)
 __all__ = [
     "RUNNER_DESCRIPTION_FORMAT",
     "RUNNER_ERROR_FORMAT",
-    "RunnerRef",
-    "ChildSpec",
-    "ChildResult",
-    "ChildrenView",
     "Attempt",
+    "ChildResult",
+    "ChildSpec",
+    "ChildrenView",
     "Runner",
+    "RunnerRef",
 ]
 
 RUNNER_DESCRIPTION_FORMAT = "httk-workflow-runner-description"

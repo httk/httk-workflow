@@ -29,7 +29,7 @@ class _VaspMonitor:
         if event.event != "line" or event.line is None:
             return ()
         result: list[Diagnostic] = []
-        allocation = re.search(r"total allocation\s*:\s*([0-9]+)\s*KBytes", event.line, re.I)
+        allocation = re.search(r"total allocation\s*:\s*([0-9]+)\s*KBytes", event.line, re.IGNORECASE)
         if allocation is not None and int(allocation.group(1)) > 500_000:
             result.append(
                 Diagnostic(

@@ -1,10 +1,10 @@
 """Private runner resolution, staging, and digest verification helpers."""
 
 import shutil
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any
 
 from .errors import FormatError, RunnerResolutionError
 from .models import JobDefinition, parse_package_runner

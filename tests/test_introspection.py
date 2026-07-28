@@ -9,9 +9,9 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from conftest import register_ws
 from httk.core import CLIContext
 
+from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._logging import reset_logging
 from httk.workflow._util import utc_now
