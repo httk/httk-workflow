@@ -1,0 +1,11 @@
+[site]
+slug = "httk-workflow"
+repository-url = "https://github.com/httk/httk-workflow"
+main-branch = "main"
+import-roots = ["httk/workflow", "httk/handlers"]
+
+[[internal-dependency]]
+distribution = "httk-core"
+slug = "httk-core"
+repository-url = "https://github.com/httk/httk-core"
+main-branch = "main"
