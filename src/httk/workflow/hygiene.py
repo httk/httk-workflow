@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from httk.project.cli import ProjectShowSection
+from httk.core.project.cli import ProjectShowSection
 
 from ._util import read_json, utc_now, write_json_atomic
 from .adapters import (

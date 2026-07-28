@@ -1,8 +1,8 @@
-"""Compatibility shim over the project anchor, now owned by :mod:`httk.project`.
+"""Compatibility shim over the project anchor, now owned by :mod:`httk.core.project`.
 
 The project anchor — the ``.httk-project`` directory, ``project.json`` and its
 validation, upward discovery, the identity key, and key pinning and trust —
-moved to *httk-core* as :mod:`httk.project` so a core-only installation has
+moved to *httk-core* as :mod:`httk.core.project` so a core-only installation has
 projects. This module re-exports that API unchanged (this is an internal move,
 so no deprecation is warranted and every public name keeps working) and keeps
 the pieces that are workflow policy rather than anchor:
@@ -21,8 +21,8 @@ from collections.abc import Iterable
 from pathlib import Path
 
 # The anchor API, re-exported so existing imports of httk.workflow.projects keep
-# resolving. httk.project owns every one of these now.
-from httk.project import (
+# resolving. httk.core.project owns every one of these now.
+from httk.core.project import (
     PROJECT_DIRECTORY,
     PROJECT_FILE,
     PUBLIC_KEY_PREFIX,
@@ -30,9 +30,9 @@ from httk.project import (
     discover_project,
     format_public_key,
 )
-from httk.project import import_v1_project as _import_v1_anchor
-from httk.project import initialize_project as _initialize_anchor
-from httk.project import (
+from httk.core.project import import_v1_project as _import_v1_anchor
+from httk.core.project import initialize_project as _initialize_anchor
+from httk.core.project import (
     key_fingerprint,
     parse_public_key,
     pin_project_key,
@@ -124,7 +124,7 @@ def initialize_project(
 ) -> dict[str, object]:
     """Initialize the project anchor and its detached-transfer workspace.
 
-    The anchor is created by :func:`httk.project.initialize_project`; a workflow
+    The anchor is created by :func:`httk.core.project.initialize_project`; a workflow
     project additionally gets a ``detached-transfer-v1`` workspace. Creating the
     workspace at init time is the behavior Phase 10 revisits — the anchor and the
     workspace need not be born together — but it is preserved unchanged here.
@@ -150,7 +150,7 @@ def import_v1_project(
     """Create v2 project metadata from a legacy ``ht.project`` directory.
 
     The anchor and its adopted legacy identities come from
-    :func:`httk.project.import_v1_project`; this adds the workflow workspace on
+    :func:`httk.core.project.import_v1_project`; this adds the workflow workspace on
     top, exactly as it did before the anchor moved.
     """
 
