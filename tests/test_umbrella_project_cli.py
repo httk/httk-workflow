@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from httk.core.cli import main
-from httk.project.cli import known_project_show_sections, known_project_subcommands
+from httk.core.project.cli import known_project_show_sections, known_project_subcommands
 
 from httk.workflow.projects import initialize_project
 
