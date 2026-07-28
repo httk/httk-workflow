@@ -5,7 +5,7 @@ happens next; a harvest reports what already happened, once, per job that
 stopped, in a shape a data layer can store without knowing anything about
 markers, journals, or leases.
 
-That shape — :class:`HarvestRecord` — is the layering boundary of *httk₂*.
+That shape — :class:`~httk.workflow.harvesting.HarvestRecord` — is the layering boundary of *httk₂*.
 *httk-workflow* has no database dependency and never will: it produces records,
 and something else consumes them. A consumer therefore reads results like this,
 and nothing in this module knows what ``store`` or ``load_vasp`` are:
@@ -705,7 +705,7 @@ def harvest(
     states: Iterable[str] = DEFAULT_HARVEST_STATES,
     placement: str | PurePosixPath | None = None,
 ) -> Iterator[HarvestRecord]:
-    """Yield one :class:`HarvestRecord` per finished job of *workspace*.
+    """Yield one :class:`~httk.workflow.harvesting.HarvestRecord` per finished job of *workspace*.
 
     *states* selects which stopped jobs are reported and defaults to the
     successful ones; every requested kind is validated against
