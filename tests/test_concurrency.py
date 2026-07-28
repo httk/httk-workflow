@@ -430,8 +430,8 @@ def test_a_lost_claim_race_leaves_exactly_one_winner_and_a_clean_loser(tmp_path:
 
     assert len(list((log / "claims").iterdir())) == 1
     assert list((log / "duplicates").iterdir()) == []
-    marker = workspace_a.find_marker_by_id(job_id)
-    assert marker is not None and marker.kind == "succeeded"
+    final_marker = workspace_a.find_marker_by_id(job_id)
+    assert final_marker is not None and final_marker.kind == "succeeded"
     assert len(list(workspace_a.scan_markers())) == 1
     assert workspace_a.check().ok
 

@@ -355,12 +355,12 @@ def test_fetch_resumes_after_an_interruption_between_pull_and_import(
     real_import = Workspace.import_bundle
     interrupted = False
 
-    def interrupt(self: Workspace, bundle: object) -> dict[str, object]:
+    def interrupt(self: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
         nonlocal interrupted
         if not interrupted:
             interrupted = True
             raise RuntimeError("simulated interruption after the bundle was pulled")
-        return real_import(self, bundle)  # pyright: ignore[reportArgumentType]
+        return real_import(self, bundle)
 
     monkeypatch.setattr(Workspace, "import_bundle", interrupt)
     argv = ["transfer", "station", "home", "--json"]

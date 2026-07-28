@@ -14,8 +14,9 @@ import os
 import subprocess
 import sys
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -288,7 +289,8 @@ def test_declaring_records_the_observed_document_and_reading_prefers_it(tmp_path
         with pytest.raises(FormatError):
             attempt.declare(refused, _OBSERVED)
     with pytest.raises(FormatError):
-        attempt.declare("workflow", ["not an object"])  # pyright: ignore[reportArgumentType]
+        invalid_document = cast(Mapping[str, object], ["not an object"])
+        attempt.declare("workflow", invalid_document)
 
 
 def test_a_bash_step_and_a_python_step_declare_the_same_bytes(tmp_path: Path) -> None:
