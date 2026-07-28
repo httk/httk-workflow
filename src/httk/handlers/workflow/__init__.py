@@ -9,7 +9,10 @@ project manifest`` therefore drive the very same handlers.
 """
 
 from httk.core import register_cli_command
-from httk.project.cli import register_project_show_section, register_project_subcommand
+from httk.core.project.cli import (
+    register_project_show_section,
+    register_project_subcommand,
+)
 
 register_cli_command(
     "workflow",
