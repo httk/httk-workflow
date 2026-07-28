@@ -312,7 +312,7 @@ def create_workspace(
     """Create a workspace on its remote and register it under *name*.
 
     A local binding initializes the workspace here through
-    :meth:`Workspace.initialize` and applies any application *settings*. A remote
+    :meth:`~httk.workflow.workspace.Workspace.initialize` and applies any application *settings*. A remote
     binding creates the workspace on the far side over the adapter — the frozen
     ``workspace init ... --by-path`` spelling — first seeding it with the remote
     definition's whitelisted queue settings and then any explicit *settings*, and

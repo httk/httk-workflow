@@ -50,7 +50,7 @@ strings, so a Bash runner and a Python runner read one contract.
   library, one directory per variant.
 * ``kpoint_density`` (default ``20.0``), ``centering`` (default
   ``Monkhorst-Pack``), ``accuracy_per_atom`` (default ``0.001``) — passed to
-  :class:`httk.workflow.VaspPreparationOptions`.
+  :class:`~httk.workflow.vasp.inputs.VaspPreparationOptions`.
 * ``parallel_tag`` and ``parallel_value`` (default none) — one of ``NPAR``,
   ``NCORE``, or ``KPAR``, and its value.
 * ``incar_tags`` (default empty) — explicit INCAR tags. They are applied before
