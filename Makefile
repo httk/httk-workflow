@@ -33,7 +33,7 @@ docs-lock:
 
 # Verify the lock in a clean environment and run the strict documentation build
 # (network target; the lock installation and build are intentionally transparent).
-docs-lock-check:
+docs-lock-check: docs-clean
 	@set -eu; \
 	check_dir=$$(mktemp -d "${TMPDIR:-/tmp}/httk-workflow-docs-lock-check.XXXXXX"); \
 	trap 'rm -rf "$$check_dir"' EXIT; \
