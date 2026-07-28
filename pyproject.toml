@@ -12,9 +12,9 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 authors = [{ name = "Rickard Armiento", email = "gitcommits@armiento.net" }]
 dependencies = [
-  # 2.1.0 is the release that adds httk.core.project (the project anchor and the
+  # 2.0.2 is the release that adds httk.core.project (the project anchor and the
   # umbrella `httk project` command this package registers its extensions into).
-  "httk-core>=2.1.0,<3",
+  "httk-core>=2.0.2,<3",
 ]
 keywords = [
   "Materials Discovery",
