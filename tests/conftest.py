@@ -16,8 +16,19 @@ from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
 
-from httk.workflow.adapters import add_remote
-from httk.workflow.registry import register_workspace
+# The suite deliberately launches many short-lived Python runners.  Under xdist
+# each runner imports NumPy through httk-core; keeping each BLAS runtime to one
+# thread prevents 28 workers from multiplying that into hundreds of threads.
+# Set this before importing any httk module, and child runners inherit it.
+for _thread_limit in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ[_thread_limit] = "1"
+
+from httk.workflow.adapters import (  # noqa: E402 - native thread limits must precede httk-core import
+    add_remote,
+)
+from httk.workflow.registry import (  # noqa: E402 - native thread limits must precede httk-core import
+    register_workspace,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -205,3 +216,34 @@ def fake_remote(
     metadata["queues"]["default"] = queue
     (bundle / "remote.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
     return bundle
+
+
+@dataclass(frozen=True)
+class TestProfile:
+    """Select normal or full-depth values without duplicating a test body."""
+
+    name: str
+
+    @property
+    def extended(self) -> bool:
+        return self.name == "extended"
+
+    def scale[T](self, *, normal: T, extended: T) -> T:
+        """Return the profile-appropriate member of a test's same-property pair."""
+
+        return extended if self.extended else normal
+
+
+@pytest.fixture(scope="session", autouse=True)
+def test_profile() -> TestProfile:
+    """The test-depth knob shared by every profiled test.
+
+    Normal is deliberately the default for direct pytest invocations.  Extended
+    runs set ``HTTK_TEST_PROFILE=extended`` as well as selecting ``extended``
+    marker cases.
+    """
+
+    name = os.environ.get("HTTK_TEST_PROFILE", "normal")
+    if name not in {"normal", "extended"}:
+        raise pytest.UsageError("HTTK_TEST_PROFILE must be 'normal' or 'extended'")
+    return TestProfile(name)

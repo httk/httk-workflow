@@ -40,6 +40,22 @@ run `httk workflow import cwl`; executing what was imported needs nothing extra,
 so the extra belongs only on the machine that does the importing. Importing
 Python Workflow Definition documents needs no extra at all.
 
+## Running tests
+
+The everyday regression gate is the normal profile: `make test` (or
+`PYTHONPATH=src python -m pytest -q`).  Pytest-xdist runs it in parallel and the
+default marker selection omits only full-depth `extended` parameter cases.
+Profiled tests keep one test body and reduce their input scale in normal mode;
+they still exercise every property with representative inputs.
+
+Run `make test-extended` at phase ends and in CI to select every parameter case
+at its current full depth.  The underlying knob is
+`HTTK_TEST_PROFILE=normal|extended`; an explicit extended invocation is
+`HTTK_TEST_PROFILE=extended PYTHONPATH=src python -m pytest -q -m ""`.
+`make ci` uses the same extended profile with fast-fail enabled.
+Tests whose process timing must remain comparable use xdist load groups, so they
+stay serial within their group while the rest of the suite runs in parallel.
+
 ## What it does
 
 - **Runs workflows without a graph.** A step decides at run time which children

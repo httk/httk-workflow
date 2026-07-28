@@ -17,6 +17,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from conftest import TestProfile as _TestProfile
+
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 
@@ -164,7 +166,7 @@ def _tag(job_key: str) -> str:
     return job_key.split("--")[0]
 
 
-def _campaign(root: Path, source: str, name: str) -> Workspace:
+def _campaign(root: Path, source: str, name: str, *, sites: int) -> Workspace:
     """Run the whole campaign of one runner file in its own workspace."""
 
     root.mkdir(parents=True)
@@ -185,7 +187,7 @@ def _campaign(root: Path, source: str, name: str) -> Workspace:
             tag="campaign",
             initial_step="characterize",
             maximum_attempts_per_activation=1,
-            inputs=_CAMPAIGN_INPUTS,
+            inputs={**_CAMPAIGN_INPUTS, "sites": sites},
         ),
     )
     workspace.submit(payload, "project/campaign")
@@ -277,14 +279,17 @@ def _artifacts(workspace: Workspace) -> dict[str, str]:
     return result
 
 
-def test_a_bash_campaign_and_a_python_campaign_publish_the_same_artifacts(tmp_path: Path) -> None:
-    python = _campaign(tmp_path / "python", _PYTHON_RUNNER, "run.py")
-    shell = _campaign(tmp_path / "bash", _BASH_RUNNER, "run.sh")
+def test_a_bash_campaign_and_a_python_campaign_publish_the_same_artifacts(
+    tmp_path: Path, test_profile: _TestProfile
+) -> None:
+    sites = test_profile.scale(normal=2, extended=3)
+    python = _campaign(tmp_path / "python", _PYTHON_RUNNER, "run.py", sites=sites)
+    shell = _campaign(tmp_path / "bash", _BASH_RUNNER, "run.sh", sites=sites)
 
-    # The campaign really ran: one parent, three children, one of them failed by
-    # its own declared failure, and the parent triaged the result.
+    # The campaign really ran: normal mode retains a success and a declared
+    # failure, while extended mode also covers the third child.
     states = _states(python)
-    assert sorted(states) == ["campaign", "site-0", "site-1", "site-2"]
+    assert sorted(states) == ["campaign", *(f"site-{site}" for site in range(sites))]
     assert states["campaign"]["kind"] == "failed"
     assert states["campaign"]["failure"] == {
         "code": "defects.child_failed",
@@ -293,7 +298,9 @@ def test_a_bash_campaign_and_a_python_campaign_publish_the_same_artifacts(tmp_pa
     assert states["campaign"]["runner_steps"] == _CAMPAIGN_STEPS
     assert states["site-1"]["failure"]["code"] == "relax.diverged"
     assert [body["action"] for body in _outcomes(python)["campaign"]] == ["wait", "advance", "fail"]
-    assert _artifacts(python)["campaign/run/report.tsv"] == "site-0\t0\nsite-2\t2\n"
+    assert _artifacts(python)["campaign/run/report.tsv"] == "".join(
+        f"site-{site}\t{site}\n" for site in range(sites) if site != 1
+    )
     assert _artifacts(python)["site-0/data/results/site.txt"] == "0\n"
     assert [item["id"] for item in _transactions(python)["site-0"]] == ["op-0001"]
 
