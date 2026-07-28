@@ -144,12 +144,14 @@ def _install_spies(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
         events.append(("fsync", target))
         return real_fsync(fd)
 
-    def spy_rename(src: object, dst: object, *args: object, **keywords: object) -> None:
-        events.append(("rename", os.fspath(src), os.fspath(dst)))  # type: ignore[arg-type]
+    def spy_rename(src: str | os.PathLike[str], dst: str | os.PathLike[str], *args: object, **keywords: object) -> None:
+        events.append(("rename", os.fspath(src), os.fspath(dst)))
         return real_rename(src, dst, *args, **keywords)  # type: ignore[arg-type]
 
-    def spy_replace(src: object, dst: object, *args: object, **keywords: object) -> None:
-        events.append(("replace", os.fspath(src), os.fspath(dst)))  # type: ignore[arg-type]
+    def spy_replace(
+        src: str | os.PathLike[str], dst: str | os.PathLike[str], *args: object, **keywords: object
+    ) -> None:
+        events.append(("replace", os.fspath(src), os.fspath(dst)))
         return real_replace(src, dst, *args, **keywords)  # type: ignore[arg-type]
 
     monkeypatch.setattr(os, "fsync", spy_fsync)

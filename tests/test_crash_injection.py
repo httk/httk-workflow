@@ -331,11 +331,17 @@ def _kill_at_transaction_operation(monkeypatch: pytest.MonkeyPatch, ordinal: int
     real = transactions_module._rename_verified
     calls = [0]
 
-    def hooked(source: Path, destination: Path, **keywords: object) -> None:
+    def hooked(
+        source: Path,
+        destination: Path,
+        *,
+        replace: bool = False,
+        attempts: int = 7,
+    ) -> None:
         calls[0] += 1
         if calls[0] >= ordinal:
             raise _KilledManager()
-        real(source, destination, **keywords)  # pyright: ignore[reportArgumentType]
+        real(source, destination, replace=replace, attempts=attempts)
 
     monkeypatch.setattr(transactions_module, "_rename_verified", hooked)
 

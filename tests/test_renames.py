@@ -281,11 +281,11 @@ def test_the_workflow_workspace_alias_is_gone() -> None:
     assert "WorkflowWorkspace" not in httk.workflow.__all__
     assert "Workspace" in httk.workflow.__all__
     with pytest.raises(AttributeError):
-        httk.workflow.WorkflowWorkspace  # pyright: ignore[reportAttributeAccessIssue]
+        getattr(httk.workflow, "WorkflowWorkspace")
     from httk.workflow import workspace
 
     with pytest.raises(AttributeError):
-        workspace.WorkflowWorkspace  # pyright: ignore[reportAttributeAccessIssue]
+        getattr(workspace, "WorkflowWorkspace")
 
 
 # ---------------------------------------------------------------------------
