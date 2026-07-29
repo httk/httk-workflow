@@ -1,12 +1,4 @@
-"""Register the workflow capability with the extensible httk CLI.
-
-Two things register here during core plugin discovery: the top-level
-``httk workflow`` command, and the workflow extensions of the umbrella
-``httk project`` command that *httk-core* owns. Both use lazy
-``"module:callable"`` references, so nothing heavy is imported until the
-relevant command actually runs; ``httk project manifest`` and ``httk workflow
-project manifest`` therefore drive the very same handlers.
-"""
+"""Register CLI commands implemented by :mod:`httk.workflow`."""
 
 from httk.core import register_cli_command
 from httk.core.project.cli import (
