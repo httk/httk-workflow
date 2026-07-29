@@ -2,7 +2,7 @@
 slug = "httk-workflow"
 repository-url = "https://github.com/httk/httk-workflow"
 main-branch = "main"
-import-roots = ["httk/workflow", "httk/handlers"]
+import-roots = ["httk/workflow", "httk/registry"]
 
 [[internal-dependency]]
 distribution = "httk-core"
