@@ -13,6 +13,7 @@ from pathlib import Path
 
 from httk.core.cli import main
 from httk.core.project.cli import known_project_show_sections, known_project_subcommands
+from httk.core.register import known_cli_commands
 
 from httk.workflow.projects import initialize_project
 
@@ -37,6 +38,10 @@ def test_workflow_registers_its_project_extensions() -> None:
     # these into the umbrella command's registry.
     assert {"doctor", "manifest"} <= set(known_project_subcommands())
     assert "workflow" in known_project_show_sections()
+
+
+def test_workflow_cli_registration_is_discovered() -> None:
+    assert "workflow" in known_cli_commands()
 
 
 def test_umbrella_manifest_and_doctor_work_end_to_end(tmp_path: Path, monkeypatch, capsys) -> None:
