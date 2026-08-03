@@ -12,7 +12,7 @@ import argparse
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from httk.core import CLIContext
+from httk.core.cli import CLIContext
 
 from httk.workflow import cli as native_cli
 from httk.workflow import workflow_cli

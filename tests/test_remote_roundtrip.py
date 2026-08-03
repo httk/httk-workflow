@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest  # pyright: ignore[reportMissingImports]
-from httk.core import CLIContext
+from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote, register_ws
 from httk.workflow import (
