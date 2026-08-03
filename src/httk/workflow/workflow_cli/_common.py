@@ -9,7 +9,7 @@ handlers rather than a second implementation of them.
 The module is laid out group by group. Each group has a ``build_*_parser``
 function that declares its subcommands, and each subcommand has a ``handle_*``
 function that receives the parsed :class:`argparse.Namespace` and the
-:class:`~httk.core.CLIContext` and does nothing but call the library.
+:class:`~httk.core.cli.CLIContext` and does nothing but call the library.
 
 Some spellings are protocol rather than user interface: the argument vectors a
 transfer runs on the far side of a remote adapter are listed once, near the
@@ -29,7 +29,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from httk.core import CLIContext
+from httk.core.cli import CLIContext
 
 # The packaged domains register their templates as an import side effect, so the
 # CLI resolves `job new --template NAME` against a populated registry. The generic

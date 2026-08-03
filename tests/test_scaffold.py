@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from httk.core import CLIContext
+from httk.core.cli import CLIContext
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._util import sha256_file

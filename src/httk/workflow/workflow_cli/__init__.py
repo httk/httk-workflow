@@ -13,7 +13,7 @@ import argparse
 import sys
 from collections.abc import Sequence
 
-from httk.core import CLIContext
+from httk.core.cli import CLIContext
 
 from ._campaign import (
     build_campaign_parser,

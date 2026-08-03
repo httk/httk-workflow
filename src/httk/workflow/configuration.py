@@ -12,7 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from httk.core import (
+from httk.core.crypto import (
     ed25519_generate_seed,
     ed25519_public_key,
     ed25519_sign,

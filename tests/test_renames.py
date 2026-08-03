@@ -24,7 +24,7 @@ import os
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from httk.core import CLIContext
+from httk.core.cli import CLIContext
 
 import httk.workflow
 from httk.workflow import TaskManager, Workspace

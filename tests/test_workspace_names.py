@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
-from httk.core import CLIContext
+from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote
 from httk.workflow import Workspace

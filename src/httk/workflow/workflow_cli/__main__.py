@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 
-from httk.core import CLIContext
+from httk.core.cli import CLIContext
 
 from . import command
 

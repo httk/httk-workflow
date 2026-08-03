@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
-from httk.core import ed25519_public_key, ed25519_sign, ed25519_verify
+from httk.core.crypto import ed25519_public_key, ed25519_sign, ed25519_verify
 
 from ._util import json_bytes, retry_delay, sha256_file, timestamp_seconds, utc_now
 from .projects import (

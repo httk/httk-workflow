@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
 import pytest
-from httk.core import CLIContext
+from httk.core.cli import CLIContext
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace

@@ -22,7 +22,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from httk.core import CLIContext
+from httk.core.cli import CLIContext
 
 from .workflow_cli import (
     TASKMANAGER_EPILOG,

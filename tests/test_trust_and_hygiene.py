@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest  # pyright: ignore[reportMissingImports]
-from httk.core import CLIContext, ed25519_generate_seed, ed25519_public_key
+from httk.core.cli import CLIContext
+from httk.core.crypto import ed25519_generate_seed, ed25519_public_key
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
