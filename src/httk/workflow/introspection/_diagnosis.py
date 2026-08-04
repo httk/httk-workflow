@@ -43,7 +43,7 @@ class ManagerRecord:
     pools: frozenset[str]
     capabilities: frozenset[str]
     placement_prefixes: tuple[str, ...]
-    runner_backends: frozenset[str]
+    executors: frozenset[str]
     accept_any_pool: bool
     started_at: str | None
     heartbeat_at: str | None
@@ -62,13 +62,13 @@ class ManagerRecord:
         pools = "any pool" if self.accept_any_pool else ",".join(sorted(self.pools)) or "no pool"
         capabilities = ",".join(sorted(self.capabilities)) or "-"
         prefixes = ",".join(self.placement_prefixes) if self.placement_prefixes else "whole workspace"
-        backends = ",".join(sorted(self.runner_backends)) or "-"
+        executors = ",".join(sorted(self.executors)) or "-"
         age = (
             "no heartbeat" if self.heartbeat_age_seconds is None else f"heartbeat {self.heartbeat_age_seconds:.0f}s ago"
         )
         return (
             f"{self.manager_id} on {where} (pools {pools}, capabilities {capabilities}, "
-            f"placement {prefixes}, backends {backends}, {age})"
+            f"placement {prefixes}, executors {executors}, {age})"
         )
 
     def as_mapping(self) -> dict[str, object]:
@@ -81,7 +81,7 @@ class ManagerRecord:
             "pools": sorted(self.pools),
             "capabilities": sorted(self.capabilities),
             "placement_prefixes": list(self.placement_prefixes),
-            "runner_backends": sorted(self.runner_backends),
+            "executors": sorted(self.executors),
             "accept_any_pool": self.accept_any_pool,
             "started_at": self.started_at,
             "heartbeat_at": self.heartbeat_at,
@@ -137,7 +137,7 @@ def read_managers(workspace: Workspace) -> list[ManagerRecord]:
                 pools=_label_set(manifest.get("pools")),
                 capabilities=_label_set(manifest.get("capabilities")),
                 placement_prefixes=_label_sequence(manifest.get("placement_prefixes")),
-                runner_backends=_label_set(manifest.get("runner_backends")),
+                executors=_label_set(manifest.get("executors")),
                 accept_any_pool=bool(manifest.get("accept_any_pool", False)),
                 started_at=_optional_string(manifest.get("started_at")),
                 heartbeat_at=heartbeat_at,
@@ -151,7 +151,7 @@ def read_managers(workspace: Workspace) -> list[ManagerRecord]:
 class ClaimRequirements:
     """What one job demands of any manager that claims it."""
 
-    backend: str
+    executor: str
     pool: str
     capabilities: frozenset[str]
 
@@ -159,7 +159,7 @@ class ClaimRequirements:
         """Return the JSON representation of these requirements."""
 
         return {
-            "runner_backend": self.backend,
+            "runner_executor": self.executor,
             "claim_pool": self.pool,
             "required_capabilities": sorted(self.capabilities),
         }
@@ -169,7 +169,7 @@ def claim_requirements(job: JobDefinition) -> ClaimRequirements:
     """Return the claim preconditions *job* imposes on a manager."""
 
     return ClaimRequirements(
-        backend=job.runner_backend,
+        executor=job.runner_executor,
         pool=job.claim_pool,
         capabilities=job.required_capabilities,
     )
@@ -195,8 +195,8 @@ def manager_refusals(
     """Return why *record* would not claim a job with *requirements*."""
 
     reasons: list[str] = []
-    if requirements.backend not in record.runner_backends:
-        reasons.append(f"does not serve runner backend {requirements.backend}")
+    if requirements.executor not in record.executors:
+        reasons.append(f"does not serve runner executor {requirements.executor}")
     if not record.accept_any_pool and requirements.pool not in record.pools:
         reasons.append(f"does not serve claim pool {requirements.pool}")
     missing = requirements.capabilities - record.capabilities
@@ -436,7 +436,7 @@ def _manager_checks(
     requirements: ClaimRequirements,
     report: _Diagnosing,
     *,
-    backend_only: bool,
+    executor_only: bool,
     placement: str | None = None,
 ) -> None:
     """Record which registered managers would accept one job, and why not."""
@@ -464,9 +464,9 @@ def _manager_checks(
     accepting: list[ManagerRecord] = []
     for record in live:
         reasons = manager_refusals(record, requirements, placement=placement)
-        if backend_only:
+        if executor_only:
             reasons = [
-                reason for reason in reasons if "runner backend" in reason or "does not scan placement" in reason
+                reason for reason in reasons if "runner executor" in reason or "does not scan placement" in reason
             ]
         if reasons:
             report.check("live manager", False, f"{record.describe()} {'; '.join(reasons)}")
@@ -477,7 +477,7 @@ def _manager_checks(
                 True,
                 f"{record.describe()} offers everything this job requires",
             )
-    demanded = "runner backend" if backend_only else "runner backend, claim pool, and capabilities"
+    demanded = "runner executor" if executor_only else "runner executor, claim pool, and capabilities"
     report.check(
         "eligible manager",
         bool(accepting),
@@ -507,9 +507,9 @@ def _requirement_checks(job: JobDefinition, report: _Diagnosing) -> ClaimRequire
         ",".join(sorted(requirements.capabilities)) or "this job requires no capability",
     )
     report.check(
-        "runner backend",
+        "runner executor",
         None,
-        f"this job runs on the {requirements.backend} runner backend "
+        f"this job runs on the {requirements.executor} runner executor "
         f"({job.runner_source}:{job.runner_path.as_posix()})",
     )
     return requirements
@@ -560,7 +560,7 @@ def _owner_checks(workspace: Workspace, state: Mapping[str, Any], report: _Diagn
         report.check(
             "lease",
             False,
-            "the lease has expired, so the next manager that serves this job's backend recovers it",
+            "the lease has expired, so the next manager that serves this job's executor recovers it",
         )
         report.hint("start or keep a manager running so the expired lease is recovered")
     return alive
@@ -637,7 +637,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
     if kind == "submitted":
         summary = (
             "this job is submitted but not registered: no manager has validated it and moved it to ready. "
-            "Registration only needs a manager that serves this job's runner backend; the claim pool, the "
+            "Registration only needs a manager that serves this job's runner executor; the claim pool, the "
             "capabilities, and the maintenance lock are checked later, when the job is claimed."
         )
         served = _profile_check(workspace, report)
@@ -647,7 +647,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 workspace,
                 requirements,
                 report,
-                backend_only=True,
+                executor_only=True,
                 placement=marker.placement.as_posix(),
             )
     elif kind == "ready":
@@ -659,7 +659,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 workspace,
                 requirements,
                 report,
-                backend_only=False,
+                executor_only=False,
                 placement=marker.placement.as_posix(),
             )
             _budget_checks(job, state, report)
@@ -683,7 +683,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
     elif kind == "committing":
         summary = (
             "this job published an outcome and its commit is pending; any manager that serves its runner "
-            "backend resumes the commit, so no operator action is needed"
+            "executor resumes the commit, so no operator action is needed"
         )
         _owner_checks(workspace, state, report)
         if job is not None:
@@ -691,7 +691,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 workspace,
                 claim_requirements(job),
                 report,
-                backend_only=True,
+                executor_only=True,
                 placement=marker.placement.as_posix(),
             )
     elif kind == "waiting":
@@ -727,7 +727,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 workspace,
                 claim_requirements(job),
                 report,
-                backend_only=True,
+                executor_only=True,
                 placement=marker.placement.as_posix(),
             )
     elif kind == "failed":
@@ -789,7 +789,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 workspace,
                 claim_requirements(job),
                 report,
-                backend_only=True,
+                executor_only=True,
                 placement=marker.placement.as_posix(),
             )
         if alive:

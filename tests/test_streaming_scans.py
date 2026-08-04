@@ -57,7 +57,7 @@ def _payload(root: Path, *, tag: str, priority: int) -> tuple[Path, str]:
         "tag": tag,
         "name": f"Streaming job {tag}",
         "workflow": "tests.streaming",
-        "runner": {"path": "files/runner", "arguments": [], "backend": "path"},
+        "runner": {"path": "files/runner", "arguments": [], "executor": "path"},
         "workdir": {"mode": "persistent", "path": "run"},
         "data": {"mode": "none"},
         "initial_step": "only",

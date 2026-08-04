@@ -159,7 +159,7 @@ and credentials are not copied or executed by the importer.
 
 ## 5. Run compatibility and native jobs side by side
 
-The *httk* v1 and native managers select different runner backends, so they can share
+The *httk* v1 and native managers select different runner executors, so they can share
 one *httk₂* workspace:
 
 ```console
@@ -175,7 +175,7 @@ transfer for native jobs.
 
 Give the first native version a new job UUID and preferably a distinct tag and
 placement. Do not edit the immutable `job.json` of an already submitted job to
-change its runner backend.
+change its runner executor.
 
 Migrate one representative task first. Compare it with the compatibility
 reference before moving a larger batch.
@@ -673,8 +673,8 @@ core-v2 workspace.
 
 For each migrated job type:
 
-1. Run one fixed input through the compatibility backend.
-2. Run the same fixed input through the native backend under a new UUID.
+1. Run one fixed input through the compatibility executor.
+2. Run the same fixed input through the native executor under a new UUID.
 3. Compare prepared `INCAR`, `KPOINTS`, POTCAR metadata, final energies,
    structures, and retained result files.
 4. Compare failure classification and retry limits.

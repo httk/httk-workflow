@@ -456,7 +456,7 @@ def _heartbeat(workspace: Workspace, manager_id: str, *, updated_at: str) -> Pat
                 "pid": 1,
                 "pools": ["default"],
                 "capabilities": [],
-                "runner_backends": ["path"],
+                "executors": ["path"],
                 "started_at": updated_at,
             }
         ),

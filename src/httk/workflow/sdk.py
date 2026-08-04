@@ -134,7 +134,7 @@ class RunnerRef:
         return cls("installed", str(PurePosixPath(path)), validate_sha256(sha256, "runner sha256"))
 
     def _resolve(self, parent: JobDefinition) -> tuple[str, RunnerSource, str, str | None, tuple[str, ...]]:
-        """Return ``(backend, source, path, sha256, arguments)`` for a child."""
+        """Return ``(executor, source, path, sha256, arguments)`` for a child."""
 
         if self.source != "inherit":
             if self.path is None or self.sha256 is None:
@@ -148,7 +148,7 @@ class RunnerRef:
                 "or spawn a prepared payload directory instead of a ChildSpec"
             )
         return (
-            parent.runner_backend,
+            parent.runner_executor,
             # Validated against the protocol's runner sources when the job was read.
             cast(RunnerSource, parent.runner_source),
             parent.runner_path.as_posix(),
@@ -192,14 +192,14 @@ class ChildSpec:
     def _job_spec(self, parent: JobDefinition, label: str) -> JobSpec:
         """Return the job specification of this child under *parent*."""
 
-        backend, source, path, sha256, arguments = self.runner._resolve(parent)
+        executor, source, path, sha256, arguments = self.runner._resolve(parent)
         return JobSpec(
             name=self.name or f"{parent.name}: {self.step} ({label})",
             workflow=self.workflow or parent.workflow,
             runner_path=path,
             initial_step=validate_step(self.step, "child step"),
             tag=self.tag or label,
-            runner_backend=backend,
+            runner_executor=executor,
             runner_source=source,
             runner_sha256=sha256,
             runner_arguments=arguments,

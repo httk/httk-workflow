@@ -133,7 +133,7 @@ def test_a_v1_style_relative_symlink_transfers_and_survives_the_import(tmp_path:
     payload, job_id = _payload(tmp_path)
     marker = source.submit(payload, "jobs")
     live = source.payload_path(marker.placement, marker.job_key)
-    # Exactly the shape the v1 compatibility backend plants in a live payload.
+    # Exactly the shape the v1 compatibility executor plants in a live payload.
     legacy = live / "ht.task"
     legacy.mkdir()
     (legacy / "inputs").symlink_to("../files")

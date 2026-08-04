@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._util import read_json, require_int, write_json_atomic
-from httk.workflow.backends import AttemptLaunch, OutcomeCommit
+from httk.workflow.executors import AttemptLaunch, OutcomeCommit
 from httk.workflow.protocol import (
     FormatError,
     JobDefinition,
@@ -23,12 +23,12 @@ from httk.workflow.protocol import (
 )
 
 __all__ = [
-    "V1_BACKEND",
     "V1_CAPABILITY",
+    "V1_EXECUTOR",
     "V1_PRIORITY_MAP",
     "V1_WORKFLOW",
     "V2_TO_V1_PRIORITY",
-    "V1RunnerBackend",
+    "V1RunnerExecutor",
     "V1TaskManager",
     "bundled_v1_root",
     "legacy_priority",
@@ -37,7 +37,7 @@ __all__ = [
     "submit_v1_task",
 ]
 
-V1_BACKEND = "httk-v1"
+V1_EXECUTOR = "httk-v1"
 V1_CAPABILITY = "httk-v1"
 V1_WORKFLOW = "httk.v1.ht_steps"
 V1_PRIORITY_MAP = {1: 100, 2: 300, 3: 500, 4: 700, 5: 900}
@@ -130,7 +130,7 @@ def _job_mapping(
         "name": name,
         "workflow": V1_WORKFLOW,
         "runner": {
-            "backend": V1_BACKEND,
+            "executor": V1_EXECUTOR,
             "path": runner_path,
             "arguments": [],
         },
@@ -293,10 +293,10 @@ def _compatibility(job: JobDefinition) -> Mapping[str, object]:
     return value
 
 
-class V1RunnerBackend:
-    """Runner backend which adapts v1 filesystem decisions to v2 outcomes."""
+class V1RunnerExecutor:
+    """Runner executor which adapts v1 filesystem decisions to v2 outcomes."""
 
-    name = V1_BACKEND
+    name = V1_EXECUTOR
 
     def __init__(
         self,
@@ -322,7 +322,7 @@ class V1RunnerBackend:
     def validate(self, job: JobDefinition, payload: Path) -> None:
         compatibility = _compatibility(job)
         if job.workflow != V1_WORKFLOW:
-            raise FormatError(f"httk-v1 backend cannot execute workflow {job.workflow!r}")
+            raise FormatError(f"httk-v1 executor cannot execute workflow {job.workflow!r}")
         program = str(compatibility.get("program", ""))
         if program not in {"ht_steps", "ht_run"}:
             raise FormatError("compatibility.program must be ht_steps or ht_run")
@@ -408,7 +408,7 @@ class V1RunnerBackend:
 
 
 class V1TaskManager(TaskManager):
-    """A task manager restricted to jobs using the httk v1 runner backend."""
+    """A task manager restricted to jobs using the httk v1 runner executor."""
 
     def __init__(
         self,
@@ -426,7 +426,7 @@ class V1TaskManager(TaskManager):
         attempts: int = 10,
     ) -> None:
         pools = ("default",) if taskset == "any" else (validate_label(taskset, "taskset"),)
-        backend = V1RunnerBackend(
+        executor = V1RunnerExecutor(
             runtime_root=runtime_root,
             timeout=timeout,
             wrapper=wrapper,
@@ -441,8 +441,8 @@ class V1TaskManager(TaskManager):
             lease_seconds=lease_seconds,
             heartbeat_interval=heartbeat_interval,
             unsafe_persistent_takeover=unsafe_persistent_takeover,
-            runner_backends=(backend,),
-            allowed_backends=(V1_BACKEND,),
+            executors=(executor,),
+            allowed_executors=(V1_EXECUTOR,),
             accept_any_pool=taskset == "any",
         )
 

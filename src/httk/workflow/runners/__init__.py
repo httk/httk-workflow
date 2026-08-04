@@ -74,7 +74,7 @@ def runner_reference(name: str, *, source: str = "installed") -> dict[str, objec
     else:
         raise ValueError("a packaged runner is referenced as an installed or a workspace runner")
     return {
-        "backend": "path",
+        "executor": "path",
         "source": source,
         "path": location,
         "sha256": sha256_file(path),

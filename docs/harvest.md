@@ -28,7 +28,7 @@ not.
 ## What a record guarantees
 
 **The executed code is pinned.** A record carries the immutable job digest and
-the complete runner identity: backend, source, path, and the SHA-256 the job
+the complete runner identity: executor, source, path, and the SHA-256 the job
 pinned for every runner living outside its payload. A runner named by the
 reserved `pkg:` form additionally reports the installed distribution and its
 version, so a stored result names the software that produced it.
@@ -128,7 +128,7 @@ $ httk workflow harvest workflow-workspace | head -1
  "job":{"claim":{"pool":"default","required_capabilities":[]},"data":{"mode":"none"},
  "digest":"0e6f…","id":"5c0a…","initial_step":"only","inputs":{},"job_key":"single--5c0a…",
  "name":"Harvest single","parent":null,"priority":500,
- "runner":{"arguments":[],"backend":"path","path":"single/run.py","sha256":"41b1…",
+ "runner":{"arguments":[],"executor":"path","path":"single/run.py","sha256":"41b1…",
  "source":"workspace"},"retry_policy":{…},"resources":{},"tag":"single",
  "workdir":{"mode":"persistent","path":"run"},"workflow":"tests.harvest.single"},
  "job_id":"5c0a…","job_key":"single--5c0a…","payload_path":"project/single/single--5c0a…",

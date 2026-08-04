@@ -176,7 +176,7 @@ contents and affected parent directories before publishing their names.
 Implementations claiming storage-crash durability MUST use `fsync` or an
 equivalent operation in the order required by the filesystem.
 
-The following require an explicit backend adapter and validation:
+The following require an explicit executor adapter and validation:
 
 - source and destination paths on different mounts;
 - object stores that only emulate rename;
@@ -363,7 +363,7 @@ If two discovered roots declare the same `workspace_id`, a manager MUST prove th
 they identify the same underlying directory before treating them as aliases.
 Suitable evidence is an equal filesystem object identity obtained from open
 directory handles, device/inode identity where reliable, or an equivalent
-backend facility. Equal `format.json` bytes, UUIDs, or path canonicalization
+executor facility. Equal `format.json` bytes, UUIDs, or path canonicalization
 alone are insufficient because a copied backup has all three. If equivalence
 cannot be proved, the manager MUST refuse both roots for mutation and report a
 loud duplicate-workspace-ID error; it MUST NOT attach an arbitrary winner.
@@ -805,7 +805,7 @@ A minimal `job.json` is:
   "name": "Silicon relaxation",
   "workflow": "example.vasp-relax",
   "runner": {
-    "backend": "path",
+    "executor": "path",
     "path": "files/runner",
     "arguments": []
   },
@@ -862,12 +862,12 @@ submission and covered by the immutable job digest like every other member.
 Nothing is inherited: a synthesized child job carries the declarations its parent
 gave it and no others.
 
-`runner.backend` selects an installed execution adapter and defaults to
+`runner.executor` selects an installed execution adapter and defaults to
 `path` when omitted. The core task manager implements `path`; managers MUST
-leave jobs using an unavailable or disallowed backend unclaimed. This permits
+leave jobs using an unavailable or disallowed executor unclaimed. This permits
 specialized managers to share a workspace without either one accidentally running
-the other's job profile. Backend-specific immutable fields belong in
-`job.json`, and their submission validation is owned by that backend.
+the other's job profile. Executor-specific immutable fields belong in
+`job.json`, and their submission validation is owned by that executor.
 
 `runner.source` selects the root `runner.path` is resolved against and defaults
 to `payload`:
@@ -879,8 +879,8 @@ to `payload`:
 | `installed` | one ordered runner search path configured in the manager |
 
 `runner.path` MUST remain beneath its root under every source. `arguments` is an
-argument vector, never a shell command string. A backend may treat the path as a
-backend-specific program while retaining these path-containment rules.
+argument vector, never a shell command string. A executor may treat the path as a
+executor-specific program while retaining these path-containment rules.
 
 A `payload` runner is already pinned by the immutable job digest, so
 `runner.sha256` MUST be absent for it. Every other source names one file, or one
@@ -1724,7 +1724,7 @@ Moving across filesystems is necessarily copy-and-acknowledge rather than one
 atomic filesystem transaction. The source job must first be sealed in
 `transferring`; the destination publishes a marker only after a complete copy
 and transfer-token validation; the source is retired only after explicit
-acknowledgement. A backend implementing this profile must document its
+acknowledgement. A executor implementing this profile must document its
 duplicate-suppression and failure policy.
 
 If the job may be named by an unresolved cross-workspace join, the source workspace
@@ -2152,7 +2152,7 @@ not protocol state: nothing reads them back, and “Retention gates and
 always-safe collection” below collects them after a month. This is distinct
 from two neighbouring cases that MUST NOT be retired:
 
-- a request whose job is served by a *runner backend this manager does not
+- a request whose job is served by a *runner executor this manager does not
   serve* is left in `requests/ready/` for a manager that does serve it. A
   manager that has decided this about a request SHOULD remember the decision
   rather than reread the file on every pass;
@@ -2568,7 +2568,7 @@ rule.
 
 ## Relationship to *httk* v1
 
-The `httk-v1` runner backend and `httk-v1-taskmanager` compatibility executor
+The `httk-v1` runner executor and `httk-v1-taskmanager` compatibility executor
 implement the following mapping for instantiated *httk* v1 task templates:
 
 | *httk* v1 | This protocol |

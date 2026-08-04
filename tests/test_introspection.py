@@ -130,7 +130,7 @@ import uuid
 from pathlib import Path
 
 CHILD_SOURCE = """@CHILD@"""
-CHILD_BACKEND = "@BACKEND@"
+CHILD_EXECUTOR = "@EXECUTOR@"
 context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
@@ -160,7 +160,7 @@ else:
         "tag": "child",
         "name": "Child job",
         "workflow": "tests.child",
-        "runner": {"backend": CHILD_BACKEND, "path": "files/runner", "arguments": []},
+        "runner": {"executor": CHILD_EXECUTOR, "path": "files/runner", "arguments": []},
         "workdir": {"mode": "persistent", "path": "run"},
         "data": {"mode": "none"},
         "initial_step": "run",
@@ -211,8 +211,8 @@ def _isolated_logging() -> Iterator[None]:
     reset_logging()
 
 
-def _parent_runner(*, child_backend: str = "path") -> str:
-    return _PARENT_RUNNER.replace("@CHILD@", _CHILD_RUNNER).replace("@BACKEND@", child_backend)
+def _parent_runner(*, child_executor: str = "path") -> str:
+    return _PARENT_RUNNER.replace("@CHILD@", _CHILD_RUNNER).replace("@EXECUTOR@", child_executor)
 
 
 def _payload(
@@ -310,13 +310,13 @@ def test_show_reports_the_authoritative_state_of_a_finished_job(tmp_path: Path) 
     assert report["initial_step"] == "prepare"
     assert report["runner_steps"] == ["prepare", "relax", "collect"]
     assert report["runner"] == {
-        "backend": "path",
+        "executor": "path",
         "source": "payload",
         "path": "files/runner",
         "sha256": None,
         "arguments": [],
     }
-    assert report["claim"] == {"claim_pool": "default", "required_capabilities": [], "runner_backend": "path"}
+    assert report["claim"] == {"claim_pool": "default", "required_capabilities": [], "runner_executor": "path"}
     # Only the registration frame carries the digest the manager validated.
     assert report["registered_job_digest"] is None
     assert len(str(report["job_digest"])) == 64
@@ -339,7 +339,7 @@ def test_show_prints_a_human_report_and_a_single_json_object(tmp_path: Path, cap
     assert command(["job", "show", ws, job_id], context) == 0
     text = capsys.readouterr().out
     assert f"job example--{job_id} (succeeded)" in text
-    assert "runner                 payload:files/runner (backend path)" in text
+    assert "runner                 payload:files/runner (executor path)" in text
     assert "attempts this activation 1/3" in text
 
     assert command(["job", "show", ws, job_id, "--json"], context) == 0
@@ -538,7 +538,7 @@ def test_why_lists_the_pending_child_of_a_waiting_parent(tmp_path: Path) -> None
     workspace = _workspace(tmp_path)
     payload, job_id = _payload(
         tmp_path / "source",
-        _parent_runner(child_backend="unserved"),
+        _parent_runner(child_executor="unserved"),
         initial_step="branch",
     )
     workspace.submit(payload, "project/waiting")
@@ -562,12 +562,12 @@ def test_why_lists_the_pending_child_of_a_waiting_parent(tmp_path: Path) -> None
     assert report["join"]["children"][0]["label"] == "only"
     assert report["join"]["children"][0]["kind"] == "submitted"
 
-    # The blocked child itself explains that nothing here serves its backend.
+    # The blocked child itself explains that nothing here serves its executor.
     child = next(marker for marker in workspace.scan_markers() if marker.job_key.startswith("child--"))
     child_diagnosis = explain_job(workspace, child)
     assert child_diagnosis.state == "submitted"
     assert any(
-        "does not serve runner backend unserved" in check.detail
+        "does not serve runner executor unserved" in check.detail
         for check in child_diagnosis.checks
         if check.name == "live manager"
     )

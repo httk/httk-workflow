@@ -390,7 +390,7 @@ step_relax() {{ httk_workflow_succeed; }}""",
         "label": "alpha",
     }
     assert child["runner"] == {
-        "backend": "path",
+        "executor": "path",
         "source": "workspace",
         "path": "parity/run.sh",
         "arguments": [],
@@ -407,7 +407,7 @@ def test_a_step_prepares_a_payload_and_spawns_the_directory(tmp_path: Path) -> N
             {
                 "name": "Prepared child",
                 "workflow": "tests.bash",
-                "runner_backend": "path",
+                "runner_executor": "path",
                 "runner_source": "workspace",
                 "runner_path": "parity/run.sh",
                 "runner_sha256": "b" * 64,
@@ -433,7 +433,7 @@ def test_a_step_prepares_a_payload_and_spawns_the_directory(tmp_path: Path) -> N
     prepared = json.loads(completed.stdout)
     assert prepared["runner_source"] == "workspace"
     assert prepared["runner_sha256"] == "b" * 64
-    assert prepared["runner_backend"] == "path"
+    assert prepared["runner_executor"] == "path"
     assert prepared["inputs"] == {"encut": 520}
     ready = fixture.control / "outcome.ready"
     spawn = json.loads((ready / "children" / "spawn.json").read_text(encoding="utf-8"))

@@ -82,7 +82,7 @@ def describe_job(workspace: Workspace, marker: Marker) -> dict[str, Any]:
                 "job_digest": job.digest,
                 "initial_step": job.initial_step,
                 "runner": {
-                    "backend": job.runner_backend,
+                    "executor": job.runner_executor,
                     "source": job.runner_source,
                     "path": job.runner_path.as_posix(),
                     "sha256": job.runner_sha256,
@@ -140,7 +140,7 @@ def render_job(report: Mapping[str, Any]) -> str:
         lines.append(
             _pair(
                 "runner",
-                f"{runner['source']}:{runner['path']} (backend {runner['backend']})",
+                f"{runner['source']}:{runner['path']} (executor {runner['executor']})",
             )
         )
         lines.append(_pair("runner sha256", runner.get("sha256") or "pinned by the job digest"))

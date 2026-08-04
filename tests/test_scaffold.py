@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from httk.core.cli import CLIContext
 
-from httk.workflow import TaskManager, Workspace
+from httk.workflow import FormatError, TaskManager, Workspace
 from httk.workflow._util import sha256_file
 from httk.workflow.models import JobDefinition, validate_label
 from httk.workflow.runners import RUNNERS, runner_path
@@ -33,6 +33,35 @@ from httk.workflow.scaffold import (
     structure_tag,
 )
 from httk.workflow.vasp.runners import PACKAGE
+
+
+def test_job_definition_uses_runner_executor_wire_key() -> None:
+    job = {
+        "format": "httk-workflow-job",
+        "format_version": 1,
+        "id": "12345678-1234-4234-8234-123456789abc",
+        "tag": None,
+        "name": "Test job",
+        "workflow": "tests.example",
+        "runner": {"executor": "path", "path": "files/runner", "arguments": []},
+        "workdir": {"mode": "persistent", "path": "run"},
+        "data": {"mode": "none"},
+        "initial_step": "run",
+        "priority": 500,
+        "claim": {"pool": "default", "required_capabilities": []},
+        "retry_policy": {"retry_on": []},
+        "resources": {},
+        "parent": None,
+    }
+    definition = JobDefinition.from_bytes(json.dumps(job).encode())
+    assert definition.runner_executor == "path"
+    assert definition.raw["runner"] == job["runner"]
+
+    job["runner"]["executor"] = ""
+    with pytest.raises(FormatError, match=r"runner\.executor"):
+        JobDefinition.from_mapping(job)
+
+
 from httk.workflow.workflow_cli import command
 
 _POSCAR = """silicon

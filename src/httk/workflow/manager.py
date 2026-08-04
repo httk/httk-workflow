@@ -30,7 +30,6 @@ from ._util import (
     utc_now,
     write_json_atomic,
 )
-from .backends import AttemptLaunch, PathRunnerBackend, RunnerBackend
 from .errors import (
     FormatError,
     RunnerResolutionError,
@@ -38,6 +37,7 @@ from .errors import (
     UnsupportedExtensionError,
     WorkflowError,
 )
+from .executors import AttemptLaunch, PathRunnerExecutor, RunnerExecutor
 from .manifests import read_maintenance_lock
 from .models import (
     ATTEMPT_CONTROL_PREFIX,
@@ -140,8 +140,8 @@ class TaskManager:
         unsafe_persistent_takeover: bool = False,
         unsafe_isolated_takeover: bool = False,
         takeover_grace_factor: float = DEFAULT_TAKEOVER_GRACE_FACTOR,
-        runner_backends: Sequence[RunnerBackend] = (),
-        allowed_backends: Sequence[str] | None = None,
+        executors: Sequence[RunnerExecutor] = (),
+        allowed_executors: Sequence[str] | None = None,
         accept_any_pool: bool = False,
         join_grace_seconds: float = 3600.0,
         cancel_grace_seconds: float = DEFAULT_CANCEL_GRACE_SECONDS,
@@ -207,16 +207,16 @@ class TaskManager:
         # what to do, and at most once per interval.
         self.gc_interval = gc_interval
         self._last_gc = 0.0
-        backends = [PathRunnerBackend(), *runner_backends]
-        self.runner_backends = {backend.name: backend for backend in backends}
-        if len(self.runner_backends) != len(backends):
-            raise ValueError("runner backend names must be unique")
-        self.allowed_backends = (
-            frozenset(self.runner_backends) if allowed_backends is None else frozenset(allowed_backends)
+        executors = [PathRunnerExecutor(), *executors]
+        self.executors = {executor.name: executor for executor in executors}
+        if len(self.executors) != len(executors):
+            raise ValueError("runner executor names must be unique")
+        self.allowed_executors = (
+            frozenset(self.executors) if allowed_executors is None else frozenset(allowed_executors)
         )
-        unknown_allowed = self.allowed_backends - self.runner_backends.keys()
+        unknown_allowed = self.allowed_executors - self.executors.keys()
         if unknown_allowed:
-            raise ValueError(f"allowed runner backends are not installed: {', '.join(sorted(unknown_allowed))}")
+            raise ValueError(f"allowed runner executors are not installed: {', '.join(sorted(unknown_allowed))}")
         self.accept_any_pool = accept_any_pool
         self.manager_id = str(uuid.uuid4())
         self.hostname = socket.gethostname()
@@ -257,7 +257,7 @@ class TaskManager:
                 "pools": sorted(self.pools),
                 "capabilities": sorted(self.capabilities),
                 "placement_prefixes": [prefix.as_posix() for prefix in self.placement_prefixes],
-                "runner_backends": sorted(self.allowed_backends),
+                "executors": sorted(self.allowed_executors),
                 "runner_search_paths": [str(path) for path in self.runner_search_paths],
                 "runner_modules": list(self.runner_modules),
                 "accept_any_pool": self.accept_any_pool,
@@ -267,27 +267,27 @@ class TaskManager:
         )
         self.heartbeat(force=True)
         _LOGGER.info(
-            "manager %s attached to workspace %s as %s pools=%s capabilities=%s backends=%s workers=%d",
+            "manager %s attached to workspace %s as %s pools=%s capabilities=%s executors=%s workers=%d",
             self.manager_id,
             self.workspace.workspace_id,
             self.hostname,
             ",".join(sorted(self.pools)) or "-",
             ",".join(sorted(self.capabilities)) or "-",
-            ",".join(sorted(self.allowed_backends)),
+            ",".join(sorted(self.allowed_executors)),
             self.maximum_workers,
             extra=self._event("manager_started", workspace=str(self.workspace.root)),
         )
-        for name in self.allowed_backends:
+        for name in self.allowed_executors:
             try:
-                self.runner_backends[name].reconcile(self.workspace)
+                self.executors[name].reconcile(self.workspace)
             except (WorkflowError, OSError) as exc:
-                # Backend views are derived and must never prevent the manager
+                # Executor views are derived and must never prevent the manager
                 # from attaching to authoritative marker state.
                 _LOGGER.warning(
-                    "runner backend %s could not reconcile its derived view: %s",
+                    "runner executor %s could not reconcile its derived view: %s",
                     name,
                     exc,
-                    extra=self._event("backend_error", backend=name),
+                    extra=self._event("executor_error", executor=name),
                 )
                 continue
 
@@ -525,10 +525,10 @@ class TaskManager:
         )
         return True
 
-    def _backend_for(self, job: JobDefinition) -> RunnerBackend | None:
-        if job.runner_backend not in self.allowed_backends:
+    def _executor_for(self, job: JobDefinition) -> RunnerExecutor | None:
+        if job.runner_executor not in self.allowed_executors:
             return None
-        return self.runner_backends.get(job.runner_backend)
+        return self.executors.get(job.runner_executor)
 
     def _transition(
         self,
@@ -549,17 +549,17 @@ class TaskManager:
         )
         try:
             job = self.workspace.load_job(moved)
-            backend = self._backend_for(job)
-            if backend is not None:
-                backend.marker_changed(self.workspace, moved)
+            executor = self._executor_for(job)
+            if executor is not None:
+                executor.marker_changed(self.workspace, moved)
         except (WorkflowError, OSError) as exc:
-            # Backend views are recoverable derivatives. The committed marker
+            # Executor views are recoverable derivatives. The committed marker
             # transition must remain successful even if refreshing one fails.
             _LOGGER.warning(
-                "runner backend view for %s could not be refreshed: %s",
+                "runner executor view for %s could not be refreshed: %s",
                 moved.job_key,
                 exc,
-                extra=self._event("backend_error", moved),
+                extra=self._event("executor_error", moved),
             )
         return moved
 
@@ -863,9 +863,9 @@ class TaskManager:
 
     def _launch_claimed(self, marker: Marker, job: JobDefinition, previous_state: StateFrame) -> None:
         claimed_state = self._read_frame(marker)
-        backend = self._backend_for(job)
-        if backend is None:
-            raise FormatError(f"runner backend is unavailable: {job.runner_backend}")
+        executor = self._executor_for(job)
+        if executor is None:
+            raise FormatError(f"runner executor is unavailable: {job.runner_executor}")
         attempt_id = claimed_state.attempt_id
         control_name = claimed_state.attempt_control
         if attempt_id is None or control_name is None:
@@ -959,7 +959,7 @@ class TaskManager:
         stdout = (control / "stdout.log").open("ab")
         stderr = (control / "stderr.log").open("ab")
         runner_command = list(
-            backend.command(
+            executor.command(
                 AttemptLaunch(
                     job=job,
                     marker=marker,
@@ -973,7 +973,7 @@ class TaskManager:
             )
         )
         if not runner_command:
-            raise FormatError(f"runner backend {job.runner_backend!r} returned an empty command")
+            raise FormatError(f"runner executor {job.runner_executor!r} returned an empty command")
         gate_read, gate_write = os.pipe()
         process: subprocess.Popen[bytes] | None = None
         running: Marker | None = None
@@ -1088,11 +1088,11 @@ class TaskManager:
                 unreadable.add(marker.job_key)
                 continue
             job, state = loaded
-            if self._backend_for(job) is None:
+            if self._executor_for(job) is None:
                 _LOGGER.debug(
-                    "skipping running job %s: runner backend %s is not served here",
+                    "skipping running job %s: runner executor %s is not served here",
                     marker.job_key,
-                    job.runner_backend,
+                    job.runner_executor,
                 )
                 continue
             try:
@@ -1550,11 +1550,11 @@ class TaskManager:
             if loaded is None:
                 continue
             parent_job, state = loaded
-            if self._backend_for(parent_job) is None:
+            if self._executor_for(parent_job) is None:
                 _LOGGER.debug(
-                    "skipping waiting job %s: runner backend %s is not served here",
+                    "skipping waiting job %s: runner executor %s is not served here",
                     marker.job_key,
-                    parent_job.runner_backend,
+                    parent_job.runner_executor,
                 )
                 continue
             try:

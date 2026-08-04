@@ -345,7 +345,7 @@ Requests capture the exact current marker generation and record reference.
 A delayed request therefore cannot mutate a newer job state. One that can never
 apply again — because the job has moved on — is moved to
 `.httk-workflow/requests/retired/` with the reason recorded beside it instead
-of being reread on every pass; a request for a runner backend this manager does
+of being reread on every pass; a request for a runner executor this manager does
 not serve is left alone for a manager that does.
 
 When the publishing installation has an operator identity key — created by
@@ -455,15 +455,15 @@ remains readable is still shown.
 `job why` answers "why is this job not running?" for every state:
 
 - `submitted`: whether any manager has registered it, and which live managers
-  serve its runner backend;
-- `ready`: every claim precondition, one line each — runner backend, claim pool,
+  serve its runner executor;
+- `ready`: every claim precondition, one line each — runner executor, claim pool,
   required capabilities, the maintenance lock, the workspace core profile, the
   attempt budgets, and which live manager would accept the job;
 - `claimed` and `running`: the owning manager, its heartbeat age against the
   recorded lease, and whether an expired lease means recovery rather than a stuck
   job;
 - `committing`: that a published outcome is being committed and any manager
-  serving the backend resumes it;
+  serving the executor resumes it;
 - `waiting`: the join condition, every child with its label and state, which
   children block, and which cannot be resolved in this workspace;
 - `failed`: the failure, whether an operator `continue` still fits inside the
@@ -471,7 +471,7 @@ remains readable is still shown.
 - `paused`, `succeeded`, and `cancelled`: the state and how to proceed.
 
 The job side of every precondition comes from `job.json` and cannot drift. The
-other side — pools, capabilities, and served backends — is deployment policy of
+other side — pools, capabilities, and served executors — is deployment policy of
 whichever manager is running and is read from the manifest each manager
 publishes, so a manager that is not running is reported as absent rather than
 assumed.
@@ -524,6 +524,6 @@ the process identity and commits the `running` marker before releasing that
 gate. If the manager disappears during this narrow launch interval, the gated
 process observes end-of-file and exits without executing the runner.
 
-`httk workflow manager run` executes only the normal `path` runner backend. Legacy
-`ht_steps` jobs use a distinct backend and are intentionally left untouched;
+`httk workflow manager run` executes only the normal `path` runner executor. Legacy
+`ht_steps` jobs use a distinct executor and are intentionally left untouched;
 run those with [*httk* v1 task compatibility](v1_compatibility.md).

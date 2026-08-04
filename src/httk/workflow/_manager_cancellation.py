@@ -204,9 +204,9 @@ def process(manager: Any, logger: Any) -> bool:
         if loaded is None:
             continue
         job, state = loaded
-        if manager._backend_for(job) is None:
+        if manager._executor_for(job) is None:
             logger.debug(
-                "skipping cancelling job %s: runner backend %s is not served here", marker.job_key, job.runner_backend
+                "skipping cancelling job %s: runner executor %s is not served here", marker.job_key, job.runner_executor
             )
             continue
         try:
