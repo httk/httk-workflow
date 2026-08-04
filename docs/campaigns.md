@@ -103,7 +103,9 @@ $ httk workflow campaign harvest --state succeeded
 `campaign start-managers` starts one manager per selected partition: in this
 process for a local partition, and submitted through the remote's scheduler for a
 remote one — exactly as {doc}`manager run <workflow_cli>` does for a single
-workspace. `campaign harvest` chains {doc}`harvest` across the partitions
+workspace. Each partition's target workspace supplies its own scheduler profile
+through workspace settings. `campaign harvest` chains {doc}`harvest` across the
+partitions
 lazily, one workspace after another in stable order, so a campaign spread over
 many workspaces streams as one harvest without ever materializing more than the
 record in hand.

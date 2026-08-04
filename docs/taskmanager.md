@@ -62,12 +62,19 @@ serialized: the write itself is atomic, but the last writer wins.
 
 Separate from that engine policy, a workspace also holds *application settings*:
 a flat, dotted-name map of small values a runner resolves at run time — the VASP
-command, a pseudopotential library — rather than tunables the scheduler reads.
+command and a pseudopotential library. The manager submission profile is also a
+workspace setting, so each workspace can carry its own scheduler requirements.
 
 ```console
 httk workflow workspace settings set WORKSPACE vasp.command '"srun -n 32 vasp_std"'
 httk workflow workspace settings show WORKSPACE
 ```
+
+For a Slurm manager, set its profile in the target workspace as well:
+`slurm.account`, `slurm.partition`, `slurm.time_limit`, `slurm.nodes`,
+`slurm.cpus_per_task`, and `slurm.reservation` become batch directives, while
+`manager.workers` supplies the default worker count. The adapter reads these
+values from the workspace when it composes the batch script.
 
 A runner reads one through `a.setting("vasp.command")`, resolved in layers — the
 job's `inputs`, then the environment (`HTTK_VASP_COMMAND`), then the workspace

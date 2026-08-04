@@ -172,7 +172,6 @@ def describe_project(
             "project_id": metadata.get("project_id"),
             "name": metadata.get("name"),
             "description": metadata.get("description"),
-            "default_queue": metadata.get("default_queue"),
             "imported_from": metadata.get("imported_from"),
             "manifest_exclusions": metadata.get("manifest_exclusions", []),
         },

@@ -265,6 +265,8 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
         parser.parse_args(["v1", "run", "WS", "--set", "vasp"])
     # But --set on `remote configure` is, and stays, KEY=VALUE settings.
     assert parser.parse_args(["remote", "configure", "cluster", "--set", "host=a"]).set == ["host=a"]
+    with pytest.raises(SystemExit):
+        parser.parse_args(["project", "init", "--default-queue", "batch"])
 
     with pytest.raises(SystemExit):
         parser.parse_args(["remote", "install", "c", "--timeout", "5"])

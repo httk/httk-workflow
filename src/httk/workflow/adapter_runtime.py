@@ -16,6 +16,10 @@ selected by the ``kind`` recorded in the bundle's ``remote.json``:
 
 Any other kind is refused rather than silently executed in the wrong place.
 
+The ``start-manager`` operation reads its scheduler profile from the target
+workspace's ``.httk-workflow/format.json``: ``slurm.*`` settings become Slurm
+directives and ``manager.workers`` supplies the default worker count.
+
 Every subprocess started here is an argument vector; no shell is ever handed an
 interpolated string. ``ssh`` is the one unavoidable exception, because it always
 concatenates its command words and lets a login shell on the far side parse the
@@ -42,14 +46,14 @@ from typing import Any, Protocol
 #: to the workspace the manager is started for.
 BATCH_DIRECTORY = ".httk-workflow/batch"
 
-#: Remote settings mapped straight onto ``#SBATCH`` directives, in written order.
+#: Workspace settings mapped onto ``#SBATCH`` directives, in written order.
 BATCH_DIRECTIVES = (
-    ("account", "--account"),
-    ("partition", "--partition"),
-    ("time_limit", "--time"),
-    ("nodes", "--nodes"),
-    ("cpus_per_task", "--cpus-per-task"),
-    ("reservation", "--reservation"),
+    ("slurm.account", "--account"),
+    ("slurm.partition", "--partition"),
+    ("slurm.time_limit", "--time"),
+    ("slurm.nodes", "--nodes"),
+    ("slurm.cpus_per_task", "--cpus-per-task"),
+    ("slurm.reservation", "--reservation"),
 )
 
 SUPPORTED_KINDS = ("local", "local-slurm", "ssh-slurm")
@@ -401,7 +405,7 @@ def _with_workers(argv: Sequence[str], workers: str | None) -> list[str]:
     if workers is None or "--workers" in arguments:
         return arguments
     if not workers.isdigit() or int(workers) < 1:
-        raise ValueError(f"remote setting workers must be a positive integer: {workers!r}")
+        raise ValueError(f"workspace setting manager.workers must be a positive integer: {workers!r}")
     return [*arguments, "--workers", workers]
 
 
@@ -429,6 +433,27 @@ def _count(request: Mapping[str, object]) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         raise ValueError("start-manager count must be a positive integer")
     return value
+
+
+def _workspace_settings(kind: str, settings: Mapping[str, object], workspace: str) -> dict[str, Any]:
+    path = Path(workspace) / ".httk-workflow" / "format.json"
+    try:
+        if kind == "ssh-slurm":
+            completed = _ssh_run(settings, ["cat", str(path)])
+            if completed.returncode != 0:
+                raise ValueError(completed.stderr.strip() or completed.returncode)
+            raw = completed.stdout
+        else:
+            raw = path.read_text(encoding="utf-8")
+        document = json.loads(raw)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot read workspace format for {workspace}: {path}: {exc}") from exc
+    if not isinstance(document, Mapping):
+        raise ValueError(f"workspace format for {workspace} is not a JSON object: {path}")
+    settings = document.get("settings", {})
+    if not isinstance(settings, Mapping):
+        raise ValueError(f"workspace settings for {workspace} are not a JSON object: {path}")
+    return dict(settings)
 
 
 def _batch_script(
@@ -628,7 +653,10 @@ def _invoke(kind: str, operation: str, request: Mapping[str, object]) -> None:
 
 def _start_manager(kind: str, request: Mapping[str, object]) -> None:
     settings = _settings(request)
-    argv = _with_workers(_argv(request, "start-manager"), _text(settings, "workers"))
+    raw_argv = _argv(request, "start-manager")
+    workspace = _workspace(request, settings, raw_argv)
+    workspace_settings = _workspace_settings(kind, settings, workspace)
+    argv = _with_workers(_argv(request, "start-manager"), _text(workspace_settings, "manager.workers"))
     if kind == "local":
         count = _count(request)
         pids = [
@@ -646,11 +674,10 @@ def _start_manager(kind: str, request: Mapping[str, object]) -> None:
         # single manager reads the same field it always did.
         _result("start-manager", pid=pids[0], pids=pids, count=count)
         return
-    workspace = _workspace(request, settings, argv)
     directory = f"{workspace.rstrip('/')}/{BATCH_DIRECTORY}"
     script = _batch_script(
         _remote_httk(argv, settings) if kind == "ssh-slurm" else _local_httk(argv, settings),
-        settings=settings,
+        settings=workspace_settings,
         workspace=workspace,
         directory=directory,
     )

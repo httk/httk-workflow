@@ -162,7 +162,6 @@ def handle_project_init(arguments: argparse.Namespace, context: CLIContext) -> i
         arguments.path,
         name=name,
         description=arguments.description,
-        default_queue=arguments.default_queue,
         manifest_exclusions=arguments.exclude,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -194,7 +193,6 @@ def _render_project(description: dict[str, Any]) -> str:
         _field("root", description.get("root")),
         _field("name", project.get("name") or "-"),
         _field("project_id", project.get("project_id") or "-"),
-        _field("default_queue", project.get("default_queue") or "-"),
         _field("key_pinned", "yes" if keys.get("pinned") else "no"),
         _field("key_fingerprint", public.get("fingerprint") or "-"),
         _field("trusted_keys", len(keys.get("trusted_keys", []))),
@@ -359,11 +357,6 @@ def build_project_parser(
     )
     initialize.add_argument("--name", metavar="NAME", help="the project name (default: the directory name)")
     initialize.add_argument("--description", metavar="TEXT", default="", help="a one-line description")
-    initialize.add_argument(
-        "--default-queue",
-        metavar="QUEUE",
-        help="the remote queue commands use by default",
-    )
     initialize.add_argument(
         "--exclude",
         action="append",

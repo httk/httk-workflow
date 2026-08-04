@@ -50,6 +50,8 @@ def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIC
     operation = arguments.operation
     target = resolve_remote(arguments.remote, project=context.cwd)
     settings = _settings(arguments.set)
+    if operation == "configure":
+        split_settings(settings)
     result = run_adapter(
         target.bundle,
         operation,

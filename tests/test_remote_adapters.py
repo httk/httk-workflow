@@ -273,13 +273,16 @@ def test_ssh_start_manager_generates_and_submits_the_batch_script(tmp_path: Path
     bundle = fake_remote(
         project,
         workspace=str(workspace.root),
-        account="p2026-1",
-        partition="main",
-        time_limit="04:00:00",
-        nodes="2",
-        cpus_per_task="16",
-        workers="4",
     )
+    for key, value in {
+        "slurm.account": "p2026-1",
+        "slurm.partition": "main",
+        "slurm.time_limit": "04:00:00",
+        "slurm.nodes": "2",
+        "slurm.cpus_per_task": "16",
+        "manager.workers": "4",
+    }.items():
+        workspace.set_setting(key, value)
 
     result = run_adapter(
         bundle,
@@ -313,11 +316,33 @@ def test_ssh_start_manager_generates_and_submits_the_batch_script(tmp_path: Path
         assert (submission.parent / f"{submission.stem}.sbatch").read_text(encoding="utf-8") == script
 
 
+def test_start_manager_without_workspace_settings_has_no_scheduler_directives(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="no-settings")
+    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
+    bundle = fake_remote(project, workspace=str(workspace.root))
+
+    result = run_adapter(
+        bundle,
+        "start-manager",
+        {"remote_settings": {}, "argv": ["httk", "workflow", "manager", "run", str(workspace.root)]},
+    )
+
+    script = Path(str(result["script"])).read_text(encoding="utf-8")
+    assert not any(line.startswith("#SBATCH --account=") for line in script.splitlines())
+    assert not any(line.startswith("#SBATCH --partition=") for line in script.splitlines())
+    assert not any(line.startswith("#SBATCH --time=") for line in script.splitlines())
+    assert not any(line.startswith("#SBATCH --nodes=") for line in script.splitlines())
+    assert not any(line.startswith("#SBATCH --cpus-per-task=") for line in script.splitlines())
+    assert not any(line.startswith("#SBATCH --reservation=") for line in script.splitlines())
+
+
 def test_start_manager_keeps_an_explicit_worker_count(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="explicit-workers")
     workspace = Workspace.initialize(remote.root / "runs" / "workspace")
-    bundle = fake_remote(project, workspace=str(workspace.root), workers="4")
+    bundle = fake_remote(project, workspace=str(workspace.root))
+    workspace.set_setting("manager.workers", "4")
 
     result = run_adapter(
         bundle,
@@ -366,7 +391,8 @@ def test_start_manager_from_the_command_line_counts_managers_and_defers_workers(
     project = tmp_path / "project"
     initialize_project(project, name="cli-start-manager")
     workspace = Workspace.initialize(remote.root / "runs" / "workspace")
-    fake_remote(project, workspace=str(workspace.root), workers="4")
+    fake_remote(project, workspace=str(workspace.root))
+    workspace.set_setting("manager.workers", "4")
     context = CLIContext("httk", project)
     # `manager run` on a remote-bound workspace submits through the remote's
     # scheduler, subsuming the retired `transfer start-manager` verb.
@@ -375,7 +401,7 @@ def test_start_manager_from_the_command_line_counts_managers_and_defers_workers(
     assert command(["manager", "run", "cluster:station", "--count", "2"], context) == 0
     submitted = json.loads(capsys.readouterr().out)
     assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
-    # No --workers on the command line, so the remote's setting is what runs.
+    # No --workers on the command line, so the workspace's setting is what runs.
     script = Path(str(submitted["script"])).read_text(encoding="utf-8")
     assert f"exec httk workflow manager run {workspace.root} --by-path --workers 4" in script
 
@@ -396,9 +422,9 @@ def test_local_slurm_start_manager_submits_with_the_local_sbatch(tmp_path: Path,
         template="local-slurm",
         name="batch",
         workspace=str(workspace.root),
-        account="p2026-1",
-        partition="devel",
     )
+    workspace.set_setting("slurm.account", "p2026-1")
+    workspace.set_setting("slurm.partition", "devel")
 
     result = run_adapter(
         bundle,
