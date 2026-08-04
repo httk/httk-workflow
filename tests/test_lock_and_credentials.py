@@ -171,6 +171,18 @@ def test_secret_setting_avoids_remote_json_and_manifests(tmp_path: Path, monkeyp
     assert f"{PROJECT_DIRECTORY}/remotes/cluster/remote.json" in body
 
 
+def test_scheduler_setting_is_refused_for_remote_configuration(tmp_path: Path, monkeypatch, capsys) -> None:
+    project = _project(tmp_path, monkeypatch, name="scheduler-settings")
+    remote = add_remote("cluster", template="local", project=project)
+
+    code = command(["remote", "configure", "cluster", "--set", "partition=x"], CLIContext("httk", project))
+
+    assert code == 2
+    assert "unknown remote setting 'partition'" in capsys.readouterr().err
+    assert json.loads((remote / "remote.json").read_text(encoding="utf-8"))["settings"] == {}
+    assert not (remote / "credentials.json").exists()
+
+
 def test_stale_project_anchor_secrets_stay_out_of_manifest(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch, name="stale-anchor")
     stale = project / ".httk-project"

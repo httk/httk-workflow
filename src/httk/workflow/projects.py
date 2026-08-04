@@ -122,7 +122,6 @@ def initialize_project(
     *,
     name: str,
     description: str = "",
-    default_queue: str | None = None,
     manifest_exclusions: Iterable[str] = (),
 ) -> dict[str, object]:
     """Initialize the project anchor and its registered default workspace.
@@ -135,7 +134,6 @@ def initialize_project(
         root,
         name=name,
         description=description,
-        default_queue=default_queue,
         manifest_exclusions=manifest_exclusions,
     )
     _add_workspace(Path(root).expanduser().resolve(), metadata)

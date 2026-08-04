@@ -69,7 +69,8 @@ def _campaign(tmp_path: Path, remote: Remote) -> Campaign:
     initialize_project(local_root, name="roundtrip")
     local = Workspace(local_root)
     station = Workspace.initialize(remote.root / "runs" / "workspace")
-    fake_remote(local_root, workspace=str(station.root), workers="2")
+    fake_remote(local_root, workspace=str(station.root))
+    station.set_setting("manager.workers", "2")
 
     source = tmp_path / "runners" / "roundtrip.py"
     source.parent.mkdir(parents=True)

@@ -154,6 +154,8 @@ quote-style = "preserve"
 pythonVersion = "3.12"
 include = ["src", "examples", "tests"]
 extraPaths = ["src", "../httk-core/src"]
+venvPath = ".."
+venv = ".venv"
 reportMissingImports = true
 
 [tool.mypy]

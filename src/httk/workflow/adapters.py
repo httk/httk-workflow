@@ -83,24 +83,21 @@ RESULT_FORMAT = "httk-computer-result"
 #: to the manifest-excluded ``credentials.json`` instead.
 PERSISTABLE_REMOTE_SETTINGS = frozenset(
     {
-        "account",
         "bootstrap",
         "check_connectivity",
-        "cpus_per_task",
         "host",
         "httk_command",
         "legacy_settings",
-        "nodes",
-        "partition",
         "port",
-        "reservation",
-        "time_limit",
         "username",
         "vasp_command",
         "vasp_pseudo_library",
-        "workers",
         "workspace_root",
     }
+)
+
+_RETIRED_REMOTE_SETTINGS = frozenset(
+    {"account", "constraint", "cpus_per_task", "nodes", "partition", "reservation", "time_limit", "workers"}
 )
 
 #: How a remote definition's settings seed the application settings of a
@@ -280,6 +277,10 @@ def add_remote(
 def split_settings(settings: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
     """Partition ``--set`` values into persistable settings and credentials."""
 
+    retired = sorted(set(settings) & _RETIRED_REMOTE_SETTINGS)
+    if retired:
+        names = ", ".join(retired)
+        raise ValueError(f"unknown remote setting {names!r}; set scheduler values in the workspace settings")
     persistable = {key: value for key, value in settings.items() if key in PERSISTABLE_REMOTE_SETTINGS}
     credentials = {key: value for key, value in settings.items() if key not in PERSISTABLE_REMOTE_SETTINGS}
     return persistable, credentials

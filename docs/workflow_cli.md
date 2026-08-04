@@ -708,11 +708,14 @@ by reading assignment-only configuration; legacy shell executables are never
 copied or run. Any other `kind` in a `remote.json` is refused rather than
 executed in the wrong place.
 
-`remote configure --set KEY=VALUE` persists only the non-secret keys
-`account`, `bootstrap`, `check_connectivity`, `cpus_per_task`, `host`,
-`httk_command`, `legacy_settings`, `nodes`, `partition`, `port`, `reservation`,
-`time_limit`, `username`, `vasp_command`, `vasp_pseudo_library`, `workers`, and
-`workspace_root` in the shareable `remote.json`. Every other key is stored in
+`remote configure --set KEY=VALUE` persists only the machine-level keys
+`bootstrap`, `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
+`port`, `username`, `vasp_command`, `vasp_pseudo_library`, and `workspace_root`
+in the shareable `remote.json`. Scheduler profile values are workspace
+settings: use `slurm.account`, `slurm.partition`, `slurm.time_limit`,
+`slurm.nodes`, `slurm.cpus_per_task`, `slurm.reservation`, and
+`manager.workers`; those scheduler names are refused as remote settings. Other
+non-persistable keys are stored in
 the remote's `credentials.json` with mode `0600` beside it, which project
 manifests exclude. Adapters receive both together as the request's
 `remote_settings`. `remote show NAME` reports which
@@ -740,13 +743,13 @@ configured host, where the manager is submitted with `sbatch`. Only `ssh` and
 | `push` / `pull` | one `rsync --archive` transfer, creating missing destination components; a `pull` is always the whole remote directory, a `push` is the whole tree or the request's explicit relative `files` batch | `host`, `username`, `port` |
 | `invoke` | runs the request's argument vector on the host, optionally in the request's directory, and returns its status, stdout and stderr | `host`, `username`, `port`, `httk_command` |
 | `status` | the same machinery running `httk workflow workspace status PATH --by-path --json` remotely | as `invoke` |
-| `start-manager` | writes a generated batch script into `WORKSPACE/.httk-workflow/batch/`, then submits it with `sbatch` once, or the request's `count` times | `account`, `partition`, `time_limit`, `nodes`, `cpus_per_task`, `reservation`, `workers`, `workspace` |
+| `start-manager` | writes a generated batch script into `WORKSPACE/.httk-workflow/batch/`, then submits it with `sbatch` once, or the request's `count` times | workspace settings `slurm.*`, `manager.workers`, `workspace` |
 
 The generated batch script is a `#!/bin/bash` file carrying one `#SBATCH`
 directive per configured setting, `--chdir` set to the workspace, `--output`
 and `--error` beside the script, and a single `exec` line that runs the manager
-command. The remote's `workers` count is appended only when the request did not
-already choose one, so an explicit `--workers` always wins. Both kinds report
+command. The workspace's `manager.workers` count is appended only when the
+request did not already choose one, so an explicit `--workers` always wins. Both kinds report
 the submitted job identifiers.
 
 A `start-manager` request names the workspace outright in its `workspace` field.
@@ -819,8 +822,8 @@ no bare paths.
 
 `manager run cluster-runs` starts managers on the remote, because the name is
 bound to one: `--count N` submits the generated batch script `N` times, `--workers
-N` fixes the workers per manager, and leaving `--workers` off lets the remote's
-configured `workers=N` decide.
+N` fixes the workers per manager, and leaving `--workers` off lets the target
+workspace's configured `manager.workers=N` decide.
 
 `transfer cluster-runs local-runs` is the fetch leg. It probes the remote
 workspace over the adapter's `status` operation, asks it to `offer` what has
