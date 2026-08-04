@@ -67,6 +67,7 @@ METADATA_FILE = "remote.json"
 RESULT_FORMAT = "httk-computer-result"
 
 _CONNECT_TIMEOUT = 20
+_WORKSPACE_FORMAT_MAX_BYTES = 1024 * 1024
 _CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 _FALSE_SETTINGS = frozenset({"0", "false", "no", "off"})
 _SUBMITTED_JOB = re.compile(r"Submitted batch job (\d+)")
@@ -439,12 +440,18 @@ def _workspace_settings(kind: str, settings: Mapping[str, object], workspace: st
     path = Path(workspace) / ".httk-workflow" / "format.json"
     try:
         if kind == "ssh-slurm":
-            completed = _ssh_run(settings, ["cat", str(path)])
+            completed = _ssh_run(settings, ["head", "-c", str(_WORKSPACE_FORMAT_MAX_BYTES), str(path)])
             if completed.returncode != 0:
                 raise ValueError(completed.stderr.strip() or completed.returncode)
             raw = completed.stdout
+            if len(raw.encode("utf-8")) >= _WORKSPACE_FORMAT_MAX_BYTES:
+                raise ValueError("workspace format too large")
         else:
-            raw = path.read_text(encoding="utf-8")
+            with path.open("rb") as stream:
+                encoded = stream.read(_WORKSPACE_FORMAT_MAX_BYTES)
+            if len(encoded) >= _WORKSPACE_FORMAT_MAX_BYTES:
+                raise ValueError("workspace format too large")
+            raw = encoded.decode("utf-8")
         document = json.loads(raw)
     except (OSError, ValueError) as exc:
         raise ValueError(f"cannot read workspace format for {workspace}: {path}: {exc}") from exc

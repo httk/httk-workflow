@@ -26,11 +26,12 @@ path — so registration is a purely client-side concept a remote never sees.
 import json
 import os
 import shutil
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from ._util import write_json_atomic
+from ._util import fsync_directory, fsync_file, write_json_atomic
 from .adapters import resolve_remote, run_adapter, seed_application_settings, valid_remote_name
 from .configuration import config_home, data_home
 from .projects import (
@@ -158,7 +159,7 @@ def _read_global() -> dict[str, dict[str, str]]:
     return {name: dict(binding) for name, binding in workspaces.items() if isinstance(binding, Mapping)}
 
 
-def _write_global(workspaces: Mapping[str, Mapping[str, str]]) -> Path:
+def _write_global(workspaces: Mapping[str, Mapping[str, str]], *, durable: bool = True) -> Path:
     """Write the global registry."""
 
     path = workspaces_path()
@@ -170,6 +171,7 @@ def _write_global(workspaces: Mapping[str, Mapping[str, str]]) -> Path:
             "format_version": _REGISTRY_FORMAT_VERSION,
             "workspaces": {name: dict(binding) for name, binding in workspaces.items()},
         },
+        durable=durable,
     )
     return path
 
@@ -181,12 +183,16 @@ def _read_project(project_root: Path) -> dict[str, dict[str, str]]:
     return {name: dict(binding) for name, binding in section.items() if isinstance(binding, Mapping)}
 
 
-def _write_project(project_root: Path, workspaces: Mapping[str, Mapping[str, str]]) -> None:
+def _write_project(project_root: Path, workspaces: Mapping[str, Mapping[str, str]], *, durable: bool = True) -> None:
     """Write the project-local registry."""
 
     write_project_section(
         project_root, WORKSPACE_SECTION, {name: dict(binding) for name, binding in workspaces.items()}
     )
+    if durable:
+        path = project_root / "httk_project" / "project.json"
+        fsync_file(path)
+        fsync_directory(path.parent)
 
 
 def _binding(name: str, raw: Mapping[str, object], scope: str) -> WorkspaceBinding:
@@ -221,6 +227,7 @@ def register_workspace(
     *,
     scope: str = "global",
     project: str | os.PathLike[str] | None = None,
+    durable: bool = True,
 ) -> WorkspaceBinding:
     """Record one name -> (remote, path) binding in the chosen scope.
 
@@ -246,14 +253,14 @@ def register_workspace(
         if name in workspaces:
             raise ValueError(f"workspace {name!r} is already registered globally; forget it first")
         workspaces[name] = record
-        _write_global(workspaces)
+        _write_global(workspaces, durable=durable)
     else:
         project_root = require_project(project)
         workspaces = _read_project(project_root)
         if name in workspaces:
             raise ValueError(f"workspace {name!r} is already registered in this project; forget it first")
         workspaces[name] = record
-        _write_project(project_root, workspaces)
+        _write_project(project_root, workspaces, durable=durable)
     return WorkspaceBinding(name=name, remote=remote, path=record["path"], scope=scope)
 
 
@@ -331,15 +338,34 @@ def default_workspace(*, project: str | os.PathLike[str] | None = None, durable:
             return _binding(DEFAULT_WORKSPACE_NAME, global_workspaces[DEFAULT_WORKSPACE_NAME], "global")
 
     root = project_root if project_root is not None else data_home() / "workspace"
-    if not (root / ".httk-workflow" / "format.json").exists():
-        Workspace.initialize(root, durable=durable)
-    return register_workspace(
-        DEFAULT_WORKSPACE_NAME,
-        LOCAL_REMOTE,
-        root,
-        scope="project" if project_root is not None else "global",
-        project=project_root,
-    )
+    format_path = root / ".httk-workflow" / "format.json"
+    if not format_path.exists():
+        try:
+            Workspace.initialize(root, durable=durable)
+        except FileExistsError as exc:
+            deadline = time.monotonic() + 2.0
+            while not format_path.is_file() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not format_path.is_file():
+                control = root / ".httk-workflow"
+                raise ValueError(
+                    f"default workspace initialization left a partial directory at {control}; "
+                    f"delete {control} and retry"
+                ) from exc
+    try:
+        return register_workspace(
+            DEFAULT_WORKSPACE_NAME,
+            LOCAL_REMOTE,
+            root,
+            scope="project" if project_root is not None else "global",
+            project=project_root,
+            durable=durable,
+        )
+    except ValueError:
+        existing = resolve_workspace(DEFAULT_WORKSPACE_NAME, project=project_root)
+        if existing.remote != LOCAL_REMOTE or Path(existing.path).resolve() != root.resolve():
+            raise
+        return existing
 
 
 def list_workspaces(*, project: str | os.PathLike[str] | None = None) -> list[WorkspaceBinding]:
@@ -411,7 +437,7 @@ def create_workspace(
         )
         if result.get("returncode") != 0:
             raise RuntimeError(f"remote workspace init failed: {result.get('stderr', '')}")
-    return register_workspace(name, remote, path, scope=scope, project=project)
+    return register_workspace(name, remote, path, scope=scope, project=project, durable=durable)
 
 
 def delete_workspace(

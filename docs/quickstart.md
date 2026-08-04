@@ -1,8 +1,11 @@
 # Quickstart
 
-*For anyone meeting httk-workflow for the first time; no runner, no graph, and no VASP required.*
+*For anyone meeting httk-workflow for the first time; run this walkthrough from a clone of httk-workflow. No VASP is required.*
 
-Five commands from an empty directory to a finished VASP relaxation whose results
+The mock VASP used below lives at `examples/mock_vasp.py` in that checkout; the
+walkthrough does not run from an arbitrary empty directory.
+
+Five commands from a checkout to a finished VASP relaxation whose results
 you can read back. Nothing here needs a runner to be written, a graph to be
 declared, or a database to exist.
 

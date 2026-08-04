@@ -143,6 +143,19 @@ def test_remote_init_derives_workspace_root_and_registers_colon_binding(
     assert "cluster:runs" in capsys.readouterr().out
 
 
+def test_remote_init_with_explicit_path_does_not_need_workspace_root(
+    tmp_path: Path, remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="explicit-remote-path")
+    fake_remote(project)
+    context = _context(project)
+    path = remote.root / "runs" / "explicit"
+    assert command(["workspace", "init", "cluster:explicit", "--path", str(path), "--scope", "project"], context) == 0
+    capsys.readouterr()
+    assert (path / ".httk-workflow" / "format.json").is_file()
+
+
 def test_plain_init_defaults_to_cwd_name_and_local_colon_is_refused(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

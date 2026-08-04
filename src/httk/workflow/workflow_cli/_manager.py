@@ -205,8 +205,24 @@ def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namesp
 
     if arguments.count < 1:
         raise ValueError("--count must be a positive integer")
+    if arguments.runner_search_path:
+        raise ValueError("--runner-search-path cannot be used with a remote workspace binding")
+    if arguments.gc_interval is not None:
+        raise ValueError("--gc-interval cannot be used with a remote workspace binding")
     target = resolve_remote(binding.remote, project=context.cwd)
     manager_argv = [*REMOTE_MANAGER_COMMAND, binding.path, "--by-path"]
+    for pool in arguments.pool:
+        manager_argv += ["--pool", pool]
+    for capability in arguments.capability:
+        manager_argv += ["--capability", capability]
+    for prefix in arguments.placement_prefix:
+        manager_argv += ["--placement-prefix", prefix]
+    if arguments.lease_seconds is not None:
+        manager_argv += ["--lease-seconds", str(arguments.lease_seconds)]
+    if arguments.heartbeat_interval != 30.0:
+        manager_argv += ["--heartbeat-interval", str(arguments.heartbeat_interval)]
+    if arguments.poll_interval != 1.0:
+        manager_argv += ["--poll-interval", str(arguments.poll_interval)]
     # Left off unless asked for, so a remote configured with workers=N is not
     # permanently shadowed by a command-line default.
     if arguments.workers is not None:
@@ -217,6 +233,12 @@ def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namesp
         manager_argv.append("--idle")
     elif arguments.idle_timeout != 3600.0:
         manager_argv += ["--idle-timeout", str(arguments.idle_timeout)]
+    if not _durable(arguments):
+        manager_argv.append("--no-durable")
+    if arguments.log_level is not None:
+        manager_argv += ["--log-level", arguments.log_level]
+    if arguments.json_logs:
+        manager_argv.append("--json-logs")
     request: dict[str, object] = {
         "remote_settings": {},
         "argv": manager_argv,

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -884,6 +885,7 @@ class TaskManager:
             workdir = base.parent / f"{base.name}.{attempt_id}"
             workdir_reused = False
         workdir.mkdir(parents=True, exist_ok=True)
+        settings = self.workspace.read_settings()
         context = {
             "format": "httk-workflow-attempt-context",
             "format_version": 1,
@@ -914,7 +916,7 @@ class TaskManager:
             # runner resolves a.setting("vasp.command") without the operator
             # re-exporting it for every job. This is the workspace layer of the
             # inputs → environment → workspace → default resolution.
-            "settings": self.workspace.settings,
+            "settings": settings,
             "resources": dict(job.resources),
             "join": claimed_state.join_summary,
             # The enriched, labeled observations of this activation's join, or an
@@ -944,11 +946,14 @@ class TaskManager:
         )
         if job.data_mode == "transactional":
             environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
-        for key in sorted(self.workspace.settings):
-            value = self.workspace.settings[key]
+        for key in sorted(settings):
+            value = settings[key]
             if isinstance(value, bool) or not isinstance(value, (str, int, float)):
                 continue
             variable = "HTTK_" + key.upper().replace(".", "_")
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable) is None:
+                _LOGGER.warning("setting %s has an invalid environment variable name; not exported", key)
+                continue
             if variable.startswith("HTTK_WORKFLOW_"):
                 _LOGGER.warning(
                     "setting %s shadows the reserved HTTK_WORKFLOW_ namespace; not exported",

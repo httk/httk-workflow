@@ -150,8 +150,9 @@ Recognized *httk* v1 computer definitions can be mapped explicitly into
 ```console
 httk workflow remote import-v1 ~/.httk/computers/cluster-a \
   --name cluster-a
-httk workflow remote configure cluster-a:default \
-  --set workspace=/remote/path/to/workflow-workspace
+httk workflow remote configure cluster-a \
+  --set workspace_root=/remote/path/to/workflow-workspace
+httk workflow workspace init cluster-a:default
 ```
 
 Review every generated adapter before installation. Legacy shell executables
