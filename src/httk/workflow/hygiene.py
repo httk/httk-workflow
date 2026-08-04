@@ -23,7 +23,6 @@ from .adapters import (
     metadata_path,
     project_remote_roots,
     read_credentials,
-    read_metadata,
     valid_remote_name,
     validate_adapter_bundle,
 )
@@ -47,6 +46,7 @@ from .projects import (
     require_project,
     trusted_project_keys,
 )
+from .registry import _read_global, _read_project
 from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -271,21 +271,30 @@ def describe_remote(
     }
 
 
-def _configured_workspace_ids(bundle: Path) -> set[str]:
-    """Return configured workspace UUIDs, when a remote setting names one."""
+def _remote_workspace_bindings(remote: str, project: Path | None) -> list[tuple[str, str]]:
+    """Return every registered workspace binding carried by *remote*."""
 
-    try:
-        metadata = read_metadata(bundle)
-    except (WorkflowError, OSError, ValueError):
-        return set()
+    records = list(_read_global().items())
+    if project is not None:
+        records += list(_read_project(project).items())
+    return [
+        (name, str(binding["path"]))
+        for name, binding in records
+        if ":" in name and binding.get("remote") == remote and isinstance(binding.get("path"), str)
+    ]
+
+
+def _configured_workspace_ids(remote: str, project: Path | None) -> set[str]:
+    """Return workspace UUIDs from registry bindings for *remote*."""
+
     identifiers: set[str] = set()
-    settings = metadata.get("settings", {})
-    location = settings.get("workspace") if isinstance(settings, Mapping) else None
-    if isinstance(location, str) and location:
+    for _name, location in _remote_workspace_bindings(remote, project):
         format_path = Path(location).expanduser() / ".httk-workflow" / "format.json"
         if format_path.is_file():
             try:
-                identifiers.add(str(read_json(format_path).get("workspace_id")))
+                workspace_id = read_json(format_path).get("workspace_id")
+                if isinstance(workspace_id, str):
+                    identifiers.add(workspace_id)
             except (WorkflowError, OSError, ValueError):
                 pass
     return identifiers
@@ -294,6 +303,8 @@ def _configured_workspace_ids(bundle: Path) -> set[str]:
 def _pending_transfers(project: Path, workspace_ids: set[str]) -> list[dict[str, object]]:
     """Return every sealed, unretired transfer of *project* bound for *workspace_ids*."""
 
+    if not workspace_ids:
+        return []
     directory = project / ".httk-workflow" / "transfers"
     pending: list[dict[str, object]] = []
     for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
@@ -303,7 +314,7 @@ def _pending_transfers(project: Path, workspace_ids: set[str]) -> list[dict[str,
             continue
         if ledger.get("status") == "retired":
             continue
-        if workspace_ids and ledger.get("destination_workspace_id") not in workspace_ids:
+        if ledger.get("destination_workspace_id") not in workspace_ids:
             continue
         pending.append(
             {
@@ -331,14 +342,17 @@ def remove_remote(
 
     bundle, scope = _remote_bundle(name, project=project)
     project_root = discover_project(project)
-    if project_root is not None:
-        pending = _pending_transfers(project_root, _configured_workspace_ids(bundle))
-        if pending:
-            jobs = ", ".join(str(item["job_key"]) for item in pending)
-            raise ValueError(
-                f"remote {name!r} is still referenced by {len(pending)} unretired transfer(s): {jobs}; "
-                "fetch or retire them before removing the remote"
-            )
+    pending = _pending_transfers(project_root, _configured_workspace_ids(name, project_root)) if project_root else []
+    if pending:
+        jobs = ", ".join(str(item["job_key"]) for item in pending)
+        raise ValueError(
+            f"remote {name!r} is still referenced by {len(pending)} unretired transfer(s): {jobs}; "
+            "fetch or retire them before removing the remote"
+        )
+    bindings = _remote_workspace_bindings(name, project_root)
+    if bindings:
+        names = ", ".join(binding_name for binding_name, _path in bindings)
+        raise ValueError(f"remote {name!r} still has workspace bindings: {names}; use workspace forget first")
     shutil.rmtree(bundle)
     _LOGGER.info(
         "removed the %s remote %s at %s",

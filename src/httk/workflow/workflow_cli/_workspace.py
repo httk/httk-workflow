@@ -77,10 +77,13 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
     else:
         remote, plain_name = binding
         target = resolve_remote(remote, project=context.cwd)
-        configured_root = remote_settings(target.bundle).get("workspace_root")
-        if not isinstance(configured_root, str) or not configured_root:
-            raise ValueError(f"remote {remote!r} has no workspace_root; configure it before workspace init")
-        path = arguments.path or f"{configured_root.rstrip('/')}/{plain_name}"
+        if arguments.path:
+            path = arguments.path
+        else:
+            configured_root = remote_settings(target.bundle).get("workspace_root")
+            if not isinstance(configured_root, str) or not configured_root:
+                raise ValueError(f"remote {remote!r} has no workspace_root; configure it before workspace init")
+            path = f"{configured_root.rstrip('/')}/{plain_name}"
     binding = create_workspace(
         arguments.workspace,
         remote=remote,

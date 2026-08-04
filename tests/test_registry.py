@@ -196,6 +196,35 @@ def test_default_workspace_adopts_an_existing_project_workspace(tmp_path: Path) 
     assert Workspace(binding.path).workspace_id == existing.workspace_id
 
 
+def test_default_workspace_reports_a_crash_left_partial_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow import registry
+
+    monkeypatch.setattr(registry, "data_home", lambda: tmp_path)
+    control = tmp_path / "workspace" / ".httk-workflow"
+    control.mkdir(parents=True)
+    with pytest.raises(ValueError, match=r"partial directory.*\.httk-workflow.*delete"):
+        registry.default_workspace()
+
+
+def test_default_workspace_adopts_a_workspace_that_won_the_initialization_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow import registry
+
+    monkeypatch.setattr(registry, "data_home", lambda: tmp_path)
+    real_initialize = Workspace.initialize
+
+    def initialize_then_report_race(cls, root, **kwargs):
+        real_initialize(root, **kwargs)
+        raise FileExistsError(root)
+
+    monkeypatch.setattr(Workspace, "initialize", classmethod(initialize_then_report_race))
+    binding = registry.default_workspace()
+    assert Path(binding.path).joinpath(".httk-workflow", "format.json").is_file()
+
+
 def test_default_workspace_preserves_an_explicit_project_binding(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_anchor(project, name="explicit-default")
@@ -244,6 +273,23 @@ def test_create_local_workspace_initializes_the_directory_and_applies_settings(t
     from httk.workflow import Workspace
 
     assert Workspace(binding.path).settings["vasp.command"] == "srun vasp_std"
+
+
+@pytest.mark.parametrize("key", ["bad=name", "bad/name", "bad name", "bad\x00name", "1bad"])
+def test_setting_names_are_dotted_identifiers(tmp_path: Path, key: str) -> None:
+    workspace = Workspace.initialize(tmp_path / "settings")
+    with pytest.raises(ValueError, match="dotted identifier"):
+        workspace.set_setting(key, "x")
+
+
+def test_setting_values_reject_nul_and_derived_name_collisions(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "settings")
+    with pytest.raises(ValueError, match="NUL"):
+        workspace.set_setting("answer", "bad\x00value")
+    workspace.set_setting("a.b", "first")
+    with pytest.raises(ValueError, match=r"a\.b.*a_b|a_b.*a\.b"):
+        workspace.set_setting("a_b", "second")
+    workspace.set_setting("a.b", "updated")
 
 
 def test_deleting_a_local_workspace_requires_force_then_destroys_and_deregisters(tmp_path: Path) -> None:

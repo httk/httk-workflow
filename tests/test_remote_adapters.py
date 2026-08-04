@@ -22,6 +22,15 @@ from httk.workflow.manager import TaskManager
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import command
 
+
+def test_start_manager_rejects_a_workspace_format_at_the_size_limit(tmp_path: Path) -> None:
+    path = tmp_path / ".httk-workflow" / "format.json"
+    path.parent.mkdir()
+    path.write_bytes(b"{" + b" " * (1024 * 1024 - 1))
+    with pytest.raises(ValueError, match="workspace format too large"):
+        adapter_runtime._workspace_settings("local", {}, str(tmp_path))
+
+
 _FAKE_PYTHON = '''#!{python}
 """Stand-in for python3 that records ``-m pip`` instead of running it."""
 
@@ -411,6 +420,70 @@ def test_start_manager_from_the_command_line_counts_managers_and_defers_workers(
     later = Path(str(explicit["script"])).read_text(encoding="utf-8")
     assert "--workers 1" in later and "--workers 4" not in later
     assert len(list(remote.spool.glob("*.json"))) == 3
+
+
+def test_remote_manager_forwards_execution_options_and_refuses_local_only_options(
+    tmp_path: Path, remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="remote-manager-options")
+    workspace = Workspace.initialize(remote.root / "runs" / "options")
+    fake_remote(project, workspace=str(workspace.root))
+    context = CLIContext("httk", project)
+    register_ws(context, workspace.root, "options", remote="cluster")
+
+    assert (
+        command(
+            [
+                "manager",
+                "run",
+                "cluster:options",
+                "--pool",
+                "gpu",
+                "--pool",
+                "cpu",
+                "--capability",
+                "cuda",
+                "--placement-prefix",
+                "volume/a",
+                "--lease-seconds",
+                "12",
+                "--heartbeat-interval",
+                "3",
+                "--poll-interval",
+                "4",
+                "--idle-timeout",
+                "9",
+                "--workers",
+                "2",
+                "--no-durable",
+                "--log-level",
+                "debug",
+                "--json-logs",
+            ],
+            context,
+        )
+        == 0
+    )
+    script = Path(str(json.loads(capsys.readouterr().out)["script"])).read_text(encoding="utf-8")
+    for option in (
+        "--pool gpu",
+        "--pool cpu",
+        "--capability cuda",
+        "--placement-prefix volume/a",
+        "--lease-seconds 12.0",
+        "--heartbeat-interval 3.0",
+        "--poll-interval 4.0",
+        "--idle-timeout 9.0",
+        "--workers 2",
+        "--no-durable",
+        "--log-level debug",
+        "--json-logs",
+    ):
+        assert option in script
+
+    assert command(["manager", "run", "cluster:options", "--runner-search-path", "/tmp/runners"], context) == 2
+    assert "cannot be used with a remote workspace binding" in capsys.readouterr().err
 
 
 def test_local_slurm_start_manager_submits_with_the_local_sbatch(tmp_path: Path, remote: Remote) -> None:

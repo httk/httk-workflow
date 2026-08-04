@@ -42,9 +42,9 @@ def test_every_publication_write_names_its_durability() -> None:
     safety on a durable workspace.
     """
 
-    from httk.workflow import runtime_builders, sdk
+    from httk.workflow import registry, runtime_builders, sdk
 
-    for module in (runtime_builders, sdk):
+    for module in (registry, runtime_builders, sdk):
         tree = ast.parse(Path(str(module.__file__)).read_text(encoding="utf-8"))
         calls = [
             node
@@ -54,6 +54,17 @@ def test_every_publication_write_names_its_durability() -> None:
         assert calls, f"{module.__name__} publishes no protocol JSON"
         for call in calls:
             assert any(keyword.arg == "durable" for keyword in call.keywords), f"{module.__name__}: {ast.unparse(call)}"
+
+
+def test_durable_global_workspace_registration_syncs_its_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from httk.workflow import registry
+
+    monkeypatch.setattr(registry, "workspaces_path", lambda: tmp_path / "config" / "workspaces.json")
+    events = _install_spies(monkeypatch)
+    registry.register_workspace("durable", "local", tmp_path / "workspace", durable=True)
+    assert sum(event[0] == "fsync" for event in events) >= 2
 
 
 def test_transaction_replay_accepts_a_durability_argument() -> None:

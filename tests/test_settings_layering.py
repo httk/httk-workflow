@@ -11,7 +11,6 @@ all.
 """
 
 import json
-import logging
 import os
 import subprocess
 import sys
@@ -52,7 +51,12 @@ raise SystemExit(run.main())
 """
 
 
-def _manager_environment(tmp_path: Path, settings: dict[str, object], names: tuple[str, ...]) -> dict[str, object]:
+def _manager_environment(
+    tmp_path: Path,
+    settings: dict[str, object],
+    names: tuple[str, ...],
+    before_run=None,
+) -> dict[str, object]:
     """Run one tiny job and return the selected variables from its environment."""
 
     workspace = Workspace.initialize(tmp_path / "workspace")
@@ -75,6 +79,8 @@ def _manager_environment(tmp_path: Path, settings: dict[str, object], names: tup
     )
     workspace.submit(payload, "project/settings")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        if before_run is not None:
+            before_run(workspace)
         manager.run_until_idle(timeout=120.0)
     marker = workspace.find_marker_by_id(job.id)
     assert marker is not None and marker.kind == "succeeded"
@@ -277,7 +283,7 @@ def test_the_manager_exports_scalar_settings_and_preserves_real_environment_valu
     # Workspace writes intentionally validate scalar settings. This override
     # also checks the manager's defensive filtering for values from an older or
     # externally-written format document.
-    monkeypatch.setattr(Workspace, "settings", property(lambda _workspace: settings))
+    monkeypatch.setattr(Workspace, "read_settings", lambda _workspace: settings)
     observed = _manager_environment(tmp_path, {}, names)
     assert observed == {
         "HTTK_EXAMPLE_SCALAR": "machine value",
@@ -290,13 +296,29 @@ def test_the_manager_exports_scalar_settings_and_preserves_real_environment_valu
     }
 
 
-def test_reserved_setting_exports_are_warned_about(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    with caplog.at_level(logging.WARNING, logger="httk.workflow"):
-        _manager_environment(tmp_path, {"workflow.secret": "reserved"}, ("HTTK_WORKFLOW_SECRET",))
-    assert any(
-        record.getMessage() == "setting workflow.secret shadows the reserved HTTK_WORKFLOW_ namespace; not exported"
-        for record in caplog.records
+def test_reserved_setting_exports_are_warned_about(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from httk.workflow import manager as manager_module
+
+    warnings: list[str] = []
+    monkeypatch.setattr(manager_module._LOGGER, "warning", lambda message, *args: warnings.append(message % args))
+    _manager_environment(tmp_path, {"workflow.secret": "reserved"}, ("HTTK_WORKFLOW_SECRET",))
+    assert "setting workflow.secret shadows the reserved HTTK_WORKFLOW_ namespace; not exported" in warnings
+
+
+def test_manager_snapshots_settings_at_claim_time(tmp_path: Path) -> None:
+    observed = _manager_environment(
+        tmp_path,
+        {},
+        ("HTTK_EXAMPLE_SCALAR",),
+        before_run=lambda workspace: Workspace(workspace.root).set_setting("example.scalar", "changed"),
     )
+    assert observed["HTTK_EXAMPLE_SCALAR"] == "changed"
+
+
+def test_seed_settings_skips_a_derived_name_collision(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "settings")
+    workspace.set_setting("a.b", "operator")
+    assert workspace.seed_settings({"a_b": "seed"}) == {"a.b": "operator"}
 
 
 def test_the_vasp_runner_reads_the_workspace_setting_without_the_environment(tmp_path: Path, monkeypatch) -> None:

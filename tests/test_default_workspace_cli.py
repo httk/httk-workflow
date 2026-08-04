@@ -63,3 +63,12 @@ def test_settings_show_distinguishes_a_name_from_a_setting_key(tmp_path: Path, c
     Workspace(default.path).set_setting("answer", 42)
     assert command(["workspace", "settings", "show", "answer"], _context(tmp_path)) == 0
     assert capsys.readouterr().out.strip() == "42"
+
+
+def test_settings_set_rejects_invalid_names_and_nul_values(tmp_path: Path, capsys) -> None:
+    context = _context(tmp_path)
+    default_workspace(project=tmp_path)
+    assert command(["workspace", "settings", "set", "default", "bad=name", "x"], context) == 2
+    assert "dotted identifier" in capsys.readouterr().err
+    assert command(["workspace", "settings", "set", "default", "answer", "bad\x00value"], context) == 2
+    assert "NUL" in capsys.readouterr().err

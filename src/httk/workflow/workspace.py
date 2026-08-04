@@ -63,7 +63,7 @@ def _validate_setting_key(key: str) -> str:
     time — never nested objects, which belong in a job's ``inputs`` instead.
     """
 
-    if not isinstance(key, str) or not key or key != key.strip() or "/" in key:
+    if not isinstance(key, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", key) is None:
         raise ValueError(f"application setting name must be a nonempty dotted identifier: {key!r}")
     return key
 
@@ -74,9 +74,15 @@ def _validate_setting_value(key: str, value: object) -> object:
     ``bool`` is a subclass of ``int`` and is accepted as the JSON scalar it is.
     """
 
+    if isinstance(value, str) and "\0" in value:
+        raise ValueError(f"application setting {key!r} must not contain NUL characters")
     if value is None or isinstance(value, (str, int, float)):
         return value
     raise ValueError(f"application setting {key!r} must be a JSON scalar, not {type(value).__name__}")
+
+
+def _setting_variable_name(key: str) -> str:
+    return "HTTK_" + key.upper().replace(".", "_")
 
 
 def _validate_settings(raw: object) -> dict[str, object]:
@@ -341,6 +347,18 @@ class Workspace:
 
         return _validate_settings(self.format.get("settings", {}))
 
+    def read_settings(self) -> dict[str, object]:
+        """Read and validate the current settings from disk."""
+
+        return _validate_settings(read_json(self.control / "format.json").get("settings", {}))
+
+    @staticmethod
+    def _check_setting_collision(key: str, settings: Mapping[str, object]) -> None:
+        variable = _setting_variable_name(key)
+        for existing in settings:
+            if existing != key and _setting_variable_name(existing) == variable:
+                raise ValueError(f"application settings {existing!r} and {key!r} derive the same variable {variable}")
+
     def set_setting(self, key: str, value: object) -> dict[str, object]:
         """Store one application setting and return the resulting map.
 
@@ -353,6 +371,7 @@ class Workspace:
         _validate_setting_value(key, value)
         stored = read_json(self.control / "format.json")
         settings = _validate_settings(stored.get("settings", {}))
+        self._check_setting_collision(key, settings)
         settings[key] = value
         stored["settings"] = settings
         write_json_atomic(self.control / "format.json", stored, durable=self.durable)
@@ -385,6 +404,11 @@ class Workspace:
         stored = read_json(self.control / "format.json")
         current = _validate_settings(stored.get("settings", {}))
         for key, value in merged.items():
+            if any(
+                existing != key and _setting_variable_name(existing) == _setting_variable_name(key)
+                for existing in current
+            ):
+                continue
             current.setdefault(key, value)
         stored["settings"] = current
         write_json_atomic(self.control / "format.json", stored, durable=self.durable)

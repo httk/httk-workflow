@@ -54,6 +54,7 @@ from httk.workflow.projects import (
     read_project,
     trust_project_key,
 )
+from httk.workflow.registry import forget_workspace, register_workspace
 from httk.workflow.workflow_cli import command
 
 
@@ -532,6 +533,7 @@ def test_remove_remote_refuses_while_a_transfer_still_needs_it(tmp_path: Path, m
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     metadata["settings"]["workspace_root"] = str(destination.root)
     (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
+    register_workspace("cluster:runs", "cluster", destination.root, scope="project", project=project)
 
     workspace = Workspace(project)
     payload, job_id = _payload(tmp_path)
@@ -543,6 +545,9 @@ def test_remove_remote_refuses_while_a_transfer_still_needs_it(tmp_path: Path, m
     assert bundle.is_dir()
 
     workspace.acknowledge_transfer(destination.import_bundle(sealed))
+    with pytest.raises(ValueError, match="workspace forget"):
+        remove_remote("cluster", project=project)
+    forget_workspace("cluster:runs", scope="project", project=project)
     assert remove_remote("cluster", project=project)["removed"] is True
     assert not bundle.exists()
     with pytest.raises(ValueError, match="unknown remote"):
@@ -716,6 +721,7 @@ def test_remote_remove_force_does_not_skip_the_transfer_refusal(tmp_path: Path, 
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     metadata["settings"]["workspace_root"] = str(destination.root)
     (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
+    register_workspace("cluster:runs", "cluster", destination.root, scope="project", project=project)
     workspace = Workspace(project)
     payload, job_id = _payload(tmp_path)
     workspace.submit(payload, "jobs")
