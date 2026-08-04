@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from typing import Any
 
 from ._util import write_json_atomic
 from .configuration import remotes_home
-from .projects import PROJECT_DIRECTORY, discover_project, read_project
+from .projects import PROJECT_DIRECTORY, discover_project
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ __all__ = [
     "ADAPTER_OPERATIONS",
     "CREDENTIALS_FILE",
     "METADATA_FILE",
-    "PERSISTABLE_QUEUE_SETTINGS",
+    "PERSISTABLE_REMOTE_SETTINGS",
     "REQUEST_FORMAT",
     "RESULT_FORMAT",
     "SEED_SETTING_MAP",
@@ -36,15 +37,15 @@ __all__ = [
     "list_remotes",
     "metadata_path",
     "project_remote_roots",
-    "queue_settings",
     "read_credentials",
     "read_metadata",
+    "remote_settings",
     "resolve_remote",
     "run_adapter",
     "seed_application_settings",
-    "split_remote",
     "split_settings",
     "store_credentials",
+    "valid_remote_name",
     "validate_adapter_bundle",
 ]
 
@@ -77,10 +78,10 @@ ADAPTER_FORMAT = "httk-computer-adapter"
 REQUEST_FORMAT = "httk-computer-request"
 RESULT_FORMAT = "httk-computer-result"
 
-#: Queue settings that may be persisted in the signed, shareable
+#: Remote settings that may be persisted in the signed, shareable
 #: ``remote.json``. Everything else is treated as a credential and is written
 #: to the manifest-excluded ``credentials.json`` instead.
-PERSISTABLE_QUEUE_SETTINGS = frozenset(
+PERSISTABLE_REMOTE_SETTINGS = frozenset(
     {
         "account",
         "bootstrap",
@@ -98,30 +99,30 @@ PERSISTABLE_QUEUE_SETTINGS = frozenset(
         "vasp_command",
         "vasp_pseudo_library",
         "workers",
-        "workspace",
+        "workspace_root",
     }
 )
 
-#: How a remote definition's queue settings seed the application settings of a
+#: How a remote definition's settings seed the application settings of a
 #: workspace created against it. A workspace bound to a remote should not make
-#: every operator restate the remote's VASP command, so the whitelisted queue
+#: every operator restate the remote's VASP command, so the whitelisted remote
 #: settings on the left become the dotted application settings on the right when
-#: the workspace is created. The map is deliberately small and explicit: a queue
-#: setting only becomes an application setting when it is named here.
+#: the workspace is created. The map is deliberately small and explicit: a
+#: remote setting only becomes an application setting when it is named here.
 SEED_SETTING_MAP: Mapping[str, str] = {
     "vasp_command": "vasp.command",
     "vasp_pseudo_library": "vasp.pseudo_library",
 }
 
 
-def seed_application_settings(bundle: str | os.PathLike[str], queue: str) -> dict[str, object]:
-    """Return the application settings a remote queue seeds a workspace with."""
+def seed_application_settings(bundle: str | os.PathLike[str]) -> dict[str, object]:
+    """Return the application settings a remote seeds a workspace with."""
 
-    configured = queue_settings(bundle, queue)
+    configured = remote_settings(bundle)
     seeds: dict[str, object] = {}
     for source, target in SEED_SETTING_MAP.items():
         value = configured.get(source)
-        # Only a JSON scalar seeds a setting; a container queue setting is never
+        # Only a JSON scalar seeds a setting; a container remote setting is never
         # an application setting, which is a flat scalar map by construction.
         if isinstance(value, (str, int, float)):
             seeds[target] = value
@@ -130,10 +131,9 @@ def seed_application_settings(bundle: str | os.PathLike[str], queue: str) -> dic
 
 @dataclass(frozen=True)
 class RemoteTarget:
-    """Resolved remote bundle and queue."""
+    """Resolved remote bundle."""
 
     name: str
-    queue: str
     bundle: Path
     project_local: bool
 
@@ -174,11 +174,9 @@ def validate_adapter_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
     executable = root / ADAPTER_EXECUTABLE
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise ValueError(f"adapter executable is not runnable: {executable}")
-    queues = metadata.get("queues", {"default": {}})
-    if not isinstance(queues, Mapping) or not queues:
-        raise ValueError("remote adapter must configure at least one queue")
-    if not all(isinstance(name, str) and isinstance(value, Mapping) for name, value in queues.items()):
-        raise ValueError("remote adapter queues must map names to objects")
+    settings = metadata.get("settings", {})
+    if not isinstance(settings, Mapping):
+        raise ValueError("remote adapter settings must be an object")
     timeout = metadata.get("timeout_seconds", 60.0)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
         raise ValueError("adapter timeout_seconds must be positive")
@@ -193,13 +191,10 @@ def validate_adapter_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
     return metadata
 
 
-def split_remote(value: str) -> tuple[str, str | None]:
-    name, separator, queue = value.partition(":")
-    if not name:
-        raise ValueError("remote name cannot be empty")
-    if separator and not queue:
-        raise ValueError("queue name cannot be empty")
-    return name, queue if separator else None
+def valid_remote_name(name: str) -> str:
+    if not name or "/" in name or ":" in name or name in {".", ".."}:
+        raise ValueError(f"invalid remote name: {name!r}; ':' is reserved for workspace bindings")
+    return name
 
 
 def resolve_remote(
@@ -209,24 +204,16 @@ def resolve_remote(
 ) -> RemoteTarget:
     """Resolve project-local before global remote definitions."""
 
-    name, explicit_queue = split_remote(value)
+    name = valid_remote_name(value)
     project_root = discover_project(project)
     candidates: list[tuple[Path, bool]] = []
-    default_queue: str | None = None
     if project_root is not None:
         candidates.extend((root / name, True) for root in project_remote_roots(project_root))
-        raw_default = read_project(project_root).get("default_queue")
-        default_queue = raw_default if isinstance(raw_default, str) and raw_default else None
     candidates.append((remotes_home() / name, False))
     for bundle, local in candidates:
         if bundle.is_dir():
-            metadata = validate_adapter_bundle(bundle)
-            queue = explicit_queue or default_queue or "default"
-            queues = metadata.get("queues", {})
-            assert isinstance(queues, Mapping)
-            if queue not in queues:
-                raise ValueError(f"remote {name!r} does not configure queue {queue!r}")
-            return RemoteTarget(name, queue, bundle, local)
+            validate_adapter_bundle(bundle)
+            return RemoteTarget(name, bundle, local)
     raise ValueError(f"unknown remote: {name}")
 
 
@@ -264,8 +251,7 @@ def add_remote(
 ) -> Path:
     """Copy one maintained adapter template into user/project data."""
 
-    if not name or "/" in name or name in {".", ".."}:
-        raise ValueError("invalid remote name")
+    valid_remote_name(name)
     if name == "local":
         # `local` is the built-in remote every workspace registry resolves as
         # "this machine". Defining one would make a binding to `local` ambiguous,
@@ -294,48 +280,42 @@ def add_remote(
 def split_settings(settings: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
     """Partition ``--set`` values into persistable settings and credentials."""
 
-    persistable = {key: value for key, value in settings.items() if key in PERSISTABLE_QUEUE_SETTINGS}
-    credentials = {key: value for key, value in settings.items() if key not in PERSISTABLE_QUEUE_SETTINGS}
+    persistable = {key: value for key, value in settings.items() if key in PERSISTABLE_REMOTE_SETTINGS}
+    credentials = {key: value for key, value in settings.items() if key not in PERSISTABLE_REMOTE_SETTINGS}
     return persistable, credentials
 
 
-def read_credentials(bundle: str | os.PathLike[str], queue: str) -> dict[str, Any]:
-    """Read queue-scoped credentials that never enter a project manifest."""
+def read_credentials(bundle: str | os.PathLike[str]) -> dict[str, Any]:
+    """Read remote credentials that never enter a project manifest."""
 
     path = Path(bundle).expanduser().resolve() / CREDENTIALS_FILE
     if not path.is_file():
         return {}
-    scoped = _read_object(path).get(queue)
-    return dict(scoped) if isinstance(scoped, Mapping) else {}
+    return _read_object(path)
 
 
 def store_credentials(
     bundle: str | os.PathLike[str],
-    queue: str,
     settings: Mapping[str, str],
 ) -> Path:
-    """Merge *settings* into the queue-scoped, manifest-excluded credentials."""
+    """Merge *settings* into the manifest-excluded remote credentials."""
 
     root = Path(bundle).expanduser().resolve()
     path = root / CREDENTIALS_FILE
     document = _read_object(path) if path.is_file() else {}
-    scoped = document.get(queue)
-    merged: dict[str, Any] = dict(scoped) if isinstance(scoped, Mapping) else {}
-    merged.update(settings)
-    document[queue] = merged
+    document.update(settings)
     write_json_atomic(path, document)
     os.chmod(path, 0o600)
     return path
 
 
-def queue_settings(bundle: str | os.PathLike[str], queue: str) -> dict[str, Any]:
-    """Return persisted queue settings with credentials merged back in."""
+def remote_settings(bundle: str | os.PathLike[str]) -> dict[str, Any]:
+    """Return persisted remote settings with credentials merged back in."""
 
     root = Path(bundle).expanduser().resolve()
-    queues = read_metadata(root).get("queues", {})
-    scoped = queues.get(queue) if isinstance(queues, Mapping) else None
-    settings: dict[str, Any] = dict(scoped) if isinstance(scoped, Mapping) else {}
-    settings.update(read_credentials(root, queue))
+    configured = read_metadata(root).get("settings", {})
+    settings: dict[str, Any] = dict(configured) if isinstance(configured, Mapping) else {}
+    settings.update(read_credentials(root))
     return settings
 
 
@@ -390,12 +370,21 @@ def import_v1_remote(
     else:
         raise ValueError("legacy computer definition cannot be mapped to a maintained adapter")
 
-    queue_settings: dict[str, dict[str, str]] = {"default": dict(base)}
+    legacy_profiles: dict[str, dict[str, str]] = {}
     for queue_file in sorted(legacy.glob("config.*")):
         queue = queue_file.name.removeprefix("config.")
         if not queue or "/" in queue or queue in {".", ".."}:
             raise ValueError(f"invalid legacy queue name: {queue!r}")
-        queue_settings[queue] = {**base, **_legacy_settings(queue_file)}
+        legacy_profiles[queue] = {**base, **_legacy_settings(queue_file)}
+
+    selected = next(iter(legacy_profiles.values()), base)
+    if len(legacy_profiles) > 1:
+        skipped = ", ".join(sorted(legacy_profiles)[1:])
+        print(
+            f"warning: imported the first v1 submission profile; skipped {skipped}. "
+            "Per-queue submission profiles are now per-workspace settings.",
+            file=sys.stderr,
+        )
 
     remote_name = legacy.name if name is None else name
     destination = add_remote(
@@ -405,20 +394,17 @@ def import_v1_remote(
         project=project,
     )
     metadata = read_metadata(destination)
-    queues: dict[str, dict[str, object]] = {}
-    for queue, settings in queue_settings.items():
-        row: dict[str, object] = {"legacy_settings": settings}
-        if template in {"local", "local-slurm"} and "LOCAL_HTTK_DIR" in settings:
-            root = Path(settings["LOCAL_HTTK_DIR"]).expanduser()
-            if not root.is_absolute():
-                root = (legacy / root).resolve()
-            row["workspace"] = str(root / "Runs" / queue)
-        elif template == "ssh-slurm" and "REMOTE_HTTK_DIR" in settings:
-            row["workspace"] = f"{settings['REMOTE_HTTK_DIR'].rstrip('/')}/Runs/{queue}"
-            row["host"] = settings.get("REMOTE_HOST", "")
-            row["username"] = settings.get("USERNAME", "")
-        queues[queue] = row
-    metadata["queues"] = queues
+    settings: dict[str, object] = {"legacy_settings": selected}
+    if template in {"local", "local-slurm"} and "LOCAL_HTTK_DIR" in selected:
+        root = Path(selected["LOCAL_HTTK_DIR"]).expanduser()
+        if not root.is_absolute():
+            root = (legacy / root).resolve()
+        settings["workspace_root"] = str(root / "Runs")
+    elif template == "ssh-slurm" and "REMOTE_HTTK_DIR" in selected:
+        settings["workspace_root"] = f"{selected['REMOTE_HTTK_DIR'].rstrip('/')}/Runs"
+        settings["host"] = selected.get("REMOTE_HOST", "")
+        settings["username"] = selected.get("USERNAME", "")
+    metadata["settings"] = settings
     # The provenance format keeps its historical name: it records that this
     # bundle was mapped from an httk v1 *computer* definition, which is what
     # that tree calls the thing.
@@ -455,7 +441,6 @@ def run_adapter(
     root = Path(bundle).expanduser().resolve()
     metadata = validate_adapter_bundle(root)
     executable = root / ADAPTER_EXECUTABLE
-    requested_queue = request.get("queue")
     payload = {
         "format": REQUEST_FORMAT,
         "format_version": 1,
@@ -463,8 +448,8 @@ def run_adapter(
         "adapter_dir": str(root),
         # Persisted settings and their manifest-excluded credentials reach the
         # adapter together, so splitting the two storage locations is invisible.
-        **({"queue_settings": queue_settings(root, requested_queue)} if isinstance(requested_queue, str) else {}),
         **dict(request),
+        "remote_settings": remote_settings(root),
     }
     descriptor, temporary_name = tempfile.mkstemp(prefix="httk-adapter-", suffix=".json")
     request_path = Path(temporary_name)

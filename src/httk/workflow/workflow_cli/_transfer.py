@@ -53,29 +53,26 @@ def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIC
     result = run_adapter(
         target.bundle,
         operation,
-        {"queue": target.queue, "settings": settings},
+        {"remote_settings": {}, "settings": settings},
         timeout=arguments.adapter_timeout,
     )
     if operation == "configure" and settings:
         persistable, credentials = split_settings(settings)
         if persistable:
             metadata = read_metadata(target.bundle)
-            queues = metadata.setdefault("queues", {})
-            if not isinstance(queues, dict):
-                raise ValueError("adapter queue configuration is not mutable JSON")
-            queue = queues.setdefault(target.queue, {})
-            if not isinstance(queue, dict):
-                raise ValueError("adapter queue configuration is not an object")
-            queue.update(persistable)
+            remote_settings = metadata.setdefault("settings", {})
+            if not isinstance(remote_settings, dict):
+                raise ValueError("adapter settings are not mutable JSON")
+            remote_settings.update(persistable)
             # A bundle that still carries the pre-rename file name keeps it, so
             # configuring an old definition rewrites what is there rather than
             # leaving two metadata files behind.
             write_json_atomic(metadata_path(target.bundle), metadata)
         if credentials:
-            path = store_credentials(target.bundle, target.queue, credentials)
+            path = store_credentials(target.bundle, credentials)
             names = ", ".join(sorted(credentials))
             print(
-                f"stored {names} for queue {target.queue} in {path}; "
+                f"stored {names} for remote {target.name} in {path}; "
                 "values there are excluded from signed project manifests",
                 file=sys.stderr,
             )
@@ -110,25 +107,20 @@ def _render_remote(description: dict[str, Any]) -> str:
             "valid",
             "yes" if description.get("valid") else f"no: {description.get('problem')}",
         ),
-        _field("default_queue", description.get("default_queue")),
         _field("timeout_seconds", description.get("timeout_seconds")),
         _field(
             "required_binaries",
             ", ".join(description.get("required_binaries", [])) or "-",
         ),
+        _field("workspace_root", description.get("settings", {}).get("workspace_root", "-")),
         _field("credentials_file", description.get("credentials_file") or "-"),
     ]
-    queues = description.get("queues", {})
-    for queue, detail in sorted(queues.items()) if isinstance(queues, dict) else ():
-        settings = detail.get("settings", {}) if isinstance(detail, dict) else {}
-        credentials = detail.get("credential_keys", []) if isinstance(detail, dict) else []
-        lines.append(f"queue {queue}")
+    settings = description.get("settings", {})
+    if isinstance(settings, dict):
         for key, value in sorted(settings.items()):
-            lines.append(f"  {key}={value}")
-        for key in credentials:
-            # The value stays where it is; a description an operator pastes into
-            # a bug report must never carry a password.
-            lines.append(f"  {key}=<credential>")
+            lines.append(f"{key}={value}")
+    for key in description.get("credential_keys", []):
+        lines.append(f"{key}=<credential>")
     return "\n".join(lines)
 
 
@@ -216,7 +208,7 @@ def build_remote_parser(
             handler=handle_remote_adapter_operation,
         )
         parser.set_defaults(operation=operation)
-        parser.add_argument("remote", metavar="REMOTE", help="the remote, as NAME or NAME:QUEUE")
+        parser.add_argument("remote", metavar="NAME", help="the remote name; ':' addresses a workspace on a remote")
         parser.add_argument(
             "--set",
             action="append",
@@ -250,7 +242,7 @@ def build_remote_parser(
     show = _leaf(
         group,
         "show",
-        summary="describe one remote and its queues",
+        summary="describe one remote",
         description="Describe one remote: where it lives, what it is, and how it is configured",
         handler=handle_remote_show,
     )
@@ -292,7 +284,7 @@ def _remote_workspace_id(target: Any, root: str, *, timeout: float | None, noun:
         target.bundle,
         "status",
         {
-            "queue": target.queue,
+            "remote_settings": {},
             "argv": [*REMOTE_STATUS_COMMAND, root, "--by-path", "--json"],
         },
         timeout=timeout,
@@ -367,7 +359,7 @@ def _send_jobs_to_remote(
         push = run_adapter(
             target.bundle,
             "push",
-            {"queue": target.queue, "source": str(bundle), "destination": incoming},
+            {"remote_settings": {}, "source": str(bundle), "destination": incoming},
             timeout=timeout,
         )
         remote_bundle = str(push.get("path", incoming))
@@ -375,7 +367,7 @@ def _send_jobs_to_remote(
             target.bundle,
             "invoke",
             {
-                "queue": target.queue,
+                "remote_settings": {},
                 "argv": [
                     *REMOTE_RECEIVE_COMMAND,
                     "--workspace",
@@ -475,7 +467,7 @@ def _remote_offer(
         argv += ["--state", state]
     if placement:
         argv += ["--placement", placement]
-    offered = run_adapter(target.bundle, "invoke", {"queue": target.queue, "argv": argv}, timeout=timeout)
+    offered = run_adapter(target.bundle, "invoke", {"remote_settings": {}, "argv": argv}, timeout=timeout)
     if offered.get("returncode") != 0:
         raise RuntimeError(f"remote offer failed: {offered.get('stderr', '')}")
     try:
@@ -516,7 +508,7 @@ def _remote_retire(
         destination_workspace_id,
         "--json",
     ]
-    response = run_adapter(target.bundle, "invoke", {"queue": target.queue, "argv": argv}, timeout=timeout)
+    response = run_adapter(target.bundle, "invoke", {"remote_settings": {}, "argv": argv}, timeout=timeout)
     if response.get("returncode") != 0:
         raise RuntimeError(f"remote retirement failed: {response.get('stderr', '')}")
     try:
@@ -561,7 +553,7 @@ def _fetch_jobs_from_remote(
             target.bundle,
             "pull",
             {
-                "queue": target.queue,
+                "remote_settings": {},
                 "source": str(offer["bundle_path"]),
                 "destination": str(staging),
             },
@@ -641,7 +633,7 @@ def _transfer_remote_to_remote(
                 source_target.bundle,
                 "pull",
                 {
-                    "queue": source_target.queue,
+                    "remote_settings": {},
                     "source": str(offer["bundle_path"]),
                     "destination": str(staging),
                 },
@@ -653,7 +645,7 @@ def _transfer_remote_to_remote(
                 destination_target.bundle,
                 "push",
                 {
-                    "queue": destination_target.queue,
+                    "remote_settings": {},
                     "source": local_bundle,
                     "destination": incoming,
                 },
@@ -664,7 +656,7 @@ def _transfer_remote_to_remote(
                 destination_target.bundle,
                 "invoke",
                 {
-                    "queue": destination_target.queue,
+                    "remote_settings": {},
                     "argv": [
                         *REMOTE_RECEIVE_COMMAND,
                         "--workspace",

@@ -11,7 +11,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow import _util as util_module

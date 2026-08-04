@@ -42,7 +42,7 @@ from typing import Any, Protocol
 #: to the workspace the manager is started for.
 BATCH_DIRECTORY = ".httk-workflow/batch"
 
-#: Queue settings mapped straight onto ``#SBATCH`` directives, in written order.
+#: Remote settings mapped straight onto ``#SBATCH`` directives, in written order.
 BATCH_DIRECTIVES = (
     ("account", "--account"),
     ("partition", "--partition"),
@@ -70,7 +70,7 @@ _WHITESPACE = re.compile(r"\s")
 
 _MISSING_HTTK = (
     "httk-workflow is not available on the target; install it there, for "
-    "example with 'pipx install httk-workflow', or configure the queue with "
+    "example with 'pipx install httk-workflow', or configure the remote with "
     "httk_command=COMMAND, or opt into an automatic attempt with bootstrap=pip"
 )
 
@@ -144,7 +144,7 @@ def _shell_command(argv: Sequence[str], *, cwd: str | None = None) -> str:
 
 
 def _settings(request: Mapping[str, object]) -> dict[str, Any]:
-    value = request.get("queue_settings")
+    value = request.get("remote_settings")
     return dict(value) if isinstance(value, Mapping) else {}
 
 
@@ -216,7 +216,7 @@ def _copy(source: Path, destination: Path) -> None:
 
 
 def _httk_prefix(settings: Mapping[str, object]) -> list[str] | None:
-    """Split the optional ``httk_command`` queue setting into an argument vector.
+    """Split the optional ``httk_command`` remote setting into an argument vector.
 
     The value is parsed once, here, and every element is quoted again before it
     reaches a remote shell; it is never interpolated into a command string.
@@ -227,7 +227,7 @@ def _httk_prefix(settings: Mapping[str, object]) -> list[str] | None:
         return None
     prefix = shlex.split(command)
     if not prefix:
-        raise ValueError("queue setting httk_command must not be empty")
+        raise ValueError("remote setting httk_command must not be empty")
     return prefix
 
 
@@ -258,7 +258,7 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
     port = _text(settings, "port")
     if port is not None:
         if not port.isdigit():
-            raise ValueError(f"queue setting port must be numeric: {port!r}")
+            raise ValueError(f"remote setting port must be numeric: {port!r}")
         argv += ["-p", port]
     argv += ["-o", "BatchMode=yes", "-o", f"ConnectTimeout={_CONNECT_TIMEOUT}"]
     return argv
@@ -267,14 +267,14 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
 def _ssh_destination(settings: Mapping[str, object]) -> str:
     host = _text(settings, "host")
     if host is None:
-        raise ValueError("the ssh-slurm adapter needs a queue setting host=HOSTNAME")
+        raise ValueError("the ssh-slurm adapter needs a remote setting host=HOSTNAME")
     if _WHITESPACE.search(host):
-        raise ValueError(f"queue setting host must not contain whitespace: {host!r}")
+        raise ValueError(f"remote setting host must not contain whitespace: {host!r}")
     username = _text(settings, "username")
     if username is None:
         return host
     if _WHITESPACE.search(username):
-        raise ValueError(f"queue setting username must not contain whitespace: {username!r}")
+        raise ValueError(f"remote setting username must not contain whitespace: {username!r}")
     return f"{username}@{host}"
 
 
@@ -390,7 +390,7 @@ def _rsync(
 
 def _batch_value(key: str, value: str) -> str:
     if _CONTROL_CHARACTER.search(value):
-        raise ValueError(f"queue setting {key} must not contain control characters")
+        raise ValueError(f"remote setting {key} must not contain control characters")
     return value
 
 
@@ -401,7 +401,7 @@ def _with_workers(argv: Sequence[str], workers: str | None) -> list[str]:
     if workers is None or "--workers" in arguments:
         return arguments
     if not workers.isdigit() or int(workers) < 1:
-        raise ValueError(f"queue setting workers must be a positive integer: {workers!r}")
+        raise ValueError(f"remote setting workers must be a positive integer: {workers!r}")
     return [*arguments, "--workers", workers]
 
 
@@ -420,7 +420,7 @@ def _workspace(request: Mapping[str, object], settings: Mapping[str, object], ar
         return value
     derived = _manager_workspace(argv) or _text(settings, "workspace")
     if derived is None:
-        raise ValueError("start-manager needs a workspace: configure the queue with workspace=PATH")
+        raise ValueError("start-manager needs a workspace path in the request")
     return derived
 
 
@@ -554,7 +554,7 @@ def _install(kind: str, request: Mapping[str, object]) -> None:
         "httk_command": command,
         "httk_version": version,
     }
-    workspace = _text(settings, "workspace")
+    workspace = _text(settings, "workspace_root")
     if workspace is not None:
         existed = run(["test", "-d", workspace]).returncode == 0
         if not existed:
@@ -586,7 +586,7 @@ def _configure(kind: str, request: Mapping[str, object]) -> None:
         _refusal(
             "configure",
             f"cannot reach {_ssh_destination(settings)}: {completed.stderr.strip() or completed.returncode}; "
-            "set check_connectivity=no to configure the queue anyway",
+            "set check_connectivity=no to configure the remote anyway",
         )
         return
     _result("configure", configured=True, connectivity="ok")

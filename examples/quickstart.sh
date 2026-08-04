@@ -39,9 +39,9 @@ END
 
 # 1. A workspace whose jobs may publish their results as transactional data,
 #    created here on this machine and registered under a name every later command
-#    addresses it by. Being local is never implied, so --remote local is explicit.
+#    addresses it by. A plain name is local and defaults to ./NAME.
 httk_workflow workspace init quickstart-workspace \
-    --remote local --path quickstart-workspace
+    --path quickstart-workspace
 
 # 2. One job of the packaged relaxation runner, starting from that structure. The
 #    command prints one tab-separated line per job: its key and its payload.

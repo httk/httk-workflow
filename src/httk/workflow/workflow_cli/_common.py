@@ -43,6 +43,7 @@ from ..adapters import (
     list_remotes,
     metadata_path,
     read_metadata,
+    remote_settings,
     resolve_remote,
     run_adapter,
     split_settings,
@@ -103,6 +104,7 @@ from ..registry import (
     list_workspaces,
     remove_local_workspace,
     resolve_workspace,
+    split_workspace_binding,
 )
 from ..scaffold import (
     DEFAULT_PLACEMENT,
@@ -452,7 +454,7 @@ def _run_remote_workspace(
     result = _run_adapter(
         target.bundle,
         "invoke",
-        {"queue": target.queue, "argv": ["httk", "workflow", *argv_tail]},
+        {"remote_settings": {}, "argv": ["httk", "workflow", *argv_tail]},
         timeout=timeout,
     )
     stdout = str(result.get("stdout", ""))

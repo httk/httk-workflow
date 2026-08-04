@@ -376,7 +376,7 @@ class Workspace:
         """Merge *seeds* into the settings, keeping any value already set.
 
         Seeding happens once, when a workspace bound to a remote is created: the
-        remote definition's whitelisted queue settings become the workspace's
+        remote definition's whitelisted settings become the workspace's
         starting application settings. An explicit setting already present is
         never overwritten, so a value the operator chose outlives a reseed.
         """

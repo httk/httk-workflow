@@ -167,7 +167,7 @@ def pair(template: Path, tmp_path: Path) -> Pair:
     # The adapter of the copy must name the remote workspace of the copy.
     metadata_path = local_root / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    metadata["queues"]["default"]["workspace"] = str(remote_root)
+    metadata["settings"]["workspace_root"] = str(remote_root)
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     identifiers = json.loads((root / "ids.json").read_text(encoding="utf-8"))
     context = CLIContext("httk", local_root)
@@ -201,7 +201,7 @@ def _offer(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> d
 
 
 def _fetch(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> dict[str, Any]:
-    argv = ["transfer", "station", "home", "--json", *arguments]
+    argv = ["transfer", "cluster:station", "home", "--json", *arguments]
     assert command(argv, pair.context) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -363,7 +363,7 @@ def test_fetch_resumes_after_an_interruption_between_pull_and_import(
         return real_import(self, bundle)
 
     monkeypatch.setattr(Workspace, "import_bundle", interrupt)
-    argv = ["transfer", "station", "home", "--json"]
+    argv = ["transfer", "cluster:station", "home", "--json"]
     assert command(argv, pair.context) == 2
     assert interrupted
 

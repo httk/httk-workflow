@@ -95,7 +95,7 @@ and pointing at `transfer` and `workspace status`.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workspace init NAME` | create a workspace **and** register the name | `--remote` (required), `--path` (required), `--scope`, `--setting`, `--no-durable` |
+| `workspace init NAME` | create a workspace **and** register the name | `--path`, `--scope`, `--setting`, `--no-durable` |
 | `workspace list` | list the registered workspaces and where each resolves | `--json` |
 | `workspace forget NAME` | deregister a name, leaving the workspace on disk | |
 | `workspace delete NAME` | destroy the workspace and deregister it | `--force` (required) |
@@ -113,14 +113,14 @@ and pointing at `transfer` and `workspace status`.
 first workspace on this machine is one command:
 
 ```console
-httk workflow workspace init my-workspace --remote local --path runs/my-workspace
+httk workflow workspace init my-workspace --path runs/my-workspace
 ```
 
 A workspace on a cluster names the remote it lives on instead of `local`; the
 workspace is created there over the adapter, and its name is registered here.
 `--setting KEY=VALUE` seeds an application setting at creation, and a
 remote-bound workspace is *also* seeded from the remote definition's whitelisted
-queue settings — see the *Application settings* section below. `workspace
+remote settings — see the *Application settings* section below. `workspace
 delete` destroys the workspace (locally, or on its remote over the adapter) and
 is refused without `--force`; `workspace forget` only removes the name.
 
@@ -240,10 +240,10 @@ unambiguous.
 | `remote configure REMOTE` | run the adapter's `configure` operation | `--set KEY=VALUE`, `--adapter-timeout` |
 | `remote install REMOTE` | run the adapter's `install` operation | `--set KEY=VALUE`, `--adapter-timeout` |
 | `remote import-v1 SOURCE` | map a legacy *httk* v1 computer bundle | `--name`, `--global` |
-| `remote show NAME` | describe one remote and its queues | `--json` |
+| `remote show NAME` | describe one remote and its settings | `--json` |
 | `remote remove NAME` | remove one remote bundle | `--force` |
 
-`remote show` never prints a credential *value*: a queue setting stored in
+`remote show` never prints a credential *value*: a remote setting stored in
 the manifest-excluded `credentials.json` is reported by name only, so a
 description an operator pastes into a bug report cannot carry a password.
 
@@ -591,7 +591,7 @@ httk workflow workspace settings unset my-workspace vasp.command
 A value that parses as JSON is stored as that scalar; a bare word is stored as a
 string. Settings can also be seeded at creation: `workspace init --setting
 KEY=VALUE` sets them explicitly, and a workspace bound to a remote is additionally
-seeded from that remote definition's whitelisted queue settings, so a cluster's
+seeded from that remote definition's whitelisted remote settings, so a cluster's
 `vasp_command` becomes the new workspace's `vasp.command` without anyone restating
 it.
 
@@ -702,9 +702,8 @@ document of each of the seven operations, and a worked skeleton for a cluster
 none of the maintained kinds covers.
 
 Maintained `local`, `local-slurm`, and `ssh-slurm` templates are packaged with
-the module. Project definitions shadow global definitions. `NAME:QUEUE`
-selects an explicit queue; otherwise the project default and then `default`
-are tried. `remote import-v1` maps recognized legacy *httk* v1 computer bundles
+the module. Project definitions shadow global definitions. `REMOTE:NAME` names
+a workspace on a remote. `remote import-v1` maps recognized legacy *httk* v1 computer bundles
 by reading assignment-only configuration; legacy shell executables are never
 copied or run. Any other `kind` in a `remote.json` is refused rather than
 executed in the wrong place.
@@ -712,10 +711,11 @@ executed in the wrong place.
 `remote configure --set KEY=VALUE` persists only the non-secret keys
 `account`, `bootstrap`, `check_connectivity`, `cpus_per_task`, `host`,
 `httk_command`, `legacy_settings`, `nodes`, `partition`, `port`, `reservation`,
-`time_limit`, `username`, `workers`, and `workspace` in the shareable
-`remote.json`. Every other key is stored per queue in `credentials.json` with
-mode `0600` beside it, which project manifests exclude. Adapters receive both
-together as the request's `queue_settings`. `remote show NAME` reports which
+`time_limit`, `username`, `vasp_command`, `vasp_pseudo_library`, `workers`, and
+`workspace_root` in the shareable `remote.json`. Every other key is stored in
+the remote's `credentials.json` with mode `0600` beside it, which project
+manifests exclude. Adapters receive both together as the request's
+`remote_settings`. `remote show NAME` reports which
 file each setting came from, and the name — never the value — of every
 credential.
 
@@ -736,7 +736,7 @@ configured host, where the manager is submitted with `sbatch`. Only `ssh` and
 | Operation | `ssh-slurm` behaviour | Settings used |
 | --- | --- | --- |
 | `configure` | verifies the host answers with a cheap remote `true`, so a mistyped host fails immediately instead of at the first transfer | `host`, `username`, `port`, `check_connectivity` |
-| `install` | checks that `httk` answers on the far side, reports its version, and creates the queue's workspace directory when it is missing | `host`, `username`, `port`, `workspace`, `httk_command`, `bootstrap` |
+| `install` | checks that `httk` answers on the far side, reports its version, and creates the remote's workspace root when it is missing | `host`, `username`, `port`, `workspace_root`, `httk_command`, `bootstrap` |
 | `push` / `pull` | one `rsync --archive` transfer, creating missing destination components; a `pull` is always the whole remote directory, a `push` is the whole tree or the request's explicit relative `files` batch | `host`, `username`, `port` |
 | `invoke` | runs the request's argument vector on the host, optionally in the request's directory, and returns its status, stdout and stderr | `host`, `username`, `port`, `httk_command` |
 | `status` | the same machinery running `httk workflow workspace status PATH --by-path --json` remotely | as `invoke` |
@@ -745,14 +745,13 @@ configured host, where the manager is submitted with `sbatch`. Only `ssh` and
 The generated batch script is a `#!/bin/bash` file carrying one `#SBATCH`
 directive per configured setting, `--chdir` set to the workspace, `--output`
 and `--error` beside the script, and a single `exec` line that runs the manager
-command. The queue's `workers` count is appended only when the request did not
+command. The remote's `workers` count is appended only when the request did not
 already choose one, so an explicit `--workers` always wins. Both kinds report
 the submitted job identifiers.
 
 A `start-manager` request names the workspace outright in its `workspace` field.
 When that field is absent the workspace is read back out of the request's
-`manager run PATH --by-path` argument vector, and only then from the queue's
-`workspace=PATH`; the argv reading is a documented fallback for hand-written
+`manager run PATH --by-path` argument vector; the argv reading is a documented fallback for hand-written
 requests, not the normal path. `local` starts `count` detached processes and
 reports their `pids`.
 
@@ -776,7 +775,7 @@ travel in the protocol rather than through the remote shell.
 `remote install` never installs software behind your back. It reports the
 `httk` it found and the workspace directory it ensured; when nothing answers it
 fails with a message pointing at `pipx install httk-workflow` on the target.
-Configuring the queue with `bootstrap=pip` opts into one attempt at
+Configuring the remote with `bootstrap=pip` opts into one attempt at
 `python3 -m pip install --user httk-workflow` before that check is repeated.
 
 ## Detached transfers
@@ -804,10 +803,10 @@ is sent to the remote, run there, fetched back once it has stopped, and harveste
 locally:
 
 ```console
-httk workflow workspace init cluster-runs --remote cluster --path /scratch/me/runs
-httk workflow transfer local-runs cluster-runs --job JOB_ID ...     # local -> remote
-httk workflow manager run cluster-runs --count 2 --workers 4
-httk workflow transfer cluster-runs local-runs                      # remote -> local
+httk workflow workspace init cluster:runs
+httk workflow transfer local-runs cluster:runs --job JOB_ID ...     # local -> remote
+httk workflow manager run cluster:runs --count 2 --workers 4
+httk workflow transfer cluster:runs local-runs                      # remote -> local
 httk workflow harvest local-runs --state succeeded --state failed
 ```
 
@@ -820,7 +819,7 @@ no bare paths.
 
 `manager run cluster-runs` starts managers on the remote, because the name is
 bound to one: `--count N` submits the generated batch script `N` times, `--workers
-N` fixes the workers per manager, and leaving `--workers` off lets the queue's
+N` fixes the workers per manager, and leaving `--workers` off lets the remote's
 configured `workers=N` decide.
 
 `transfer cluster-runs local-runs` is the fetch leg. It probes the remote

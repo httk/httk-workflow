@@ -207,7 +207,7 @@ def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namesp
         raise ValueError("--count must be a positive integer")
     target = resolve_remote(binding.remote, project=context.cwd)
     manager_argv = [*REMOTE_MANAGER_COMMAND, binding.path, "--by-path"]
-    # Left off unless asked for, so a queue configured with workers=N is not
+    # Left off unless asked for, so a remote configured with workers=N is not
     # permanently shadowed by a command-line default.
     if arguments.workers is not None:
         if arguments.workers < 1:
@@ -218,7 +218,7 @@ def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namesp
     elif arguments.idle_timeout != 3600.0:
         manager_argv += ["--idle-timeout", str(arguments.idle_timeout)]
     request: dict[str, object] = {
-        "queue": target.queue,
+        "remote_settings": {},
         "argv": manager_argv,
         "workspace": binding.path,
         "count": arguments.count,

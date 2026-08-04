@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ._util import write_json_atomic
-from .adapters import resolve_remote, run_adapter, seed_application_settings
+from .adapters import resolve_remote, run_adapter, seed_application_settings, valid_remote_name
 from .configuration import config_home, data_home
 from .projects import (
     discover_project,
@@ -57,6 +57,7 @@ __all__ = [
     "register_workspace",
     "remove_local_workspace",
     "resolve_workspace",
+    "valid_workspace_binding_name",
     "valid_workspace_name",
     "workspaces_path",
 ]
@@ -107,6 +108,29 @@ def valid_workspace_name(name: str) -> str:
     if not name or "/" in name or ":" in name or name in {".", ".."}:
         raise ValueError(f"invalid workspace name: {name!r}; ':' is reserved for remote-qualified names")
     return name
+
+
+def valid_workspace_binding_name(name: str) -> str:
+    """Return a legal ``REMOTE:NAME`` workspace binding name."""
+
+    if name.count(":") != 1:
+        raise ValueError(f"invalid workspace binding name: {name!r}; use REMOTE:NAME")
+    remote, workspace = name.split(":", 1)
+    valid_remote_name(remote)
+    valid_workspace_name(workspace)
+    if remote == LOCAL_REMOTE:
+        raise ValueError("local:NAME is invalid; plain NAME addresses a local workspace")
+    return name
+
+
+def split_workspace_binding(name: str) -> tuple[str, str] | None:
+    """Return the remote and plain name of a binding, or ``None`` for local."""
+
+    if ":" not in name:
+        valid_workspace_name(name)
+        return None
+    valid_workspace_binding_name(name)
+    return tuple(name.split(":", 1))  # type: ignore[return-value]
 
 
 def workspaces_path() -> Path:
@@ -206,7 +230,13 @@ def register_workspace(
     binding is never silently replaced.
     """
 
-    valid_workspace_name(name)
+    binding = split_workspace_binding(name)
+    if binding is None:
+        valid_workspace_name(name)
+        if remote != LOCAL_REMOTE:
+            raise ValueError("plain workspace names are local; use REMOTE:NAME for a remote workspace")
+    elif remote != binding[0]:
+        raise ValueError(f"workspace binding {name!r} must use remote {binding[0]!r}")
     if scope not in {"global", "project"}:
         raise ValueError(f"unknown registry scope: {scope!r}")
     _validate_remote(remote, project=project)
@@ -349,12 +379,17 @@ def create_workspace(
     :meth:`~httk.workflow.workspace.Workspace.initialize` and applies any application *settings*. A remote
     binding creates the workspace on the far side over the adapter — the frozen
     ``workspace init ... --by-path`` spelling — first seeding it with the remote
-    definition's whitelisted queue settings and then any explicit *settings*, and
+    definition's whitelisted remote settings and then any explicit *settings*, and
     records the binding locally. The name is refused if it is already registered
     in the target scope, before anything is created.
     """
 
-    valid_workspace_name(name)
+    binding = split_workspace_binding(name)
+    if binding is None:
+        if remote != LOCAL_REMOTE:
+            raise ValueError("plain workspace names are local; use REMOTE:NAME for a remote workspace")
+    elif remote != binding[0]:
+        raise ValueError(f"workspace binding {name!r} must use remote {binding[0]!r}")
     _guard_unregistered(name, scope=scope, project=project)
     explicit = dict(settings or {})
     if remote == LOCAL_REMOTE:
@@ -363,7 +398,7 @@ def create_workspace(
             workspace.set_setting(key, value)
     else:
         target = resolve_remote(remote, project=project)
-        seeds = seed_application_settings(target.bundle, target.queue)
+        seeds = seed_application_settings(target.bundle)
         merged = {**seeds, **explicit}
         argv = [*REMOTE_WORKSPACE_INIT_COMMAND, str(path), "--by-path"]
         for key, value in merged.items():
@@ -371,7 +406,7 @@ def create_workspace(
         result = run_adapter(
             target.bundle,
             "invoke",
-            {"queue": target.queue, "argv": argv},
+            {"remote_settings": {}, "argv": argv},
             timeout=adapter_timeout,
         )
         if result.get("returncode") != 0:
@@ -405,7 +440,7 @@ def delete_workspace(
         result = run_adapter(
             target.bundle,
             "invoke",
-            {"queue": target.queue, "argv": argv},
+            {"remote_settings": {}, "argv": argv},
             timeout=adapter_timeout,
         )
         if result.get("returncode") != 0:

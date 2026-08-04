@@ -11,7 +11,7 @@ stable.
 import argparse
 from pathlib import Path
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 from httk.core.cli import CLIContext
 
 from httk.workflow import Workspace, workflow_cli
@@ -225,7 +225,7 @@ def test_the_taskmanager_alias_really_does_the_work_it_names(tmp_path: Path, cap
     """Not only the same parse: the same effect on the filesystem."""
 
     root = tmp_path / "workspace"
-    assert native_cli.main(["init", "aliased", "--remote", "local", "--path", str(root)]) == 0
+    assert native_cli.main(["init", "aliased", "--path", str(root)]) == 0
     assert "aliased" in capsys.readouterr().out
     assert (root / ".httk-workflow" / "format.json").is_file()
 

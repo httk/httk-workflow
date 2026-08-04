@@ -10,7 +10,7 @@ a harvest reads exactly as any other.
 
 from pathlib import Path
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.campaigns import (
@@ -192,8 +192,8 @@ def test_harvest_refuses_and_names_a_remote_partition(tmp_path: Path) -> None:
     from httk.workflow.adapters import add_remote
 
     add_remote("cluster", template="local", project=root)
-    register_workspace("far", "cluster", tmp_path / "far-runs", scope="project", project=root)
-    write_campaign({"far": "far"}, assignment="explicit", project=root)
+    register_workspace("cluster:far", "cluster", tmp_path / "far-runs", scope="project", project=root)
+    write_campaign({"far": "cluster:far"}, assignment="explicit", project=root)
 
     with pytest.raises(ValueError, match="remote workspace"):
         list(campaign_harvest(project=root))

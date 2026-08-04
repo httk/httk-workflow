@@ -24,14 +24,9 @@ def add_workspace_init_arguments(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument("workspace", metavar="NAME", help="the name to register this workspace under")
     parser.add_argument(
-        "--remote",
-        metavar="REMOTE",
-        help="the remote this workspace lives on, or 'local' for this machine (required)",
-    )
-    parser.add_argument(
         "--path",
         metavar="PATH",
-        help="where the workspace lives on that remote (required)",
+        help="where the workspace lives; defaults to ./NAME locally or REMOTE's workspace_root remotely",
     )
     parser.add_argument(
         "--scope",
@@ -59,8 +54,8 @@ def _init_settings(arguments: argparse.Namespace) -> dict[str, object]:
 def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Create one workflow workspace, register it, and print its name.
 
-    The user form takes a NAME and the ``--remote``/``--path`` the workspace is
-    bound to. The protocol form (``--by-path``) initializes a workspace directly
+    The user form takes a plain local NAME or a ``REMOTE:NAME`` binding and an
+    optional path. The protocol form (``--by-path``) initializes a workspace directly
     at a path with no registration: it is what one machine runs on another, where
     the far side keeps no registry.
     """
@@ -75,17 +70,21 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
             workspace.set_setting(key, value)
         print(workspace.root)
         return 0
-    if not arguments.remote:
-        raise ValueError(
-            "workspace init requires --remote; use the default workspace when no registration is needed, "
-            "or specify --remote local for an explicitly registered workspace"
-        )
-    if not arguments.path:
-        raise ValueError("workspace init requires --path: where the workspace lives on that remote")
+    binding = split_workspace_binding(arguments.workspace)
+    if binding is None:
+        remote = LOCAL_REMOTE
+        path = arguments.path or str(Path(context.cwd) / arguments.workspace)
+    else:
+        remote, plain_name = binding
+        target = resolve_remote(remote, project=context.cwd)
+        configured_root = remote_settings(target.bundle).get("workspace_root")
+        if not isinstance(configured_root, str) or not configured_root:
+            raise ValueError(f"remote {remote!r} has no workspace_root; configure it before workspace init")
+        path = arguments.path or f"{configured_root.rstrip('/')}/{plain_name}"
     binding = create_workspace(
         arguments.workspace,
-        remote=arguments.remote,
-        path=arguments.path,
+        remote=remote,
+        path=path,
         scope=arguments.scope,
         project=context.cwd,
         durable=_durable(arguments),
