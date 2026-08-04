@@ -1,11 +1,9 @@
-"""The workspace registry: the named, init:ed workspaces the CLI addresses.
+"""The workspace registry: the named workspaces the CLI addresses.
 
-Every :command:`httk workflow` command that operates on a workspace takes a
-*registered name*, never a bare path. A name is bound once — "init:ed" — to a
-place: either the built-in ``local`` remote, or exactly one defined remote, plus
-the path the workspace lives at on that machine. The binding is always explicit;
-being local is never implied, because a name that silently meant "here" would be
-a different workspace on a different machine.
+An omitted workspace resolves to the reserved ``default`` binding. On first use,
+that binding is created at the project root inside a project, or under the user
+data home otherwise. Explicit names always stay explicit: they resolve only
+through their registered binding and are never redirected to ``default``.
 
 A binding lives in one of two scopes:
 
@@ -34,7 +32,7 @@ from pathlib import Path
 
 from ._util import write_json_atomic
 from .adapters import resolve_remote, run_adapter, seed_application_settings
-from .configuration import config_home
+from .configuration import config_home, data_home
 from .projects import (
     discover_project,
     read_project_section,
@@ -44,6 +42,7 @@ from .projects import (
 from .workspace import Workspace
 
 __all__ = [
+    "DEFAULT_WORKSPACE_NAME",
     "LOCAL_REMOTE",
     "REMOTE_WORKSPACE_DELETE_COMMAND",
     "REMOTE_WORKSPACE_INIT_COMMAND",
@@ -51,6 +50,7 @@ __all__ = [
     "WORKSPACE_SECTION",
     "WorkspaceBinding",
     "create_workspace",
+    "default_workspace",
     "delete_workspace",
     "forget_workspace",
     "list_workspaces",
@@ -65,6 +65,9 @@ __all__ = [
 #: real, always-resolvable remote name a binding may carry, and defining a remote
 #: called this is refused elsewhere so the two can never disagree.
 LOCAL_REMOTE = "local"
+
+#: The binding created lazily when a caller omits a workspace name.
+DEFAULT_WORKSPACE_NAME = "default"
 
 #: Where the global registry is written.
 WORKSPACES_FILE = "workspaces.json"
@@ -97,12 +100,12 @@ def valid_workspace_name(name: str) -> str:
     """Return *name* if it is a legal workspace name, else raise.
 
     A workspace name is validated like every other httk name: it is nonempty,
-    holds no path separator, and is neither ``.`` nor ``..`` — so it can never be
-    read as a path, which is exactly the ambiguity the registry removes.
+    holds no path separator or ``:``, and is neither ``.`` nor ``..`` — so it can
+    never be read as a path. A colon is reserved for remote-qualified names.
     """
 
-    if not name or "/" in name or name in {".", ".."}:
-        raise ValueError(f"invalid workspace name: {name!r}")
+    if not name or "/" in name or ":" in name or name in {".", ".."}:
+        raise ValueError(f"invalid workspace name: {name!r}; ':' is reserved for remote-qualified names")
     return name
 
 
@@ -274,6 +277,38 @@ def resolve_workspace(
     raise ValueError(
         f"unknown workspace: {name}; register it with `httk workflow workspace init` "
         "or list the registered ones with `httk workflow workspace list`"
+    )
+
+
+def default_workspace(*, project: str | os.PathLike[str] | None = None, durable: bool = True) -> WorkspaceBinding:
+    """Resolve or lazily create the reserved default workspace binding.
+
+    An existing explicit ``default`` binding in the applicable scope wins
+    untouched; this is the scope-local escape hatch for choosing another
+    workspace. Project scope is used inside a project and global scope only
+    outside projects. Otherwise a local workspace is adopted or initialized at
+    the project root, or at ``data_home() / "workspace"`` with no project.
+    """
+
+    project_root = discover_project(project)
+    if project_root is not None:
+        project_workspaces = _read_project(project_root)
+        if DEFAULT_WORKSPACE_NAME in project_workspaces:
+            return _binding(DEFAULT_WORKSPACE_NAME, project_workspaces[DEFAULT_WORKSPACE_NAME], "project")
+    else:
+        global_workspaces = _read_global()
+        if DEFAULT_WORKSPACE_NAME in global_workspaces:
+            return _binding(DEFAULT_WORKSPACE_NAME, global_workspaces[DEFAULT_WORKSPACE_NAME], "global")
+
+    root = project_root if project_root is not None else data_home() / "workspace"
+    if not (root / ".httk-workflow" / "format.json").exists():
+        Workspace.initialize(root, durable=durable)
+    return register_workspace(
+        DEFAULT_WORKSPACE_NAME,
+        LOCAL_REMOTE,
+        root,
+        scope="project" if project_root is not None else "global",
+        project=project_root,
     )
 
 
