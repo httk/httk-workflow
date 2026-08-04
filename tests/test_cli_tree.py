@@ -161,8 +161,8 @@ def test_an_unknown_group_names_the_tree(tmp_path: Path, capsys) -> None:
 
 
 def test_a_missing_required_argument_names_the_leaf(tmp_path: Path, capsys) -> None:
-    assert command(["workspace", "gc"], _context(tmp_path)) == 2
-    assert "httk workflow workspace gc" in capsys.readouterr().err
+    assert command(["workspace", "policy", "set"], _context(tmp_path)) == 2
+    assert "httk workflow workspace policy set" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

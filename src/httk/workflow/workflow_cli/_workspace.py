@@ -77,8 +77,8 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
         return 0
     if not arguments.remote:
         raise ValueError(
-            "workspace init requires --remote; use --remote local for a workspace on this machine, "
-            "because being local is never implied"
+            "workspace init requires --remote; use the default workspace when no registration is needed, "
+            "or specify --remote local for an explicitly registered workspace"
         )
     if not arguments.path:
         raise ValueError("workspace init requires --path: where the workspace lives on that remote")
@@ -98,7 +98,7 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
 def add_workspace_status_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`workspace status`, shared with ``httk-taskmanager status``."""
 
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to summarize")
+    add_workspace_argument(parser, help_text="the workspace to summarize")
     parser.add_argument("--json", action="store_true", help="print the machine-readable status document")
     _add_by_path_argument(parser)
     add_durability_arguments(parser)
@@ -326,10 +326,25 @@ def handle_workspace_delete(arguments: argparse.Namespace, context: CLIContext) 
 def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Show one workspace's application settings, or one named member."""
 
+    ambiguous_key = False
+    if arguments.key is None and arguments.workspace is not None:
+        candidate = arguments.workspace
+        try:
+            resolve_workspace(candidate, project=context.cwd)
+        except ValueError as exc:
+            if not str(exc).startswith("unknown workspace:"):
+                raise
+            arguments.workspace = None
+            arguments.key = candidate
+            ambiguous_key = True
     workspace = Workspace(_local_root(arguments, context, action="read its settings"), mutable=False)
     settings = workspace.settings
     if arguments.key is not None:
         if arguments.key not in settings:
+            if ambiguous_key:
+                raise ValueError(
+                    f"{arguments.key!r} is neither a registered workspace nor a setting key of the default workspace"
+                )
             raise ValueError(f"application setting is not set: {arguments.key}")
         print(json.dumps(settings[arguments.key], sort_keys=True))
         return 0
@@ -402,11 +417,7 @@ def build_workspace_parser(
         description="Print the shared policy of one workflow workspace",
         handler=handle_workspace_policy_show,
     )
-    show.add_argument(
-        "workspace",
-        metavar="WORKSPACE",
-        help="the registered workspace whose policy to print",
-    )
+    add_workspace_argument(show, help_text="the workspace whose policy to print")
     show.add_argument("--json", action="store_true", help="print the policy as one JSON object")
     store = _leaf(
         policy_actions,
@@ -415,11 +426,7 @@ def build_workspace_parser(
         description="Store one member of the shared policy of a workflow workspace",
         handler=handle_workspace_policy_set,
     )
-    store.add_argument(
-        "workspace",
-        metavar="WORKSPACE",
-        help="the registered workspace whose policy to change",
-    )
+    add_workspace_argument(store, help_text="the workspace whose policy to change")
     store.add_argument("key", metavar="KEY", help="one of " + ", ".join(sorted(POLICY_KEYS)))
     store.add_argument("value", metavar="VALUE", help="the JSON value to store")
     store.add_argument(
@@ -470,11 +477,7 @@ def build_workspace_parser(
         description="Print the application settings of one workspace, or one named setting",
         handler=handle_workspace_settings_show,
     )
-    settings_show.add_argument(
-        "workspace",
-        metavar="WORKSPACE",
-        help="the registered workspace whose settings to read",
-    )
+    add_workspace_argument(settings_show, help_text="the workspace whose settings to read")
     settings_show.add_argument(
         "key",
         metavar="KEY",
@@ -489,7 +492,7 @@ def build_workspace_parser(
         description="Store one application setting on a workspace, e.g. vasp.command",
         handler=handle_workspace_settings_set,
     )
-    settings_set.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to change")
+    add_workspace_argument(settings_set, help_text="the workspace to change")
     settings_set.add_argument("key", metavar="KEY", help="the dotted setting name, e.g. vasp.command")
     settings_set.add_argument("value", metavar="VALUE", help="the JSON value, or a bare string, to store")
     settings_unset = _leaf(
@@ -499,7 +502,7 @@ def build_workspace_parser(
         description="Remove one application setting from a workspace",
         handler=handle_workspace_settings_unset,
     )
-    settings_unset.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to change")
+    add_workspace_argument(settings_unset, help_text="the workspace to change")
     settings_unset.add_argument("key", metavar="KEY", help="the dotted setting name to remove")
 
     fsck = _leaf(
@@ -509,7 +512,7 @@ def build_workspace_parser(
         description="Check, and optionally repair, the marker-to-journal integrity of a workspace",
         handler=handle_workspace_fsck,
     )
-    fsck.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to check")
+    add_workspace_argument(fsck, help_text="the workspace to check")
     fsck.add_argument(
         "--repair",
         action="store_true",
@@ -530,7 +533,7 @@ def build_workspace_parser(
         description="Collect the garbage one workflow workspace has accumulated",
         handler=handle_workspace_gc,
     )
-    collect.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to collect")
+    add_workspace_argument(collect, help_text="the workspace to collect")
     collect.add_argument(
         "--dry-run",
         action="store_true",
@@ -546,11 +549,7 @@ def build_workspace_parser(
         description="Release a stale, or with --force a live, workspace maintenance lock",
         handler=handle_workspace_unlock,
     )
-    unlock.add_argument(
-        "workspace",
-        metavar="WORKSPACE",
-        help="the registered workspace whose lock to release",
-    )
+    add_workspace_argument(unlock, help_text="the workspace whose lock to release")
     unlock.add_argument(
         "--force",
         action="store_true",

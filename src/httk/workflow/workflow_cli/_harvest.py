@@ -40,7 +40,7 @@ def build_harvest_parser(
         description="Harvest the finished jobs of one workflow workspace",
         handler=handle_harvest,
     )
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the workspace to harvest")
+    add_workspace_argument(parser, help_text="the workspace to harvest")
     parser.add_argument(
         "--state",
         action="append",
