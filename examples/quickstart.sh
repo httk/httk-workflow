@@ -5,21 +5,28 @@
 #
 #     examples/quickstart.sh
 #
-# It creates POSCAR and quickstart-workspace/ in the working directory and drives
-# one packaged VASP relaxation to completion. Without VASP installed the mock one
-# beside this file stands in for it; set HTTK_VASP_COMMAND yourself to use the real
-# thing.
+# It creates POSCAR and httk_project/ in the working directory and drives one
+# packaged VASP relaxation to completion. Without VASP installed the mock one
+# beside this file stands in for it; set vasp.command to use the real thing.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
 
-# "httk workflow ..." is the canonical command for everything below. When its
-# console script is not on PATH, this is the identical module form.
+# These helpers use the installed command when available and the identical
+# module form otherwise.
 httk_workflow() {
     if command -v httk >/dev/null 2>&1; then
         httk workflow "$@"
     else
         python -m httk.core.cli workflow "$@"
+    fi
+}
+
+httk_project() {
+    if command -v httk >/dev/null 2>&1; then
+        httk project "$@"
+    else
+        python3 -m httk.core.cli project "$@"
     fi
 }
 
@@ -37,31 +44,25 @@ Direct
 0.5000000000 0.5000000000 0.5000000000
 END
 
-# 1. A workspace whose jobs may publish their results as transactional data,
-#    created here on this machine and registered under a name every later command
-#    addresses it by. A plain name is local and defaults to ./NAME.
-httk_workflow workspace init quickstart-workspace \
-    --path quickstart-workspace
+# 1. The project anchor. Its first workflow command creates the default workspace
+#    lazily at this project root.
+httk_project init --name quickstart
 
 # 2. One job of the packaged relaxation runner, starting from that structure. The
-#    command prints one tab-separated line per job: its key and its payload.
-job=$(httk_workflow job new quickstart-workspace \
+#    command prints one tab-separated line with its key and payload.
+httk_workflow job new \
     --template vasp-relax \
     --from POSCAR \
-    --tag silicon | cut -f1)
-printf 'submitted %s\n' "$job"
+    --tag silicon
 
-# 3. How VASP is invoked on this machine, which is deployment state and not part of
-#    any job. Without VASP, the mock beside this file writes plausible outputs.
-: "${HTTK_VASP_COMMAND:=$here/mock_vasp.py}"
-export HTTK_VASP_COMMAND
+# 3. Workspace state follows the job. Without VASP, the mock beside this file
+#    writes plausible outputs.
+httk_workflow workspace settings set vasp.command "$here/mock_vasp.py"
 
-# 4. Run every ready job in the foreground until nothing is left to do.
-httk_workflow run quickstart-workspace
+# 4. Run every ready job until nothing is left to do.
+httk_workflow run
 
 # 5. What happened, and what it produced.
-httk_workflow job list quickstart-workspace
-httk_workflow job show quickstart-workspace "$job"
-httk_workflow harvest quickstart-workspace
+httk_workflow harvest
 
-printf '\nthe published result is in quickstart-workspace/jobs/%s/data/vasp/\n' "$job"
+printf '\nthe published result is in jobs/*/data/vasp/\n'

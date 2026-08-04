@@ -25,12 +25,12 @@ characterization — the point is the campaign, not the physics):
 
 .. code-block:: console
 
-    httk workflow workspace init campaign-workspace
-    httk workflow job new campaign-workspace \\
+    httk project init --name campaign
+    httk workflow job new \\
         --template examples/defect_campaign.py --step characterize \\
         --input sites=3 --input diverging=1 --tag campaign
-    httk workflow run campaign-workspace
-    httk workflow job list campaign-workspace
+    httk workflow run
+    httk workflow job list
 
 The campaign then fails by design, with ``defects.child_failed``, because
 ``diverging=1`` made site 1 fail: ``httk workflow job show`` on the parent and on

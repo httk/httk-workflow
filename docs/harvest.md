@@ -139,9 +139,9 @@ $ httk workflow harvest workflow-workspace | head -1
 ```
 
 Jobs that ran on a remote are harvested the same way once they are
-home: `httk workflow transfer fetch --remote NAME --workspace WORKSPACE` imports
-them into this workspace in the terminal state they stopped in, and the harvest
-that follows cannot tell them from jobs that ran locally. See
+home: `httk workflow transfer REMOTE:NAME default` imports them into the local
+default workspace in the terminal state they stopped in, and the harvest that
+follows cannot tell them from jobs that ran locally. See
 {doc}`workflow_cli`.
 
 Each line is exactly `HarvestRecord.as_mapping()`, and

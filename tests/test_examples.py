@@ -59,6 +59,7 @@ def _environment(bin_directory: Path) -> dict[str, str]:
         os.pathsep
     )
     environment["PATH"] = os.pathsep.join([str(bin_directory), str(_EXAMPLES), environment.get("PATH", "")])
+    environment["HTTK_DATA_HOME"] = str(bin_directory.parent / "data")
     # A test must never depend on a VASP the machine happens to have, nor on the
     # operator's configuration; every example names the mock one itself.
     for name in ("HTTK_VASP_COMMAND", "HTTK_MOCK_VASP_FAIL_ONCE"):
@@ -124,9 +125,9 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     commands = [line.replace(" --remote local", "") for line in _documented_commands(_QUICKSTART)]
 
     # The page really is five commands, and they are the ones a newcomer types.
-    assert sum(1 for line in commands if line.startswith(("httk", "export"))) == 5
-    assert ("httk workflow workspace init quickstart-workspace --path quickstart-workspace") in commands
-    assert any(line.startswith("httk workflow job new quickstart-workspace --template vasp-relax") for line in commands)
+    assert sum(1 for line in commands if line.startswith("httk")) == 5
+    assert "httk project init --name quickstart" in commands
+    assert any(line.startswith("httk workflow job new --template vasp-relax") for line in commands)
 
     completed = _run(
         ["bash", "-e", "-c", "\n".join(commands)],
@@ -134,7 +135,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
         environment=_environment(console_scripts),
     )
 
-    kind, payload = _finished(work / "quickstart-workspace")
+    kind, payload = _finished(work)
     assert kind == "succeeded"
     # The published result is a real VASP result, produced by the documented run.
     published = payload / "data" / "vasp"
@@ -162,7 +163,7 @@ def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) ->
         environment=_environment(empty),
     )
 
-    kind, payload = _finished(work / "quickstart-workspace")
+    kind, payload = _finished(work)
     assert kind == "succeeded"
     assert (payload / "data" / "vasp" / "OUTCAR").is_file()
     assert "succeeded" in completed.stdout
