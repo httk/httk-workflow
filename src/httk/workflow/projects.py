@@ -11,9 +11,7 @@ the pieces that are workflow policy rather than anchor:
   signed manifest never records, which is a property of the manifest format and
   therefore stays here beside :mod:`httk.workflow.manifests`.
 * :func:`initialize_project` and :func:`import_v1_project` — the anchor plus the
-  workflow *workspace* a workflow project also needs. Creating a
-  workspace at ``init`` time is revisited in Phase 10; for now the behavior is
-  exactly what it was before the anchor moved.
+  project's registered default workflow workspace.
 """
 
 import os
@@ -47,7 +45,6 @@ from httk.core.project import import_v1_project as _import_v1_anchor
 from httk.core.project import initialize_project as _initialize_anchor
 
 from ._util import write_json_atomic
-from .workspace import Workspace
 
 __all__ = [
     "DEFAULT_MANIFEST_EXCLUSIONS",
@@ -128,12 +125,10 @@ def initialize_project(
     default_queue: str | None = None,
     manifest_exclusions: Iterable[str] = (),
 ) -> dict[str, object]:
-    """Initialize the project anchor and its detached-transfer workspace.
+    """Initialize the project anchor and its registered default workspace.
 
     The anchor is created by :func:`httk.core.project.initialize_project`; a workflow
-    project additionally gets a workflow workspace. Creating the
-    workspace at init time is the behavior Phase 10 revisits — the anchor and the
-    workspace need not be born together — but it is preserved unchanged here.
+    project additionally gets its project's registered default workspace.
     """
 
     metadata = _initialize_anchor(
@@ -169,7 +164,9 @@ def _add_workspace(project: Path, metadata: dict[str, object]) -> None:
     """Give one freshly created project its workflow workspace."""
 
     try:
-        Workspace.initialize(project)
+        from .registry import default_workspace
+
+        default_workspace(project=project)
     except Exception:
         # Leave a recognizable project rather than guessing whether it is safe
         # to remove a directory that may already contain user files.

@@ -8,16 +8,22 @@ redefined, and creating or destroying a workspace acts on the filesystem while
 registration only records where a name points.
 """
 
+import json
 from pathlib import Path
 
 import pytest  # pyright: ignore[reportMissingImports]
+from httk.core.project import initialize_project as initialize_anchor
 
+from httk.workflow import Workspace
 from httk.workflow.adapters import add_remote
+from httk.workflow.configuration import data_home
 from httk.workflow.projects import initialize_project
 from httk.workflow.registry import (
+    DEFAULT_WORKSPACE_NAME,
     LOCAL_REMOTE,
     WorkspaceBinding,
     create_workspace,
+    default_workspace,
     delete_workspace,
     forget_workspace,
     list_workspaces,
@@ -47,6 +53,8 @@ def test_a_project_binding_registers_resolves_and_is_forgotten(tmp_path: Path) -
 
     project = tmp_path / "project"
     initialize_project(project, name="scoped")
+    default = resolve_workspace(DEFAULT_WORKSPACE_NAME, project=project)
+    assert default.scope == "project" and default.path == str(project)
     # A project binding may name any defined remote; define one so a remote-bound
     # binding validates, alongside the local binding this round-trips.
     add_remote("cluster-like", template="local", project=project)
@@ -131,6 +139,85 @@ def test_an_illegal_workspace_name_is_refused(name: str) -> None:
 
     with pytest.raises(ValueError, match="invalid workspace name"):
         valid_workspace_name(name)
+
+
+def test_a_colon_is_reserved_in_workspace_names() -> None:
+    with pytest.raises(ValueError, match="reserved"):
+        valid_workspace_name("a:b")
+
+
+def test_default_workspace_creates_and_registers_at_a_project_root(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    initialize_anchor(project, name="default-project")
+
+    binding = default_workspace(project=project)
+
+    assert binding == WorkspaceBinding(DEFAULT_WORKSPACE_NAME, LOCAL_REMOTE, str(project), "project")
+    document = json.loads((project / "httk_project" / "project.json").read_text(encoding="utf-8"))
+    assert document["workspaces"][DEFAULT_WORKSPACE_NAME] == {"remote": LOCAL_REMOTE, "path": str(project)}
+
+
+def test_default_workspace_without_a_project_uses_the_global_data_home(tmp_path: Path) -> None:
+    binding = default_workspace(project=tmp_path)
+
+    assert binding.scope == "global"
+    assert Path(binding.path) == data_home() / "workspace"
+    assert (Path(binding.path) / ".httk-workflow" / "format.json").is_file()
+    assert resolve_workspace(DEFAULT_WORKSPACE_NAME) == binding
+
+
+def test_default_workspace_is_idempotent(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    initialize_anchor(project, name="idempotent")
+
+    first = default_workspace(project=project)
+    workspace_id = Workspace(first.path).workspace_id
+    second = default_workspace(project=project)
+
+    assert second == first
+    assert Workspace(second.path).workspace_id == workspace_id
+
+
+def test_default_workspace_adopts_an_existing_project_workspace(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    initialize_anchor(project, name="adopt")
+    existing = Workspace.initialize(project)
+
+    binding = default_workspace(project=project)
+
+    assert binding.scope == "project" and Path(binding.path) == project
+    assert Workspace(binding.path).workspace_id == existing.workspace_id
+
+
+def test_default_workspace_preserves_an_explicit_project_binding(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    initialize_anchor(project, name="explicit-default")
+    elsewhere = tmp_path / "elsewhere"
+    explicit = register_workspace(
+        DEFAULT_WORKSPACE_NAME,
+        LOCAL_REMOTE,
+        elsewhere,
+        scope="project",
+        project=project,
+    )
+
+    assert default_workspace(project=project) == explicit
+
+
+def test_project_default_ignores_an_existing_global_default(tmp_path: Path) -> None:
+    global_binding = default_workspace(project=tmp_path / "outside")
+    project = tmp_path / "project"
+    initialize_anchor(project, name="project-default")
+
+    project_binding = default_workspace(project=project)
+
+    assert global_binding.scope == "global"
+    assert project_binding.scope == "project"
+    assert Path(project_binding.path) == project
+    assert project_binding != global_binding
+    assert json.loads((project / "httk_project" / "project.json").read_text(encoding="utf-8"))["workspaces"][
+        DEFAULT_WORKSPACE_NAME
+    ] == {"remote": LOCAL_REMOTE, "path": str(project)}
 
 
 def test_create_local_workspace_initializes_the_directory_and_applies_settings(tmp_path: Path) -> None:

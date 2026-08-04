@@ -106,11 +106,10 @@ def config_home() -> Path:
 def data_home() -> Path:
     """Return the httk data directory.
 
-    Nothing httk-workflow keeps per user lives here any more: remote
-    definitions and identity keys are *configuration*, and moved to
-    :func:`config_home`. The function stays because the directory is still the
-    right answer for genuine data, and because :func:`adopt_legacy_data_home` has
-    to know where to look for what was left there.
+    Remote definitions and identity keys are *configuration* and live under
+    :func:`config_home`; the lazily created default workspace is genuine
+    per-user data and lives here. :func:`adopt_legacy_data_home` also uses this
+    location to find data left by older releases.
     """
 
     override = os.environ.get("HTTK_DATA_HOME")
