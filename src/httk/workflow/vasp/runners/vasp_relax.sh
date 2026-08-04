@@ -71,16 +71,16 @@ step_prepare() {
 # the reviewed ladder has nothing left to try.
 step_run() {
     local command timeout status classification energy applied maximum decision policy problem message amplitude
-    command=${HTTK_VASP_COMMAND:-$(httk_workflow_input vasp_command '')}
+    command=$(httk_workflow_setting vasp.command "$(httk_workflow_input vasp_command '')")
     if [ -z "$command" ]; then
         httk_workflow_fail vasp.command_missing \
-            "no VASP command is configured: set HTTK_VASP_COMMAND on the machine that runs this job, or give the job a vasp_command input"
+            "no VASP command is configured: set it with httk workflow workspace settings set vasp.command '...', or set HTTK_VASP_COMMAND on the machine that runs this job, or give the job a vasp_command input"
         return
     fi
     timeout=$(httk_workflow_input timeout 86400)
     httk_vasp_preclean --directory . --keep WAVECAR --keep CHGCAR --keep CHG >/dev/null
     status=0
-    # Deliberately unquoted: HTTK_VASP_COMMAND is one argv string, not one path.
+    # Deliberately unquoted: the resolved VASP command is one argv string, not one path.
     # shellcheck disable=SC2086
     httk_vasp_run --directory . --timeout "$timeout" --report vasp-run-report.json -- $command || status=$?
     case $status in
