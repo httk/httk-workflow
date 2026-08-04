@@ -61,7 +61,7 @@ language, and compares everything both left behind.
 | `Attempt.job` | — | The immutable job definition as a typed value. | `job.json` (read-only) |
 | `Attempt.inputs` | `httk_workflow_input` | The application-defined `inputs` object of the job. | `job.json` → `inputs` |
 | `Attempt.input` | `httk_workflow_input` | One input, with an optional default; without one, a missing input raises `KeyError` in Python and exits 1 in Bash. | `job.json` → `inputs` |
-| `Attempt.setting` | `httk_workflow_setting` | One application setting, resolved most-specific first: the job's `inputs[name]`, then the environment variable `HTTK_` + the dotted name upper-cased with dots as underscores (`vasp.command` → `HTTK_VASP_COMMAND`), then the workspace settings, then the default; without one, an absent setting returns `None` in Python and exits 1 in Bash. | `job.json` → `inputs`, environment, `context.json` → `settings` |
+| `Attempt.setting` | `httk_workflow_setting` | One application setting, resolved most-specific first: the job's `inputs[name]`, then the environment variable `HTTK_` + the dotted name upper-cased with dots as underscores (`vasp.command` → `HTTK_VASP_COMMAND`), then the workspace settings, then the default; without one, an absent setting returns `None` in Python and exits 1 in Bash. | `job.json` → `inputs`, manager-built attempt environment, `context.json` → `settings` |
 | `Attempt.state` | — | The job's private JSON state mapping, surviving every advance, every retry, and every isolated workdir. | `.httk-job/state.json` |
 | `JobState.read` | `httk_workflow_state_get` | Read the whole state document, or in Bash one key; an unset key exits 1. | `.httk-job/state.json` |
 | `JobState.set` | `httk_workflow_state_set` | Store one JSON value in one atomic replace. | `.httk-job/state.json` |
@@ -98,6 +98,14 @@ language, and compares everything both left behind.
 | `runtime_utils.render_template` | `httk_template_render` | Render one template file with one JSON value document. | the named output file |
 | `runtime_utils.compress_files` | `httk_compress` | Compress named files with `bz2`, `gz`, or `xz`, optionally removing the sources. | the compressed files |
 | `runtime_utils.decompress_files` | `httk_decompress` | Decompress named files, optionally removing the sources. | the decompressed files |
+
+Every scalar workspace setting is exported into each attempt's environment as
+**`HTTK_<DOTTED_NAME_UPPERCASED>`**, with dots replaced by underscores (for
+example, `vasp.command` becomes **`HTTK_VASP_COMMAND`**). The export uses
+setdefault semantics: a variable already present in the manager's environment
+wins. Boolean and non-scalar settings are not exported. The
+**`HTTK_WORKFLOW_*`** namespace is reserved and no setting may derive a
+variable in it.
 
 ## Exit-code discipline
 

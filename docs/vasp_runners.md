@@ -144,7 +144,7 @@ side as `relax/` and `static/`.
 
 | Code | Meaning |
 | --- | --- |
-| `vasp.command_missing` | no `vasp.command` resolved — no `HTTK_VASP_COMMAND`, no workspace `vasp.command` setting, and no `vasp_command` input |
+| `vasp.command_missing` | no `vasp.command` resolved — set it with `httk workflow workspace settings set vasp.command '...'`, or use `HTTK_VASP_COMMAND` as a deployment override; no `vasp_command` input was provided |
 | `vasp.input_missing` | the structure named by `poscar` is not in the payload |
 | `vasp.no_relaxed_structure` | the chained runner's relaxation left no CONTCAR |
 | `vasp.failed` | VASP did not complete and no remedy remained |

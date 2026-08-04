@@ -337,7 +337,18 @@ def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLICo
             arguments.workspace = None
             arguments.key = candidate
             ambiguous_key = True
-    workspace = Workspace(_local_root(arguments, context, action="read its settings"), mutable=False)
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        return _remote_workspace_read(
+            binding,
+            context,
+            ("workspace", "settings", "show"),
+            arguments,
+            flags=("--json",),
+            tail=() if arguments.key is None else (arguments.key,),
+        )
+    workspace = Workspace(root, mutable=False)
     settings = workspace.settings
     if arguments.key is not None:
         if arguments.key not in settings:
@@ -359,8 +370,20 @@ def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLICo
 def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Store one application setting on a workspace."""
 
-    workspace = Workspace(_local_root(arguments, context, action="set its settings"))
-    settings = workspace.set_setting(arguments.key, _json_value(arguments.value, f"setting {arguments.key}"))
+    value = _json_value(arguments.value, f"setting {arguments.key}")
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        return _remote_workspace_read(
+            binding,
+            context,
+            ("workspace", "settings", "set"),
+            arguments,
+            flags=("--durable", "--no-durable"),
+            tail=(arguments.key, arguments.value),
+        )
+    workspace = Workspace(root, durable=_durable(arguments))
+    settings = workspace.set_setting(arguments.key, value)
     print(json.dumps(settings[arguments.key], sort_keys=True))
     return 0
 
@@ -368,7 +391,18 @@ def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLICon
 def handle_workspace_settings_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Remove one application setting from a workspace."""
 
-    workspace = Workspace(_local_root(arguments, context, action="unset its settings"))
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        return _remote_workspace_read(
+            binding,
+            context,
+            ("workspace", "settings", "unset"),
+            arguments,
+            flags=("--durable", "--no-durable"),
+            tail=(arguments.key,),
+        )
+    workspace = Workspace(root, durable=_durable(arguments))
     workspace.unset_setting(arguments.key)
     return 0
 
@@ -485,6 +519,7 @@ def build_workspace_parser(
         help="print only this setting (default: all of them)",
     )
     settings_show.add_argument("--json", action="store_true", help="print the settings as one JSON object")
+    _add_by_path_argument(settings_show)
     settings_set = _leaf(
         settings_actions,
         "set",
@@ -495,6 +530,8 @@ def build_workspace_parser(
     add_workspace_argument(settings_set, help_text="the workspace to change")
     settings_set.add_argument("key", metavar="KEY", help="the dotted setting name, e.g. vasp.command")
     settings_set.add_argument("value", metavar="VALUE", help="the JSON value, or a bare string, to store")
+    _add_by_path_argument(settings_set)
+    add_durability_arguments(settings_set)
     settings_unset = _leaf(
         settings_actions,
         "unset",
@@ -504,6 +541,8 @@ def build_workspace_parser(
     )
     add_workspace_argument(settings_unset, help_text="the workspace to change")
     settings_unset.add_argument("key", metavar="KEY", help="the dotted setting name to remove")
+    _add_by_path_argument(settings_unset)
+    add_durability_arguments(settings_unset)
 
     fsck = _leaf(
         group,

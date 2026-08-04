@@ -189,8 +189,15 @@ def dispatch(parser: argparse.ArgumentParser, argv: Sequence[str], context: CLIC
     tree answers a bare invocation the way an operator exploring it expects.
     """
 
+    raw_argv = list(argv)
+    # ``argparse`` does not intermingle an optional workspace positional with
+    # the protocol's ``<path> --by-path KEY [VALUE]`` tail. Keep the frozen
+    # remote vector and move only this hidden switch for the local parse.
+    if raw_argv[:2] == ["workspace", "settings"] and "--by-path" in raw_argv:
+        raw_argv.remove("--by-path")
+        raw_argv.append("--by-path")
     try:
-        arguments = parser.parse_args(list(argv))
+        arguments = parser.parse_args(raw_argv)
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else 1
     handler: Handler | None = getattr(arguments, "handler", None)

@@ -111,16 +111,18 @@ def _campaign(
     data_mode: str = "transactional",
     initial_step: str = "prepare",
     command: str | None = None,
+    workspace_settings: dict[str, object] | None = None,
+    set_command_environment: bool = True,
 ) -> tuple[Workspace, str]:
     """Submit and run one job of one packaged runner, and return where it landed."""
 
     root.mkdir(parents=True)
     executable = _fake_vasp(root, fail_once=fail_once)
-    if command is None:
-        monkeypatch.setenv("HTTK_VASP_COMMAND", str(executable))
-    else:
-        monkeypatch.setenv("HTTK_VASP_COMMAND", command)
+    if set_command_environment:
+        monkeypatch.setenv("HTTK_VASP_COMMAND", str(executable) if command is None else command)
     workspace = Workspace.initialize(root / "workspace")
+    for key, value in (workspace_settings or {}).items():
+        workspace.set_setting(key, value)
     reference = _reference(workspace, runner, source)
     payload = root / "payload"
     (payload / "files").mkdir(parents=True)
@@ -328,6 +330,21 @@ def test_a_job_without_transactional_data_keeps_its_result_in_the_workdir(
     assert not (payload / "data").exists()
     assert set(_COLLECTED) <= set(_files(payload / "run"))
     assert _job_state(payload)["classification"] == "completed"
+
+
+def test_the_bash_vasp_runner_uses_the_workspace_command_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HTTK_VASP_COMMAND", raising=False)
+    workspace, job_id = _campaign(
+        tmp_path / "settings-command",
+        monkeypatch,
+        "vasp_relax.sh",
+        workspace_settings={"vasp.command": str(tmp_path / "settings-command" / "fake-vasp")},
+        set_command_environment=False,
+    )
+
+    assert _payload_of(workspace, job_id)[0] == "succeeded"
 
 
 def test_a_job_with_no_configured_vasp_command_fails_by_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -11,6 +11,7 @@ all.
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -22,12 +23,63 @@ import pytest  # pyright: ignore[reportMissingImports]
 from conftest import fake_remote
 from httk.workflow import Workspace
 from httk.workflow.adapters import SEED_SETTING_MAP, seed_application_settings
+from httk.workflow.manager import TaskManager
 from httk.workflow.projects import initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.registry import create_workspace
 from httk.workflow.sdk import Attempt
 
 _BASH_API = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "shell" / "httk-workflow.sh"
+
+_EXPORT_RUNNER = """#!/usr/bin/env python3
+import json
+import os
+from httk.workflow import Runner
+
+run = Runner("tests.settings_export")
+
+
+@run.step
+def only(a):
+    (a.workdir / "environment.json").write_text(
+        json.dumps({{name: os.environ.get(name) for name in {names!r}}}),
+        encoding="utf-8",
+    )
+    a.succeed()
+
+
+raise SystemExit(run.main())
+"""
+
+
+def _manager_environment(tmp_path: Path, settings: dict[str, object], names: tuple[str, ...]) -> dict[str, object]:
+    """Run one tiny job and return the selected variables from its environment."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    for key, value in settings.items():
+        workspace.set_setting(key, value)
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    runner = payload / "runner.py"
+    runner.write_text(_EXPORT_RUNNER.format(names=names), encoding="utf-8")
+    runner.chmod(0o755)
+    job = prepare_job_payload(
+        payload,
+        JobSpec(
+            name="Settings export",
+            workflow="tests.settings_export",
+            runner_path="runner.py",
+            initial_step="only",
+            data_mode="none",
+        ),
+    )
+    workspace.submit(payload, "project/settings")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=120.0)
+    marker = workspace.find_marker_by_id(job.id)
+    assert marker is not None and marker.kind == "succeeded"
+    result = workspace.payload_path(marker.placement, marker.job_key) / "run" / "environment.json"
+    return json.loads(result.read_text(encoding="utf-8"))
 
 
 def _attempt_environment(tmp_path: Path, *, inputs: dict[str, object], settings: dict[str, object]) -> dict[str, str]:
@@ -198,6 +250,53 @@ def test_a_remote_definition_seeds_the_new_workspaces_settings(tmp_path: Path) -
         "vasp.command": "srun vasp_std",
         "vasp.pseudo_library": "/data/potpaw",
     }
+
+
+def test_the_manager_exports_scalar_settings_and_preserves_real_environment_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTK_EXAMPLE_SCALAR", "machine value")
+    names = (
+        "HTTK_EXAMPLE_SCALAR",
+        "HTTK_EXAMPLE_INTEGER",
+        "HTTK_EXAMPLE_FLOAT",
+        "HTTK_EXAMPLE_BOOL",
+        "HTTK_EXAMPLE_NONE",
+        "HTTK_EXAMPLE_STRUCTURED",
+        "HTTK_WORKFLOW_SECRET",
+    )
+    settings = {
+        "example.scalar": "workspace value",
+        "example.integer": 7,
+        "example.float": 1.5,
+        "example.bool": True,
+        "example.none": None,
+        "example.structured": {"value": 1},
+        "workflow.secret": "reserved",
+    }
+    # Workspace writes intentionally validate scalar settings. This override
+    # also checks the manager's defensive filtering for values from an older or
+    # externally-written format document.
+    monkeypatch.setattr(Workspace, "settings", property(lambda _workspace: settings))
+    observed = _manager_environment(tmp_path, {}, names)
+    assert observed == {
+        "HTTK_EXAMPLE_SCALAR": "machine value",
+        "HTTK_EXAMPLE_INTEGER": "7",
+        "HTTK_EXAMPLE_FLOAT": "1.5",
+        "HTTK_EXAMPLE_BOOL": None,
+        "HTTK_EXAMPLE_NONE": None,
+        "HTTK_EXAMPLE_STRUCTURED": None,
+        "HTTK_WORKFLOW_SECRET": None,
+    }
+
+
+def test_reserved_setting_exports_are_warned_about(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="httk.workflow"):
+        _manager_environment(tmp_path, {"workflow.secret": "reserved"}, ("HTTK_WORKFLOW_SECRET",))
+    assert any(
+        record.getMessage() == "setting workflow.secret shadows the reserved HTTK_WORKFLOW_ namespace; not exported"
+        for record in caplog.records
+    )
 
 
 def test_the_vasp_runner_reads_the_workspace_setting_without_the_environment(tmp_path: Path, monkeypatch) -> None:

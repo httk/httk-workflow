@@ -944,6 +944,18 @@ class TaskManager:
         )
         if job.data_mode == "transactional":
             environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
+        for key in sorted(self.workspace.settings):
+            value = self.workspace.settings[key]
+            if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+                continue
+            variable = "HTTK_" + key.upper().replace(".", "_")
+            if variable.startswith("HTTK_WORKFLOW_"):
+                _LOGGER.warning(
+                    "setting %s shadows the reserved HTTK_WORKFLOW_ namespace; not exported",
+                    key,
+                )
+                continue
+            environment.setdefault(variable, str(value))
         stdout = (control / "stdout.log").open("ab")
         stderr = (control / "stderr.log").open("ab")
         runner_command = list(

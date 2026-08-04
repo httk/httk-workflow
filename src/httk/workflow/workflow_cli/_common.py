@@ -142,6 +142,7 @@ REMOTE_RECEIVE_COMMAND = ("httk", "workflow", "transfer", "receive")
 REMOTE_OFFER_COMMAND = ("httk", "workflow", "transfer", "offer")
 REMOTE_RETIRE_COMMAND = ("httk", "workflow", "transfer", "retire")
 REMOTE_STATUS_COMMAND = ("httk", "workflow", "workspace", "status")
+REMOTE_WORKSPACE_SETTINGS_COMMAND = ("httk", "workflow", "workspace", "settings")
 REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
 
 #: The hidden protocol subcommands the ``transfer`` verb dispatches by name: the
@@ -470,6 +471,7 @@ def _remote_workspace_read(
     arguments: argparse.Namespace,
     *,
     flags: Sequence[str] = (),
+    tail: Sequence[str] = (),
 ) -> int:
     """Dispatch one read-style workspace command to a remote binding.
 
@@ -480,7 +482,7 @@ def _remote_workspace_read(
     all reach a remote the same way.
     """
 
-    tail = [*command, binding.path, "--by-path"]
+    tail = [*command, binding.path, "--by-path", *tail]
     for flag in flags:
         if getattr(arguments, flag.lstrip("-").replace("-", "_"), False):
             tail.append(flag)

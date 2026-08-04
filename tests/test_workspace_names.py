@@ -123,3 +123,35 @@ def test_status_of_a_remote_bound_name_reaches_the_far_side(
     assert command(["workspace", "status", "station"], context) == 0
     capsys.readouterr()
     assert any("workspace status" in item for item in remote.commands())
+
+
+def test_settings_round_trip_on_a_remote_bound_name(
+    tmp_path: Path,
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="remote-settings")
+    remote_path = str(remote.root / "runs" / "settings")
+    fake_remote(project, workspace=remote_path)
+    context = _context(project)
+
+    assert (
+        command(
+            ["workspace", "init", "station", "--remote", "cluster", "--path", remote_path, "--scope", "project"],
+            context,
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert command(["workspace", "settings", "set", "station", "vasp.command", "srun -n 8 vasp_std"], context) == 0
+    assert json.loads(capsys.readouterr().out) == "srun -n 8 vasp_std"
+    assert command(["workspace", "settings", "show", "station", "vasp.command"], context) == 0
+    assert json.loads(capsys.readouterr().out) == "srun -n 8 vasp_std"
+    assert command(["workspace", "settings", "unset", "station", "vasp.command"], context) == 0
+    capsys.readouterr()
+    assert Workspace(remote_path, mutable=False).settings == {}
+    assert any("workspace settings set" in item for item in remote.commands())
+    assert any("workspace settings show" in item for item in remote.commands())
+    assert any("workspace settings unset" in item for item in remote.commands())

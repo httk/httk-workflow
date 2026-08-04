@@ -185,8 +185,8 @@ def execute(a: Attempt, *, next_step: str) -> None:
     if not argv:
         a.fail(
             "vasp.command_missing",
-            "no VASP command is configured: set HTTK_VASP_COMMAND on the machine that runs this job, "
-            "configure the workspace's vasp.command setting, or give the job a vasp_command input",
+            "no VASP command is configured: set it with `httk workflow workspace settings set vasp.command '...'`, "
+            "or set HTTK_VASP_COMMAND on the machine that runs this job, or give the job a vasp_command input",
         )
         return
     history = job_remedy_history_path(a.payload)

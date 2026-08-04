@@ -308,6 +308,7 @@ def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
     assert workflow_cli.REMOTE_OFFER_COMMAND == ("httk", "workflow", "transfer", "offer")
     assert workflow_cli.REMOTE_RETIRE_COMMAND == ("httk", "workflow", "transfer", "retire")
     assert workflow_cli.REMOTE_STATUS_COMMAND == ("httk", "workflow", "workspace", "status")
+    assert workflow_cli.REMOTE_WORKSPACE_SETTINGS_COMMAND == ("httk", "workflow", "workspace", "settings")
     assert workflow_cli.REMOTE_MANAGER_COMMAND == ("httk", "workflow", "manager", "run")
 
     # Every one of them still parses here, whichever side runs it.
@@ -317,6 +318,7 @@ def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
         workflow_cli.REMOTE_OFFER_COMMAND,
         workflow_cli.REMOTE_RETIRE_COMMAND,
         workflow_cli.REMOTE_STATUS_COMMAND,
+        workflow_cli.REMOTE_WORKSPACE_SETTINGS_COMMAND,
         workflow_cli.REMOTE_MANAGER_COMMAND,
     ):
         assert spelling[:2] == ("httk", "workflow")
