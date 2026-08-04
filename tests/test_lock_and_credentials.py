@@ -171,6 +171,21 @@ def test_secret_setting_avoids_remote_json_and_manifests(tmp_path: Path, monkeyp
     assert f"{PROJECT_DIRECTORY}/remotes/cluster/remote.json" in body
 
 
+def test_stale_project_anchor_secrets_stay_out_of_manifest(tmp_path: Path, monkeypatch) -> None:
+    project = _project(tmp_path, monkeypatch, name="stale-anchor")
+    stale = project / ".httk-project"
+    (stale / "keys").mkdir(parents=True)
+    (stale / "keys" / "project.seed").write_text("fake-seed\n", encoding="ascii")
+    credentials = stale / "remotes" / "cluster" / "credentials.json"
+    credentials.parent.mkdir(parents=True)
+    credentials.write_text('{"default":{"password":"secret"}}\n', encoding="utf-8")
+
+    body = bz2.decompress(create_manifest(project).read_bytes()).decode("utf-8")
+
+    assert '"path":".httk-project/keys/project.seed"' not in body
+    assert '"path":".httk-project/remotes/cluster/credentials.json"' not in body
+
+
 def test_secret_setting_remains_visible_to_the_adapter(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch, name="visible")
     remote, code = _configured(project, "password=hunter2", "host=login.example.test")

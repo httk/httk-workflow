@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import pytest  # pyright: ignore[reportMissingImports]
 from httk.core.cli import CLIContext
-from httk.core.crypto import ed25519_generate_seed, ed25519_public_key
+from httk.core.crypto import ed25519_generate_seed, ed25519_public_key, ed25519_sign
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
@@ -153,6 +153,24 @@ def test_fresh_project_manifest_is_valid_and_trusted(tmp_path: Path, monkeypatch
     printed = capsys.readouterr().out
     assert printed.splitlines()[0] == "valid"
     assert VALID_TRUSTED in printed
+
+
+def test_legacy_manifest_verification_handles_v1_discovery_refusal(tmp_path: Path) -> None:
+    project = tmp_path / "legacy"
+    legacy = project / "ht.project"
+    legacy.mkdir(parents=True)
+    seed = ed25519_generate_seed()
+    public = base64.b64encode(ed25519_public_key(seed))
+    signed = public + b"\n\n"
+    manifest = signed + b"\n" + base64.b64encode(ed25519_sign(seed, signed)) + b"\n"
+    path = legacy / "manifest.bz2"
+    path.write_bytes(bz2.compress(manifest))
+
+    verification = verify_manifest(project)
+
+    assert verification.valid
+    assert verification.manifest_format == "legacy"
+    assert verification.manifest == path
 
 
 def test_resigning_with_a_fresh_key_is_valid_but_not_trusted(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -707,3 +725,15 @@ def test_remote_remove_force_does_not_skip_the_transfer_refusal(tmp_path: Path, 
     assert command(["remote", "remove", "cluster", "--force"], context) == 2
     assert "unretired transfer" in capsys.readouterr().err
     assert bundle.is_dir()
+
+
+def test_legacy_manifest_verification_reraises_prerelease_refusal(tmp_path: Path) -> None:
+    from httk.core.project import PROJECT_FILE, LegacyProjectError
+
+    project = tmp_path / "prerelease"
+    anchor = project / ".httk-project"
+    anchor.mkdir(parents=True)
+    (anchor / PROJECT_FILE).write_text("{}", encoding="utf-8")
+
+    with pytest.raises(LegacyProjectError, match="rename it: mv"):
+        verify_manifest(project)

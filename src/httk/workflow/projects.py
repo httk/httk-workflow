@@ -99,6 +99,14 @@ DEFAULT_MANIFEST_EXCLUSIONS = (
     f"{PROJECT_DIRECTORY}/remotes/**/credentials*",
     f"{PROJECT_DIRECTORY}/computers/**/credentials*",
     f"{PROJECT_DIRECTORY}/manifest.jsonl.bz2",
+    # A stale pre-release anchor may remain after a copy or partial migration;
+    # never publish its credentials even though discovery no longer accepts it.
+    ".httk-project/project.json",
+    ".httk-project/keys/*.seed",
+    ".httk-project/keys/*.priv",
+    ".httk-project/remotes/**/credentials*",
+    ".httk-project/computers/**/credentials*",
+    ".httk-project/manifest.jsonl.bz2",
     ".httk-workflow",
     ".httk-workflow/**",
     ".httk-attempt.*",
