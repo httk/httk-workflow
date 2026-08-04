@@ -382,11 +382,11 @@ raise SystemExit(run.main())
 '''
 
 
-def _campaign(root: Path, *, extensions: tuple[str, ...] = ()) -> tuple[Workspace, str]:
+def _campaign(root: Path) -> tuple[Workspace, str]:
     """Run one declaring job to completion in its own workspace."""
 
     root.mkdir(parents=True)
-    workspace = Workspace.initialize(root / "workspace", extensions=list(extensions))
+    workspace = Workspace.initialize(root / "workspace")
     payload = root / "payload"
     files = payload / "files"
     files.mkdir(parents=True)
@@ -461,8 +461,8 @@ def test_an_unreadable_observed_declaration_is_a_gap_and_not_a_silence(tmp_path:
 
 
 def test_declaring_does_not_move_the_payload_digest(tmp_path: Path) -> None:
-    source, job_id = _campaign(tmp_path / "run", extensions=("detached-transfer-v1",))
-    destination = Workspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+    source, job_id = _campaign(tmp_path / "run")
+    destination = Workspace.initialize(tmp_path / "destination")
     marker = source.find_marker_by_id(job_id)
     assert marker is not None
     payload = source.payload_path(marker.placement, marker.job_key)

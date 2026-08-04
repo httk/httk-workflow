@@ -46,7 +46,7 @@ carries the same switch on the leaf that acts on it, so both spellings work.
 ## The complete tree
 
 ```text
-httk workflow workspace  init | list | forget | delete | status | settings show | settings set | settings unset | policy show | policy set | fsck | gc | upgrade | unlock
+httk workflow workspace  init | list | forget | delete | status | settings show | settings set | settings unset | policy show | policy set | fsck | gc | unlock
 httk workflow runner     publish | describe
 httk workflow job        new | submit | request | list | show | log | why | debug
 httk workflow import     pwd | cwl
@@ -88,14 +88,14 @@ Reaching a remote binding depends on the command: the read commands
 `workspace status`, `workspace fsck`, and `workspace gc` run over the remote's
 adapter and read it exactly as they read a local one, while every command that
 only makes sense where the files are — `job …`, `harvest`, `workspace settings`,
-`upgrade`, `unlock` — refuses a remote binding with a message naming the remote
+`unlock` — refuses a remote binding with a message naming the remote
 and pointing at `transfer` and `workspace status`.
 
 ### `workspace` — the workspace itself, not its jobs
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workspace init NAME` | create a workspace **and** register the name | `--remote` (required), `--path` (required), `--scope`, `--setting`, `--extension`, `--no-durable` |
+| `workspace init NAME` | create a workspace **and** register the name | `--remote` (required), `--path` (required), `--scope`, `--setting`, `--no-durable` |
 | `workspace list` | list the registered workspaces and where each resolves | `--json` |
 | `workspace forget NAME` | deregister a name, leaving the workspace on disk | |
 | `workspace delete NAME` | destroy the workspace and deregister it | `--force` (required) |
@@ -107,15 +107,13 @@ and pointing at `transfer` and `workspace status`.
 | `workspace policy set NAME KEY VALUE` | store one policy member | `--json` |
 | `workspace fsck NAME` | check every marker against its journal frame (remote: over the adapter) | `--repair`, `--quarantine-unrepairable`, `--json` |
 | `workspace gc NAME` | collect what the retention policy allows (remote: over the adapter) | `--dry-run`, `--json` |
-| `workspace upgrade NAME` | enable an implemented extension | `--extension` (required) |
 | `workspace unlock NAME` | release a maintenance lock | `--force` |
 
 `workspace init` both creates the workspace and registers the name for it, so a
 first workspace on this machine is one command:
 
 ```console
-httk workflow workspace init my-workspace --remote local --path runs/my-workspace \
-    --extension transactional-data-v1
+httk workflow workspace init my-workspace --remote local --path runs/my-workspace
 ```
 
 A workspace on a cluster names the remote it lives on instead of `local`; the
@@ -442,8 +440,7 @@ means by them; one with no `format_version` at all predates versioning and is
 read as version 1.
 
 A project has `httk_project/project.json`, a standard 32-byte Ed25519 seed
-stored with mode `0600`, and a workflow workspace with
-`detached-transfer-v1` enabled. Commands discover the nearest project in the
+stored with mode `0600`, and a core-v2 workflow workspace. Commands discover the nearest project in the
 working directory's parent chain.
 
 ### Describing and checking a project
@@ -783,12 +780,6 @@ Configuring the queue with `bootstrap=pip` opts into one attempt at
 
 ## Detached transfers
 
-Workspaces can enable the implemented migration explicitly:
-
-```console
-httk workflow workspace upgrade WORKSPACE --extension detached-transfer-v1
-```
-
 A transfer fences an explicit quiescent marker, seals it in the payload,
 validates the payload digest at import, publishes the preserved UUID and prior
 state only at the destination, and retires the source only after an
@@ -812,8 +803,7 @@ is sent to the remote, run there, fetched back once it has stopped, and harveste
 locally:
 
 ```console
-httk workflow workspace init cluster-runs --remote cluster --path /scratch/me/runs \
-    --extension detached-transfer-v1
+httk workflow workspace init cluster-runs --remote cluster --path /scratch/me/runs
 httk workflow transfer local-runs cluster-runs --job JOB_ID ...     # local -> remote
 httk workflow manager run cluster-runs --count 2 --workers 4
 httk workflow transfer cluster-runs local-runs                      # remote -> local

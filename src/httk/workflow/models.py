@@ -21,18 +21,7 @@ from ._util import (
 from .errors import FormatError
 
 CORE_PROFILE = "core-v2"
-# core-v1 workspaces remain readable so an operator can inspect and export one,
-# but their on-disk shapes predate mandatory spawn labels, enriched join
-# observations, and shared runners, so nothing may mutate them in place.
-READABLE_CORE_PROFILES = frozenset({"core-v1", CORE_PROFILE})
-SUPPORTED_EXTENSIONS = frozenset({"transactional-data-v1", "detached-transfer-v1"})
-# ``priority-bands-v1`` was specified and implemented, then withdrawn: it sharded
-# ready/ into ten pNxx directories that every scan had to walk anyway, it was an
-# irreversible choice made at init, and the exact priority was always in the
-# marker basename regardless. A workspace that declares it cannot be interpreted
-# by this implementation — its ready markers carry one extra path component that
-# would be read as a placement — so it is refused rather than silently misread.
-WITHDRAWN_EXTENSIONS = frozenset({"priority-bands-v1"})
+SUPPORTED_EXTENSIONS = frozenset()
 RUNNER_SOURCES = frozenset({"payload", "workspace", "installed"})
 PACKAGE_RUNNER_PREFIX = "pkg:"
 STATE_KINDS = (

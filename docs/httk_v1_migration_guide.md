@@ -142,9 +142,8 @@ httk workflow project import-v1 . --source ./ht.project
 
 This imports safe metadata and public identities. It does not import private
 keys or the *httk* v1 queue. Imported project metadata records
-`legacy_queue_imported: false`. The project workspace is initialized for detached
-transfer, not transactional data. Use persistent `data.mode: "none"` jobs
-there, or initialize a separate transactional workspace before submission.
+`legacy_queue_imported: false`. The project workspace is a core-v2 workspace,
+with detached transfer and transactional data available to native jobs.
 
 Recognized *httk* v1 computer definitions can be mapped explicitly into
 *httk₂* remotes:
@@ -172,10 +171,8 @@ httk workflow v1 run workflow-workspace --taskset any --workers 2
 httk workflow manager run workflow-workspace --pool vasp-native --workers 2
 ```
 
-If the future native jobs will use transactional data, create this shared
-workspace with `--extension transactional-data-v1` before submitting the
-compatibility baseline. That extension cannot currently be added to an
-existing workspace in place.
+The shared core-v2 workspace already provides transactional data and detached
+transfer for native jobs.
 
 Give the first native version a new job UUID and preferably a distinct tag and
 placement. Do not edit the immutable `job.json` of an already submitted job to
@@ -279,18 +276,14 @@ The outcome functions publish exactly one decision and then *return*:
 `httk_workflow_main` owns the process exit status. Do not additionally return a
 legacy decision code or write `ht.nextstep`.
 
-The `collect` example uses transactional data. Its workspace must have been
-created with that extension:
+The `collect` example uses transactional data. Its workspace is core-v2:
 
 ```console
-httk workflow workspace init native-workspace \
-  --extension transactional-data-v1
+httk workflow workspace init native-workspace
 ```
 
-`transactional-data-v1` cannot currently be added to an existing workspace by an
-in-place upgrade, so decide this when creating the native workspace. If the job
-uses `data.mode: "none"`, omit the transaction and keep restartable working
-files in its persistent workdir instead.
+If the job uses `data.mode: "none"`, omit the transaction and keep restartable
+working files in its persistent workdir instead.
 
 ### Prepare the native payload
 
@@ -675,8 +668,8 @@ There is no step-dispatch chain and no `unknown_step` branch to write: `Runner.m
 dispatches the step the manager asked for, and reports an unimplemented step, a step
 that published nothing, and a step that raised as the corresponding outcome.
 
-As in the Bash example, the transaction requires a transactional-data job and
-a workspace initialized with `transactional-data-v1`.
+As in the Bash example, the transaction requires a transactional-data job in a
+core-v2 workspace.
 
 ## 12. Validate before switching production work
 
@@ -724,7 +717,7 @@ read-only according to the project's provenance and retention policy.
 - [ ] Project/configuration/remote imports were reviewed separately.
 - [ ] No live *httk* v1 queue is being treated as an *httk₂* workspace.
 - [ ] Persistent scratch and committed result files are distinguished.
-- [ ] The workspace's extensions match the native job's data model.
+- [ ] The core-v2 workspace matches the native job's data model.
 - [ ] Every `HT_TASK_*` and `VASP_*` dependency has an explicit replacement.
 - [ ] Automatic remedies became explicit plan-and-apply decisions.
 - [ ] Child jobs use stable identities and an explicit join condition.

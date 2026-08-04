@@ -68,10 +68,7 @@ def _campaign(tmp_path: Path, remote: Remote) -> Campaign:
     local_root = tmp_path / "local"
     initialize_project(local_root, name="roundtrip")
     local = Workspace(local_root)
-    station = Workspace.initialize(
-        remote.root / "runs" / "workspace",
-        extensions=["detached-transfer-v1"],
-    )
+    station = Workspace.initialize(remote.root / "runs" / "workspace")
     fake_remote(local_root, workspace=str(station.root), workers="2")
 
     source = tmp_path / "runners" / "roundtrip.py"

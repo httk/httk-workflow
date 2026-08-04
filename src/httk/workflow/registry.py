@@ -28,7 +28,7 @@ path — so registration is a purely client-side concept a remote never sees.
 import json
 import os
 import shutil
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -303,7 +303,6 @@ def create_workspace(
     path: str | os.PathLike[str],
     scope: str = "global",
     project: str | os.PathLike[str] | None = None,
-    extensions: Iterable[str] = (),
     durable: bool = True,
     policy: Mapping[str, object] | None = None,
     settings: Mapping[str, object] | None = None,
@@ -324,7 +323,7 @@ def create_workspace(
     _guard_unregistered(name, scope=scope, project=project)
     explicit = dict(settings or {})
     if remote == LOCAL_REMOTE:
-        workspace = Workspace.initialize(path, extensions=extensions, durable=durable, policy=policy)
+        workspace = Workspace.initialize(path, durable=durable, policy=policy)
         for key, value in explicit.items():
             workspace.set_setting(key, value)
     else:
@@ -332,8 +331,6 @@ def create_workspace(
         seeds = seed_application_settings(target.bundle, target.queue)
         merged = {**seeds, **explicit}
         argv = [*REMOTE_WORKSPACE_INIT_COMMAND, str(path), "--by-path"]
-        for extension in extensions:
-            argv += ["--extension", extension]
         for key, value in merged.items():
             argv += ["--setting", f"{key}={json.dumps(value)}"]
         result = run_adapter(

@@ -316,7 +316,7 @@ def test_the_packaged_runners_moved_with_the_science_they_implement() -> None:
 
 def test_the_scaffold_template_names_are_unchanged(tmp_path: Path) -> None:
     assert registered_templates() == ("vasp-relax", "vasp-relax-bash", "vasp-static", "vasp-relax-static")
-    workspace = Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize(tmp_path / "workspace")
     job = new_job(workspace, "vasp-relax", publish="installed", tag="silicon")
     assert job.runner["path"] == "pkg:httk.workflow.vasp.runners/vasp_relax.py"
     assert job.workflow == "httk.vasp.relax"

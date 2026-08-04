@@ -406,8 +406,8 @@ def test_forged_operator_request_is_quarantined(tmp_path: Path, monkeypatch) -> 
 def test_transfer_acknowledgement_is_signed_and_a_forged_one_is_refused(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
     ensure_identity_key()
-    source = Workspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
-    destination = Workspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+    source = Workspace.initialize(tmp_path / "source")
+    destination = Workspace.initialize(tmp_path / "destination")
     payload, job_id = _payload(tmp_path)
     source.submit(payload, "jobs")
     bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)
@@ -492,7 +492,7 @@ def test_describe_project_reports_keys_workspace_and_manifest(tmp_path: Path, mo
     assert description["keys"]["public_key"]["fingerprint"].startswith("sha256:")
     assert description["keys"]["seed_present"] is True
     assert description["workspace"]["present"] is True
-    assert "detached-transfer-v1" in description["workspace"]["extensions"]
+    assert description["workspace"]["extensions"] == []
     assert description["workspace"]["counts"] == {} and description["workspace"]["jobs"] == 0
     assert description["manifest"]["verdict"] == VALID_TRUSTED
     assert description["remotes"] == ["cluster"]
@@ -527,7 +527,7 @@ def test_describe_remote_never_reports_a_credential_value(tmp_path: Path, monkey
 
 def test_remove_remote_refuses_while_a_transfer_still_needs_it(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch, name="removal")
-    destination = Workspace.initialize(tmp_path / "remote", extensions=["detached-transfer-v1"])
+    destination = Workspace.initialize(tmp_path / "remote")
     bundle = add_remote("cluster", template="local", project=project)
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = str(destination.root)
@@ -711,7 +711,7 @@ def test_remote_remove_force_does_not_skip_the_transfer_refusal(tmp_path: Path, 
     """``--force`` answers the prompt; it does not overrule the refusal."""
 
     project = _project(tmp_path, monkeypatch, name="forced-removal")
-    destination = Workspace.initialize(tmp_path / "remote", extensions=["detached-transfer-v1"])
+    destination = Workspace.initialize(tmp_path / "remote")
     bundle = add_remote("cluster", template="local", project=project)
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = str(destination.root)

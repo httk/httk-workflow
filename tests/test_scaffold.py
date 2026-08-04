@@ -17,7 +17,6 @@ from httk.core.cli import CLIContext
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._util import sha256_file
-from httk.workflow.errors import UnsupportedExtensionError
 from httk.workflow.models import JobDefinition, validate_label
 from httk.workflow.runners import RUNNERS, runner_path
 from httk.workflow.scaffold import (
@@ -80,7 +79,7 @@ def structure(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def workspace(tmp_path: Path) -> Iterator[Workspace]:
-    yield Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
+    yield Workspace.initialize(tmp_path / "workspace")
 
 
 def test_every_packaged_runner_has_a_template_that_says_what_it_implements() -> None:
@@ -200,13 +199,12 @@ def test_an_undescribable_template_is_refused_by_name(tmp_path: Path, workspace:
         new_job(workspace, mystery)
 
 
-def test_a_transactional_template_needs_the_extension(tmp_path: Path, structure: Path) -> None:
+def test_a_transactional_template_works_in_a_core_workspace(tmp_path: Path, structure: Path) -> None:
     plain = Workspace.initialize(tmp_path / "plain")
-    with pytest.raises(UnsupportedExtensionError, match="transactional-data-v1"):
-        new_job(plain, "vasp-relax", files={"POSCAR": structure})
+    job = new_job(plain, "vasp-relax", files={"POSCAR": structure})
+    assert JobDefinition.from_path(job.payload / "job.json").data_mode == "transactional"
 
-    # The same template scaffolds without the extension when the results are left
-    # in the workdir instead of being published.
+    # The same template can leave results in the workdir when requested.
     job = new_job(plain, "vasp-relax", files={"POSCAR": structure}, data_mode="none")
     assert JobDefinition.from_path(job.payload / "job.json").data_mode == "none"
 
@@ -305,8 +303,6 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
                 "local",
                 "--path",
                 str(root),
-                "--extension",
-                "transactional-data-v1",
             ],
             _context(tmp_path),
         )
@@ -373,8 +369,7 @@ def test_the_command_reports_what_it_cannot_do(
     assert command(["workspace", "init", name, "--remote", "local", "--path", str(root)], _context(tmp_path)) == 0
     capsys.readouterr()
 
-    # A malformed assignment, an unknown template, an empty structure directory,
-    # and a template needing an extension this workspace does not have.
+    # A malformed assignment, an unknown template, and an empty structure directory.
     assert command(["job", "new", name, "--template", "vasp-relax", "--input", "bare"], _context(tmp_path)) == 2
     assert "NAME=VALUE" in capsys.readouterr().err
     assert command(["job", "new", name, "--template", "nope"], _context(tmp_path)) == 2
@@ -383,8 +378,6 @@ def test_the_command_reports_what_it_cannot_do(
     empty.mkdir()
     assert command(["job", "new", name, "--template", "vasp-relax", "--from", str(empty)], _context(tmp_path)) == 2
     assert "POSCAR*" in capsys.readouterr().err
-    assert command(["job", "new", name, "--template", "vasp-relax", "--from", str(structure)], _context(tmp_path)) == 2
-    assert "transactional-data-v1" in capsys.readouterr().err
 
 
 def _context(cwd: Path) -> CLIContext:

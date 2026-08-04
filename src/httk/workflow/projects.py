@@ -11,7 +11,7 @@ the pieces that are workflow policy rather than anchor:
   signed manifest never records, which is a property of the manifest format and
   therefore stays here beside :mod:`httk.workflow.manifests`.
 * :func:`initialize_project` and :func:`import_v1_project` — the anchor plus the
-  detached-transfer *workspace* a workflow project also needs. Creating a
+  workflow *workspace* a workflow project also needs. Creating a
   workspace at ``init`` time is revisited in Phase 10; for now the behavior is
   exactly what it was before the anchor moved.
 """
@@ -131,7 +131,7 @@ def initialize_project(
     """Initialize the project anchor and its detached-transfer workspace.
 
     The anchor is created by :func:`httk.core.project.initialize_project`; a workflow
-    project additionally gets a ``detached-transfer-v1`` workspace. Creating the
+    project additionally gets a workflow workspace. Creating the
     workspace at init time is the behavior Phase 10 revisits — the anchor and the
     workspace need not be born together — but it is preserved unchanged here.
     """
@@ -166,10 +166,10 @@ def import_v1_project(
 
 
 def _add_workspace(project: Path, metadata: dict[str, object]) -> None:
-    """Give one freshly created project its detached-transfer workspace."""
+    """Give one freshly created project its workflow workspace."""
 
     try:
-        Workspace.initialize(project, extensions=("detached-transfer-v1",))
+        Workspace.initialize(project)
     except Exception:
         # Leave a recognizable project rather than guessing whether it is safe
         # to remove a directory that may already contain user files.

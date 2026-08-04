@@ -33,7 +33,6 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "policy",
         "fsck",
         "gc",
-        "upgrade",
         "unlock",
     ),
     "runner": ("publish", "describe"),
@@ -172,10 +171,7 @@ def test_a_missing_required_argument_names_the_leaf(tmp_path: Path, capsys) -> N
 
 
 ALIASED_TASKMANAGER = (
-    (
-        ["init", "WS", "--extension", "detached-transfer-v1"],
-        ["workspace", "init", "WS", "--extension", "detached-transfer-v1"],
-    ),
+    (["init", "WS"], ["workspace", "init", "WS"]),
     (
         ["submit", "WS", "SRC", "--placement", "p/0", "--move"],
         ["job", "submit", "WS", "SRC", "--placement", "p/0", "--move"],
@@ -227,12 +223,7 @@ def test_the_taskmanager_alias_really_does_the_work_it_names(tmp_path: Path, cap
     """Not only the same parse: the same effect on the filesystem."""
 
     root = tmp_path / "workspace"
-    assert (
-        native_cli.main(
-            ["init", "aliased", "--remote", "local", "--path", str(root), "--extension", "detached-transfer-v1"]
-        )
-        == 0
-    )
+    assert native_cli.main(["init", "aliased", "--remote", "local", "--path", str(root)]) == 0
     assert "aliased" in capsys.readouterr().out
     assert (root / ".httk-workflow" / "format.json").is_file()
 

@@ -1,4 +1,4 @@
-"""Marker-lookup scale, the withdrawn priority-bands extension, and the
+"""Marker-lookup scale, unknown extension handling, and the
 cross-wave handoffs: a diagnosable ``cancelling`` state, fsck's live-kind set,
 collection of retired requests, background collection inside a manager, and the
 guard against reviving a job a decided join already consumed.
@@ -347,23 +347,23 @@ def test_a_placement_hint_is_resolved_before_the_index_or_a_scan(
 
 
 # ---------------------------------------------------------------------------
-# priority-bands-v1 is withdrawn
+# Unknown extensions are refused
 # ---------------------------------------------------------------------------
 
 
-def test_priority_bands_cannot_be_enabled_and_such_a_workspace_is_refused(tmp_path: Path) -> None:
+def test_unknown_extensions_cannot_be_enabled_or_attached(tmp_path: Path) -> None:
     with pytest.raises(UnsupportedExtensionError) as enabling:
-        Workspace.initialize(tmp_path / "banded", extensions=["priority-bands-v1"])
-    assert "priority-bands-v1" in str(enabling.value)
+        Workspace.initialize(tmp_path / "unknown", extensions=["unknown-feature"])
+    assert "unknown-feature" in str(enabling.value)
 
     workspace = Workspace.initialize(tmp_path / "workspace")
     stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
-    stored["extensions"] = ["priority-bands-v1"]
+    stored["extensions"] = ["unknown-feature"]
     (workspace.control / "format.json").write_text(json.dumps(stored), encoding="utf-8")
     for mutable in (True, False):
         with pytest.raises(UnsupportedExtensionError) as attaching:
             Workspace(workspace.root, mutable=mutable)
-        assert "re-initialized" in str(attaching.value)
+        assert "unknown-feature" in str(attaching.value)
 
 
 def test_registration_accepts_a_submitted_marker_an_operator_already_repriced(tmp_path: Path) -> None:

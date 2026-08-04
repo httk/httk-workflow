@@ -11,7 +11,7 @@ from httk.core.cli import CLIContext
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._util import tree_digest
-from httk.workflow.errors import UnsupportedExtensionError, WorkspaceCorruptionError
+from httk.workflow.errors import WorkspaceCorruptionError
 from httk.workflow.workflow_cli import command as workflow_command
 
 _SUCCEED_RUNNER = """#!/usr/bin/env python3
@@ -265,8 +265,8 @@ def test_runner_publish_command_prints_the_job_reference(tmp_path: Path, capsys)
 
 
 def test_detached_transfer_carries_the_workspace_runner_it_references(tmp_path: Path) -> None:
-    source = Workspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
-    destination = Workspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+    source = Workspace.initialize(tmp_path / "source")
+    destination = Workspace.initialize(tmp_path / "destination")
     reference = source.publish_runner(_runner_file(tmp_path / "runners"))
     payload, job_id = _payload(tmp_path / "payloads", dict(reference), tag="detached")
     source.submit(payload, "project/detached")
@@ -290,8 +290,8 @@ def test_detached_transfer_carries_the_workspace_runner_it_references(tmp_path: 
 
 
 def test_import_refuses_a_runner_name_holding_different_content(tmp_path: Path) -> None:
-    source = Workspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
-    destination = Workspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+    source = Workspace.initialize(tmp_path / "source")
+    destination = Workspace.initialize(tmp_path / "destination")
     reference = source.publish_runner(_runner_file(tmp_path / "runners"))
     destination.publish_runner(_runner_file(tmp_path / "other", _OTHER_RUNNER, name="succeed.py"))
     payload, job_id = _payload(tmp_path / "payloads", dict(reference), tag="conflicting")
@@ -299,22 +299,6 @@ def test_import_refuses_a_runner_name_holding_different_content(tmp_path: Path) 
     bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)
     with pytest.raises(WorkspaceCorruptionError, match="holds digest"):
         destination.import_bundle(bundle)
-
-
-def test_core_v1_workspaces_are_readable_but_never_mutated(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    format_path = workspace.control / "format.json"
-    assert json.loads(format_path.read_text(encoding="utf-8"))["core_profile"] == "core-v2"
-    stored = json.loads(format_path.read_text(encoding="utf-8"))
-    stored["core_profile"] = "core-v1"
-    format_path.write_text(json.dumps(stored), encoding="utf-8")
-
-    with pytest.raises(UnsupportedExtensionError, match="core-v1"):
-        Workspace(workspace.root)
-    inspected = Workspace(workspace.root, mutable=False)
-    assert inspected.core_profile == "core-v1"
-    with pytest.raises(UnsupportedExtensionError, match="cannot serve"):
-        TaskManager(inspected)
 
 
 def test_runner_describe_reports_every_published_reference(tmp_path: Path, capsys) -> None:

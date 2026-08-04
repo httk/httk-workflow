@@ -14,8 +14,8 @@ did not write, checks it, or exports from it — should be able to work from
 **alone**, without importing anything else from the package. Everything the
 protocol defines is re-exported there:
 
-- **Workspace format and profile** — the `core-v2` profile, its readable
-  ancestors, the supported and withdrawn extensions, and
+- **Workspace format and profile** — the `core-v2` profile, its future-extension
+  plumbing, and
   {py:class}`~httk.workflow.protocol.WorkspacePolicy`.
 - **Immutable job definitions** — {py:class}`~httk.workflow.protocol.JobDefinition`,
   {py:func}`~httk.workflow.protocol.job_digest`,

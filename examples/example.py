@@ -50,12 +50,9 @@ def main() -> int:
     # beside this file writes plausible outputs when no real command is configured.
     os.environ.setdefault("HTTK_VASP_COMMAND", str(Path(__file__).with_name("mock_vasp.py")))
 
-    # One workspace is the whole state of the work. The extension lets its jobs
-    # publish results as transactional data.
-    workspace = Workspace.initialize(
-        Path("example-workflow-workspace"),
-        extensions=["transactional-data-v1"],
-    )
+    # One workspace is the whole state of the work; its jobs may publish
+    # results as transactional data.
+    workspace = Workspace.initialize(Path("example-workflow-workspace"))
     print(f"workspace {workspace.workspace_id} at {workspace.root}")
 
     # One job of the packaged relaxation runner. The runner file is published into
