@@ -9,7 +9,7 @@
 #     httk workflow job new campaign-workspace \
 #         --template examples/defect_campaign.sh --step characterize \
 #         --input sites=3 --input diverging=1 --tag campaign
-#     httk workflow manager run campaign-workspace --until-idle
+#     httk workflow run campaign-workspace
 #
 # Job inputs:
 #   sites      -- how many sites to relax, one child job each

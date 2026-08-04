@@ -39,7 +39,7 @@ Python module beside the document.
 
 ```console
 httk workflow import pwd WORKSPACE workflow.json --module workflow.py --tag arithmetic
-httk workflow manager run WORKSPACE --until-idle
+httk workflow run WORKSPACE
 ```
 
 `--module FILE` stages a Python file into the payload, and the runner puts the
@@ -127,7 +127,7 @@ and executed by the packaged `cwl_runner.py`.
 ```console
 pip install httk-workflow[cwl]
 httk workflow import cwl WORKSPACE flow.cwl job.yml --tag echo
-httk workflow manager run WORKSPACE --until-idle
+httk workflow run WORKSPACE
 ```
 
 The extra is needed on the machine that *imports*. The machine that *runs* the

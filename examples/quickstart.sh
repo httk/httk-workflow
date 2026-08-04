@@ -57,7 +57,7 @@ printf 'submitted %s\n' "$job"
 export HTTK_VASP_COMMAND
 
 # 4. Run every ready job in the foreground until nothing is left to do.
-httk_workflow manager run quickstart-workspace --until-idle
+httk_workflow run quickstart-workspace
 
 # 5. What happened, and what it produced.
 httk_workflow job list quickstart-workspace

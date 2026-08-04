@@ -308,10 +308,18 @@ def handle_v1_run(arguments: argparse.Namespace, context: CLIContext) -> int:
         log_compression=compression,
         attempts=arguments.attempts,
     ) as manager:
-        if arguments.until_idle:
-            manager.run_until_idle(timeout=arguments.idle_timeout, poll_interval=arguments.poll_interval)
-        else:
+        if arguments.idle:
             manager.serve(poll_interval=arguments.poll_interval)
+        else:
+            try:
+                manager.run_until_idle(timeout=arguments.idle_timeout, poll_interval=arguments.poll_interval)
+            except TimeoutError:
+                print(
+                    f"workspace is not idle after {arguments.idle_timeout:.0f}s; jobs are still running or "
+                    "claimable — rerun, raise --idle-timeout, or pass --idle to keep serving",
+                    file=sys.stderr,
+                )
+                return 2
     return 0
 
 
@@ -397,13 +405,17 @@ def add_v1_run_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="SECONDS",
         help="how often this manager looks for work (default: 1)",
     )
-    parser.add_argument("--until-idle", action="store_true", help="stop once no claimable task is left")
+    parser.add_argument(
+        "--idle",
+        action="store_true",
+        help="keep serving the workspace when nothing is left to do",
+    )
     parser.add_argument(
         "--idle-timeout",
         type=float,
         default=3600.0,
         metavar="SECONDS",
-        help="with --until-idle, give up waiting for work after this long (default: 3600)",
+        help="without --idle, give up after this long if the workspace never becomes idle (default: 3600)",
     )
     parser.add_argument(
         "--unsafe-persistent-takeover",

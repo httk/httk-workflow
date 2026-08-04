@@ -86,7 +86,9 @@ from ._job import (
 from ._manager import (
     _submit_remote_manager,
     add_manager_run_arguments,
+    add_run_arguments,
     build_manager_parser,
+    build_run_parser,
     handle_manager_run,
 )
 from ._project import (
@@ -172,6 +174,7 @@ def build_parser(program: str, context: CLIContext) -> argparse.ArgumentParser:
     build_job_parser(groups)
     build_import_parser(groups)
     build_harvest_parser(groups)
+    build_run_parser(groups)
     build_manager_parser(groups)
     build_v1_parser(groups)
     build_config_parser(groups)

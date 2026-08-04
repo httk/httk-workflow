@@ -223,7 +223,8 @@ httk workflow manager run WORKSPACE \
 A manager claims work under the workspace's `lease_seconds` unless
 `--lease-seconds` overrides it for that manager alone.
 
-`--until-idle` is useful for batch invocations and tests.
+The default until-idle behavior is useful for batch invocations and tests;
+pass `--idle` to keep serving.
 
 **Taking over another manager's attempt.** An expired lease says that a manager
 stopped heartbeating, which is not the same as its attempt having stopped, so
