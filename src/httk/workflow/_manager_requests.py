@@ -144,13 +144,13 @@ def handle(manager: Any) -> bool:
             marker = manager._resolve_request_marker(request)
             if marker is not None:
                 job = manager.workspace.load_job(marker)
-                if manager._backend_for(job) is None:
+                if manager._executor_for(job) is None:
                     _LOGGER.info(
-                        "leaving request %s to another manager: runner backend %s is not served here",
+                        "leaving request %s to another manager: runner executor %s is not served here",
                         request_path.name,
-                        job.runner_backend,
+                        job.runner_executor,
                         extra=manager._event(
-                            "request_deferred", request=request_path.name, runner_backend=job.runner_backend
+                            "request_deferred", request=request_path.name, runner_executor=job.runner_executor
                         ),
                     )
                     manager._deferred_requests.add(request_path.name)

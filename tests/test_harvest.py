@@ -242,7 +242,7 @@ def test_a_record_pins_the_job_digest_and_the_runner_that_executed_it(
     assert parent.job["initial_step"] == "branch"
     assert parent.job["inputs"] == {"structure": "Si"}
     assert parent.job["runner"] == {
-        "backend": "path",
+        "executor": "path",
         "source": "workspace",
         "path": "campaign/run.py",
         "sha256": identifiers["runner_sha256"],
@@ -417,7 +417,7 @@ def test_a_packaged_runner_record_names_the_distribution_that_installs_it(
     assert packaged.state == "failed"
     assert packaged.failure is not None and packaged.failure.code == "vasp.input_missing"
     assert packaged.job["runner"] == {
-        "backend": "path",
+        "executor": "path",
         "source": "installed",
         "path": f"pkg:{PACKAGE}/vasp_static.py",
         "sha256": sha256_file(runner_path("vasp_static.py")),

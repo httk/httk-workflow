@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 from httk.workflow import TaskManager, Workspace
-from httk.workflow.compat.v1 import V1RunnerBackend, V1TaskManager, submit_v1_task
+from httk.workflow.compat.v1 import V1RunnerExecutor, V1TaskManager, submit_v1_task
 from httk.workflow.compat.v1._runner import replay_v1_atomic
 
 
@@ -254,12 +254,12 @@ HT_TASK_FINISHED
     submitted = submit_v1_task(workspace, source, "project/module")
     marker = workspace.find_marker_by_id(submitted.job_id)
     assert marker is not None
-    backend = V1RunnerBackend(log_compression="none")
-    from httk.workflow.backends import AttemptLaunch
+    executor = V1RunnerExecutor(log_compression="none")
+    from httk.workflow.executors import AttemptLaunch
 
     payload = workspace.payload_path(marker.placement, marker.job_key)
     command = list(
-        backend.command(
+        executor.command(
             AttemptLaunch(
                 job=workspace.load_job(marker),
                 marker=marker,

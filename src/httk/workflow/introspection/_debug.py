@@ -220,7 +220,7 @@ def _drive(
     assert job is not None
     write(
         f"[{meta}] {marker.job_key} at {marker.placement.as_posix()} is {marker.kind} "
-        f"(runner {job.runner_source}:{job.runner_path.as_posix()} on backend {job.runner_backend})"
+        f"(runner {job.runner_source}:{job.runner_path.as_posix()} on executor {job.runner_executor})"
     )
     scoped = ScopedWorkspace(workspace.root, {marker.job_key}, durable=workspace.durable)
     tails: dict[str, list[_Tail]] = {}

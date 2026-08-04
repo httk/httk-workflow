@@ -615,7 +615,7 @@ def _job_prepare(arguments: argparse.Namespace) -> None:
     """Create ``job.json`` in a prepared payload from a specification file.
 
     The specification is exactly the member set of :class:`JobSpec`, including
-    ``runner_backend``, ``runner_source``, ``runner_sha256``, and ``inputs``, so
+    ``runner_executor``, ``runner_source``, ``runner_sha256``, and ``inputs``, so
     a Bash runner can prepare a payload for a shared runner without a Python
     program in between.
     """
@@ -634,7 +634,7 @@ def _job_prepare(arguments: argparse.Namespace) -> None:
         {
             "id": job.id,
             "job_key": job.job_key,
-            "runner_backend": job.runner_backend,
+            "runner_executor": job.runner_executor,
             "runner_source": job.runner_source,
             "runner_sha256": job.runner_sha256,
             "inputs": dict(job.inputs),

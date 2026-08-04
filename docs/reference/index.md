@@ -9,7 +9,7 @@ in its `__all__` — rather than every source object. The three layers are:
 - **Execution / authoring** — the package root `httk.workflow` (`Runner`,
   `Attempt`, and the small job and result types), with `httk.workflow.sdk`,
   `httk.workflow.runtime`, `httk.workflow.runtime_utils`,
-  `httk.workflow.scaffold`, `httk.workflow.backends`, and
+  `httk.workflow.scaffold`, `httk.workflow.executors`, and
   `httk.workflow.shell_bridge`.
 - **Orchestration and management** — `httk.workflow.harvesting`,
   `httk.workflow.supervision`, `httk.workflow.transfers`,

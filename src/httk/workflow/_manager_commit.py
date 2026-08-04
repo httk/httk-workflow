@@ -163,12 +163,12 @@ def process_committing(manager: Any, marker: Marker) -> None:
         if changed_data:
             data_generation += 1
     manager._register_children(marker, state, outcome_path)
-    backend = manager._backend_for(job)
-    if backend is None:
+    executor = manager._executor_for(job)
+    if executor is None:
         return
-    from .backends import OutcomeCommit
+    from .executors import OutcomeCommit
 
-    backend.commit_outcome(
+    executor.commit_outcome(
         OutcomeCommit(
             job=job,
             marker=marker,
@@ -427,9 +427,9 @@ def resume(manager: Any, logger: Any) -> bool:
         if loaded is None:
             continue
         job, state = loaded
-        if manager._backend_for(job) is None:
+        if manager._executor_for(job) is None:
             logger.debug(
-                "skipping committing job %s: runner backend %s is not served here", marker.job_key, job.runner_backend
+                "skipping committing job %s: runner executor %s is not served here", marker.job_key, job.runner_executor
             )
             continue
         try:

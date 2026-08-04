@@ -1,4 +1,4 @@
-"""Runner-backend contracts used by the workflow manager."""
+"""Runner-executor contracts used by the workflow manager."""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -14,8 +14,8 @@ if TYPE_CHECKING:
 __all__ = [
     "AttemptLaunch",
     "OutcomeCommit",
-    "PathRunnerBackend",
-    "RunnerBackend",
+    "PathRunnerExecutor",
+    "RunnerExecutor",
 ]
 
 
@@ -57,30 +57,30 @@ class OutcomeCommit:
     outcome: Mapping[str, Any]
 
 
-class RunnerBackend(Protocol):
-    """Execution behavior selected by ``runner.backend`` in ``job.json``."""
+class RunnerExecutor(Protocol):
+    """Execution behavior selected by ``runner.executor`` in ``job.json``."""
 
     name: str
 
     def validate(self, job: JobDefinition, payload: Path) -> None:
-        """Validate backend-specific immutable payload requirements."""
+        """Validate executor-specific immutable payload requirements."""
 
     def command(self, launch: AttemptLaunch) -> Sequence[str]:
         """Return the command argument vector for one attempt."""
         raise NotImplementedError
 
     def commit_outcome(self, commit: OutcomeCommit) -> None:
-        """Complete backend-specific idempotent work before the marker advances."""
+        """Complete executor-specific idempotent work before the marker advances."""
 
     def reconcile(self, workspace: "Workspace") -> None:
-        """Repair backend-specific derived views; never alter authoritative state."""
+        """Repair executor-specific derived views; never alter authoritative state."""
 
     def marker_changed(self, workspace: "Workspace", marker: Marker) -> None:
         """Refresh derived views after an authoritative marker transition."""
 
 
-class PathRunnerBackend:
-    """The normal backend which directly executes ``runner.path``."""
+class PathRunnerExecutor:
+    """The normal executor which directly executes ``runner.path``."""
 
     name = "path"
 

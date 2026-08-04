@@ -22,7 +22,7 @@ workspace does not. Two properties follow from that and are the reason this
 module exists at all:
 
 * **The executed code is pinned.** A record carries the immutable job digest and
-  the complete runner identity: backend, source, path, and the SHA-256 the job
+  the complete runner identity: executor, source, path, and the SHA-256 the job
   pinned for every runner that lives outside its payload. For a runner named by
   the reserved ``pkg:`` form the installed distribution and its version are
   reported as well, so a stored result names the software that produced it.
@@ -379,7 +379,7 @@ def _job_mapping(job: JobDefinition) -> dict[str, object]:
         "initial_step": job.initial_step,
         "priority": job.priority,
         "runner": {
-            "backend": job.runner_backend,
+            "executor": job.runner_executor,
             "source": job.runner_source,
             "path": job.runner_path.as_posix(),
             "sha256": job.runner_sha256,

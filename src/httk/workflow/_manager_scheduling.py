@@ -31,11 +31,11 @@ def eligible_ready(manager: Any) -> list[Marker]:
             )
             continue
         manager._reported.pop(f"ready:{marker.job_key}", None)
-        if manager._backend_for(job) is None:
+        if manager._executor_for(job) is None:
             _LOGGER.debug(
-                "skipping ready job %s: runner backend %s is not served here",
+                "skipping ready job %s: runner executor %s is not served here",
                 marker.job_key,
-                job.runner_backend,
+                job.runner_executor,
             )
             continue
         if not manager.accept_any_pool and job.claim_pool not in manager.pools:
@@ -91,15 +91,15 @@ def register_submissions(manager: Any) -> bool:
         manager._pace()
         try:
             job = manager.workspace.validate_job_payload(marker)
-            backend = manager._backend_for(job)
-            if backend is None:
+            executor = manager._executor_for(job)
+            if executor is None:
                 _LOGGER.debug(
-                    "skipping submitted job %s: runner backend %s is not served here",
+                    "skipping submitted job %s: runner executor %s is not served here",
                     marker.job_key,
-                    job.runner_backend,
+                    job.runner_executor,
                 )
                 continue
-            backend.validate(job, manager.workspace.payload_path(marker.placement, marker.job_key))
+            executor.validate(job, manager.workspace.payload_path(marker.placement, marker.job_key))
             manager._transition(
                 marker,
                 "ready",
@@ -141,9 +141,9 @@ def recover_abandoned_claims(manager: Any, logger: Any) -> bool:
         if loaded is None:
             continue
         job, state = loaded
-        if manager._backend_for(job) is None:
+        if manager._executor_for(job) is None:
             logger.debug(
-                "skipping claimed job %s: runner backend %s is not served here", marker.job_key, job.runner_backend
+                "skipping claimed job %s: runner executor %s is not served here", marker.job_key, job.runner_executor
             )
             continue
         try:
@@ -202,6 +202,6 @@ def has_actionable_work(manager: Any) -> bool:
             if marker.kind == "submitted":
                 return True
             continue
-        if manager._backend_for(job) is not None:
+        if manager._executor_for(job) is not None:
             return True
     return False

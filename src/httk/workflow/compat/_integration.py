@@ -94,7 +94,7 @@ def runner_reference(package: str, name: str) -> dict[str, object]:
 
     path = runner_path(package, name)
     return {
-        "backend": "path",
+        "executor": "path",
         "source": "installed",
         "path": f"pkg:{package}/{PurePosixPath(name)}",
         "sha256": sha256_file(path),

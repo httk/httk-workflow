@@ -299,7 +299,7 @@ def _spawn_children(
     payload with a deterministic identity, staged beside the attempt and handed
     to :meth:`OutcomeDraft.add_child`, which copies it into the draft and writes
     the canonical spawn set. The legacy directory the parent still owns is left
-    in place; :meth:`V1RunnerBackend.commit_outcome` replaces it with a symlink
+    in place; :meth:`V1RunnerExecutor.commit_outcome` replaces it with a symlink
     to the registered child once the spawn is committed.
     """
 

@@ -143,7 +143,7 @@ def _payload(
     tag: str,
     workdir_mode: str = "persistent",
     pool: str = "default",
-    backend: str = "path",
+    executor: str = "path",
     initial_step: str = "only",
     retry_on: tuple[str, ...] = (),
 ) -> tuple[Path, str]:
@@ -161,7 +161,7 @@ def _payload(
         "tag": tag,
         "name": f"Scheduling job {tag}",
         "workflow": "tests.scheduling",
-        "runner": {"path": "files/runner", "arguments": [], "backend": backend},
+        "runner": {"path": "files/runner", "arguments": [], "executor": executor},
         "workdir": {"mode": workdir_mode, "path": "run"},
         "data": {"mode": "none"},
         "initial_step": initial_step,
@@ -417,7 +417,7 @@ def test_a_long_tick_heartbeats_while_it_scans_and_reports_its_own_slowness(
     crowd_size = test_profile.scale(normal=12, extended=40)
     validation_pause = test_profile.scale(normal=0.05, extended=0.025)
     for index in range(crowd_size):
-        crowd, _ = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag=f"crowd-{index}", backend="foreign")
+        crowd, _ = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag=f"crowd-{index}", executor="foreign")
         workspace.submit(crowd, f"project/crowd/{index}")
 
     real_validate = Workspace.validate_job_payload
@@ -721,12 +721,12 @@ def test_a_request_that_can_never_apply_is_retired_once_and_never_reread(
     assert marker is not None and marker.kind == "ready"
 
 
-def test_a_request_for_an_unserved_backend_is_left_for_another_manager(
+def test_a_request_for_an_unserved_executor_is_left_for_another_manager(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="foreign", backend="foreign")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="foreign", executor="foreign")
     marker = workspace.submit(payload, "project/foreign")
 
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
@@ -735,7 +735,7 @@ def test_a_request_for_an_unserved_backend_is_left_for_another_manager(
             manager.tick()
             manager.tick()
 
-    # It stays where a manager serving that backend will find it, and this
+    # It stays where a manager serving that executor will find it, and this
     # manager decided about it exactly once.
     assert published.is_file()
     deferrals = [record for record in caplog.records if "leaving request" in record.getMessage()]

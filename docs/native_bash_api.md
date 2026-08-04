@@ -112,7 +112,7 @@ workspace.submit("prepared-job", "project/si-vacancies")
 
 A Bash step can also prepare a payload itself, with
 `httk_workflow_job_prepare DESTINATION SPEC.json`, where the spec object holds
-the members of `JobSpec` — including `runner_backend`, `runner_source`,
+the members of `JobSpec` — including `runner_executor`, `runner_source`,
 `runner_sha256`, and `inputs` — and the created job's identity is printed back as
 JSON.
 

@@ -191,7 +191,7 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.runtime",
         "httk.workflow.runtime_utils",
         "httk.workflow.scaffold",
-        "httk.workflow.backends",
+        "httk.workflow.executors",
         "httk.workflow.shell_bridge",
         # Orchestration and management.
         "httk.workflow.harvesting",

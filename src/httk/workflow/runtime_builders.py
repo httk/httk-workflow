@@ -126,7 +126,7 @@ class JobSpec:
     initial_step: str = "start"
     tag: str | None = None
     job_id: str | None = None
-    runner_backend: str = "path"
+    runner_executor: str = "path"
     runner_source: Literal["payload", "workspace", "installed"] = "payload"
     runner_sha256: str | None = None
     runner_arguments: tuple[str, ...] = ()
@@ -154,7 +154,7 @@ class JobSpec:
         retry_policy: dict[str, object] = {name: value for name, value in limits.items() if value is not None}
         retry_policy["retry_on"] = list(self.retry_on)
         runner: dict[str, object] = {
-            "backend": self.runner_backend,
+            "executor": self.runner_executor,
             "source": self.runner_source,
             "path": self.runner_path,
             "arguments": list(self.runner_arguments),

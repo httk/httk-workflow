@@ -370,7 +370,7 @@ def _packaged_runner_reference(provider: TemplateProvider) -> dict[str, object]:
 
     path = _packaged_runner_path(provider)
     return {
-        "backend": "path",
+        "executor": "path",
         "source": "installed",
         "path": f"pkg:{provider.runner_package}/{PurePosixPath(provider.runner_file)}",
         "sha256": sha256_file(path),

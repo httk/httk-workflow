@@ -102,7 +102,7 @@ def _stage(payload: Path, *, failing: bool, runner: dict[str, object]) -> str:
 
 
 def _plant_legacy_link(workspace: Workspace, job_id: str) -> None:
-    """Plant the shape the v1 compatibility backend leaves inside a payload.
+    """Plant the shape the v1 compatibility executor leaves inside a payload.
 
     A submission deliberately dereferences symlinks, so the relative link a v1
     parent carries only ever appears in the live payload, exactly as
