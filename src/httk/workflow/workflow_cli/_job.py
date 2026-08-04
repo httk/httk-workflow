@@ -164,7 +164,7 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
 def add_job_submit_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`job submit`, shared with ``httk-taskmanager submit``."""
 
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the workspace to submit into")
+    add_workspace_argument(parser, help_text="the workspace to submit into")
     parser.add_argument("source", metavar="SOURCE", help="the complete payload directory to submit")
     parser.add_argument(
         "--placement",
@@ -191,7 +191,7 @@ def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int
 def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`job request`, shared with ``httk-taskmanager request``."""
 
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the workspace holding the job")
+    add_workspace_argument(parser, help_text="the workspace holding the job")
     parser.add_argument("job_id", metavar="JOB_ID", help="the UUID of the job the request is about")
     parser.add_argument(
         "action",
@@ -335,7 +335,7 @@ def handle_job_debug(arguments: argparse.Namespace, context: CLIContext) -> int:
 def _add_job_selector(parser: argparse.ArgumentParser) -> None:
     """Add the workspace and job selector every inspection command shares."""
 
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the workspace holding the job")
+    add_workspace_argument(parser, help_text="the workspace holding the job")
     parser.add_argument("job", metavar="JOB", help="job UUID, job key, or any unique prefix of either")
 
 
@@ -358,7 +358,7 @@ def build_job_parser(
         description="Scaffold and submit jobs from a runner template",
         handler=handle_job_new,
     )
-    new.add_argument("workspace", metavar="WORKSPACE", help="the workspace to submit into")
+    add_workspace_argument(new, help_text="the workspace to submit into")
     new.add_argument(
         "--template",
         metavar="TEMPLATE",
@@ -457,7 +457,7 @@ def build_job_parser(
         description="List the jobs of one workflow workspace",
         handler=handle_job_list,
     )
-    listing.add_argument("workspace", metavar="WORKSPACE", help="the workspace to list")
+    add_workspace_argument(listing, help_text="the workspace to list")
     listing.add_argument(
         "--kind",
         action="append",
@@ -515,7 +515,7 @@ def build_job_parser(
         description="Drive one job to a terminal state in the foreground, reporting every transition",
         handler=handle_job_debug,
     )
-    debug.add_argument("workspace", metavar="WORKSPACE", help="the workspace to debug in")
+    add_workspace_argument(debug, help_text="the workspace to debug in")
     debug.add_argument(
         "job",
         metavar="JOB",

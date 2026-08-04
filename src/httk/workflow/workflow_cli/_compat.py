@@ -92,7 +92,7 @@ def build_import_parser(
         description="Import one Python Workflow Definition (PWD) JSON document as one job",
         handler=handle_import_pwd,
     )
-    pwd.add_argument("workspace", metavar="WORKSPACE", help="the workspace to submit into")
+    add_workspace_argument(pwd, help_text="the workspace to submit into")
     pwd.add_argument("document", metavar="DOCUMENT", help="the PWD JSON document to import")
     pwd.add_argument(
         "--module",
@@ -148,7 +148,7 @@ def build_import_parser(
         ),
         handler=handle_import_cwl,
     )
-    cwl.add_argument("workspace", metavar="WORKSPACE", help="the workspace to submit into")
+    add_workspace_argument(cwl, help_text="the workspace to submit into")
     cwl.add_argument(
         "workflow",
         metavar="WORKFLOW",
@@ -327,7 +327,7 @@ def add_v1_prepare_arguments(parser: argparse.ArgumentParser) -> None:
 def add_v1_submit_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`v1 submit`, shared with ``httk-v1-taskmanager submit``."""
 
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the workspace to submit into")
+    add_workspace_argument(parser, help_text="the workspace to submit into")
     parser.add_argument("source", metavar="SOURCE", help="the instantiated httk v1 task directory")
     parser.add_argument(
         "--placement",
@@ -342,7 +342,7 @@ def add_v1_submit_arguments(parser: argparse.ArgumentParser) -> None:
 def add_v1_run_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`v1 run`, shared with ``httk-v1-taskmanager run``."""
 
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the workspace this manager serves")
+    add_workspace_argument(parser, help_text="the workspace this manager serves")
     # `run` filters rather than assigns, so "any" — accept every task set — is
     # the only default that runs the work a v1 operator already submitted.
     parser.add_argument(

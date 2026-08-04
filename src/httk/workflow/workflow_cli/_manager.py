@@ -20,11 +20,7 @@ from ._common import _run_adapter as run_adapter
 def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`manager run`, shared with ``httk-taskmanager run``."""
 
-    parser.add_argument(
-        "workspace",
-        metavar="WORKSPACE",
-        help="the registered workspace this manager serves",
-    )
+    add_workspace_argument(parser, help_text="the workspace this manager serves")
     parser.add_argument(
         "--pool",
         action="append",

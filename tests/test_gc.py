@@ -528,7 +528,8 @@ def test_the_gc_command_prints_a_table_and_json(aged: _Fixture, capsys: pytest.C
     assert document["removed"] > 0
     assert not aged.old_attempts[0].exists()
 
-    assert command(["workspace", "gc"], context) == 2
+    assert command(["workspace", "gc"], context) == 0
+    capsys.readouterr()
 
 
 def test_a_collection_report_round_trips_through_its_mapping(aged: _Fixture) -> None:

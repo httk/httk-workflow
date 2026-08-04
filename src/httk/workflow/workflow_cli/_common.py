@@ -97,6 +97,7 @@ from ..registry import (
     LOCAL_REMOTE,
     WorkspaceBinding,
     create_workspace,
+    default_workspace,
     delete_workspace,
     forget_workspace,
     list_workspaces,
@@ -283,6 +284,18 @@ def add_durability_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_workspace_argument(parser: argparse.ArgumentParser, *, help_text: str) -> None:
+    """Add the optional workspace name shared by workspace-selecting leaves."""
+
+    parser.add_argument(
+        "workspace",
+        metavar="WORKSPACE",
+        nargs="?",
+        default=None,
+        help=f"{help_text} (default: this project's workspace, or the per-user default)",
+    )
+
+
 def _durable(arguments: argparse.Namespace) -> bool:
     """Report whether this invocation asked for durable publication.
 
@@ -394,8 +407,14 @@ def _resolve_binding(arguments: argparse.Namespace, context: CLIContext) -> tupl
     """
 
     if _by_path(arguments):
+        if arguments.workspace is None:
+            raise ValueError("--by-path requires an explicit path")
         return None, Path(arguments.workspace)
-    binding = resolve_workspace(arguments.workspace, project=context.cwd)
+    binding = (
+        default_workspace(project=context.cwd)
+        if arguments.workspace is None
+        else resolve_workspace(arguments.workspace, project=context.cwd)
+    )
     return binding, (Path(binding.path) if binding.remote == LOCAL_REMOTE else None)
 
 
