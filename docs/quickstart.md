@@ -41,7 +41,7 @@ END
 ## The five commands
 
 ```console
-$ httk workflow workspace init quickstart-workspace --remote local --path quickstart-workspace --extension transactional-data-v1
+$ httk workflow workspace init quickstart-workspace --remote local --path quickstart-workspace
 $ httk workflow job new quickstart-workspace --template vasp-relax --from POSCAR --tag silicon
 $ export HTTK_VASP_COMMAND="$PWD/examples/mock_vasp.py"
 $ httk workflow manager run quickstart-workspace --until-idle
@@ -59,9 +59,9 @@ gave it rather than by its path. `--remote local --path quickstart-workspace`
 says where it lives — on this machine, in a `quickstart-workspace/` directory
 here; being local is never implied, so the remote is always spelled out (a
 cluster workspace names the remote it lives on instead). Every later command
-takes that registered name, never a bare path. `--extension transactional-data-v1`
-lets jobs publish their results as transactional data, which is what makes a
-finished calculation readable without looking inside a workdir.
+takes that registered name, never a bare path. Core-v2 workspaces let jobs
+publish their results as transactional data, which makes a finished calculation
+readable without looking inside a workdir.
 
 **`job new`** built and submitted one job. `--template vasp-relax` is the packaged
 relaxation runner — one file, three steps, the reviewed remedy ladder — so no

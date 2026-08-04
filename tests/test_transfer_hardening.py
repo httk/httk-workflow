@@ -54,8 +54,8 @@ def _payload(root: Path, *, tag: str = "test") -> tuple[Path, str]:
 
 
 def _pair(tmp_path: Path) -> tuple[Workspace, Workspace]:
-    source = Workspace.initialize(tmp_path / "source", extensions=["detached-transfer-v1"])
-    destination = Workspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+    source = Workspace.initialize(tmp_path / "source")
+    destination = Workspace.initialize(tmp_path / "destination")
     return source, destination
 
 

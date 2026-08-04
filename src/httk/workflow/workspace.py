@@ -36,10 +36,8 @@ from .models import (
     ACTIVE_STATE_KINDS,
     CORE_PROFILE,
     CORE_STATE_KINDS,
-    READABLE_CORE_PROFILES,
     STATE_KINDS,
     SUPPORTED_EXTENSIONS,
-    WITHDRAWN_EXTENSIONS,
     JobDefinition,
     Marker,
     WorkspacePolicy,
@@ -211,33 +209,14 @@ class Workspace:
         if self.format.get("format") != "httk-workflow-filesystem" or self.format.get("format_version") != 1:
             raise FormatError("workspace must use httk-workflow-filesystem format version 1")
         self.core_profile = self.format.get("core_profile")
-        if self.core_profile not in READABLE_CORE_PROFILES:
+        if self.core_profile != CORE_PROFILE:
             raise UnsupportedExtensionError(f"unsupported core profile: {self.core_profile!r}")
-        if mutable and self.core_profile != CORE_PROFILE:
-            # An older profile can be read and exported, never written: its
-            # spawn sets, join summaries, and runner references predate the
-            # shapes this implementation now publishes.
-            raise UnsupportedExtensionError(
-                f"workspace core profile {self.core_profile!r} cannot be mutated by this "
-                f"implementation, which writes {CORE_PROFILE!r}; attach read-only to inspect it"
-            )
         extensions_raw = self.format.get("extensions", [])
         if not isinstance(extensions_raw, list) or not all(isinstance(item, str) for item in extensions_raw):
             raise FormatError("workspace extensions must be an array of strings")
         self.extensions = frozenset(extensions_raw)
-        withdrawn = self.extensions & WITHDRAWN_EXTENSIONS
-        if withdrawn:
-            # A withdrawn extension changed the on-disk shapes this
-            # implementation reads, so even a read-only attach would misparse
-            # the workspace. There is no migration: the state tree would have to
-            # be rewritten marker by marker.
-            raise UnsupportedExtensionError(
-                f"workspace declares withdrawn extensions: {', '.join(sorted(withdrawn))}; "
-                "this implementation no longer reads that layout, so the workspace must be "
-                "re-initialized (httk workflow workspace init) and its jobs resubmitted"
-            )
         unsupported = self.extensions - SUPPORTED_EXTENSIONS
-        if mutable and unsupported:
+        if unsupported:
             raise UnsupportedExtensionError(f"unsupported enabled extensions: {', '.join(sorted(unsupported))}")
         if self.format.get("record_ref_encoding") != "hwref-v1":
             raise UnsupportedExtensionError("unsupported record reference encoding")
@@ -275,12 +254,6 @@ class Workspace:
         root_path.mkdir(parents=True, exist_ok=True)
         initial_policy = WorkspacePolicy.from_mapping({} if policy is None else policy)
         extension_set = frozenset(extensions)
-        withdrawn = extension_set & WITHDRAWN_EXTENSIONS
-        if withdrawn:
-            raise UnsupportedExtensionError(
-                f"withdrawn extensions cannot be enabled: {', '.join(sorted(withdrawn))}; "
-                "priority is encoded in every marker basename and needs no directory layer"
-            )
         unsupported = extension_set - SUPPORTED_EXTENSIONS
         if unsupported:
             raise UnsupportedExtensionError(f"unsupported extensions: {', '.join(sorted(unsupported))}")
@@ -301,9 +274,8 @@ class Workspace:
             "state/submitted",
         ):
             (control / relative).mkdir(parents=True, exist_ok=True)
-        if "detached-transfer-v1" in extension_set:
-            for relative in ("transfers/acks", "transfers/imported", "transfers/incoming", "transfers/retired"):
-                (control / relative).mkdir(parents=True, exist_ok=True)
+        for relative in ("transfers/acks", "transfers/imported", "transfers/incoming", "transfers/retired"):
+            (control / relative).mkdir(parents=True, exist_ok=True)
         write_json_atomic(
             control / "format.json",
             {
@@ -447,30 +419,6 @@ class Workspace:
         from .gc import collect_garbage
 
         return collect_garbage(self, dry_run=dry_run, now=now)
-
-    def upgrade(self, extensions: Iterable[str]) -> frozenset[str]:
-        """Enable extensions that have an implemented in-place migration."""
-
-        requested = frozenset(extensions)
-        unknown = requested - SUPPORTED_EXTENSIONS
-        if unknown:
-            raise UnsupportedExtensionError(f"no implemented migration for extensions: {', '.join(sorted(unknown))}")
-        additions = requested - self.extensions
-        unsupported_migrations = additions - {"detached-transfer-v1"}
-        if unsupported_migrations:
-            raise UnsupportedExtensionError(
-                "existing workspaces can only enable detached-transfer-v1; "
-                f"no implemented migration for: {', '.join(sorted(unsupported_migrations))}"
-            )
-        if "detached-transfer-v1" in additions:
-            for relative in ("transfers/acks", "transfers/imported", "transfers/incoming", "transfers/retired"):
-                (self.control / relative).mkdir(parents=True, exist_ok=True)
-            updated = dict(self.format)
-            updated["extensions"] = sorted(self.extensions | additions)
-            write_json_atomic(self.control / "format.json", updated, durable=self.durable)
-            self.format = updated
-            self.extensions = frozenset(updated["extensions"])
-        return self.extensions
 
     def runner_store_path(self, path: str | PurePosixPath) -> Path:
         """Return the store location of one workspace runner.
@@ -1185,8 +1133,6 @@ class Workspace:
 
         source_path = Path(source).resolve()
         job = JobDefinition.from_path(source_path / "job.json")
-        if job.data_mode == "transactional" and "transactional-data-v1" not in self.extensions:
-            raise UnsupportedExtensionError("job requires transactional-data-v1")
         normalized_placement = normalize_placement(placement)
         target = self.payload_path(normalized_placement, job.job_key)
         if target.exists():
@@ -1215,8 +1161,6 @@ class Workspace:
         """Perform manager-side immutable submission validation."""
 
         job = self.load_job(marker)
-        if job.data_mode == "transactional" and "transactional-data-v1" not in self.extensions:
-            raise UnsupportedExtensionError("job requires transactional-data-v1")
         return job
 
     def quarantine(self, path: Path, *, reason: str) -> Path:

@@ -163,10 +163,9 @@ def test_safe_v1_remote_import_uses_maintained_adapter(tmp_path: Path) -> None:
     assert not (imported / "command").exists()
 
 
-def test_workspace_upgrade_and_transfer_round_trip_are_idempotent(tmp_path: Path) -> None:
+def test_transfer_round_trip_is_idempotent(tmp_path: Path) -> None:
     source = Workspace.initialize(tmp_path / "source")
-    assert source.upgrade(["detached-transfer-v1"]) == frozenset({"detached-transfer-v1"})
-    destination = Workspace.initialize(tmp_path / "destination", extensions=["detached-transfer-v1"])
+    destination = Workspace.initialize(tmp_path / "destination")
     payload, job_id = _payload(tmp_path)
     source.submit(payload, "jobs")
     transfer_id = str(uuid.uuid4())

@@ -476,7 +476,7 @@ def test_a_fresh_manager_completes_an_interrupted_commit_exactly_once(
     interruption: _Interruption,
 ) -> None:
     root = tmp_path / "workspace"
-    Workspace.initialize(root, extensions=["transactional-data-v1"])
+    Workspace.initialize(root)
     payload, job_id = _payload(
         tmp_path / "source",
         _COMMIT_HEAVY_RUNNER,
@@ -550,7 +550,7 @@ def test_a_commit_resumes_after_its_registered_child_has_already_started(
     """
 
     root = tmp_path / "workspace"
-    Workspace.initialize(root, extensions=["transactional-data-v1"])
+    Workspace.initialize(root)
     payload, job_id = _payload(
         tmp_path / "source",
         _COMMIT_HEAVY_RUNNER,

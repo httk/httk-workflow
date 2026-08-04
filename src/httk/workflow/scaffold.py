@@ -20,7 +20,7 @@ importing the science that owns it.
     from httk.workflow import Workspace
     from httk.workflow.scaffold import new_job
 
-    workspace = Workspace.initialize("workflow-workspace", extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize("workflow-workspace")
     job = new_job(workspace, "some-template", files={"input": "input"}, tag="example")
     print(job.job_key, job.payload)
 
@@ -53,7 +53,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, TypedDict, cast
 
 from ._util import sha256_file
-from .errors import FormatError, UnsupportedExtensionError
+from .errors import FormatError
 from .models import (
     ATTEMPT_CONTROL_PREFIX,
     JOB_STATE_DIRECTORY,
@@ -627,13 +627,6 @@ def _prepare(
     """Resolve one template and make its runner referenceable, exactly once."""
 
     resolved = resolve_template(template, workflow=workflow, step=step, data_mode=data_mode)
-    if resolved.data_mode == "transactional" and "transactional-data-v1" not in workspace.extensions:
-        raise UnsupportedExtensionError(
-            "publishing the results of a job as transactional data needs the transactional-data-v1 "
-            f"extension, which {workspace.root} does not have; initialize a workspace with "
-            "--extension transactional-data-v1, or scaffold with data_mode='none' to leave the "
-            "results in the job's workdir"
-        )
     if publish == "installed":
         provider = template_provider(resolved.name)
         if resolved.packaged is None or provider is None:

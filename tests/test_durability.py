@@ -308,7 +308,7 @@ def _run(workspace: Workspace) -> None:
 def test_a_durable_commit_syncs_the_transaction_before_the_committing_marker_moves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"], durable=True)
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=True)
     payload, job_id = _prepare(tmp_path / "source", _TRANSACTION_RUNNER, data_mode="transactional")
     workspace.submit(payload, "project/jobs")
 
@@ -338,7 +338,7 @@ def test_a_durable_commit_syncs_the_transaction_before_the_committing_marker_mov
 
 
 def test_a_nondurable_commit_does_not_sync_the_committed_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"], durable=False)
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
     payload, job_id = _prepare(tmp_path / "source", _TRANSACTION_RUNNER, data_mode="transactional")
     workspace.submit(payload, "project/jobs")
 

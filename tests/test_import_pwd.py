@@ -103,7 +103,7 @@ _ARITHMETIC: dict[str, object] = {
 
 @pytest.fixture()
 def workspace(tmp_path: Path) -> Iterator[Workspace]:
-    yield Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
+    yield Workspace.initialize(tmp_path / "workspace")
 
 
 @pytest.fixture()

@@ -193,7 +193,6 @@ class _Fixture:
     def __init__(self, tmp_path: Path) -> None:
         self.workspace = Workspace.initialize(
             tmp_path / "workspace",
-            extensions=["detached-transfer-v1"],
             durable=False,
         )
         control = self.workspace.control

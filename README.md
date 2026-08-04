@@ -18,7 +18,7 @@ recovered without cleanup hooks.
 From nothing to a finished VASP relaxation, without writing a runner:
 
 ```console
-httk workflow workspace init workflow-workspace --extension transactional-data-v1
+httk workflow workspace init workflow-workspace
 httk workflow job new workflow-workspace --template vasp-relax --from POSCAR --tag silicon
 export HTTK_VASP_COMMAND="$PWD/examples/mock_vasp.py"   # or: srun -n 32 vasp_std
 httk workflow manager run workflow-workspace --until-idle

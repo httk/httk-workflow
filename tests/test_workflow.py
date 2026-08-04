@@ -266,7 +266,7 @@ content = b"complete\\n"
 }))
 os.rename(temporary, control / "outcome.ready")
 """
-    workspace = Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", runner, data_mode="transactional")
     workspace.submit(payload, "project/transaction")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:

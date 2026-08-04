@@ -154,7 +154,6 @@ from ._workspace import (
     handle_workspace_settings_unset,
     handle_workspace_status,
     handle_workspace_unlock,
-    handle_workspace_upgrade,
 )
 
 

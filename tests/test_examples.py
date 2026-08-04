@@ -125,10 +125,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
 
     # The page really is five commands, and they are the ones a newcomer types.
     assert sum(1 for line in commands if line.startswith(("httk", "export"))) == 5
-    assert (
-        "httk workflow workspace init quickstart-workspace "
-        "--remote local --path quickstart-workspace --extension transactional-data-v1"
-    ) in commands
+    assert ("httk workflow workspace init quickstart-workspace --remote local --path quickstart-workspace") in commands
     assert any(line.startswith("httk workflow job new quickstart-workspace --template vasp-relax") for line in commands)
 
     completed = _run(
@@ -192,7 +189,7 @@ def test_the_python_api_tour_runs(work: Path, tmp_path: Path) -> None:
 @pytest.mark.parametrize("runner", ["defect_campaign.py", "defect_campaign.sh"])
 def test_the_campaign_examples_run_in_either_language(runner: str, tmp_path: Path, test_profile: _TestProfile) -> None:
     sites = test_profile.scale(normal=2, extended=3)
-    workspace = Workspace.initialize(tmp_path / runner, extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize(tmp_path / runner)
     parent = new_job(
         workspace,
         _EXAMPLES / runner,

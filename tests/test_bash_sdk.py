@@ -683,7 +683,7 @@ httk_workflow_main
 
 
 def test_a_payload_bash_runner_advances_commits_data_and_succeeds(tmp_path: Path) -> None:
-    workspace = Workspace.initialize(tmp_path / "workspace", extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize(tmp_path / "workspace")
     payload = tmp_path / "payload"
     files = payload / "files"
     files.mkdir(parents=True)

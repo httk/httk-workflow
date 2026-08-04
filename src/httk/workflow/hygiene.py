@@ -406,7 +406,7 @@ def _check_workspace_initialization(project: Path, metadata: dict[str, object], 
     if not repair:
         return finding
     if not (project / ".httk-workflow" / "format.json").is_file():
-        Workspace.initialize(project, extensions=("detached-transfer-v1",))
+        Workspace.initialize(project)
         finding.action = "initialized a detached-transfer workspace"
     else:
         finding.action = "the workspace already exists; cleared the failure flag"

@@ -50,8 +50,7 @@ The payload carries the structure and the INCAR it starts from:
 ```console
 mkdir -p prepared-job/files
 cp POSCAR INCAR POTCAR prepared-job/files/
-httk workflow workspace init workflow-workspace --remote local --path workflow-workspace \
-    --extension transactional-data-v1
+httk workflow workspace init workflow-workspace --remote local --path workflow-workspace
 httk workflow job submit workflow-workspace prepared-job --placement project/si
 httk workflow manager run workflow-workspace
 ```
@@ -64,7 +63,7 @@ The same file can be published to the workspace runner store instead, which pins
 it by digest for a whole campaign:
 
 ```python
-workspace = Workspace.initialize("workflow-workspace", extensions=["transactional-data-v1"])
+workspace = Workspace.initialize("workflow-workspace")
 published = workspace.publish_runner("/path/to/vasp_relax.py", name="vasp/relax.py")
 ```
 

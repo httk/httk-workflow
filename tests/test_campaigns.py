@@ -85,7 +85,7 @@ def _campaign_project(tmp_path: Path, assignment: str) -> tuple[Path, dict[str, 
     initialize_project(root, name="campaign")
     workspaces: dict[str, Workspace] = {}
     for partition in ("north", "south"):
-        workspace = Workspace.initialize(tmp_path / partition, extensions=["transactional-data-v1"])
+        workspace = Workspace.initialize(tmp_path / partition)
         register_workspace(partition, LOCAL_REMOTE, workspace.root, scope="project", project=root)
         workspaces[partition] = workspace
     write_campaign({"north": "north", "south": "south"}, assignment=assignment, project=root)

@@ -120,7 +120,7 @@ def _campaign(
         monkeypatch.setenv("HTTK_VASP_COMMAND", str(executable))
     else:
         monkeypatch.setenv("HTTK_VASP_COMMAND", command)
-    workspace = Workspace.initialize(root / "workspace", extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize(root / "workspace")
     reference = _reference(workspace, runner, source)
     payload = root / "payload"
     (payload / "files").mkdir(parents=True)

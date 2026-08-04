@@ -46,14 +46,6 @@ def add_workspace_init_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="KEY=VALUE",
         help="seed one application setting at creation, e.g. vasp.command=... (repeatable)",
     )
-    parser.add_argument(
-        "--extension",
-        action="append",
-        default=[],
-        metavar="EXTENSION",
-        choices=("transactional-data-v1", "detached-transfer-v1"),
-        help="enable this optional workspace extension (repeatable)",
-    )
     _add_by_path_argument(parser)
     add_durability_arguments(parser)
 
@@ -77,7 +69,6 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
     if _by_path(arguments):
         workspace = Workspace.initialize(
             arguments.workspace,
-            extensions=arguments.extension,
             durable=_durable(arguments),
         )
         for key, value in settings.items():
@@ -97,7 +88,6 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
         path=arguments.path,
         scope=arguments.scope,
         project=context.cwd,
-        extensions=arguments.extension,
         durable=_durable(arguments),
         settings=settings,
     )
@@ -261,14 +251,6 @@ def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> i
         print(f"skipped {skipped}")
     if arguments.dry_run:
         print("dry run: nothing was removed")
-    return 0
-
-
-def handle_workspace_upgrade(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Enable one implemented workspace extension in place."""
-
-    workspace = Workspace(_local_root(arguments, context, action="upgrade it"))
-    print("\n".join(sorted(workspace.upgrade(arguments.extension))))
     return 0
 
 
@@ -556,22 +538,6 @@ def build_workspace_parser(
     )
     collect.add_argument("--json", action="store_true", help="print the collection as one JSON report")
     _add_by_path_argument(collect)
-
-    upgrade = _leaf(
-        group,
-        "upgrade",
-        summary="enable an implemented workspace extension",
-        description="Enable one implemented workflow workspace extension",
-        handler=handle_workspace_upgrade,
-    )
-    upgrade.add_argument("workspace", metavar="WORKSPACE", help="the registered workspace to upgrade")
-    upgrade.add_argument(
-        "--extension",
-        action="append",
-        required=True,
-        metavar="EXTENSION",
-        help="the extension to enable, for example detached-transfer-v1 (repeatable)",
-    )
 
     unlock = _leaf(
         group,

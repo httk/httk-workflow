@@ -19,15 +19,6 @@ machine (being local is never implied), plus the `--path` the workspace lives at
 httk workflow workspace init WORKSPACE --remote local --path runs/WORKSPACE
 ```
 
-This creates a `core-v2` workspace and registers the name for it. Optional
-supported extensions are enabled at initialization:
-
-```console
-httk workflow workspace init WORKSPACE --remote local --path runs/WORKSPACE \
-  --extension transactional-data-v1 \
-  --extension detached-transfer-v1
-```
-
 A workspace on a cluster names the remote it lives on instead of `local`; it is
 created there over the adapter and its name is registered here. `workspace list`
 shows every registered name and where it resolves, `workspace forget` deregisters

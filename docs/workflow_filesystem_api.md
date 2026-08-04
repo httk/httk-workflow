@@ -8,19 +8,19 @@ workspace on disk means.*
 This document specifies the filesystem protocol around which the
 *httk-workflow* engine is built. It is the normative on-disk protocol rather
 than Python API documentation. The current `httk.workflow` implementation
-writes and serves the `core-v2` profile and supports the
-`transactional-data-v1` and `detached-transfer-v1` extensions; relocation and
-cross-workspace children remain reserved optional extensions and are rejected
+writes and serves the `core-v2` profile. Core-v2 includes transactional data,
+detached transfer, and replay-after-stop semantics; relocation and
+cross-workspace children remain reserved future capabilities and are rejected
 rather than partially executed.
 
-`core-v2` is `core-v1` plus four on-disk refinements: every `spawn.json` entry
+`core-v2` defines the current on-disk protocol: every `spawn.json` entry
 carries a mandatory unique `label`; a join summary records typed per-child
 observations which the next activation also reads as `children` in its attempt
 context; `runner` in `job.json` may name a shared runner outside the payload
 through `source` and `sha256`; and a runner-declared failure marked
-`retryable` is retried within the job's existing attempt budgets. A `core-v1`
-workspace remains readable, so it can be inspected and exported, but is never
-mutated in place: the sections below describe `core-v2`.
+`retryable` is retried within the job's existing attempt budgets. Transaction
+publication, sealed job transfer, and recovery after a stopped manager are also
+core semantics.
 
 The protocol is language independent. A workflow step may be a shell script, a
 Python program, a compiled executable, or any other program that can read and
@@ -44,7 +44,7 @@ The protocol covers:
 - safe competition between any number of task managers;
 - automatic and manual continuation;
 - dynamic fan-out into child jobs and later joins;
-- optional transactional contributions to durable job data;
+- transactional contributions to durable job data;
 - explicit, unexpected, and dependency failures;
 - durable history and discovery of failed jobs.
 
@@ -197,39 +197,16 @@ current profile, **core-v2**, supports:
 - persistent and isolated workdirs;
 - retries, joins, failures, cancellation, and operator requests;
 - packed journals, verified marker renames, startup recovery, and garbage
-  collection.
+  collection;
+- transactional data publication and replay;
+- sealed detached transfer and replay after a stopped manager.
 
-The following are optional extensions:
+`format.json` carries an `extensions` array for future protocol additions; it is
+empty in this release, and a workspace declaring an unknown extension refuses
+to attach. Unknown state kinds are never treated as failed or orphaned jobs.
 
-| Extension | Additional behavior |
-| --- | --- |
-| `transactional-data-v1` | Replayable contributions to `data/`. |
-| `relocation-v1` | Moving payloads between placements in one workspace. |
-| `multiworkspace-v1` | Cross-workspace children, joins, and coordinated transfer. |
-| `detached-transfer-v1` | Sealed standalone transfer bundles. |
-
-A workspace declares its core profile and enabled extensions in `format.json`.
-A manager MUST refuse to mutate a workspace whose core profile or enabled
-extensions it does not support. It MAY attach such a workspace read-only for
-inspection. Unknown state kinds are never treated as failed or orphaned jobs.
-
-**Withdrawn: `priority-bands-v1`.** An earlier revision defined an extension
-that sharded `state/ready/` into ten `p0xx/` through `p9xx/` directories. It is
-withdrawn and MUST NOT be enabled. It bought nothing: the exact priority is in
-every marker basename already, so nothing needed the directory to know a job's
-priority; a scan looking for the best available work still had to walk all ten
-bands; and because a band is part of the marker path, enabling it was an
-irreversible decision taken at workspace creation. It also made priority a
-placement-changing transition, which is the one thing ordinary transitions
-promise not to do. The `p<priority>` field of the marker basename stays exactly
-as specified — nothing about priority encoding changes. A workspace that
-declares this extension cannot be interpreted, because its ready markers carry
-one path component that would otherwise read as a placement, so an
-implementation MUST refuse to attach it — read-only included — and say that the
-workspace has to be re-initialized rather than migrated.
-
-This split is about implementation scope, not separate data models. Extensions
-retain the same job definition, marker, journal, and verified-rename rules.
+Priority is encoded in marker names rather than directory levels, and scheduling
+is best effort rather than a strict global ordering guarantee.
 
 ## Workspace layout and arbitrary placement
 
@@ -291,9 +268,8 @@ The protocol assigns no meaning to the placement components. They may represent
 projects, user names, dates, hash shards of any depth, or a mixture. Different
 jobs in one workspace may use completely different placement schemes.
 
-The layout shows all defined extensions. A core-only workspace need not create
-`relocating/` or `transferring/`, and no empty state-kind or placement
-directories are required.
+The layout includes the transfer state directories used by core-v2, and no
+empty state-kind or placement directories are required.
 
 `files/`, `data/`, a workdir, and attempt control are created only when
 required. Empty placeholder directories SHOULD NOT be created. Empty placement
@@ -349,10 +325,8 @@ manager reads policy when it attaches; a change reaches already-running
 managers only when they restart.
 
 There is no configured sharding depth and no priority directory level at all:
-priority is encoded in marker names, and the withdrawn `priority-bands-v1`
-extension described in “Conformance profiles” is the only thing that ever
-proposed otherwise. A marker's path below its state kind is its placement and
-nothing else.
+priority is encoded in marker names. A marker's path below its state kind is its
+placement and nothing else.
 
 Managers therefore provide best-effort priority scheduling: a cold start and an
 incremental scan may temporarily discover lower-priority work first. Strict
@@ -372,7 +346,7 @@ limits rather than a protocol sharding scheme.
 
 A core manager may attach several independent workspaces for operational
 convenience, but jobs and joins remain within their own workspaces. Cross-workspace
-references and coordinated movement require `multiworkspace-v1`.
+references and coordinated movement are reserved future capabilities.
 
 A task manager accepts any combination of:
 
@@ -949,7 +923,7 @@ The mode MUST be explicit in `job.json`; the protocol has no implicit default.
 job may keep all mutable and final application data in its persistent workdir.
 It never needs to create `data/`, publish a transaction, or increment a data
 generation. With `transactional`, `data/` and the transaction protocol below
-are available when the workspace enables `transactional-data-v1`.
+are available in every core-v2 workspace.
 
 `claim` and its `pool` are required; `required_capabilities` may be empty.
 `claim.pool` is the scheduling pool or queue from which the job may be claimed.
@@ -1042,8 +1016,8 @@ The state kinds are:
 | `running` | The current attempt may have a live process. |
 | `committing` | The attempt is fenced; its outcome is being replayed. |
 | `cancelling` | The attempt is fenced by a cancellation; its process is being stopped and its exit verified. |
-| `relocating` | `relocation-v1`: no attempt may run; placement is changing. |
-| `transferring` | Transfer extensions: a quiescent payload is moving or detaching. |
+| `relocating` | No attempt may run; the placement is changing. |
+| `transferring` | A quiescent payload is moving or detaching. |
 | `waiting` | Waiting for a declared child join. |
 | `paused` | Requires an operator request to continue. |
 | `succeeded` | Successful terminal state. |
@@ -1125,7 +1099,7 @@ Every transition of the core profile, exhaustively:
 | `submitted`, `ready`, `waiting`, `paused`, `failed` | the same kind | Operator `set_priority`, which renames the marker to a new priority at the next generation. |
 
 Each row is one verified rename of the same marker; no other rename of a marker
-is defined, and the two extension states `relocating` and `transferring` are
+is defined, and the `relocating` and `transferring` states are
 described in their own sections.
 
 `advance` may name any next step, including the same textual name. It creates a
@@ -1139,8 +1113,8 @@ terminal state and not a quiescent one: it is the interval in which the fenced
 process is stopped and its exit is verified. See
 [Cancellation](#cancellation).
 
-When `relocation-v1` is enabled, quiescent states may also pass through
-`relocating` and return to the same logical state at a different placement.
+Quiescent states may also pass through `relocating` and return to the same
+logical state at a different placement.
 
 ### Cancellation
 
@@ -1667,9 +1641,8 @@ permanent revision and manifest hierarchy per step.
 
 ## Relocating and transferring jobs
 
-This section requires `relocation-v1`, `multiworkspace-v1`, or
-`detached-transfer-v1` as indicated. A core implementation does not create
-`relocating` or `transferring` states.
+This section describes relocation and detached transfer in core-v2. A core
+implementation creates `relocating` and `transferring` states as needed.
 
 Arbitrary placement is dynamic. A job may move after submission, but a raw
 `mv` of an authoritative payload is not a state transition: the marker would
@@ -1805,7 +1778,7 @@ whole-workspace scan inside a scheduling tick. The guard is advisory, so a child
 written before spawns carried the parent placement makes it probe nothing rather
 than rescan; a fresh child MUST carry it. Child UUIDs and tags are chosen before outcome publication. In the
 core profile, the target workspace MUST be the parent's workspace;
-cross-workspace children require `multiworkspace-v1`.
+cross-workspace children remain a reserved future capability.
 
 Every `spawn.json` entry MUST also carry a `label`: a nonempty tag-syntax name
 that is unique within that spawn set. A gathering step selects its inputs by
@@ -1887,8 +1860,7 @@ A manager resolves each named child through this ladder, in order:
    case;
 2. its in-memory job-id-to-marker index, confirmed against the filesystem
    before it is used;
-3. under `relocation-v1` or `multiworkspace-v1`, any packed relocation or
-   transfer forwarding record;
+3. any packed relocation or transfer forwarding record;
 4. a complete marker scan of the named workspace.
 
 A cache is never the only recovery path, and a cache miss is never the answer.
@@ -1899,7 +1871,7 @@ alone, and it never falls back to a whole-workspace scan from inside a
 scheduling tick. A reference that lacks a placement is a protocol error of
 whatever published it, and the manager rejects the outcome rather than rescanning
 the workspace per child. The whole-workspace scan of step 4 survives for the
-extension forwarding of step 3 and for interactive resolution — `job show`, `job
+forwarding record of step 3 and for interactive resolution — `job show`, `job
 why`, `job log`, and harvest resolve — where locating an arbitrary and possibly
 finished job by one exhaustive scan is acceptable; it is never entered on the
 scheduling hot path. The
@@ -1918,7 +1890,7 @@ restarted manager restarts that grace, which is safe because the grace exists
 only to absorb transient nonvisibility.
 
 In the core profile, a child named by an unresolved join MUST NOT relocate, so
-its placement hint remains valid. Extension implementations MAY relocate it only
+its placement hint remains valid. Future implementations MAY relocate it only
 when they provide the forwarding and full-scan fallback above.
 
 When satisfied, the manager appends a ready frame for a new activation and
@@ -2110,8 +2082,8 @@ Actions include:
 - `cancel`;
 - `set_priority`;
 - `pause`;
-- `relocate`, when `relocation-v1` is enabled;
-- `transfer`, when `multiworkspace-v1` or `detached-transfer-v1` is enabled.
+- `relocate`, when a placement changes;
+- `transfer`, when a job moves between workspaces.
 
 Action validity is deliberately narrow:
 
@@ -2119,8 +2091,7 @@ Action validity is deliberately narrow:
 - `set_priority` applies only to `submitted`, `ready`, `waiting`, `paused`, or
   `failed`;
 - an operator `pause` applies only to `submitted`, `ready`, or `waiting`;
-- `relocate` and `transfer` apply only to the quiescent states permitted by
-  their extension;
+- `relocate` and `transfer` apply only to their permitted quiescent states;
 - `cancel` may target any nonterminal state and uses the explicit fencing and
   process-termination procedure of [Cancellation](#cancellation) for a live
   attempt. A second `cancel` of a job already in `cancelling` is not an error
@@ -2243,8 +2214,7 @@ decision must not be mistaken for an abandoned attempt.
 A manager:
 
 1. discovers explicit and watched workspaces and validates each `format.json`;
-2. rejects duplicate workspace IDs and unsupported enabled extensions before
-   mutation;
+2. rejects duplicate workspace IDs and unknown future capabilities before mutation;
 3. creates a manager record, fresh writer-incarnation journal, and heartbeat in
    each attached workspace;
 4. resumes markers in `committing` and, when enabled, `relocating` and
@@ -2275,9 +2245,8 @@ A high-scale implementation SHOULD:
 Discovering the globally highest-priority ready job requires enumerating the
 ready tree. Incremental scans MAY therefore cause long-lived operational
 priority inversion, especially after cold start; priority is a preference
-rather than a strict global ordering guarantee. This is not a gap an extension
-should close by adding directory levels — see the withdrawn `priority-bands-v1`
-above — and no scan strategy changes claim correctness.
+rather than a strict global ordering guarantee. This is not a gap to close by
+adding directory levels, and no scan strategy changes claim correctness.
 
 A manager MAY restrict every scan to a set of placement prefixes, the same kind
 of deployment policy by which it advertises pools and capabilities, so that
@@ -2349,8 +2318,8 @@ workspace publishes in `policy.retention`:
 That list is permissive: it bounds what a conforming collector *may* touch, not
 what one must. The `httk workflow workspace gc` implementation collects the
 subset tabulated in “Retention gates and always-safe collection” below, and
-adds the retired transfer bundles and per-transfer receipts the
-`detached-transfer-v1` extension accumulates. It deliberately leaves isolated
+adds the retired transfer bundles and per-transfer receipts core-v2 accumulates.
+It deliberately leaves isolated
 workdirs, incomplete outcome directories, and payloads that never reached
 `submitted` alone, because each of those is the only remaining evidence of a
 job that went wrong.
@@ -2564,8 +2533,8 @@ variables are convenient projections for simple runners.
 
 ## Worked example
 
-This example deliberately uses isolated workdirs in a workspace with
-`transactional-data-v1` enabled. Job `silicon-relax--J` starts at `prepare`,
+This example deliberately uses isolated workdirs in a core-v2 workspace. Job
+`silicon-relax--J` starts at `prepare`,
 creates two calculations, joins them, and finalizes:
 
 1. Submission publishes its one marker as

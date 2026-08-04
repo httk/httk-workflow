@@ -80,11 +80,8 @@ def test_job_state_and_attempt_control_do_not_change_the_payload_digest(tmp_path
 
 
 def test_a_job_that_wrote_state_still_transfers_and_verifies(tmp_path: Path) -> None:
-    source = Workspace.initialize(tmp_path / "source-workspace", extensions=["detached-transfer-v1"])
-    destination = Workspace.initialize(
-        tmp_path / "destination-workspace",
-        extensions=["detached-transfer-v1"],
-    )
+    source = Workspace.initialize(tmp_path / "source-workspace")
+    destination = Workspace.initialize(tmp_path / "destination-workspace")
     job_id = _submit(source, tmp_path / "source")
     with TaskManager(source, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=60.0)

@@ -282,7 +282,7 @@ def _remote_workspace_id(target: Any, root: str, *, timeout: float | None, noun:
 
     The probe is the same for both directions of a transfer: nothing is sealed,
     pushed, or pulled until the far side has answered with a status of the
-    profile and extension this protocol needs, so an incompatible or absent
+    profile this protocol needs, so an incompatible or absent
     workspace is reported before any state moves. The status is asked for
     ``--by-path`` because the far side keeps no registry: it addresses its own
     workspace by the path this client resolved the binding to.
@@ -305,7 +305,6 @@ def _remote_workspace_id(target: Any, root: str, *, timeout: float | None, noun:
             status_data.get("format") != "httk-workflow-status"
             or status_data.get("format_version") != 1
             or status_data.get("core_profile") != CORE_PROFILE
-            or "detached-transfer-v1" not in status_data.get("extensions", [])
         ):
             raise ValueError
         workspace_id = str(status_data["workspace_id"])

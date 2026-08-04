@@ -172,7 +172,7 @@ def _campaign(root: Path, source: str, name: str, *, sites: int) -> Workspace:
     runner = root / name
     runner.write_text(source, encoding="utf-8")
     runner.chmod(0o755)
-    workspace = Workspace.initialize(root / "workspace", extensions=["transactional-data-v1"])
+    workspace = Workspace.initialize(root / "workspace")
     reference = workspace.publish_runner(runner, name=f"parity/{name}")
     payload = root / "parent"
     prepare_job_payload(

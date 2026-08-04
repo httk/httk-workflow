@@ -538,11 +538,7 @@ def test_an_unrecognized_adapter_kind_still_refuses(tmp_path: Path, remote: Remo
 def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote: Remote) -> None:
     source_root = tmp_path / "project"
     initialize_project(source_root, name="end-to-end")
-    Workspace(source_root).upgrade(["detached-transfer-v1"])
-    destination = Workspace.initialize(
-        remote.root / "runs" / "workspace",
-        extensions=["detached-transfer-v1"],
-    )
+    destination = Workspace.initialize(remote.root / "runs" / "workspace")
     fake_remote(source_root, workspace=str(destination.root))
     payload, job_id = _payload(tmp_path / "incoming")
     Workspace(source_root).submit(payload, "jobs")

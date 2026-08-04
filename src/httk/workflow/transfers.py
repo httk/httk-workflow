@@ -12,8 +12,9 @@ from typing import Any
 
 from ._util import read_json, sha256_file, utc_now, write_json_atomic
 from .configuration import sign_document, verify_document
-from .errors import FormatError, UnsupportedExtensionError, WorkspaceCorruptionError
+from .errors import FormatError, WorkspaceCorruptionError
 from .models import (
+    CORE_PROFILE,
     QUIESCENT_KINDS,
     STATE_KINDS,
     JobDefinition,
@@ -259,7 +260,7 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
     manifest = {
         "format": TRANSFER_FORMAT,
         "format_version": TRANSFER_FORMAT_VERSION,
-        "extension": "detached-transfer-v1",
+        "core_profile": CORE_PROFILE,
         "transfer_id": transfer_id,
         "source_workspace_id": workspace.workspace_id,
         "destination_workspace_id": destination_workspace_id,
@@ -302,8 +303,6 @@ def detach_job(
 ) -> Path:
     """Fence and seal one job, leaving no schedulable source marker."""
 
-    if "detached-transfer-v1" not in workspace.extensions:
-        raise UnsupportedExtensionError("workspace has not enabled detached-transfer-v1")
     destination_id = canonical_uuid(destination_workspace_id, "destination_workspace_id")
     identifier = str(uuid.uuid4()) if transfer_id is None else canonical_uuid(transfer_id, "transfer_id")
     existing = _ledger_path(workspace, identifier)
@@ -350,7 +349,7 @@ def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
 
     payload = Path(bundle).expanduser().resolve()
     manifest = read_json(payload / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
-    if manifest.get("format") != TRANSFER_FORMAT or manifest.get("extension") != "detached-transfer-v1":
+    if manifest.get("format") != TRANSFER_FORMAT or manifest.get("core_profile") != CORE_PROFILE:
         raise FormatError("unsupported detached transfer manifest")
     if manifest.get("format_version") != TRANSFER_FORMAT_VERSION:
         # Naming the version keeps an older bundle from being reported as the
@@ -389,8 +388,6 @@ def _ack_path(workspace: Workspace, transfer_id: str) -> Path:
 def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
     """Idempotently import a sealed bundle and publish its prior state."""
 
-    if "detached-transfer-v1" not in workspace.extensions:
-        raise UnsupportedExtensionError("destination workspace has not enabled detached-transfer-v1")
     source = Path(bundle).expanduser().resolve()
     manifest = validate_bundle(source)
     transfer_id = str(manifest["transfer_id"])
