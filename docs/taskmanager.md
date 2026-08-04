@@ -11,12 +11,12 @@ Every command below is spelled the canonical way, `httk workflow …`. The
 
 Every `httk workflow` command names a *registered* workspace — a name bound once
 to a place — never a bare path. `workspace init` both creates the workspace and
-registers the name, and the place is always explicit: `--remote local` for this
-machine (being local is never implied), plus the `--path` the workspace lives at.
+registers the name. Plain names are local and default to `./NAME`; a
+`REMOTE:NAME` name creates a workspace on that remote.
 `WORKSPACE` below is that registered name.
 
 ```console
-httk workflow workspace init WORKSPACE --remote local --path runs/WORKSPACE
+httk workflow workspace init WORKSPACE --path runs/WORKSPACE
 ```
 
 A workspace on a cluster names the remote it lives on instead of `local`; it is

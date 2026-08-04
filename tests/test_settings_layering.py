@@ -18,7 +18,7 @@ import sys
 import uuid
 from pathlib import Path
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 
 from conftest import fake_remote
 from httk.workflow import Workspace
@@ -218,7 +218,7 @@ def test_an_absent_setting_is_none_in_python_and_exit_one_in_bash(tmp_path: Path
 
 
 def test_a_remote_definition_seeds_the_new_workspaces_settings(tmp_path: Path) -> None:
-    """A workspace bound to a remote starts with the remote's whitelisted queue
+    """A workspace bound to a remote starts with the remote's whitelisted
     settings as its application settings, so no operator restates them."""
 
     assert SEED_SETTING_MAP["vasp_command"] == "vasp.command"
@@ -234,11 +234,11 @@ def test_a_remote_definition_seeds_the_new_workspaces_settings(tmp_path: Path) -
         vasp_pseudo_library="/data/potpaw",
     )
 
-    seeds = seed_application_settings(bundle, "default")
+    seeds = seed_application_settings(bundle)
     assert seeds == {"vasp.command": "srun vasp_std", "vasp.pseudo_library": "/data/potpaw"}
 
     binding = create_workspace(
-        "station",
+        "cluster:station",
         remote="cluster",
         path=tmp_path / "runs",
         scope="project",

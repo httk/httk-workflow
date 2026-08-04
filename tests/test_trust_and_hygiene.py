@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 from httk.core.cli import CLIContext
 from httk.core.crypto import ed25519_generate_seed, ed25519_public_key, ed25519_sign
 
@@ -504,9 +504,9 @@ def test_describe_project_reports_keys_workspace_and_manifest(tmp_path: Path, mo
 def test_describe_remote_never_reports_a_credential_value(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch, name="remotes")
     bundle = add_remote("cluster", template="local", project=project)
-    store_credentials(bundle, "default", {"password": "hunter2", "token": "abc"})
+    store_credentials(bundle, {"password": "hunter2", "token": "abc"})
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
-    metadata["queues"]["default"]["workspace"] = str(tmp_path / "remote")
+    metadata["settings"]["workspace_root"] = str(tmp_path / "remote")
     (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
 
     description = _fields(describe_remote("cluster", project=project))
@@ -514,11 +514,11 @@ def test_describe_remote_never_reports_a_credential_value(tmp_path: Path, monkey
     assert description["scope"] == "project" and description["kind"] == "local"
     assert description["valid"] is True
     assert description["adapter"] == str(bundle / "adapter")
-    queue = description["queues"]["default"]
-    assert queue["settings"] == {"workspace": str(tmp_path / "remote")}
-    assert queue["credential_keys"] == ["password", "token"]
-    assert queue["settings_source"] == {
-        "workspace": "remote.json",
+    remote_settings = description
+    assert remote_settings["settings"] == {"workspace_root": str(tmp_path / "remote")}
+    assert remote_settings["credential_keys"] == ["password", "token"]
+    assert remote_settings["settings_source"] == {
+        "workspace_root": "remote.json",
         "password": "credentials.json",
         "token": "credentials.json",
     }
@@ -530,7 +530,7 @@ def test_remove_remote_refuses_while_a_transfer_still_needs_it(tmp_path: Path, m
     destination = Workspace.initialize(tmp_path / "remote")
     bundle = add_remote("cluster", template="local", project=project)
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
-    metadata["queues"]["default"]["workspace"] = str(destination.root)
+    metadata["settings"]["workspace_root"] = str(destination.root)
     (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
 
     workspace = Workspace(project)
@@ -684,7 +684,7 @@ def test_remote_show_and_remove_are_reachable_from_the_command_line(
 ) -> None:
     project = _project(tmp_path, monkeypatch, name="remotes-cli")
     bundle = add_remote("cluster", template="local", project=project)
-    store_credentials(bundle, "default", {"password": "hunter2"})
+    store_credentials(bundle, {"password": "hunter2"})
     context = CLIContext("httk", project)
 
     assert command(["remote", "show", "cluster", "--json"], context) == 0
@@ -714,7 +714,7 @@ def test_remote_remove_force_does_not_skip_the_transfer_refusal(tmp_path: Path, 
     destination = Workspace.initialize(tmp_path / "remote")
     bundle = add_remote("cluster", template="local", project=project)
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
-    metadata["queues"]["default"]["workspace"] = str(destination.root)
+    metadata["settings"]["workspace_root"] = str(destination.root)
     (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
     workspace = Workspace(project)
     payload, job_id = _payload(tmp_path)

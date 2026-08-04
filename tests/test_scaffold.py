@@ -328,8 +328,6 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
                 "workspace",
                 "init",
                 ws_name,
-                "--remote",
-                "local",
                 "--path",
                 str(root),
             ],
@@ -395,7 +393,7 @@ def test_the_command_reports_what_it_cannot_do(
 ) -> None:
     name = "refusals"
     root = tmp_path / name
-    assert command(["workspace", "init", name, "--remote", "local", "--path", str(root)], _context(tmp_path)) == 0
+    assert command(["workspace", "init", name, "--path", str(root)], _context(tmp_path)) == 0
     capsys.readouterr()
 
     # A malformed assignment, an unknown template, and an empty structure directory.

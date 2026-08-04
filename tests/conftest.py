@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 
 # The suite deliberately launches many short-lived Python runners.  Under xdist
 # each runner imports NumPy through httk-core; keeping each BLAS runtime to one
@@ -57,11 +57,12 @@ def register_ws(
     first with this helper and passes the name instead.
     """
 
-    register_workspace(name, remote, str(path), scope=scope, project=getattr(context, "cwd", None))
-    return name
+    qualified = name if remote == "local" else f"{remote}:{name}"
+    register_workspace(qualified, remote, str(path), scope=scope, project=getattr(context, "cwd", None))
+    return qualified
 
 
-#: The host every fake ``ssh-slurm`` queue is pointed at. The stand-in ``ssh``
+#: The host every fake ``ssh-slurm`` remote is pointed at. The stand-in ``ssh``
 #: ignores it beyond logging it, but the adapters must still carry it around.
 FAKE_HOST = "fake.example.test"
 
@@ -206,15 +207,17 @@ def fake_remote(
     name: str = "cluster",
     **settings: object,
 ) -> Path:
-    """Add one remote to *project* and point its default queue at the stand-in."""
+    """Add one remote to *project* and point it at the stand-in."""
 
     bundle = add_remote(name, template=template, project=project)
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
-    queue = dict(metadata["queues"]["default"])
+    remote_settings = dict(metadata["settings"])
     if template == "ssh-slurm":
-        queue.update({"host": FAKE_HOST, "username": "someone"})
-    queue.update(settings)
-    metadata["queues"]["default"] = queue
+        remote_settings.update({"host": FAKE_HOST, "username": "someone"})
+    if "workspace" in settings:
+        settings["workspace_root"] = settings.pop("workspace")
+    remote_settings.update(settings)
+    metadata["settings"] = remote_settings
     (bundle / "remote.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
     return bundle
 

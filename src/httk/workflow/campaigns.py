@@ -286,7 +286,7 @@ def campaign_managers(
             result = run_adapter(
                 target.bundle,
                 "start-manager",
-                {"queue": target.queue, "argv": manager_argv, "workspace": binding.path, "count": count},
+                {"remote_settings": {}, "argv": manager_argv, "workspace": binding.path, "count": count},
                 timeout=adapter_timeout,
             )
             report.append({"partition": partition, "workspace": name, "mode": "remote", "result": result})

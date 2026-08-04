@@ -8,12 +8,12 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
 from httk.workflow import Workspace
-from httk.workflow.adapters import add_remote, queue_settings, run_adapter
+from httk.workflow.adapters import add_remote, remote_settings, run_adapter
 from httk.workflow.manifests import (
     MAINTENANCE_LOCK_FILE,
     MAINTENANCE_LOCK_MAX_AGE_SECONDS,
@@ -157,10 +157,10 @@ def test_secret_setting_avoids_remote_json_and_manifests(tmp_path: Path, monkeyp
 
     metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
     assert "password" not in json.dumps(metadata) and "hunter2" not in json.dumps(metadata)
-    assert metadata["queues"]["default"] == {}
+    assert metadata["settings"] == {}
 
     credentials = remote / "credentials.json"
-    assert json.loads(credentials.read_text(encoding="utf-8")) == {"default": {"password": "hunter2", "token": "abc"}}
+    assert json.loads(credentials.read_text(encoding="utf-8")) == {"password": "hunter2", "token": "abc"}
     assert credentials.stat().st_mode & 0o777 == 0o600
 
     manifest = create_manifest(project)
@@ -190,7 +190,7 @@ def test_secret_setting_remains_visible_to_the_adapter(tmp_path: Path, monkeypat
     project = _project(tmp_path, monkeypatch, name="visible")
     remote, code = _configured(project, "password=hunter2", "host=login.example.test")
     assert code == 0
-    assert queue_settings(remote, "default") == {
+    assert remote_settings(remote) == {
         "host": "login.example.test",
         "password": "hunter2",
     }
@@ -207,16 +207,16 @@ print(json.dumps({{"format":"httk-computer-result","format_version":1,
         encoding="utf-8",
     )
     adapter.chmod(0o755)
-    run_adapter(remote, "invoke", {"queue": "default", "argv": ["true"]})
-    assert json.loads(echo.read_text(encoding="utf-8"))["queue_settings"]["password"] == "hunter2"
+    run_adapter(remote, "invoke", {"remote_settings": {}, "argv": ["true"]})
+    assert json.loads(echo.read_text(encoding="utf-8"))["remote_settings"]["password"] == "hunter2"
 
 
 def test_whitelisted_setting_still_lands_in_remote_json(tmp_path: Path, monkeypatch, capsys) -> None:
     project = _project(tmp_path, monkeypatch, name="whitelisted")
     destination = tmp_path / "elsewhere"
-    remote, code = _configured(project, f"workspace={destination}", "username=someone")
+    remote, code = _configured(project, f"workspace_root={destination}", "username=someone")
     assert code == 0
     assert "credentials.json" not in capsys.readouterr().err
     metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
-    assert metadata["queues"]["default"] == {"workspace": str(destination), "username": "someone"}
+    assert metadata["settings"] == {"workspace_root": str(destination), "username": "someone"}
     assert not (remote / "credentials.json").exists()

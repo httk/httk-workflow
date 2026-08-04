@@ -11,7 +11,7 @@ registration only records where a name points.
 import json
 from pathlib import Path
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 from httk.core.project import initialize_project as initialize_anchor
 
 from httk.workflow import Workspace
@@ -58,7 +58,7 @@ def test_a_project_binding_registers_resolves_and_is_forgotten(tmp_path: Path) -
     # A project binding may name any defined remote; define one so a remote-bound
     # binding validates, alongside the local binding this round-trips.
     add_remote("cluster-like", template="local", project=project)
-    register_workspace("station", "cluster-like", tmp_path / "runs", scope="project", project=project)
+    register_workspace("cluster-like:station", "cluster-like", tmp_path / "runs", scope="project", project=project)
 
     register_workspace("local-ws", LOCAL_REMOTE, tmp_path / "here", scope="project", project=project)
     resolved = resolve_workspace("local-ws", project=project)
@@ -107,6 +107,13 @@ def test_defining_a_remote_named_local_is_refused(tmp_path: Path) -> None:
     initialize_project(project, name="reserved")
     with pytest.raises(ValueError, match="reserved"):
         add_remote("local", template="local", project=project)
+
+
+def test_remote_names_cannot_contain_colons(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="colon-remote")
+    with pytest.raises(ValueError, match="workspace bindings"):
+        add_remote("ka:ppa", template="local", project=project)
 
 
 def test_binding_to_an_undefined_remote_is_refused_at_registration(tmp_path: Path) -> None:

@@ -10,7 +10,7 @@ checks that a remote-bound name reaches its far side through the adapter.
 import json
 from pathlib import Path
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote
@@ -53,7 +53,7 @@ def test_a_job_runs_end_to_end_addressed_only_by_name(tmp_path: Path, capsys: py
     runner = _runner(tmp_path)
     root = tmp_path / "runs"
 
-    assert command(["workspace", "init", "sweep", "--remote", "local", "--path", str(root)], context) == 0
+    assert command(["workspace", "init", "sweep", "--path", str(root)], context) == 0
     capsys.readouterr()
 
     assert (
@@ -107,7 +107,7 @@ def test_status_of_a_remote_bound_name_reaches_the_far_side(
 
     assert (
         command(
-            ["workspace", "init", "station", "--remote", "cluster", "--path", remote_path, "--scope", "project"],
+            ["workspace", "init", "cluster:station", "--path", remote_path, "--scope", "project"],
             context,
         )
         == 0
@@ -118,11 +118,42 @@ def test_status_of_a_remote_bound_name_reaches_the_far_side(
 
     assert command(["workspace", "list"], context) == 0
     listing = capsys.readouterr().out
-    assert "station" in listing and "cluster" in listing
+    assert "cluster:station" in listing and "cluster" in listing
 
-    assert command(["workspace", "status", "station"], context) == 0
+    assert command(["workspace", "status", "cluster:station"], context) == 0
     capsys.readouterr()
     assert any("workspace status" in item for item in remote.commands())
+
+
+def test_remote_init_derives_workspace_root_and_registers_colon_binding(
+    tmp_path: Path,
+    remote: Remote,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="derived-remote")
+    root = remote.root / "Runs"
+    fake_remote(project, workspace_root=str(root))
+    context = _context(project)
+
+    assert command(["workspace", "init", "cluster:runs", "--scope", "project"], context) == 0
+    capsys.readouterr()
+    assert (root / "runs" / ".httk-workflow" / "format.json").is_file()
+    assert command(["workspace", "list"], context) == 0
+    assert "cluster:runs" in capsys.readouterr().out
+
+
+def test_plain_init_defaults_to_cwd_name_and_local_colon_is_refused(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    context = _context(tmp_path)
+    assert command(["workspace", "init", "plain"], context) == 0
+    capsys.readouterr()
+    assert (tmp_path / "plain" / ".httk-workflow" / "format.json").is_file()
+
+    assert command(["workspace", "init", "local:x"], context) == 2
+    assert "plain NAME" in capsys.readouterr().err
 
 
 def test_settings_round_trip_on_a_remote_bound_name(
@@ -138,18 +169,20 @@ def test_settings_round_trip_on_a_remote_bound_name(
 
     assert (
         command(
-            ["workspace", "init", "station", "--remote", "cluster", "--path", remote_path, "--scope", "project"],
+            ["workspace", "init", "cluster:station", "--path", remote_path, "--scope", "project"],
             context,
         )
         == 0
     )
     capsys.readouterr()
 
-    assert command(["workspace", "settings", "set", "station", "vasp.command", "srun -n 8 vasp_std"], context) == 0
+    assert (
+        command(["workspace", "settings", "set", "cluster:station", "vasp.command", "srun -n 8 vasp_std"], context) == 0
+    )
     assert json.loads(capsys.readouterr().out) == "srun -n 8 vasp_std"
-    assert command(["workspace", "settings", "show", "station", "vasp.command"], context) == 0
+    assert command(["workspace", "settings", "show", "cluster:station", "vasp.command"], context) == 0
     assert json.loads(capsys.readouterr().out) == "srun -n 8 vasp_std"
-    assert command(["workspace", "settings", "unset", "station", "vasp.command"], context) == 0
+    assert command(["workspace", "settings", "unset", "cluster:station", "vasp.command"], context) == 0
     capsys.readouterr()
     assert Workspace(remote_path, mutable=False).settings == {}
     assert any("workspace settings set" in item for item in remote.commands())

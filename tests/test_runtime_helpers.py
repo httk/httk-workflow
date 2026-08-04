@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 
 from httk.workflow import Attempt
 from httk.workflow.compat.v1 import bundled_v1_root

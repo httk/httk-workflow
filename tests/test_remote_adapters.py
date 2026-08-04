@@ -12,7 +12,7 @@ import stat
 import uuid
 from pathlib import Path
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 from httk.core.cli import CLIContext
 
 from conftest import FAKE_HOST, Remote, fake_remote, register_ws
@@ -107,7 +107,9 @@ def test_ssh_push_and_pull_round_trip_a_real_tree(tmp_path: Path, remote: Remote
     source = _tree(tmp_path / "source")
     destination = remote.root / "runs" / "incoming"
 
-    pushed = run_adapter(bundle, "push", {"queue": "default", "source": str(source), "destination": str(destination)})
+    pushed = run_adapter(
+        bundle, "push", {"remote_settings": {}, "source": str(source), "destination": str(destination)}
+    )
 
     assert pushed["path"] == str(destination)
     assert (destination / "files" / "data with spaces.txt").read_text(encoding="utf-8") == "payload\n"
@@ -116,14 +118,14 @@ def test_ssh_push_and_pull_round_trip_a_real_tree(tmp_path: Path, remote: Remote
     assert os.readlink(destination / "link") == "files/runner"
 
     back = tmp_path / "back"
-    pulled = run_adapter(bundle, "pull", {"queue": "default", "source": str(destination), "destination": str(back)})
+    pulled = run_adapter(bundle, "pull", {"remote_settings": {}, "source": str(destination), "destination": str(back)})
 
     assert pulled["path"] == str(back)
     assert (back / "files" / "runner").read_text(encoding="utf-8") == _RUNNER
     assert stat.S_IMODE((back / "files" / "runner").stat().st_mode) == 0o750
     assert os.readlink(back / "link") == "files/runner"
     # Repeating the push is the resume path the detached transfer relies on.
-    assert run_adapter(bundle, "push", {"queue": "default", "source": str(source), "destination": str(destination)})
+    assert run_adapter(bundle, "push", {"remote_settings": {}, "source": str(source), "destination": str(destination)})
 
 
 def test_ssh_push_transfers_only_the_requested_files(tmp_path: Path, remote: Remote) -> None:
@@ -137,7 +139,7 @@ def test_ssh_push_transfers_only_the_requested_files(tmp_path: Path, remote: Rem
         bundle,
         "push",
         {
-            "queue": "default",
+            "remote_settings": {},
             "source": str(source),
             "destination": str(destination),
             "files": ["files/data with spaces.txt"],
@@ -158,7 +160,7 @@ def test_ssh_push_refuses_a_path_that_escapes_the_transfer(tmp_path: Path, remot
             bundle,
             "push",
             {
-                "queue": "default",
+                "remote_settings": {},
                 "source": str(source),
                 "destination": str(remote.root / "runs" / "escape"),
                 "files": ["../secret"],
@@ -200,7 +202,7 @@ def test_remote_invoke_keeps_quoting_hostile_arguments_intact(tmp_path: Path, re
         bundle,
         "invoke",
         {
-            "queue": "default",
+            "remote_settings": {},
             "argv": [
                 "python3",
                 "-c",
@@ -226,7 +228,7 @@ def test_remote_invoke_honours_the_requested_directory(tmp_path: Path, remote: R
     invoked = run_adapter(
         bundle,
         "invoke",
-        {"queue": "default", "argv": ["pwd"], "cwd": str(directory)},
+        {"remote_settings": {}, "argv": ["pwd"], "cwd": str(directory)},
     )
 
     assert invoked["returncode"] == 0
@@ -238,7 +240,7 @@ def test_remote_invoke_reports_a_failing_remote_command(tmp_path: Path, remote: 
     initialize_project(project, name="failing")
     bundle = fake_remote(project)
 
-    invoked = run_adapter(bundle, "invoke", {"queue": "default", "argv": ["false"]})
+    invoked = run_adapter(bundle, "invoke", {"remote_settings": {}, "argv": ["false"]})
 
     assert invoked["returncode"] == 1
 
@@ -253,7 +255,7 @@ def test_remote_status_returns_the_remote_workspace_json(tmp_path: Path, remote:
         bundle,
         "status",
         {
-            "queue": "default",
+            "remote_settings": {},
             "argv": ["httk", "workflow", "workspace", "status", str(workspace.root), "--by-path", "--json"],
         },
     )
@@ -283,7 +285,7 @@ def test_ssh_start_manager_generates_and_submits_the_batch_script(tmp_path: Path
         bundle,
         "start-manager",
         {
-            "queue": "default",
+            "remote_settings": {},
             "argv": ["httk", "workflow", "manager", "run", str(workspace.root)],
             "count": 3,
         },
@@ -321,7 +323,7 @@ def test_start_manager_keeps_an_explicit_worker_count(tmp_path: Path, remote: Re
         bundle,
         "start-manager",
         {
-            "queue": "default",
+            "remote_settings": {},
             "argv": ["httk", "workflow", "manager", "run", str(workspace.root), "--workers", "1"],
         },
     )
@@ -343,7 +345,7 @@ def test_start_manager_prefers_the_stated_workspace_over_the_argv_heuristic(
         bundle,
         "start-manager",
         {
-            "queue": "default",
+            "remote_settings": {},
             "workspace": str(workspace.root),
             # Reading the workspace back out of this vector is only the
             # documented fallback, so the stated field has to win over it.
@@ -370,14 +372,14 @@ def test_start_manager_from_the_command_line_counts_managers_and_defers_workers(
     # scheduler, subsuming the retired `transfer start-manager` verb.
     register_ws(context, workspace.root, "station", remote="cluster")
 
-    assert command(["manager", "run", "station", "--count", "2"], context) == 0
+    assert command(["manager", "run", "cluster:station", "--count", "2"], context) == 0
     submitted = json.loads(capsys.readouterr().out)
     assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
-    # No --workers on the command line, so the queue's setting is what runs.
+    # No --workers on the command line, so the remote's setting is what runs.
     script = Path(str(submitted["script"])).read_text(encoding="utf-8")
     assert f"exec httk workflow manager run {workspace.root} --by-path --workers 4" in script
 
-    assert command(["manager", "run", "station", "--workers", "1"], context) == 0
+    assert command(["manager", "run", "cluster:station", "--workers", "1"], context) == 0
     explicit = json.loads(capsys.readouterr().out)
     assert explicit["count"] == 1 and len(explicit["job_ids"]) == 1
     later = Path(str(explicit["script"])).read_text(encoding="utf-8")
@@ -401,7 +403,7 @@ def test_local_slurm_start_manager_submits_with_the_local_sbatch(tmp_path: Path,
     result = run_adapter(
         bundle,
         "start-manager",
-        {"queue": "default", "argv": ["httk", "workflow", "manager", "run", str(workspace.root)], "count": 2},
+        {"remote_settings": {}, "argv": ["httk", "workflow", "manager", "run", str(workspace.root)], "count": 2},
     )
 
     script_path = Path(str(result["script"]))
@@ -422,7 +424,7 @@ def test_local_slurm_transfers_stay_in_this_filesystem(tmp_path: Path, remote: R
     pushed = run_adapter(
         bundle,
         "push",
-        {"queue": "default", "source": str(source), "destination": str(tmp_path / "copy")},
+        {"remote_settings": {}, "source": str(source), "destination": str(tmp_path / "copy")},
     )
 
     assert (tmp_path / "copy" / "files" / "runner").read_text(encoding="utf-8") == _RUNNER
@@ -436,7 +438,7 @@ def test_install_reports_a_missing_remote_httk_with_the_packaging_hint(tmp_path:
     bundle = fake_remote(project, httk_command=str(tmp_path / "nowhere" / "httk"))
 
     with pytest.raises(RuntimeError, match="pipx install httk-workflow"):
-        run_adapter(bundle, "install", {"queue": "default"})
+        run_adapter(bundle, "install", {"remote_settings": {}})
 
 
 def test_install_finds_the_remote_httk_and_creates_the_workspace(tmp_path: Path, remote: Remote) -> None:
@@ -445,7 +447,7 @@ def test_install_finds_the_remote_httk_and_creates_the_workspace(tmp_path: Path,
     workspace = remote.root / "runs" / "fresh"
     bundle = fake_remote(project, workspace=str(workspace))
 
-    result = run_adapter(bundle, "install", {"queue": "default"})
+    result = run_adapter(bundle, "install", {"remote_settings": {}})
 
     assert result["installed"] is True
     assert result["bootstrapped"] is False
@@ -453,7 +455,7 @@ def test_install_finds_the_remote_httk_and_creates_the_workspace(tmp_path: Path,
     assert str(result["httk_version"]).strip()
     assert result["workspace_created"] is True
     assert workspace.is_dir()
-    assert run_adapter(bundle, "install", {"queue": "default"})["workspace_created"] is False
+    assert run_adapter(bundle, "install", {"remote_settings": {}})["workspace_created"] is False
 
 
 def test_install_refuses_an_unreachable_host(tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -463,7 +465,7 @@ def test_install_refuses_an_unreachable_host(tmp_path: Path, remote: Remote, mon
     monkeypatch.setenv("HTTK_FAKE_SSH_REFUSE", "1")
 
     with pytest.raises(RuntimeError, match=f"cannot reach someone@{FAKE_HOST}"):
-        run_adapter(bundle, "install", {"queue": "default"})
+        run_adapter(bundle, "install", {"remote_settings": {}})
 
 
 def test_install_attempts_pip_only_when_bootstrap_opts_in(
@@ -480,12 +482,12 @@ def test_install_attempts_pip_only_when_bootstrap_opts_in(
 
     without = fake_remote(project, name="plain", httk_command=absent)
     with pytest.raises(RuntimeError, match="pipx install httk-workflow"):
-        run_adapter(without, "install", {"queue": "default"})
+        run_adapter(without, "install", {"remote_settings": {}})
     assert not log.exists()
 
     opted_in = fake_remote(project, name="opted-in", httk_command=absent, bootstrap="pip")
     with pytest.raises(RuntimeError, match="pipx install httk-workflow"):
-        run_adapter(opted_in, "install", {"queue": "default"})
+        run_adapter(opted_in, "install", {"remote_settings": {}})
     assert json.loads(log.read_text(encoding="utf-8").splitlines()[0]) == [
         "-m",
         "pip",
@@ -504,12 +506,12 @@ def test_configure_verifies_connectivity_for_ssh_remotes(
     initialize_project(project, name="configure")
     bundle = fake_remote(project)
 
-    assert run_adapter(bundle, "configure", {"queue": "default", "settings": {}})["connectivity"] == "ok"
+    assert run_adapter(bundle, "configure", {"remote_settings": {}, "settings": {}})["connectivity"] == "ok"
 
     monkeypatch.setenv("HTTK_FAKE_SSH_REFUSE", "1")
     with pytest.raises(RuntimeError, match="cannot reach"):
-        run_adapter(bundle, "configure", {"queue": "default", "settings": {}})
-    skipped = run_adapter(bundle, "configure", {"queue": "default", "settings": {"check_connectivity": "no"}})
+        run_adapter(bundle, "configure", {"remote_settings": {}, "settings": {}})
+    skipped = run_adapter(bundle, "configure", {"remote_settings": {}, "settings": {"check_connectivity": "no"}})
     assert skipped["connectivity"] == "skipped"
 
 
@@ -518,9 +520,9 @@ def test_configure_checks_the_host_the_command_line_is_about_to_store(tmp_path: 
     initialize_project(project, name="pending")
     bundle = add_remote("cluster", template="ssh-slurm", project=project)
 
-    assert run_adapter(bundle, "configure", {"queue": "default", "settings": {}})["connectivity"] == "skipped"
+    assert run_adapter(bundle, "configure", {"remote_settings": {}, "settings": {}})["connectivity"] == "skipped"
     pending = {"host": FAKE_HOST, "username": "someone"}
-    assert run_adapter(bundle, "configure", {"queue": "default", "settings": pending})["connectivity"] == "ok"
+    assert run_adapter(bundle, "configure", {"remote_settings": {}, "settings": pending})["connectivity"] == "ok"
 
 
 def test_an_unrecognized_adapter_kind_still_refuses(tmp_path: Path, remote: Remote) -> None:
@@ -532,7 +534,7 @@ def test_an_unrecognized_adapter_kind_still_refuses(tmp_path: Path, remote: Remo
     (bundle / "remote.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="'torque' is not implemented"):
-        run_adapter(bundle, "status", {"queue": "default", "argv": ["true"]})
+        run_adapter(bundle, "status", {"remote_settings": {}, "argv": ["true"]})
 
 
 def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote: Remote) -> None:
@@ -546,7 +548,7 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     register_ws(context, source_root, "home")
     register_ws(context, destination.root, "station", remote="cluster")
 
-    assert command(["transfer", "home", "station", "--job", job_id], context) == 0
+    assert command(["transfer", "home", "cluster:station", "--job", job_id], context) == 0
 
     assert Workspace(source_root).find_marker_by_id(job_id) is None
     marker = destination.find_marker_by_id(job_id)

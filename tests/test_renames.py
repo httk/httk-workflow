@@ -23,7 +23,7 @@ import logging
 import os
 from pathlib import Path
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 from httk.core.cli import CLIContext
 
 import httk.workflow

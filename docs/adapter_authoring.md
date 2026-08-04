@@ -395,7 +395,7 @@ command line always wins over the queue's default.
 `httk workflow remote configure NAME --set KEY=VALUE` splits every assignment
 in two, by name:
 
-- keys in {py:data}`httk.workflow.adapters.PERSISTABLE_QUEUE_SETTINGS` —
+- keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS` —
   `account`, `bootstrap`, `check_connectivity`, `cpus_per_task`, `host`,
   `httk_command`, `legacy_settings`, `nodes`, `partition`, `port`,
   `reservation`, `time_limit`, `username`, `workers`, `workspace` — are written
@@ -404,7 +404,7 @@ in two, by name:
   `credentials.json` beside it, with mode `0600`, and project manifests exclude
   that file.
 
-{py:func}`httk.workflow.adapters.queue_settings` merges the two back together —
+{py:func}`httk.workflow.adapters.remote_settings` merges the two back together —
 `remote.json` first, `credentials.json` over it — and that single object is what
 arrives as the request's `queue_settings`. **An adapter never sees the split.**
 It reads one flat settings object and cannot tell, and must not care, which file

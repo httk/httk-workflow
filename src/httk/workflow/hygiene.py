@@ -24,6 +24,7 @@ from .adapters import (
     project_remote_roots,
     read_credentials,
     read_metadata,
+    valid_remote_name,
     validate_adapter_bundle,
 )
 from .configuration import keys_home, remotes_home
@@ -209,8 +210,7 @@ def _remote_bundle(name: str, *, project: str | os.PathLike[str] | None) -> tupl
     bundle is exactly what is broken about it.
     """
 
-    if not name or "/" in name or name in {".", ".."}:
-        raise ValueError(f"invalid remote name: {name!r}")
+    valid_remote_name(name)
     project_root = discover_project(project)
     if project_root is not None:
         for root in project_remote_roots(project_root):
@@ -230,15 +230,13 @@ def describe_remote(
 ) -> dict[str, object]:
     """Describe one remote: where it lives, what it is, how it is configured.
 
-    Credential values never appear. A queue's settings are reported with the
+    Credential values never appear. A remote's settings are reported with the
     file each one came from, and for a setting stored in the manifest-excluded
     ``credentials.json`` only its *name* is reported: a description an operator
     can paste into a bug report must never carry a password.
     """
 
     bundle, scope = _remote_bundle(name, project=project)
-    project_root = discover_project(project)
-    default_queue = str(read_project(project_root).get("default_queue") or "") if project_root is not None else ""
     try:
         metadata: dict[str, Any] = dict(validate_adapter_bundle(bundle))
         valid, problem = True, None
@@ -246,22 +244,9 @@ def describe_remote(
         recorded = metadata_path(bundle)
         metadata = read_json(recorded) if recorded.is_file() else {}
         valid, problem = False, str(exc)
-    raw_queues = metadata.get("queues", {"default": {}})
-    queues: dict[str, object] = {}
-    for queue, settings in sorted(raw_queues.items()) if isinstance(raw_queues, Mapping) else ():
-        persisted = dict(settings) if isinstance(settings, Mapping) else {}
-        credentials = sorted(read_credentials(bundle, queue))
-        queues[queue] = {
-            "settings": persisted,
-            # Every setting the adapter will see, with the file it comes from.
-            # Only the names of the credential settings appear; their values
-            # stay in credentials.json, which is also what manifests exclude.
-            "settings_source": {
-                **{key: CREDENTIALS_FILE for key in credentials},
-                **{key: metadata_path(bundle).name for key in sorted(persisted)},
-            },
-            "credential_keys": credentials,
-        }
+    persisted = metadata.get("settings", {})
+    persisted = dict(persisted) if isinstance(persisted, Mapping) else {}
+    credentials = sorted(read_credentials(bundle))
     return {
         "format": REMOTE_DESCRIPTION_FORMAT,
         "format_version": 1,
@@ -277,33 +262,33 @@ def describe_remote(
         # One dispatcher serves every operation; the operation name travels in
         # the request JSON, so a single executable path is all there is to report.
         "adapter": str(bundle / ADAPTER_EXECUTABLE),
-        "queues": queues,
+        "settings": persisted,
+        "settings_source": {
+            **{key: CREDENTIALS_FILE for key in credentials},
+            **{key: metadata_path(bundle).name for key in sorted(persisted)},
+        },
+        "credential_keys": credentials,
         "credentials_file": str(bundle / CREDENTIALS_FILE) if (bundle / CREDENTIALS_FILE).is_file() else None,
-        "default_queue": default_queue or "default",
     }
 
 
 def _configured_workspace_ids(bundle: Path) -> set[str]:
-    """Return the workspace UUIDs this remote's queues point at, if readable."""
+    """Return configured workspace UUIDs, when a remote setting names one."""
 
     try:
         metadata = read_metadata(bundle)
     except (WorkflowError, OSError, ValueError):
         return set()
-    queues = metadata.get("queues", {})
     identifiers: set[str] = set()
-    for settings in queues.values() if isinstance(queues, Mapping) else ():
-        merged: dict[str, Any] = dict(settings) if isinstance(settings, Mapping) else {}
-        location = merged.get("workspace")
-        if not isinstance(location, str) or not location:
-            continue
+    settings = metadata.get("settings", {})
+    location = settings.get("workspace") if isinstance(settings, Mapping) else None
+    if isinstance(location, str) and location:
         format_path = Path(location).expanduser() / ".httk-workflow" / "format.json"
-        if not format_path.is_file():
-            continue
-        try:
-            identifiers.add(str(read_json(format_path).get("workspace_id")))
-        except (WorkflowError, OSError, ValueError):
-            continue
+        if format_path.is_file():
+            try:
+                identifiers.add(str(read_json(format_path).get("workspace_id")))
+            except (WorkflowError, OSError, ValueError):
+                pass
     return identifiers
 
 

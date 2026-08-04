@@ -7,7 +7,7 @@ import types
 import uuid
 from pathlib import Path
 
-import pytest  # pyright: ignore[reportMissingImports]
+import pytest
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
@@ -319,7 +319,7 @@ def test_both_command_line_interfaces_default_to_durable(tmp_path: Path) -> None
     assert native_cli._parser().parse_args(["--durable", "init", "x"]).no_durable is False
     assert native_cli._parser().parse_args(["--no-durable", "init", "x"]).no_durable is True
     assert v1_cli._parser().parse_args(["--no-durable", "prepare", "a", "b"]).no_durable is True
-    assert native_cli.main(["init", "durable-ws", "--remote", "local", "--path", str(tmp_path / "workspace")]) == 0
+    assert native_cli.main(["init", "durable-ws", "--path", str(tmp_path / "workspace")]) == 0
     assert Workspace(tmp_path / "workspace", mutable=False).policy == WorkspacePolicy()
 
 
