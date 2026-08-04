@@ -1,6 +1,6 @@
 """Compatibility shim over the project anchor, now owned by :mod:`httk.core.project`.
 
-The project anchor — the ``.httk-project`` directory, ``project.json`` and its
+The project anchor — the ``httk_project`` directory, ``project.json`` and its
 validation, upward discovery, the identity key, and key pinning and trust —
 moved to *httk-core* as :mod:`httk.core.project` so a core-only installation has
 projects. This module re-exports that API unchanged (this is an internal move,
@@ -26,6 +26,7 @@ from httk.core.project import (
     PROJECT_DIRECTORY,
     PROJECT_FILE,
     PUBLIC_KEY_PREFIX,
+    LegacyProjectError,
     canonical_public_key,
     discover_project,
     format_public_key,
@@ -53,6 +54,7 @@ __all__ = [
     "PROJECT_DIRECTORY",
     "PROJECT_FILE",
     "PUBLIC_KEY_PREFIX",
+    "LegacyProjectError",
     "canonical_public_key",
     "discover_project",
     "format_public_key",
@@ -91,14 +93,12 @@ DEFAULT_MANIFEST_EXCLUSIONS = (
     # project identity and the exclusion list — are carried in the signed
     # manifest header instead, and the header's project_id is compared with this
     # file's on every verification.
-    ".httk-project/project.json",
-    ".httk-project/keys/*.seed",
-    ".httk-project/keys/*.priv",
-    ".httk-project/remotes/**/credentials*",
-    # The pre-rename name of the same directory, so a project initialized by an
-    # earlier release never publishes a credential either.
-    ".httk-project/computers/**/credentials*",
-    ".httk-project/manifest.jsonl.bz2",
+    f"{PROJECT_DIRECTORY}/project.json",
+    f"{PROJECT_DIRECTORY}/keys/*.seed",
+    f"{PROJECT_DIRECTORY}/keys/*.priv",
+    f"{PROJECT_DIRECTORY}/remotes/**/credentials*",
+    f"{PROJECT_DIRECTORY}/computers/**/credentials*",
+    f"{PROJECT_DIRECTORY}/manifest.jsonl.bz2",
     ".httk-workflow",
     ".httk-workflow/**",
     ".httk-attempt.*",

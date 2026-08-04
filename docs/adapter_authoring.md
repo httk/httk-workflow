@@ -45,7 +45,7 @@ global one of the same name:
 
 | Scope | Location |
 | --- | --- |
-| project | `PROJECT/.httk-project/remotes/NAME/` |
+| project | `PROJECT/httk_project/remotes/NAME/` |
 | global | `$XDG_CONFIG_HOME/httk/remotes/NAME/` |
 
 The metadata file is `remote.json`, below a `remotes/` directory; those are the
@@ -157,7 +157,7 @@ envelope is always present:
   "format": "httk-computer-request",
   "format_version": 1,
   "operation": "invoke",
-  "adapter_dir": "/home/me/project/.httk-project/remotes/my-cluster",
+  "adapter_dir": "/home/me/project/httk_project/remotes/my-cluster",
   "queue": "default",
   "queue_settings": {"host": "login.example.org", "workspace": "/scratch/me/runs"}
 }
@@ -627,8 +627,8 @@ The bundle is an ordinary directory; put it where the CLI looks and configure a
 queue:
 
 ```console
-mkdir -p .httk-project/remotes/my-cluster
-cp -a my-cluster/. .httk-project/remotes/my-cluster/
+mkdir -p httk_project/remotes/my-cluster
+cp -a my-cluster/. httk_project/remotes/my-cluster/
 httk workflow remote configure my-cluster --set username=me
 httk workflow remote install my-cluster
 httk workflow transfer start-manager my-cluster:wide --count 2

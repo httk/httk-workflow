@@ -37,7 +37,7 @@ from httk.workflow.adapters import (
     resolve_remote,
 )
 from httk.workflow.configuration import config_home, data_home, keys_home, remotes_home
-from httk.workflow.projects import initialize_project
+from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.runners import RUNNERS, runner_package, runner_path, runner_reference
 from httk.workflow.scaffold import new_job, registered_templates
@@ -75,7 +75,7 @@ def test_adding_a_remote_writes_remote_json_below_remotes(isolated: Path) -> Non
     context = CLIContext("httk", isolated)
     assert command(["remote", "add", "cluster", "--template", "local"], context) == 0
 
-    bundle = isolated / ".httk-project" / "remotes" / "cluster"
+    bundle = isolated / PROJECT_DIRECTORY / "remotes" / "cluster"
     assert (bundle / METADATA_FILE).is_file()
     assert not (bundle / "computer.json").exists()
     assert metadata_path(bundle).name == METADATA_FILE

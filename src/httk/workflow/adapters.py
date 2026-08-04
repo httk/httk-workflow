@@ -16,7 +16,7 @@ from typing import Any
 
 from ._util import write_json_atomic
 from .configuration import remotes_home
-from .projects import discover_project, read_project
+from .projects import PROJECT_DIRECTORY, discover_project, read_project
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -233,7 +233,7 @@ def resolve_remote(
 def project_remote_roots(project_root: Path) -> tuple[Path, ...]:
     """Return where one project keeps its remotes."""
 
-    return (project_root / ".httk-project" / "remotes",)
+    return (project_root / PROJECT_DIRECTORY / "remotes",)
 
 
 def list_remotes(project: str | os.PathLike[str] | None = None) -> list[dict[str, object]]:
