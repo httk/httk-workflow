@@ -62,7 +62,7 @@ def test_a_job_runs_end_to_end_addressed_only_by_name(tmp_path: Path, capsys: py
     key = capsys.readouterr().out.strip().split("\t")[0]
     assert key.startswith("silicon--")
 
-    assert command(["manager", "run", "sweep", "--until-idle"], context) == 0
+    assert command(["manager", "run", "sweep"], context) == 0
     capsys.readouterr()
 
     assert command(["harvest", "sweep", "--state", "succeeded"], context) == 0

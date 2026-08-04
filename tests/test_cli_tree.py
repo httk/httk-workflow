@@ -14,14 +14,16 @@ from pathlib import Path
 import pytest  # pyright: ignore[reportMissingImports]
 from httk.core.cli import CLIContext
 
+from httk.workflow import Workspace, workflow_cli
 from httk.workflow import cli as native_cli
-from httk.workflow import workflow_cli
 from httk.workflow.compat.v1 import cli as v1_cli
-from httk.workflow.workflow_cli import command
+from httk.workflow.projects import initialize_project
+from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
+from httk.workflow.workflow_cli import _campaign, command
 
 #: Every group of the canonical tree, with the subcommands its help must name.
-#: ``transfer`` is deliberately absent: it is a single verb (``transfer SRC DST``)
-#: rather than a group, so it is a leaf and is checked on its own below.
+#: ``run`` and ``transfer`` are deliberately absent: they are single verbs
+#: rather than groups, so they are checked on their own below.
 GROUPS: dict[str, tuple[str, ...]] = {
     "workspace": (
         "init",
@@ -75,8 +77,8 @@ def test_the_tree_itself_answers_help_and_names_every_group(tmp_path: Path, caps
     printed = capsys.readouterr().out
     for group in GROUPS:
         assert group in printed
-    # The single-verb transfer command is a leaf, but the tree still names it.
-    assert "transfer" in printed
+    # The single-verb commands are leaves, but the tree still names them.
+    assert "run" in printed and "transfer" in printed
     # A bare invocation is somebody exploring, not somebody making a mistake.
     assert command([], _context(tmp_path)) == 0
     assert "usage:" in capsys.readouterr().out
@@ -176,7 +178,7 @@ ALIASED_TASKMANAGER = (
         ["submit", "WS", "SRC", "--placement", "p/0", "--move"],
         ["job", "submit", "WS", "SRC", "--placement", "p/0", "--move"],
     ),
-    (["run", "WS", "--workers", "4", "--until-idle"], ["manager", "run", "WS", "--workers", "4", "--until-idle"]),
+    (["run", "WS", "--workers", "4", "--idle"], ["manager", "run", "WS", "--workers", "4", "--idle"]),
     (["status", "WS", "--json"], ["workspace", "status", "WS", "--json"]),
     (
         ["request", "WS", "JOB", "cancel", "--operator", "me", "--reason", "why"],
@@ -266,11 +268,67 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
 
     with pytest.raises(SystemExit):
         parser.parse_args(["remote", "install", "c", "--timeout", "5"])
-    # The manager's idle wait is --idle-timeout only.
+    # The manager's idle wait is bounded by --idle-timeout.
     assert parser.parse_args(["manager", "run", "WS", "--idle-timeout", "5"]).idle_timeout == 5.0
     assert parser.parse_args(["manager", "run", "WS"]).idle_timeout == 3600.0
     with pytest.raises(SystemExit):
+        parser.parse_args(["manager", "run", "WS", "--until-" + "idle"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["manager", "run", "WS", "--fore" + "ground"])
+    assert parser.parse_args(["run"]).workspace is None
+    assert parser.parse_args(["run", "WS", "--idle"]).idle is True
+    with pytest.raises(SystemExit):
         parser.parse_args(["manager", "run", "WS", "--timeout", "5"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["v1", "run", "WS", "--until-" + "idle"])
+
+
+def test_top_level_run_is_manager_run_with_pinned_defaults(tmp_path: Path) -> None:
+    parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
+    top_level = _namespace(parser.parse_args(["run", "WS", "--workers", "4", "--idle"]))
+    manager = _namespace(parser.parse_args(["manager", "run", "WS", "--workers", "4", "--idle"]))
+    assert top_level == manager
+
+
+def test_top_level_run_defaults_to_until_idle_for_the_project_workspace(tmp_path: Path) -> None:
+    initialize_project(tmp_path, name="run-default")
+    assert command(["run"], _context(tmp_path)) == 0
+
+
+def test_top_level_run_reports_an_idle_timeout_without_a_traceback(tmp_path: Path, capsys) -> None:
+    initialize_project(tmp_path, name="run-timeout")
+    source = tmp_path / "source" / "files"
+    source.mkdir(parents=True)
+    (source / "runner").write_text("#!/bin/sh\n", encoding="utf-8")
+    payload = tmp_path / "source"
+    prepare_job_payload(
+        payload,
+        JobSpec(
+            name="unserved",
+            workflow="tests.cli_tree",
+            runner_path="files/runner",
+            initial_step="only",
+            claim_pool="unserved",
+        ),
+    )
+    Workspace(tmp_path).submit(payload, "project/unserved")
+
+    assert command(["run", "--idle-timeout", "0.05"], _context(tmp_path)) == 2
+    error = capsys.readouterr().err
+    assert "workspace is not idle after 0s; jobs are still running or claimable" in error
+    assert "Traceback" not in error
+
+
+def test_campaign_start_managers_forwards_idle_timeout(tmp_path: Path, monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_campaign_managers(**arguments: object) -> list[dict[str, object]]:
+        seen.update(arguments)
+        return []
+
+    monkeypatch.setattr(_campaign, "campaign_managers", fake_campaign_managers)
+    assert command(["campaign", "start-managers", "--idle-timeout", "10"], _context(tmp_path)) == 0
+    assert seen["idle_timeout"] == 10.0
 
 
 def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:

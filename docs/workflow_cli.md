@@ -170,12 +170,13 @@ See {doc}`importing_workflows`.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `manager run WORKSPACE` | run a manager locally, or submit managers to a remote workspace's scheduler | `--workers`, `--count`, `--foreground`, `--pool`, `--capability`, `--until-idle`, `--idle-timeout`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `run [WORKSPACE]` | run a manager until idle, or keep serving with `--idle` | `--workers`, `--count`, `--pool`, `--idle`, `--idle-timeout`, `--adapter-timeout`, `--log-level` |
+| `manager run WORKSPACE` | run a manager locally, or submit managers to a remote workspace's scheduler | `--workers`, `--count`, `--pool`, `--capability`, `--idle`, `--idle-timeout`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
 `manager run` follows the binding: a local workspace runs the manager in this
 process as before, and a remote workspace submits managers through the remote's
 scheduler over its adapter — `--count N` managers, `--workers N` workers each.
-`--foreground` asks to run here and so is refused for a remote workspace; this is
+Both manager commands run until idle by default; `--idle` keeps serving. This is
 the command that subsumed the old `transfer start-manager`.
 
 ### `v1` — *httk* v1 task templates on the v2 engine
@@ -184,7 +185,7 @@ the command that subsumed the old `transfer start-manager`.
 | --- | --- | --- |
 | `v1 prepare SOURCE DESTINATION` | turn an instantiated v1 task into a payload | `--taskset` (default `default`), `--tag`, `--step`, `--priority`, `--attempts` |
 | `v1 submit WORKSPACE SOURCE` | prepare and submit one v1 task | `--placement` (required), `--taskset` (default `default`) |
-| `v1 run WORKSPACE` | run only the httk-v1 jobs of a workspace | `--taskset` (default `any`), `--wrap`, `--task-timeout`, `--workers`, `--until-idle`, `--idle-timeout` |
+| `v1 run WORKSPACE` | run only the httk-v1 jobs of a workspace | `--taskset` (default `any`), `--wrap`, `--task-timeout`, `--workers`, `--idle`, `--idle-timeout` |
 
 `--taskset` deliberately defaults differently between siblings, because the
 siblings mean different things by it. `prepare` and `submit` **assign** a task

@@ -620,7 +620,7 @@ def test_a_sigkilled_manager_process_leaves_a_job_a_fresh_manager_finishes(tmp_p
     existing = environment.get("PYTHONPATH", "")
     environment["PYTHONPATH"] = f"{source_root}{os.pathsep}{existing}" if existing else str(source_root)
     process = subprocess.Popen(
-        [sys.executable, "-m", "httk.workflow.cli", "run", ws, "--until-idle", "--poll-interval", "0.05"],
+        [sys.executable, "-m", "httk.workflow.cli", "run", ws, "--poll-interval", "0.05"],
         env=environment,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

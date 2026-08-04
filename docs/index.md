@@ -68,7 +68,7 @@ One workspace, one job of a packaged runner, and one manager that runs it:
 ```console
 httk workflow workspace init workflow-workspace --remote local --path workflow-workspace
 httk workflow job new workflow-workspace --template vasp-relax --from POSCAR --tag silicon
-httk workflow manager run workflow-workspace --until-idle
+httk workflow run workflow-workspace
 httk workflow harvest workflow-workspace
 ```
 

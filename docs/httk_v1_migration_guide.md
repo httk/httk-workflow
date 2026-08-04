@@ -101,7 +101,6 @@ Run only *httk* v1 compatibility jobs:
 httk workflow v1 run workflow-workspace \
   --taskset any \
   --workers 4 \
-  --until-idle
 ```
 
 The exact old source paths remain available below the compatibility
@@ -325,7 +324,6 @@ httk workflow job submit native-workspace native-job \
   --placement migration/native/silicon-relax
 httk workflow manager run native-workspace \
   --pool vasp-native \
-  --until-idle
 ```
 
 Static payload files are available below `HTTK_WORKFLOW_JOB_DIR`; the selected

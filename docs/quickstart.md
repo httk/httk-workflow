@@ -44,7 +44,7 @@ END
 $ httk workflow workspace init quickstart-workspace --remote local --path quickstart-workspace
 $ httk workflow job new quickstart-workspace --template vasp-relax --from POSCAR --tag silicon
 $ export HTTK_VASP_COMMAND="$PWD/examples/mock_vasp.py"
-$ httk workflow manager run quickstart-workspace --until-idle
+$ httk workflow run quickstart-workspace
 $ httk workflow harvest quickstart-workspace
 ```
 
@@ -79,10 +79,9 @@ silicon--0c4f…	/…/quickstart-workspace/jobs/silicon--0c4f…
 a job decides how VASP is invoked there, so the same job runs on a laptop and on
 32 ranks of a cluster without being resubmitted.
 
-**`run --until-idle`** ran a task manager in the foreground until nothing was
-ready, driving the job through `prepare`, `run`, and `collect`. Without
-`--until-idle` the same manager keeps serving the workspace, which is how a
-campaign is run.
+**`run`** ran a task manager until nothing was ready, driving the job through
+`prepare`, `run`, and `collect`. With `--idle` the same manager keeps serving
+the workspace, which is how a campaign is run.
 
 **`harvest`** printed one JSON record per finished job: what ran, where its files
 are, and everything that happened on the way. That record is the boundary to a

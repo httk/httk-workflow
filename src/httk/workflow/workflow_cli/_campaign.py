@@ -91,6 +91,7 @@ def handle_campaign_start_managers(arguments: argparse.Namespace, context: CLICo
         partitions=arguments.partition or None,
         workers=arguments.workers,
         count=arguments.count,
+        idle_timeout=arguments.idle_timeout,
         adapter_timeout=arguments.adapter_timeout,
         project=context.cwd,
     )
@@ -241,5 +242,12 @@ def build_campaign_parser(
         default=1,
         metavar="COUNT",
         help="remote managers to submit per partition (default: 1)",
+    )
+    managers.add_argument(
+        "--idle-timeout",
+        type=float,
+        default=3600.0,
+        metavar="SECONDS",
+        help="cap how long each local manager waits for the campaign to become idle (default: 3600)",
     )
     _add_adapter_timeout(managers)
