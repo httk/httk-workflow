@@ -74,10 +74,7 @@ satisfying it stops being usable, which is the point.
   "format": "httk-computer-adapter",
   "format_version": 1,
   "kind": "pbs",
-  "queues": {
-    "default": {"host": "login.example.org", "workspace": "/scratch/me/runs"},
-    "large": {"host": "login.example.org", "workspace": "/scratch/me/runs", "nodes": "16"}
-  },
+  "settings": {"host": "login.example.org", "workspace_root": "/scratch/me/runs"},
   "required_binaries": ["rsync", "ssh"],
   "timeout_seconds": 300
 }
@@ -92,7 +89,7 @@ is selected by the request, not by a per-operation path.
 | `format` | yes | must be `httk-computer-adapter` (the historical spelling; see above) |
 | `format_version` | yes | must be `1` |
 | `adapter_version` | yes | must be `1`; the version of the operation contract below |
-| `queues` | no | maps queue name to a settings object; defaults to `{"default": {}}` and must not be empty |
+| `settings` | no | flat machine-level settings; defaults to `{}` |
 | `timeout_seconds` | no | positive number, default `60`; the wall-clock bound on one operation |
 | `required_binaries` | no | array of program names that must be on `PATH` **of the machine running the adapter**, checked with `shutil.which` at every validation |
 | `kind` | no | free-form; see below |
@@ -158,15 +155,13 @@ envelope is always present:
   "format_version": 1,
   "operation": "invoke",
   "adapter_dir": "/home/me/project/httk_project/remotes/my-cluster",
-  "queue": "default",
-  "queue_settings": {"host": "login.example.org", "workspace": "/scratch/me/runs"}
+  "remote_settings": {"host": "login.example.org", "workspace_root": "/scratch/me/runs"}
 }
 ```
 
 - `adapter_dir` is the absolute, resolved bundle directory. It is how an adapter
   finds its own files; nothing else tells it where it lives.
-- `queue_settings` is present exactly when the caller named a `queue`. It is the
-  merge described under [Settings and credentials](#settings-and-credentials).
+- `remote_settings` is the merge described under [Settings and credentials](#settings-and-credentials).
 - Everything else is operation-specific and documented per operation below.
 
 The request file is written with `sort_keys=True` and removed as soon as the
@@ -189,7 +184,7 @@ the same envelope with `ok: false` and a human-readable `error`:
 
 ### `configure`
 
-Verify that a queue's settings can work, before the command line persists them.
+Verify that a remote's settings can work, before the command line persists them.
 
 Request members beyond the envelope:
 
@@ -198,14 +193,14 @@ Request members beyond the envelope:
 | `settings` | object | the **pending** `--set KEY=VALUE` values, not yet stored anywhere |
 
 Pending settings are passed separately because storage happens only after this
-operation succeeds; an adapter that only looked at `queue_settings` could never
+operation succeeds; an adapter that only looked at `remote_settings` could never
 validate the first configuration of a host. Merge `settings` over
-`queue_settings` and check the result.
+`remote_settings` and check the result.
 
 ```json
 {"format": "httk-computer-request", "format_version": 1, "operation": "configure",
- "adapter_dir": "/home/me/.config/httk/remotes/my-cluster", "queue": "default",
- "queue_settings": {"workspace": "/scratch/me/runs"},
+ "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
+ "remote_settings": {"workspace_root": "/scratch/me/runs"},
  "settings": {"host": "login.example.org", "username": "me"}}
 ```
 
@@ -215,21 +210,21 @@ validate the first configuration of a host. Merge `settings` over
 ```
 
 The maintained implementation reports `connectivity` as `ok` when a remote `true`
-answered, and `skipped` when there is no `host` or the queue sets
+answered, and `skipped` when there is no `host` or the remote sets
 `check_connectivity=no`.
 
 ### `install`
 
 Report — and only where explicitly opted into, arrange — that the target can run
-*httk-workflow*, and ensure the queue's workspace directory exists.
+*httk-workflow*, and ensure the remote's workspace root exists.
 
 No request members beyond the envelope.
 
 ```json
 {"format": "httk-computer-request", "format_version": 1, "operation": "install",
- "adapter_dir": "/home/me/.config/httk/remotes/my-cluster", "queue": "default",
- "queue_settings": {"host": "login.example.org", "username": "me",
-                    "workspace": "/scratch/me/runs", "bootstrap": "pip"}}
+ "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
+ "remote_settings": {"host": "login.example.org", "username": "me",
+                      "workspace_root": "/scratch/me/runs", "bootstrap": "pip"}}
 ```
 
 ```json
@@ -245,7 +240,7 @@ No request members beyond the envelope.
 | `httk_command` | the argument vector that answered, as an array |
 | `httk_version` | its `--version` output, stripped |
 | `bootstrapped` | whether this call installed anything (only ever under `bootstrap=pip`) |
-| `workspace`, `workspace_created` | present when the queue configures a `workspace` |
+| `workspace`, `workspace_created` | present when the remote configures a `workspace_root` |
 
 Answering "httk-core is installed" is not enough: the maintained implementation
 also runs `httk workflow workspace --help`, because the `workflow` command group
@@ -268,7 +263,7 @@ did.
 {"argv": ["httk", "workflow", "workspace", "status", "/scratch/me/runs", "--json"],
  "cwd": "/scratch/me", "format": "httk-computer-request", "format_version": 1,
  "operation": "invoke", "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
- "queue": "default", "queue_settings": {"host": "login.example.org"}}
+ "remote_settings": {"host": "login.example.org"}}
 ```
 
 ```json
@@ -281,7 +276,7 @@ the command and is reporting the outcome. `ok: false` means the adapter could no
 run it at all. Callers check `returncode` themselves; every remote command in
 `httk workflow transfer …` does exactly that and raises on the value.
 
-If `argv[0]` is the literal `httk`, an adapter is expected to honour the queue's
+If `argv[0]` is the literal `httk`, an adapter is expected to honour the remote's
 `httk_command` setting by replacing that one element with the parsed vector; see
 [Spelling `httk` on the target](#spelling-httk-on-the-target).
 
@@ -290,14 +285,14 @@ If `argv[0]` is the literal `httk`, an adapter is expected to honour the queue's
 Byte-for-byte the same contract as `invoke`, except that `cwd` is ignored. It
 exists as a separate operation so that a health probe can be given a different
 implementation, a different timeout, or different credentials from arbitrary
-command execution. `httk workflow transfer fetch` uses it to check that the far
-side is a compatible workspace before anything moves.
+command execution. `httk workflow transfer REMOTE:NAME default` uses it to check
+that the far side is a compatible workspace before anything moves.
 
 ```json
 {"argv": ["httk", "workflow", "workspace", "status", "/scratch/me/runs", "--json"],
  "format": "httk-computer-request", "format_version": 1, "operation": "status",
- "adapter_dir": "/home/me/.config/httk/remotes/my-cluster", "queue": "default",
- "queue_settings": {"host": "login.example.org"}}
+ "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
+ "remote_settings": {"host": "login.example.org"}}
 ```
 
 ```json
@@ -324,8 +319,8 @@ manifest must not be able to name anything outside the workspace it came from.
 {"destination": "/scratch/me/runs/.httk-workflow/transfers/incoming/6f1c…",
  "format": "httk-computer-request", "format_version": 1, "operation": "push",
  "source": "/home/me/ws/.httk-workflow/transfers/outgoing/6f1c…",
- "adapter_dir": "/home/me/.config/httk/remotes/my-cluster", "queue": "default",
- "queue_settings": {"host": "login.example.org"}}
+ "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
+ "remote_settings": {"host": "login.example.org"}}
 ```
 
 ```json
@@ -355,18 +350,15 @@ Start one or more task managers on the target.
 
 The `workspace` member is stated outright by every caller in this package. When
 it is absent the maintained implementation reads it back out of a
-`manager run WORKSPACE` argument vector, and only then from the queue's
-`workspace=PATH`; that fallback is documented for hand-written requests and is
-not the normal path.
+`manager run WORKSPACE` argument vector; that fallback is documented for
+hand-written requests and is not the normal path.
 
 ```json
 {"argv": ["httk", "workflow", "manager", "run", "/scratch/me/runs"], "count": 2,
  "format": "httk-computer-request", "format_version": 1, "operation": "start-manager",
  "workspace": "/scratch/me/runs",
- "adapter_dir": "/home/me/.config/httk/remotes/my-cluster", "queue": "large",
- "queue_settings": {"account": "snic2026-1-1", "host": "login.example.org",
-                    "nodes": "16", "partition": "main", "time_limit": "24:00:00",
-                    "workers": "4"}}
+ "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
+ "remote_settings": {"host": "login.example.org", "workspace_root": "/scratch/me/runs"}}
 ```
 
 Batch implementations report the submitted identifiers:
@@ -386,9 +378,9 @@ it always did:
  "operation": "start-manager", "ok": true, "pid": 40311, "pids": [40311, 40312]}
 ```
 
-An adapter should append the queue's configured `workers` to `argv` only when the
+An adapter should append the workspace's configured `manager.workers` to `argv` only when the
 request did not already choose one, so that an explicit `--workers` from the
-command line always wins over the queue's default.
+command line always wins over the workspace's default.
 
 ## Settings and credentials
 
@@ -396,17 +388,17 @@ command line always wins over the queue's default.
 in two, by name:
 
 - keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS` —
-  `account`, `bootstrap`, `check_connectivity`, `cpus_per_task`, `host`,
-  `httk_command`, `legacy_settings`, `nodes`, `partition`, `port`,
-  `reservation`, `time_limit`, `username`, `workers`, `workspace` — are written
-  into `queues.<QUEUE>` of the shareable, signable `remote.json`;
-- **every other key** is a credential. It is written per queue into
+  `bootstrap`, `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
+  `port`, `username`, `vasp_command`, `vasp_pseudo_library`, and `workspace_root` —
+  are written into the flat `settings` object of the shareable, signable
+  `remote.json`;
+- **every other key** is a credential. It is written into
   `credentials.json` beside it, with mode `0600`, and project manifests exclude
   that file.
 
 {py:func}`httk.workflow.adapters.remote_settings` merges the two back together —
 `remote.json` first, `credentials.json` over it — and that single object is what
-arrives as the request's `queue_settings`. **An adapter never sees the split.**
+arrives as the request's `remote_settings`. **An adapter never sees the split.**
 It reads one flat settings object and cannot tell, and must not care, which file
 a value came from. `httk workflow remote show NAME` reports which file each
 setting came from, and the *name* only — never the value — of every credential.
@@ -415,11 +407,11 @@ Two consequences worth stating:
 
 - A credential is never a member of `remote.json`, so a signed project manifest
   covering the bundle covers no secret.
-- Adding a persistable key means adding it to `PERSISTABLE_QUEUE_SETTINGS`. A key
+- Adding a persistable key means adding it to `PERSISTABLE_REMOTE_SETTINGS`. A key
   an adapter invents and the engine does not know about is treated as a secret,
   which is the safe direction to be wrong in.
 
-Values arriving in `queue_settings` are strings as the operator typed them.
+Values arriving in `remote_settings` are strings as the operator typed them.
 Validate them: the maintained implementation refuses a non-numeric `port`, a
 `host` or `username` containing whitespace, a non-positive-integer `workers`, and
 any batch directive value containing control characters.
@@ -476,7 +468,7 @@ request, an unreadable bundle, an exception. The maintained implementation exits
 `2` with one stderr line for those and `0` for every refusal.
 
 Prefer refusals. An operator reading `cannot reach me@login.example.org:
-Permission denied; set check_connectivity=no to configure the queue anyway` is
+Permission denied; set check_connectivity=no to configure the remote anyway` is
 being told what to do next; an operator reading a traceback is not.
 
 The timeout is `timeout_seconds` from `remote.json`, overridable per call by
@@ -490,7 +482,7 @@ for `local`.
 
 What follows is the *skeleton* of a custom bundle, not a working PBS
 implementation. Everything specific to the site — how `qsub` is spelled, which
-directives the queue wants, whether files travel by `rsync` or by a staging
+directives the remote wants, whether files travel by `rsync` or by a staging
 service — lives in one Python module of yours, and the bundle is one `adapter`
 dispatcher that calls it.
 
@@ -516,11 +508,7 @@ rule cheap to hold, because no request value is ever visible to `sh`.
   "format": "httk-computer-adapter",
   "format_version": 1,
   "kind": "pbs",
-  "queues": {
-    "default": {"host": "login.hpc.example.org", "workspace": "/scratch/me/runs"},
-    "wide": {"host": "login.hpc.example.org", "workspace": "/scratch/me/runs",
-             "nodes": "32", "time_limit": "12:00:00"}
-  },
+  "settings": {"host": "login.hpc.example.org", "workspace_root": "/scratch/me/runs"},
   "required_binaries": ["rsync", "ssh"],
   "timeout_seconds": 300
 }
@@ -572,7 +560,7 @@ def batch_script(argv: Sequence[str], settings: dict, workspace: str) -> str:
     for key, directive in (("account", "-A"), ("partition", "-q")):
         if key in settings:
             lines.append(f"#PBS {directive} {settings[key]}")
-        # ... nodes, walltime, and whatever else this site's queues want
+        # ... nodes, walltime, and whatever else this site's scheduler needs
     lines += ["", "set -eu", f"cd {shlex.quote(workspace)}", f"exec {shell_command(argv)}", ""]
     return "\n".join(lines)
 
@@ -588,7 +576,7 @@ def main(argv: list[str] | None = None) -> int:
         operation = request.get("operation") if isinstance(request, dict) else None
         if not isinstance(operation, str) or not operation:
             raise ValueError("request carries no operation")
-        settings = request.get("queue_settings") or {}
+        settings = request.get("remote_settings") or {}
         if operation == "configure":
             pending = {**settings, **(request.get("settings") or {})}
             probe = ssh(pending, ["true"])
@@ -624,19 +612,19 @@ if __name__ == "__main__":
 ### Installing and using it
 
 The bundle is an ordinary directory; put it where the CLI looks and configure a
-queue:
+remote:
 
 ```console
 mkdir -p httk_project/remotes/my-cluster
 cp -a my-cluster/. httk_project/remotes/my-cluster/
-httk workflow remote configure my-cluster --set username=me
+httk workflow remote configure my-cluster --set username=me --set workspace_root=/scratch/me/runs
 httk workflow remote install my-cluster
-httk workflow transfer start-manager my-cluster:wide --count 2
+httk workflow workspace init my-cluster:runs
+httk workflow run my-cluster:runs --workers 8
 ```
 
-Nothing about the rest of the system changes: `transfer send`, `transfer fetch`,
-and `transfer status` drive the new bundle through exactly the operations
-above.
+Jobs reach the bundle through `transfer SRC DST`; the same adapter operations
+above handle sending, remote execution, and fetching.
 
 ## Reading the maintained implementation
 

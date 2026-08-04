@@ -11,8 +11,7 @@ declared, or a database to exist.
 
 Every command below works without VASP installed: `examples/mock_vasp.py` writes
 the output files a finished run leaves behind, so the whole path — prepare, run,
-collect, harvest — is exercised for real, with meaningless numbers. Point
-`HTTK_VASP_COMMAND` at it, exactly as a deployment points it at `vasp_std`.
+collect, harvest — is exercised for real, with meaningless numbers.
 
 The complete sequence of this page is also `examples/quickstart.sh`, which runs
 it in whatever directory you start it in.
@@ -41,27 +40,22 @@ END
 ## The five commands
 
 ```console
-$ httk workflow workspace init quickstart-workspace --remote local --path quickstart-workspace
-$ httk workflow job new quickstart-workspace --template vasp-relax --from POSCAR --tag silicon
-$ export HTTK_VASP_COMMAND="$PWD/examples/mock_vasp.py"
-$ httk workflow run quickstart-workspace
-$ httk workflow harvest quickstart-workspace
+$ httk project init --name quickstart
+$ httk workflow job new --template vasp-relax --from POSCAR --tag silicon
+$ httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
+$ httk workflow run
+$ httk workflow harvest
 ```
 
-On a machine with VASP, the third command names the real one instead — for
-example `export HTTK_VASP_COMMAND="srun -n 32 vasp_std"`.
+On a VASP machine, set `vasp.command` to a command such as
+`"srun -n 32 vasp_std"` instead.
 
 ## What each command did
 
-**`init`** created the workspace *and* registered it under a name: one directory
-that is the whole state of your work, addressed everywhere after by the name you
-gave it rather than by its path. `--remote local --path quickstart-workspace`
-says where it lives — on this machine, in a `quickstart-workspace/` directory
-here; being local is never implied, so the remote is always spelled out (a
-cluster workspace names the remote it lives on instead). Every later command
-takes that registered name, never a bare path. Core-v2 workspaces let jobs
-publish their results as transactional data, which makes a finished calculation
-readable without looking inside a workdir.
+**`project init`** created the project anchor. The first workflow command lazily
+created the project workspace at the project root and registered it as `default`.
+The workspace is the state of the work, and transactional data makes a finished
+calculation readable without looking inside a workdir.
 
 **`job new`** built and submitted one job. `--template vasp-relax` is the packaged
 relaxation runner — one file, three steps, the reviewed remedy ladder — so no
@@ -72,12 +66,14 @@ cannot change what its jobs execute. `--from POSCAR` staged the structure as the
 The command printed the job key and the payload directory:
 
 ```console
-silicon--0c4f…	/…/quickstart-workspace/jobs/silicon--0c4f…
+silicon--0c4f…	/…/jobs/silicon--0c4f…
 ```
 
-**`HTTK_VASP_COMMAND`** is deployment state, not job state: the machine that runs
-a job decides how VASP is invoked there, so the same job runs on a laptop and on
-32 ranks of a cluster without being resubmitted.
+**`settings set`** stored workspace state that travels with the job wherever it
+runs. The manager exports scalar settings into each attempt environment, so
+`vasp.command` becomes `HTTK_VASP_COMMAND`; a real VASP machine can set it to
+`"srun -n 32 vasp_std"`. A real environment variable remains a deployment
+override and wins over the workspace setting.
 
 **`run`** ran a task manager until nothing was ready, driving the job through
 `prepare`, `run`, and `collect`. With `--idle` the same manager keeps serving
@@ -90,12 +86,12 @@ data layer — see {doc}`harvest`.
 ## Looking at a job
 
 ```console
-$ httk workflow job list quickstart-workspace
+$ httk workflow job list
 JOB                                  STATE       STEP             PRI PLACEMENT
 silicon--0c4f…                       succeeded   collect          500 jobs
 
-$ httk workflow job show quickstart-workspace silicon
-$ httk workflow job why quickstart-workspace silicon
+$ httk workflow job show silicon
+$ httk workflow job why silicon
 ```
 
 Any job UUID, complete `tag--uuid` key, or unique prefix of either names a job.
@@ -152,11 +148,10 @@ marker.
   already have becomes one job with `httk workflow import pwd` or
   `httk workflow import cwl`, without being rewritten and without a runner file.
 - {doc}`harvest` — turning finished jobs into stored results.
-- Running on a cluster — register a workspace on a remote with `workspace init
-  NAME --remote R --path P`, then `transfer LOCAL REMOTE --job JOB` puts jobs
-  there, `manager run REMOTE` submits managers through its scheduler, and
-  `transfer REMOTE LOCAL` brings the finished ones home for `harvest`; a very
-  large run spread across many workspaces is a {doc}`campaigns`. See
+- Running on a cluster — add and configure a remote, initialize `R:NAME`, then
+  `transfer LOCAL R:NAME --job JOB` puts jobs there and `run R:NAME` submits a
+  manager through its scheduler; a very large run spread across many workspaces
+  is a {doc}`campaigns`. See
   {doc}`workflow_cli`.
 - {doc}`taskmanager` and {doc}`workflow_cli` — running managers for real, and the
   complete command tree.

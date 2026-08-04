@@ -50,9 +50,9 @@ The payload carries the structure and the INCAR it starts from:
 ```console
 mkdir -p prepared-job/files
 cp POSCAR INCAR POTCAR prepared-job/files/
-httk workflow workspace init workflow-workspace --remote local --path workflow-workspace
-httk workflow job submit workflow-workspace prepared-job --placement project/si
-httk workflow manager run workflow-workspace
+httk project init --name workflow
+httk workflow job submit prepared-job --placement project/si
+httk workflow manager run
 ```
 
 Every `httk workflow` command names the *registered* workspace, never a path;
@@ -80,18 +80,13 @@ invokes VASP its own way still exports the environment variable, and it wins ove
 everything a workspace configures — deployment state a job submitted elsewhere
 cannot know:
 
-```console
-export HTTK_VASP_COMMAND="srun -n 32 vasp_std"
-httk workflow manager run workflow-workspace --pool vasp
-```
-
-Or configure the command once on the workspace, so no one has to export it for
+Configure the command once on the workspace, so no one has to export it for
 every job — and a workspace bound to a remote is even seeded with it from the
 remote definition when it is created:
 
 ```console
-httk workflow workspace settings set workflow-workspace vasp.command '"srun -n 32 vasp_std"'
-httk workflow manager run workflow-workspace --pool vasp
+httk workflow workspace settings set vasp.command "srun -n 32 vasp_std"
+httk workflow manager run --pool vasp
 ```
 
 The pseudopotential library resolves the same way, as `vasp.pseudo_library`

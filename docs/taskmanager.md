@@ -9,20 +9,20 @@ Every command below is spelled the canonical way, `httk workflow …`. The
 
 ## Initialize a workspace
 
-Every `httk workflow` command names a *registered* workspace — a name bound once
-to a place — never a bare path. `workspace init` both creates the workspace and
-registers the name. Plain names are local and default to `./NAME`; a
-`REMOTE:NAME` name creates a workspace on that remote.
-`WORKSPACE` below is that registered name.
+`WORKSPACE` is optional inside a project: omitting it uses the project workspace,
+creating it lazily at the project root and registering it as `default`. Outside a
+project, commands use the per-user default workspace. Explicit local names are
+created with `workspace init NAME`; `REMOTE:NAME` creates a workspace on that
+remote.
 
 ```console
 httk workflow workspace init WORKSPACE --path runs/WORKSPACE
 ```
 
-A workspace on a cluster names the remote it lives on instead of `local`; it is
-created there over the adapter and its name is registered here. `workspace list`
-shows every registered name and where it resolves, `workspace forget` deregisters
-a name, and `workspace delete --force` destroys the workspace and deregisters it.
+A workspace on a cluster is created there over the adapter and its name is
+registered here. `workspace list` shows every registered name and where it
+resolves, `workspace forget` deregisters a name, and `workspace delete --force`
+destroys the workspace and deregisters it.
 A library caller still constructs `Workspace(path)` directly; the registry is the
 command-line contract. See {doc}`workflow_cli` for the whole `workspace` group and
 {doc}`campaigns` for spreading a very large run across many workspaces.
@@ -33,6 +33,30 @@ faster at the price of correctness after a node crash: an unsynchronized
 journal frame can be lost while the marker naming it survives, which leaves a
 job whose state cannot be read until `workspace fsck --repair` restores it.
 `--durable` is still accepted and does nothing, since it is now the default.
+
+## Running on a remote
+
+The canonical remote flow keeps scheduler settings with the remote workspace:
+
+```console
+httk workflow remote add kappa --template ssh-slurm
+httk workflow remote configure kappa \
+    --set host=kappa.example.org --set username=rar \
+    --set workspace_root=/scratch/rar/httk
+httk workflow remote install kappa
+httk workflow workspace init kappa:runs
+httk workflow workspace settings set kappa:runs slurm.partition batch
+httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
+httk workflow job new --template vasp-relax --from POSCAR --tag silicon
+httk workflow transfer default kappa:runs --job JOB-ID
+httk workflow run kappa:runs --workers 8
+httk workflow workspace status kappa:runs
+```
+
+`workspace_root` is required for the derived `kappa:runs` path. `transfer`
+detaches the selected job from the local default workspace, and `run` submits a
+manager through the remote adapter. Use `transfer kappa:runs default` after the
+remote job stops, then `httk workflow harvest` locally.
 
 ## Workspace policy
 
@@ -77,12 +101,11 @@ For a Slurm manager, set its profile in the target workspace as well:
 values from the workspace when it composes the batch script.
 
 A runner reads one through `a.setting("vasp.command")`, resolved in layers — the
-job's `inputs`, then the environment (`HTTK_VASP_COMMAND`), then the workspace
-setting, then the runner's default — so an operator configures the command once
-per workspace instead of exporting it for every job, while a machine's own
-environment still wins. The manager snapshots the settings into each attempt's
-`context.json` at claim time, so a runner sees the values the workspace held when
-its job was claimed. See {doc}`vasp_runners` and {doc}`sdk_parity`.
+job's inputs, a real `HTTK_VASP_COMMAND` deployment override, the workspace
+setting, then the runner's default. The manager exports scalar workspace settings
+into each attempt environment (`vasp.command` becomes `HTTK_VASP_COMMAND`) and
+snapshots them into `context.json`, so a runner sees the values the workspace
+held when its job was claimed. See {doc}`vasp_runners` and {doc}`sdk_parity`.
 
 ## Freeing disk on a quota'd filesystem
 

@@ -18,11 +18,11 @@ recovered without cleanup hooks.
 From nothing to a finished VASP relaxation, without writing a runner:
 
 ```console
-httk workflow workspace init workflow-workspace
-httk workflow job new workflow-workspace --template vasp-relax --from POSCAR --tag silicon
-export HTTK_VASP_COMMAND="$PWD/examples/mock_vasp.py"   # or: srun -n 32 vasp_std
-httk workflow run workflow-workspace
-httk workflow harvest workflow-workspace
+httk project init --name quickstart
+httk workflow job new --template vasp-relax --from POSCAR --tag silicon
+httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
+httk workflow run
+httk workflow harvest
 ```
 
 [`docs/quickstart.md`](docs/quickstart.md) explains each command, and
@@ -89,5 +89,5 @@ stay serial within their group while the rest of the suite runs in parallel.
 ```console
 httk workflow project init . --name example
 httk workflow project manifest create
-httk workflow workspace status .
+httk workflow workspace status
 ```

@@ -60,16 +60,13 @@ httk workflow remote     list | add | configure | install | import-v1 | show | r
 httk workflow transfer   SRC DST      (plus the protocol spellings: receive | offer | retire)
 ```
 
-### Every command names a *registered* workspace
+### Workspace selection
 
-A `WORKSPACE` above is always a **registered name**, never a bare path. A name is
-bound once — "init:ed" — to a place: either the built-in `local` remote, meaning
-this machine, or exactly one defined remote, plus the path the workspace lives at
-there. The binding is always explicit; being local is never implied, because a
-name that silently meant "here" would be a different workspace on a different
-machine. There is no path notation anywhere in the CLI: a command handed
-something that is not a registered name refuses and points you at
-`workspace init` or `workspace list`.
+A `WORKSPACE` is an optional registered name. Inside a project, omitting it uses
+the project workspace and creates it lazily on the first workflow command,
+registering it as `default`; outside a project, commands use the per-user default
+workspace. Explicit local names are created with `workspace init NAME`, and
+remote names use `REMOTE:NAME`.
 
 A binding lives in one of two scopes — **global**
 (`$XDG_CONFIG_HOME/httk/workspaces.json`, shared by every project) or **project**
@@ -84,12 +81,9 @@ workspace, the client resolves the name to its remote path and sends the **path*
 always been path-based. The Python API keeps `Workspace(path)` for library use;
 the registry is what the command line speaks.
 
-Reaching a remote binding depends on the command: the read commands
-`workspace status`, `workspace fsck`, and `workspace gc` run over the remote's
-adapter and read it exactly as they read a local one, while every command that
-only makes sense where the files are — `job …`, `harvest`, `workspace settings`,
-`unlock` — refuses a remote binding with a message naming the remote
-and pointing at `transfer` and `workspace status`.
+Remote-capable workspace commands use the adapter; this includes status and
+settings. Jobs are created in the local default workspace, then `transfer` moves
+them to a remote workspace for execution.
 
 ### `workspace` — the workspace itself, not its jobs
 
@@ -109,20 +103,17 @@ and pointing at `transfer` and `workspace status`.
 | `workspace gc NAME` | collect what the retention policy allows (remote: over the adapter) | `--dry-run`, `--json` |
 | `workspace unlock NAME` | release a maintenance lock | `--force` |
 
-`workspace init` both creates the workspace and registers the name for it, so a
-first workspace on this machine is one command:
+`workspace init` creates and registers an explicit workspace:
 
 ```console
 httk workflow workspace init my-workspace --path runs/my-workspace
 ```
 
-A workspace on a cluster names the remote it lives on instead of `local`; the
-workspace is created there over the adapter, and its name is registered here.
-`--setting KEY=VALUE` seeds an application setting at creation, and a
-remote-bound workspace is *also* seeded from the remote definition's whitelisted
-remote settings — see the *Application settings* section below. `workspace
-delete` destroys the workspace (locally, or on its remote over the adapter) and
-is refused without `--force`; `workspace forget` only removes the name.
+A workspace on a cluster is addressed as `REMOTE:NAME`; its path defaults to
+`<workspace_root>/NAME` after the remote is configured. `--setting KEY=VALUE`
+seeds an application setting at creation. `workspace delete` destroys the
+workspace (locally, or on its remote over the adapter) and is refused without
+`--force`; `workspace forget` only removes the name.
 
 ### `runner` — the shared runners a workspace publishes
 
@@ -218,7 +209,7 @@ provided by *httk-core*. `httk project init` creates only the anchor, whereas
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `project init [PATH]` | create a project, its key, and its workspace | `--name`, `--description`, `--default-queue`, `--exclude`, `--non-interactive` |
+| `project init [PATH]` | create a project, its key, and its workflow workspace | `--name`, `--description`, `--exclude`, `--non-interactive` |
 | `project import-v1 [PATH]` | read a legacy `ht.project` | `--source`, `--name` |
 | `project show [PATH]` | describe the project, its keys, its workspace, its manifest | `--no-verify`, `--json` |
 | `project doctor [PATH]` | check, and optionally repair, the project | `--repair`, `--json` |
@@ -422,14 +413,14 @@ nothing was.
 httk workflow config init --name "A User" --email user@example.org
 httk workflow config set name "Another User"
 httk workflow config unset email
-httk workflow project init . --name example --default-queue default
+httk workflow project init . --name example
 ```
 
 The project *anchor* is owned by *httk-core*, which provides the umbrella
 `httk project` command. `httk project init` creates the anchor alone;
-`httk workflow project init` above additionally creates the workflow workspace
-(that the two are born together is revisited in a later phase). The manifest,
-doctor, and workflow-aware `show` commands below are provided by
+`httk workflow project init` above is the explicit variant that also creates the
+workflow workspace. The manifest, doctor, and workflow-aware `show` commands are
+provided by
 *httk-workflow* under `httk workflow project`.
 
 `config set` accepts only the keys the configuration actually has — `name` and
@@ -583,7 +574,7 @@ library — distinct from the engine `policy` above, which tunes scheduling. The
 are stored in the workspace and edited by name:
 
 ```console
-httk workflow workspace settings set my-workspace vasp.command '"srun -n 32 vasp_std"'
+httk workflow workspace settings set my-workspace vasp.command "srun -n 32 vasp_std"
 httk workflow workspace settings show my-workspace
 httk workflow workspace settings unset my-workspace vasp.command
 ```
@@ -596,14 +587,12 @@ seeded from that remote definition's whitelisted remote settings, so a cluster's
 it.
 
 A runner reads a setting through `a.setting("vasp.command")`, and the value is
-resolved in layers, most specific first: the job's own `inputs`, then the
-environment (`HTTK_VASP_COMMAND`), then the workspace setting, then the runner's
-default. The environment therefore still wins over the workspace setting — a
-machine's own `HTTK_VASP_COMMAND` is honoured exactly as before — while the
-workspace setting spares an operator from exporting it for every job. The manager
-snapshots the settings into each attempt's `context.json`, so a runner sees the
-values the workspace held when its job was claimed. See {doc}`vasp_runners` and
-{doc}`sdk_parity`.
+resolved in layers, most specific first: the job's own inputs, a real
+`HTTK_VASP_COMMAND` deployment override, the workspace setting, then the runner's
+default. The manager exports scalar workspace settings into each attempt
+environment (`vasp.command` becomes `HTTK_VASP_COMMAND`) and snapshots them into
+`context.json`, so a runner sees the values the workspace held when its job was
+claimed. See {doc}`vasp_runners` and {doc}`sdk_parity`.
 
 ## Workspace policy and integrity
 
@@ -801,47 +790,50 @@ destination.
 
 ## Running on a remote and fetching the results
 
-Register the remote workspace once, then the complete loop is four commands. Work
-is sent to the remote, run there, fetched back once it has stopped, and harvested
-locally:
+Add and configure the machine, install *httk-workflow* there, create its
+workspace, then send and run a job:
 
 ```console
-httk workflow workspace init cluster:runs
-httk workflow transfer local-runs cluster:runs --job JOB_ID ...     # local -> remote
-httk workflow manager run cluster:runs --count 2 --workers 4
-httk workflow transfer cluster:runs local-runs                      # remote -> local
-httk workflow harvest local-runs --state succeeded --state failed
+httk workflow remote add kappa --template ssh-slurm
+httk workflow remote configure kappa \
+    --set host=kappa.example.org --set username=rar \
+    --set workspace_root=/scratch/rar/httk
+httk workflow remote install kappa
+httk workflow workspace init kappa:runs
+httk workflow workspace settings set kappa:runs slurm.partition batch
+httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
+httk workflow job new --template vasp-relax --from POSCAR --tag silicon
+httk workflow transfer default kappa:runs --job JOB-ID
+httk workflow run kappa:runs --workers 8
+httk workflow workspace status kappa:runs
 ```
 
-`transfer local-runs cluster-runs` detaches each `--job` from the local workspace
-and imports it on the remote, at the placement it had here unless
-`--destination-placement` puts it elsewhere. Both names resolve through the
-registry, so the source being local and the destination being remote is what
-makes this the send leg — no `--source-workspace`/`--remote-workspace` flags, and
-no bare paths.
+`remote configure --set` accepts machine-level settings, including
+`workspace_root`; scheduler settings belong to the workspace instead. The
+`workspace init` command therefore derives `kappa:runs` as
+`<workspace_root>/runs`, and the `slurm.*` and `manager.workers` settings travel
+with that workspace. The explicit `workspace_root` assignment above is required;
+the adapter template does not invent a site path.
 
-`manager run cluster-runs` starts managers on the remote, because the name is
-bound to one: `--count N` submits the generated batch script `N` times, `--workers
-N` fixes the workers per manager, and leaving `--workers` off lets the target
-workspace's configured `manager.workers=N` decide.
+`transfer default kappa:runs` detaches each selected job from the local default
+workspace and imports it on the remote, at the placement it had here unless
+`--destination-placement` puts it elsewhere. `run kappa:runs` submits the
+generated manager through the remote adapter; `--workers` fixes its worker count.
+`manager run` is the advanced spelling for the same operation.
 
-`transfer cluster-runs local-runs` is the fetch leg. It probes the remote
-workspace over the adapter's `status` operation, asks it to `offer` what has
-stopped, `pull`s each offered bundle into `.httk-workflow/transfers/incoming/`,
-imports it, and only then tells the remote to `retire` the sources it still
-holds:
+To bring stopped jobs home, use the reverse transfer and then harvest:
 
 ```console
-httk workflow transfer cluster-runs local-runs \
+httk workflow transfer kappa:runs default \
     --state succeeded --state failed --placement project/screening --json
 ```
 
 `--state` accepts the kinds a stopped job can be in and defaults to `succeeded`
 and `failed`; `--placement` restricts the fetch to one subtree; `--adapter-timeout`
 bounds every adapter operation the fetch runs. A fetched job arrives as an
-ordinary job of the local workspace, in the terminal state and at the placement it
-had on the remote, so `httk workflow harvest local-runs` then reports it exactly
-like a job that ran at home.
+ordinary job of the local default workspace, in the terminal state and at the
+placement it had on the remote, so `httk workflow harvest` then reports it
+exactly like a job that ran at home.
 
 Under the fetch leg run the two far-side protocol commands, invoked over the
 adapter but usable on their own on the remote itself. They are path-based, because

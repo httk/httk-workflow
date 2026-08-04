@@ -66,10 +66,11 @@ python -m pip install -e .
 One workspace, one job of a packaged runner, and one manager that runs it:
 
 ```console
-httk workflow workspace init workflow-workspace --remote local --path workflow-workspace
-httk workflow job new workflow-workspace --template vasp-relax --from POSCAR --tag silicon
-httk workflow run workflow-workspace
-httk workflow harvest workflow-workspace
+httk project init --name quickstart
+httk workflow job new --template vasp-relax --from POSCAR --tag silicon
+httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
+httk workflow run
+httk workflow harvest
 ```
 
 {doc}`quickstart` walks through exactly those commands, including how to run them

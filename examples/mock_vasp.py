@@ -11,8 +11,8 @@ Use it exactly the way a deployment names the real thing:
 
 .. code-block:: console
 
-    export HTTK_VASP_COMMAND="$PWD/examples/mock_vasp.py"
-    httk workflow run workflow-workspace
+    httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
+    httk workflow run
 
 ``HTTK_MOCK_VASP_FAIL_ONCE=1`` makes the first run in a directory fail with a
 diagnosable ``ZPOTRF`` error instead, which is what makes the runners' remedy
