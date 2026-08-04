@@ -17,6 +17,7 @@ from functools import partial
 from pathlib import Path
 
 from httk.core.crypto import ed25519_public_key, ed25519_sign, ed25519_verify
+from httk.core.project import LegacyProjectError
 
 from ._util import json_bytes, retry_delay, sha256_file, timestamp_seconds, utc_now
 from .projects import (
@@ -609,25 +610,23 @@ def verify_manifest(
     """
 
     supplied = Path(project).expanduser().resolve() if project is not None else Path.cwd().resolve()
-    v2_root = discover_project(supplied)
-    if v2_root is None:
-        start = supplied.parent if supplied.is_file() else supplied
-        legacy_root = next(
-            (
-                candidate
-                for candidate in (start, *start.parents)
-                if (candidate / "ht.project" / "manifest.bz2").is_file()
-            ),
-            None,
-        )
-        if legacy_root is None:
-            raise ValueError("no v2 or legacy httk project exists at or above the working directory")
+    try:
+        v2_root = discover_project(supplied)
+    except LegacyProjectError as error:
+        # Only the v1 flavor has a read-only legacy verification path here; a
+        # pre-release .httk-project refusal propagates with its rename remedy.
+        if error.kind != "v1":
+            raise
         path = (
             Path(manifest).expanduser().resolve()
             if manifest is not None
-            else legacy_root / "ht.project" / "manifest.bz2"
+            else error.root / "ht.project" / "manifest.bz2"
         )
-        return _verify_legacy(legacy_root, path, resolve_trusted_keys(None, trusted_keys=trusted_keys))
+        if not path.is_file():
+            raise ValueError(f"the v1 project at {error.root} has no manifest to verify: {path}") from error
+        return _verify_legacy(error.root, path, resolve_trusted_keys(None, trusted_keys=trusted_keys))
+    if v2_root is None:
+        raise ValueError("no v2 or legacy httk project exists at or above the working directory")
     trusted = resolve_trusted_keys(v2_root, trusted_keys=trusted_keys)
     if manifest is not None:
         path = Path(manifest).expanduser().resolve()
