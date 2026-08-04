@@ -25,7 +25,7 @@ from httk.workflow import (
     harvest,
 )
 from httk.workflow.adapters import add_remote
-from httk.workflow.projects import initialize_project
+from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.transfers import TRANSFER_DIRECTORY, _payload_digest
 from httk.workflow.workflow_cli import command
@@ -165,7 +165,7 @@ def pair(template: Path, tmp_path: Path) -> Pair:
     local_root = root / "local"
     remote_root = root / "remote"
     # The adapter of the copy must name the remote workspace of the copy.
-    metadata_path = local_root / ".httk-project" / "remotes" / "cluster" / "remote.json"
+    metadata_path = local_root / PROJECT_DIRECTORY / "remotes" / "cluster" / "remote.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     metadata["queues"]["default"]["workspace"] = str(remote_root)
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")

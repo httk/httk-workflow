@@ -11,7 +11,7 @@ A binding lives in one of two scopes:
 
 * **global** — ``$XDG_CONFIG_HOME/httk/workspaces.json``, shared by every
   project this user works in.
-* **project** — the ``workspaces`` member of ``.httk-project/project.json``,
+* **project** — the ``workspaces`` member of ``httk_project/project.json``,
   travelling with the project.
 
 A project binding shadows a global one of the same name, exactly as a

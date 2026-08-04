@@ -330,39 +330,6 @@ def add_project_manifest_verify_arguments(parser: argparse.ArgumentParser) -> No
     )
 
 
-def build_umbrella_doctor_parser(parser: argparse.ArgumentParser) -> None:
-    """Declare ``httk project doctor`` on the umbrella command's own parser.
-
-    Registered into the core ``httk project`` command, so ``httk project doctor``
-    and ``httk workflow project doctor`` drive the very same handler.
-    """
-
-    add_project_doctor_arguments(parser)
-
-
-def build_umbrella_manifest_parser(parser: argparse.ArgumentParser) -> None:
-    """Declare ``httk project manifest create|verify`` on the umbrella parser."""
-
-    parser.set_defaults(handler=None, help_parser=parser)
-    actions = parser.add_subparsers(metavar="COMMAND")
-    create = actions.add_parser(
-        "create",
-        help="write the signed manifest",
-        description="Write the deterministic signed manifest of one project",
-        formatter_class=HelpFormatter,
-    )
-    create.set_defaults(handler=handle_project_manifest_create, help_parser=create)
-    add_project_manifest_create_arguments(create)
-    verify = actions.add_parser(
-        "verify",
-        help="verify the manifest against the tree",
-        description="Verify one project manifest against the tree and this project's trust anchors",
-        formatter_class=HelpFormatter,
-    )
-    verify.set_defaults(handler=handle_project_manifest_verify, help_parser=verify)
-    add_project_manifest_verify_arguments(verify)
-
-
 def build_project_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
     context: CLIContext,

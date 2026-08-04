@@ -16,8 +16,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from httk.core.project.cli import ProjectShowSection
-
 from ._util import read_json, utc_now, write_json_atomic
 from .adapters import (
     ADAPTER_EXECUTABLE,
@@ -63,7 +61,6 @@ __all__ = [
     "describe_remote",
     "project_doctor",
     "remove_remote",
-    "workflow_show_section",
 ]
 
 PROJECT_DESCRIPTION_FORMAT = "httk-project-description"
@@ -201,35 +198,6 @@ def _project_remotes(project: Path) -> list[str]:
             for path in root.iterdir()
             if path.is_dir()
         }
-    )
-
-
-def workflow_show_section(project: Path, *, verify: bool) -> ProjectShowSection:
-    """Contribute the workflow rows of ``httk project show``.
-
-    This is the workflow half of what :func:`describe_project` reports — the
-    workspace, the manifest, and the remotes — registered into the umbrella
-    ``httk project`` command as a show section. The anchor half (metadata and
-    keys) is rendered by *httk-core*; here we only add what a workflow
-    installation knows about a project.
-    """
-
-    metadata = read_project(project)
-    workspace = _workspace_summary(project, metadata)
-    manifest = _manifest_summary(project, verify=verify)
-    remotes = _project_remotes(project)
-    rows: list[tuple[str, str]] = [
-        ("workspace", str(workspace.get("workspace_id") or ("present" if workspace.get("present") else "-"))),
-        ("jobs", str(workspace.get("jobs", 0))),
-        ("manifest", f"{manifest.get('verdict') or 'none'}: {manifest.get('reason') or '-'}"),
-        ("remotes", ", ".join(remotes) or "-"),
-    ]
-    lock = workspace.get("maintenance_lock")
-    if isinstance(lock, dict):
-        rows.append(("maintenance_lock", f"{lock.get('holder')} ({'stale' if lock.get('stale') else 'live'})"))
-    return ProjectShowSection(
-        json={"workspace": workspace, "manifest": manifest, "remotes": remotes},
-        rows=rows,
     )
 
 

@@ -96,8 +96,6 @@ from ._project import (
     add_project_manifest_verify_arguments,
     build_config_parser,
     build_project_parser,
-    build_umbrella_doctor_parser,
-    build_umbrella_manifest_parser,
     handle_config_import_v1,
     handle_config_init,
     handle_config_set,

@@ -111,7 +111,7 @@ def _records(root: Path, patterns: Sequence[str]) -> Iterator[dict[str, object]]
 
 
 def _seed(project: Path) -> bytes:
-    path = project / ".httk-project" / "keys" / "project.seed"
+    path = project / PROJECT_DIRECTORY / "keys" / "project.seed"
     try:
         seed = base64.b64decode(path.read_text(encoding="ascii").strip(), validate=True)
     except (OSError, ValueError) as exc:
@@ -283,7 +283,7 @@ def create_manifest(
     root = require_project(project)
     metadata = read_project(root)
     destination = (
-        Path(output).expanduser().resolve() if output is not None else root / ".httk-project" / "manifest.jsonl.bz2"
+        Path(output).expanduser().resolve() if output is not None else root / PROJECT_DIRECTORY / "manifest.jsonl.bz2"
     )
     exclusions = project_exclusions(metadata)
     if destination.is_relative_to(root):

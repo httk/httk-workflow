@@ -21,7 +21,7 @@ from httk.workflow.manifests import (
     read_maintenance_lock,
     workspace_maintenance_guard,
 )
-from httk.workflow.projects import initialize_project
+from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.workflow_cli import command
 
 
@@ -166,9 +166,9 @@ def test_secret_setting_avoids_remote_json_and_manifests(tmp_path: Path, monkeyp
     manifest = create_manifest(project)
     body = bz2.decompress(manifest.read_bytes()).decode("utf-8")
     relative = credentials.relative_to(project).as_posix()
-    assert relative == ".httk-project/remotes/cluster/credentials.json"
+    assert relative == f"{PROJECT_DIRECTORY}/remotes/cluster/credentials.json"
     assert relative not in body and "hunter2" not in body
-    assert ".httk-project/remotes/cluster/remote.json" in body
+    assert f"{PROJECT_DIRECTORY}/remotes/cluster/remote.json" in body
 
 
 def test_secret_setting_remains_visible_to_the_adapter(tmp_path: Path, monkeypatch) -> None:
