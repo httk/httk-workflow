@@ -192,6 +192,7 @@ def campaign_submit_many(
     items: Iterable[JobItem],
     *,
     key: str,
+    index: int = 0,
     project: str | os.PathLike[str] | None = None,
     **shared: object,
 ) -> list[ScaffoldedJob]:
@@ -201,7 +202,7 @@ def campaign_submit_many(
     across partitions, or ``round-robin`` assignment with distinct indices.
     """
 
-    partition = assign_partition(key, project=project)
+    partition = assign_partition(key, index=index, project=project)
     workspace = _local_partition_workspace(partition, project)
     return list(new_jobs(workspace, template, items, **shared))  # type: ignore[arg-type]
 

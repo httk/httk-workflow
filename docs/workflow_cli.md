@@ -126,7 +126,7 @@ workspace (locally, or on its remote over the adapter) and is refused without
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `job new WORKSPACE` | scaffold and submit jobs from a template | `--template` (required), `--from`, `--file`, `--input`, `--tag`, `--placement`, `--json` |
+| `job new WORKSPACE` | scaffold and submit jobs from a template | `--template` (required), `--parameter`, `--parameter-from`, `--file`, `--input`, `--tag`, `--placement`, `--json` |
 | `job submit WORKSPACE SOURCE` | submit one prepared payload directory | `--placement` (required), `--move` |
 | `job request WORKSPACE JOB_ID ACTION` | publish an operator request | `--operator`, `--reason` (both required), `--priority`, `--step`, `--force` |
 | `job list WORKSPACE` | list the jobs as a cheap table | `--kind`, `--placement`, `--json` |
@@ -318,7 +318,7 @@ job again, or edit the one `runner.path` member.
 | --- | --- | --- |
 | `campaign init` | define the project's partition map and assignment policy | `--partition NAME=WORKSPACE`, `--assignment` |
 | `campaign show` | show the partition map | `--json` |
-| `campaign submit` | assign one root job to a partition and submit it there | `--template` (required), `--key` (required), `--index`, `--input`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
+| `campaign submit` | assign one root job to a partition and submit it there | `--template` (required), `--key` (required), `--index`, `--input`, `--parameter`, `--parameter-from`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
 | `campaign harvest` | harvest every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--json` |
 | `campaign start-managers` | start a manager per selected partition | `--partition`, `--workers`, `--count`, `--adapter-timeout` |
 
@@ -334,14 +334,15 @@ children always inherit their parent's workspace. See {doc}`campaigns`.
 the path of a runner file of your own — and needs no prepared payload:
 
 ```console
-httk workflow job new WORKSPACE --template vasp-relax --from POSCAR --tag silicon
-httk workflow job new WORKSPACE --template vasp-relax --from structures/ --placement project/screening
+httk workflow job new WORKSPACE --template vasp-relax --parameter structure=POSCAR --tag silicon
+httk workflow job new WORKSPACE --template vasp-relax --parameter-from structure structures/ --placement project/screening
 httk workflow job new WORKSPACE --template ./my_runner.py --step characterize --input sites=8
 ```
 
-`--from` is a structure file, staged as the `files/POSCAR` the packaged runners
-read, or a directory of `POSCAR*` and `*.vasp` files, which becomes one job each,
-tagged after its file. `--file NAME=PATH` stages anything else, `--input
+`--parameter NAME=VALUE` supplies a creation-time value verbatim; `--parameter-from
+NAME SOURCE...` loads a file or the readable files in a directory, realizes the
+declared payload destination, and creates one job per file for a batch. `--file
+NAME=PATH` stages anything else, `--input
 NAME=VALUE` writes the job's inputs — JSON when the value parses as JSON, a string
 otherwise, and `NAME=@FILE` reads a JSON file — and the command prints one
 tab-separated `job_key<TAB>payload` line per job, or `--json` reports. The runner
@@ -802,7 +803,7 @@ httk workflow remote install kappa
 httk workflow workspace init kappa:runs
 httk workflow workspace settings set kappa:runs slurm.partition batch
 httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
-httk workflow job new --template vasp-relax --from POSCAR --tag silicon
+httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
 httk workflow transfer default kappa:runs --job JOB-ID
 httk workflow run kappa:runs --workers 8
 httk workflow workspace status kappa:runs

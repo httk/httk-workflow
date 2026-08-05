@@ -12,7 +12,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Self
 
 from ._util import (
     fsync_directory,
@@ -297,6 +297,15 @@ class Workspace:
             durable=durable,
         )
         return cls(root_path, durable=durable)
+
+    @classmethod
+    def default(cls) -> Self:
+        """Resolve the project (or per-user) default workspace, creating it if needed."""
+
+        from . import registry
+
+        binding = registry.default_workspace()
+        return cls(binding.path)
 
     @property
     def policy(self) -> WorkspacePolicy:

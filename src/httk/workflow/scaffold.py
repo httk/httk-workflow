@@ -40,6 +40,7 @@ design, generating a partitioned campaign costs one payload and one marker per
 job and never materializes a list of them.
 """
 
+import hashlib
 import importlib
 import json
 import os
@@ -47,12 +48,15 @@ import shutil
 import subprocess
 import sys
 import uuid
-from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType, ModuleType
 from typing import Literal, TypedDict, cast
 
-from ._util import sha256_file
+import httk.core
+
+from ._util import sha256_file, validate_parameters
 from .errors import FormatError
 from .models import (
     ATTEMPT_CONTROL_PREFIX,
@@ -68,6 +72,7 @@ __all__ = [
     "FILES_DIRECTORY",
     "JOB_SCAFFOLD_FORMAT",
     "STRUCTURE_PATTERNS",
+    "InstantiateContext",
     "JobItem",
     "JobTemplate",
     "ScaffoldedJob",
@@ -92,7 +97,7 @@ DEFAULT_PLACEMENT = "jobs"
 #: The payload directory a staged file lands in when its name has no directory of
 #: its own. Every packaged runner reads its inputs from there.
 FILES_DIRECTORY = "files"
-#: The file names ``--from`` recognizes as structures when it is given a directory.
+#: The file names legacy callers may recognize as structures in a directory.
 STRUCTURE_PATTERNS = ("POSCAR*", "*.vasp")
 _DESCRIBE_VARIABLE = "HTTK_WORKFLOW_DESCRIBE"
 _DESCRIBE_TIMEOUT = 120.0
@@ -127,6 +132,14 @@ class TemplateProvider:
     data_mode: DataMode = "none"
     workdir_mode: WorkdirMode = "persistent"
     summary: str = ""
+    parameters: Mapping[str, str | None] = field(default_factory=dict)
+    instantiate: bool = False
+
+    def __post_init__(self) -> None:
+        parameters = validate_parameters(self.parameters)
+        if any(destination is None for destination in parameters.values()) and not self.instantiate:
+            raise ValueError(f"template {self.name!r} has hook-consumed parameters and requires an instantiate hook")
+        object.__setattr__(self, "parameters", MappingProxyType(parameters))
 
 
 #: Every registered template, keyed by name in registration order. The scaffold
@@ -174,6 +187,7 @@ class JobItem(TypedDict, total=False):
 
     inputs: Mapping[str, object]
     files: Mapping[str, str | os.PathLike[str]]
+    parameters: Mapping[str, object]
     tag: str | None
     name: str
     placement: str | PurePosixPath
@@ -199,6 +213,8 @@ class JobTemplate:
     workdir_mode: WorkdirMode = "persistent"
     packaged: str | None = None
     summary: str = ""
+    parameters: Mapping[str, str | None] = field(default_factory=dict)
+    instantiate: bool = False
 
     @property
     def store_name(self) -> str:
@@ -263,6 +279,30 @@ class _Prepared:
     runner_path: str
     runner_sha256: str
     data_mode: DataMode
+    instantiate: Callable[["InstantiateContext"], object] | None
+
+
+@dataclass
+class InstantiateContext:
+    """The mutable creation-time view passed to a runner's instantiate hook.
+
+    ``payload`` is the staging root, ``parameters`` contains every supplied
+    creation parameter, ``inputs`` is the merged job input mapping, and ``tag``
+    is the caller's tag. The hook may write below ``payload`` and update
+    ``inputs``; use :meth:`suggest_tag` to provide a tag without overriding one
+    the caller supplied.
+    """
+
+    payload: Path
+    parameters: Mapping[str, object]
+    inputs: dict[str, object]
+    tag: str | None
+
+    def suggest_tag(self, tag: str) -> None:
+        """Set a tag only when the caller did not supply one."""
+
+        if self.tag is None:
+            self.tag = tag
 
 
 def describe_runner(runner: str | os.PathLike[str]) -> dict[str, object]:
@@ -347,7 +387,22 @@ def _parse_description(text: str, path: Path) -> dict[str, object]:
     steps = described.get("steps")
     if not isinstance(steps, list) or not all(isinstance(step, str) for step in steps):
         raise ValueError(f"the runner {path} described steps that are not an array of names")
-    return {"workflow": described["workflow"], "steps": [str(step) for step in steps]}
+    raw_parameters = described.get("parameters", {})
+    try:
+        parameters = validate_parameters(raw_parameters)
+    except ValueError as exc:
+        raise ValueError(f"the runner {path} described invalid parameters: {exc}") from exc
+    instantiate = described.get("instantiate", False)
+    if not isinstance(instantiate, bool):
+        raise ValueError(f"the runner {path} described instantiate that is not a boolean")
+    if any(destination is None for destination in parameters.values()) and not instantiate:
+        raise ValueError(f"the runner {path} has hook-consumed parameters and requires an instantiate hook")
+    result: dict[str, object] = {"workflow": described["workflow"], "steps": [str(step) for step in steps]}
+    if "parameters" in described:
+        result["parameters"] = parameters
+    if "instantiate" in described:
+        result["instantiate"] = instantiate
+    return result
 
 
 def _packaged_runner_path(provider: TemplateProvider) -> Path:
@@ -394,6 +449,8 @@ def packaged_template(name: str) -> JobTemplate | None:
         workdir_mode=provider.workdir_mode,
         packaged=provider.runner_file,
         summary=provider.summary,
+        parameters=provider.parameters,
+        instantiate=provider.instantiate,
     )
 
 
@@ -431,6 +488,8 @@ def resolve_template(
             initial_step=_initial_step(path, steps, step),
             steps=steps,
             summary=f"the runner {path}",
+            parameters=cast(dict[str, str | None], described.get("parameters", {})),
+            instantiate=bool(described.get("instantiate", False)),
         )
     if workflow is not None:
         resolved = replace(resolved, workflow=workflow)
@@ -498,6 +557,14 @@ def structure_tag(path: str | os.PathLike[str]) -> str | None:
             if name.lower().endswith(suffix):
                 name = name[: -len(suffix)]
                 break
+        else:
+            return None
+    return _sanitize_tag(name)
+
+
+def _sanitize_tag(name: str) -> str | None:
+    """Reduce a filename fragment to the protocol's tag syntax."""
+
     reduced: list[str] = []
     for character in name.lower():
         if character in _TAG_CHARACTERS:
@@ -518,6 +585,7 @@ def new_job(
     *,
     inputs: Mapping[str, object] | None = None,
     files: Mapping[str, str | os.PathLike[str]] | None = None,
+    parameters: Mapping[str, object] | None = None,
     tag: str | None = None,
     placement: str | PurePosixPath = DEFAULT_PLACEMENT,
     priority: int | None = None,
@@ -551,6 +619,7 @@ def new_job(
         prepared,
         inputs=inputs,
         files=files,
+        parameters=parameters,
         tag=tag,
         placement=placement,
         priority=priority,
@@ -566,6 +635,7 @@ def new_jobs(
     *,
     inputs: Mapping[str, object] | None = None,
     files: Mapping[str, str | os.PathLike[str]] | None = None,
+    parameters: Mapping[str, object] | None = None,
     tag: str | None = None,
     placement: str | PurePosixPath = DEFAULT_PLACEMENT,
     priority: int | None = None,
@@ -607,6 +677,7 @@ def new_jobs(
             prepared,
             inputs={**(inputs or {}), **item.get("inputs", {})},
             files={**(files or {}), **item.get("files", {})},
+            parameters={**(parameters or {}), **item.get("parameters", {})},
             tag=item.get("tag", tag),
             placement=item.get("placement", placement),
             priority=item.get("priority", priority),
@@ -638,13 +709,53 @@ def _prepare(
         reference = _packaged_runner_reference(provider)
     else:
         reference = workspace.publish_runner(resolved.source, name=resolved.store_name)
+    runner_sha256 = str(reference["sha256"])
+    instantiate = _resolve_instantiate(resolved, runner_sha256) if resolved.instantiate else None
     return _Prepared(
         template=resolved,
         runner_source=cast(Literal["workspace", "installed"], str(reference["source"])),
         runner_path=str(reference["path"]),
-        runner_sha256=str(reference["sha256"]),
+        runner_sha256=runner_sha256,
         data_mode=resolved.data_mode,
+        instantiate=instantiate,
     )
+
+
+def _resolve_instantiate(template: JobTemplate, runner_sha256: str) -> Callable[[InstantiateContext], object]:
+    """Import and resolve a template's instantiate hook once."""
+
+    if template.source.suffix != ".py":
+        raise ValueError(f"the instantiate hook is Python-SDK-only: {template.source}")
+    source = template.source
+    source_bytes = source.read_bytes()
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    if digest != runner_sha256:
+        raise ValueError(
+            f"the runner {source} changed while resolving its instantiate hook: "
+            f"import digest {digest} does not match pinned runner digest {runner_sha256}"
+        )
+    module_name = f"httk_workflow_runner_{digest}"
+    module = sys.modules.get(module_name)
+    if module is None:
+        module = ModuleType(module_name)
+        module.__file__ = str(source)
+        sys.modules[module_name] = module
+        try:
+            exec(compile(source_bytes, str(source), "exec"), module.__dict__)  # noqa: S102
+        except BaseException:
+            sys.modules.pop(module_name, None)
+            raise
+    from .sdk import Runner
+
+    runners = [value for value in vars(module).values() if isinstance(value, Runner)]
+    if not runners:
+        raise ValueError(f"the runner {source} defines no Runner")
+    if len(runners) != 1:
+        raise ValueError(f"the runner {source} defines {len(runners)} Runner instances")
+    runner = runners[0]
+    if not runner.has_instantiate or runner._instantiate is None:
+        raise ValueError(f"the runner {source} declares instantiate but the found Runner has no hook")
+    return runner._instantiate
 
 
 def _submit(
@@ -653,6 +764,7 @@ def _submit(
     *,
     inputs: Mapping[str, object] | None,
     files: Mapping[str, str | os.PathLike[str]] | None,
+    parameters: Mapping[str, object] | None,
     tag: str | None,
     placement: str | PurePosixPath,
     priority: int | None,
@@ -667,9 +779,23 @@ def _submit(
     # submitting it is a rename on one filesystem rather than a copy, whatever
     # the size of the files it stages.
     staging = workspace.control / "tmp" / f"scaffold.{uuid.uuid4()}"
+    caller_tag = tag
     try:
         staging.mkdir(parents=True, exist_ok=False)
         _stage_files(staging, files or {})
+        supplied_parameters = dict(parameters or {})
+        _stage_parameters(staging, template, supplied_parameters, instantiate=prepared.instantiate is not None)
+        job_inputs = dict(inputs or {})
+        if prepared.instantiate is not None:
+            context = InstantiateContext(
+                payload=staging,
+                parameters=MappingProxyType(supplied_parameters),
+                inputs=job_inputs,
+                tag=tag,
+            )
+            prepared.instantiate(context)
+            job_inputs = context.inputs
+            tag = caller_tag if caller_tag is not None else context.tag
         job = prepare_job_payload(
             staging,
             JobSpec(
@@ -683,7 +809,7 @@ def _submit(
                 workdir_mode=workdir_mode,
                 data_mode=prepared.data_mode,
                 priority=500 if priority is None else priority,
-                inputs=validate_inputs(inputs or {}),
+                inputs=validate_inputs(job_inputs),
             ),
         )
         marker = workspace.submit(staging, normalized, move=True)
@@ -719,6 +845,39 @@ def _stage_files(payload: Path, files: Mapping[str, str | os.PathLike[str]]) -> 
         destination = payload.joinpath(*payload_relative(name).parts)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, destination)
+
+
+def _stage_parameters(
+    payload: Path,
+    template: JobTemplate,
+    parameters: Mapping[str, object],
+    *,
+    instantiate: bool = False,
+) -> None:
+    """Realize creation parameters into the payload declared by the template."""
+
+    declared = template.parameters
+    for name, value in parameters.items():
+        if name not in declared:
+            names = ", ".join(declared) or "none"
+            raise ValueError(f"unknown template parameter {name!r}; declared parameters: {names}")
+        destination_name = declared[name]
+        if destination_name is None:
+            if not instantiate:
+                raise ValueError(f"template parameter {name!r} requires an instantiate hook")
+            continue
+        destination = payload_relative(destination_name)
+        if isinstance(value, (str, os.PathLike)):
+            _stage_files(payload, {destination.as_posix(): value})
+            continue
+        if not httk.core.has_writer_for(destination.name):
+            raise ValueError(
+                f"no writer is registered for {destination.name!r}; a writer must be registered "
+                "(installing httk-io and httk-atomistic provides the POSCAR/CIF writers)"
+            )
+        path = payload.joinpath(*destination.parts)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        httk.core.save(value, path)
 
 
 def payload_relative(name: str) -> PurePosixPath:

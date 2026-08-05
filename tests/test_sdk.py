@@ -356,6 +356,22 @@ def test_describe_mode_prints_the_step_set_and_touches_nothing(
     assert json.loads(capsys.readouterr().out)["steps"] == ["collect", "prepare"]
 
 
+def test_runner_creation_parameters_are_immutable_and_optional() -> None:
+    plain = Runner("tests.plain")
+    assert plain.parameters == {}
+    assert "parameters" not in plain.description()
+
+    run = Runner("tests.parameters", parameters={"structure": "POSCAR", "future": None})
+    assert run.parameters == {"structure": "POSCAR", "future": None}
+    with pytest.raises(TypeError):
+        run.parameters["other"] = "x"  # type: ignore[index]
+    assert run.description()["parameters"] == {"structure": "POSCAR", "future": None}
+    with pytest.raises(ValueError, match="nonempty"):
+        Runner("tests.invalid", parameters={"": "POSCAR"})
+    with pytest.raises(ValueError, match="nonempty string or null"):
+        Runner("tests.invalid", parameters={"x": 7})  # type: ignore[dict-item]
+
+
 def test_registration_refuses_a_duplicate_step_name() -> None:
     run = Runner("tests.duplicates")
 
@@ -366,6 +382,19 @@ def test_registration_refuses_a_duplicate_step_name() -> None:
     with pytest.raises(ValueError, match="already registered"):
         run.step(name="relax")(lambda a: a.succeed())
     assert run.steps == frozenset({"relax"})
+
+
+def test_registration_refuses_a_duplicate_instantiate_hook() -> None:
+    run = Runner("tests.instantiate")
+
+    @run.instantiate
+    def hook(context: object) -> None:
+        del context
+
+    assert run.has_instantiate
+    assert run.description()["instantiate"] is True
+    with pytest.raises(ValueError, match="tests.instantiate"):
+        run.instantiate(lambda context: None)
 
 
 def test_a_step_that_publishes_nothing_is_reported_as_no_outcome(tmp_path: Path) -> None:

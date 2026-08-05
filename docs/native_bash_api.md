@@ -9,6 +9,9 @@ same shape as a Python runner: `httk_workflow_runner` declares the workflow and
 its steps, one `step_<name>` function implements each of them, and
 `httk_workflow_main` dispatches the step the manager asked for.
 
+Bash runners cannot declare the Python-only instantiate hook; the describe field
+is absent unless a Python runner declares it.
+
 Nothing declares the shape of the workflow up front. A step decides *at run time*
 which children to spawn and which step runs next, so the graph of a job is
 whatever its steps published. Every Bash function below performs its work through

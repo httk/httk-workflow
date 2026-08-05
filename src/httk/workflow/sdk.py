@@ -38,9 +38,10 @@ import traceback
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Literal, Self, cast, overload
+from types import MappingProxyType
+from typing import Any, Literal, Self, cast, overload
 
-from ._util import read_json, require_string, write_json_atomic
+from ._util import read_json, require_string, validate_parameters, write_json_atomic
 from .errors import FormatError
 from .models import (
     JOB_STATE_DIRECTORY,
@@ -76,6 +77,7 @@ __all__ = [
     "ChildResult",
     "ChildSpec",
     "ChildrenView",
+    "InstantiateHandler",
     "Runner",
     "RunnerRef",
 ]
@@ -87,6 +89,7 @@ _DESCRIBE_FLAG = "--describe"
 _RUNNER_STEPS_FILE = "runner-steps.json"
 
 type StepHandler = Callable[["Attempt"], object]
+type InstantiateHandler = Callable[[Any], object]
 type RunnerSource = Literal["payload", "workspace", "installed"]
 
 
@@ -809,15 +812,29 @@ class Runner:
     steps that really exist.
     """
 
-    def __init__(self, workflow: str) -> None:
+    def __init__(self, workflow: str, *, parameters: Mapping[str, str | None] | None = None) -> None:
         self.workflow = require_string(workflow, "workflow")
+        self._parameters = MappingProxyType(validate_parameters(parameters or {}))
         self._steps: dict[str, StepHandler] = {}
+        self._instantiate: InstantiateHandler | None = None
+
+    @property
+    def parameters(self) -> Mapping[str, str | None]:
+        """The immutable creation-parameter declaration."""
+
+        return self._parameters
 
     @property
     def steps(self) -> frozenset[str]:
         """The names of every registered step."""
 
         return frozenset(self._steps)
+
+    @property
+    def has_instantiate(self) -> bool:
+        """Whether this runner has a creation-time instantiate hook."""
+
+        return self._instantiate is not None
 
     @overload
     def step(self, function: StepHandler) -> StepHandler: ...
@@ -842,15 +859,28 @@ class Runner:
 
         return register if function is None else register(function)
 
+    def instantiate(self, function: InstantiateHandler) -> InstantiateHandler:
+        """Register the hook receiving ``httk.workflow.scaffold.InstantiateContext``."""
+
+        if self._instantiate is not None:
+            raise ValueError(f"an instantiate hook is already registered on the {self.workflow} runner")
+        self._instantiate = function
+        return function
+
     def description(self) -> dict[str, object]:
         """Return the machine-readable description of this runner."""
 
-        return {
+        description = {
             "format": RUNNER_DESCRIPTION_FORMAT,
             "format_version": 1,
             "workflow": self.workflow,
             "steps": sorted(self._steps),
         }
+        if self.parameters:
+            description["parameters"] = dict(self.parameters)
+        if self.has_instantiate:
+            description["instantiate"] = True
+        return description
 
     def main(self, argv: Sequence[str] | None = None) -> int:
         """Run the step this process was launched for and publish its outcome.

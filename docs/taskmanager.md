@@ -47,7 +47,7 @@ httk workflow remote install kappa
 httk workflow workspace init kappa:runs
 httk workflow workspace settings set kappa:runs slurm.partition batch
 httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
-httk workflow job new --template vasp-relax --from POSCAR --tag silicon
+httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
 httk workflow transfer default kappa:runs --job JOB-ID
 httk workflow run kappa:runs --workers 8
 httk workflow workspace status kappa:runs

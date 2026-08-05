@@ -114,6 +114,10 @@ workspace.submit("prepared-job", "project/si-vacancies")
 
 ## Steps and dispatch
 
+`Runner(workflow, parameters=...)` declares creation-time payload parameters as
+`name` → destination (or `null` for a hook-consumed parameter). The optional
+`parameters` member is included in the runner description when non-empty.
+
 `@run.step` registers the handler under the function's own name;
 `@run.step(name="collect-results")` names it explicitly. Registering the same
 name twice is an error at decoration time, so the step set is complete and
@@ -140,6 +144,27 @@ the `step` of a `ChildSpec` that inherits this runner.
 so a tool can enumerate the steps of a runner it is not running. The step set is
 also recorded in the job's state frame as `runner_steps`, from the first outcome
 the job publishes.
+
+### Creation-time instantiation
+
+`@run.instantiate` is a Python-only creation-time hook, replacing v1's
+`ht.instantiate.py`. `new_job(s)` imports the template on the creating machine,
+after declarative parameters are staged and before `job.json` is finalized. Its
+`InstantiateContext` provides the staging `payload`, read-only `parameters`,
+mutable merged `inputs`, and caller `tag`; `suggest_tag` supplies a tag only
+when the caller did not. For example:
+
+```python
+@run.instantiate
+def instantiate(ctx):
+    (ctx.payload / "files" / "generated.txt").write_text(ctx.parameters["note"])
+    ctx.inputs["derived"] = "ready"
+    ctx.suggest_tag("generated")
+```
+
+The hook may write anywhere below `payload`. It is trusted template code: the
+file is code being published and executed anyway, and Bash runners cannot
+declare this hook.
 
 ## What an attempt reads
 

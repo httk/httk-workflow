@@ -6,6 +6,7 @@ from ._common import (
     _group,
     _json_value,
     _leaf,
+    _load_parameters,
     _local_root,
     _pairs,
 )
@@ -115,13 +116,16 @@ def build_runner_parser(
 
 
 def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Scaffold and submit one job per template, structure, or both."""
+    """Scaffold and submit one job or a parameter-source batch."""
 
     workspace = Workspace(_local_root(arguments, context, action="submit into it"))
     inputs = {name: _json_value(text, f"job input {name!r}") for name, text in _pairs(arguments.inputs, "a job input")}
     files: dict[str, str | Path] = {name: Path(text) for name, text in _pairs(arguments.files, "a staged file")}
+    parameters, items, parameter_tag = _load_parameters(arguments.parameters, arguments.parameter_from)
     shared: dict[str, Any] = {
         "inputs": inputs,
+        "files": files,
+        "parameters": parameters,
         "placement": arguments.placement,
         "priority": arguments.priority,
         "workdir_mode": arguments.workdir_mode,
@@ -130,25 +134,12 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
         "step": arguments.step,
         "name": arguments.name,
     }
-    structures = Path(arguments.structures).expanduser() if arguments.structures else None
-    if structures is not None and structures.is_dir():
-        found = structure_files(structures)
-        if not found:
-            raise ValueError(f"no {' or '.join(STRUCTURE_PATTERNS)} file in {structures}")
-        items: list[JobItem] = [
-            {
-                "files": {**files, "POSCAR": path},
-                "tag": arguments.tag or structure_tag(path) or f"structure-{index:04d}",
-            }
-            for index, path in enumerate(found)
-        ]
+    if items:
+        for item in items:
+            item["tag"] = arguments.tag or item.get("tag")
         results: Iterator[ScaffoldedJob] = new_jobs(workspace, arguments.template, items, **shared)
     else:
-        tag = arguments.tag
-        if structures is not None:
-            files["POSCAR"] = structures
-            tag = tag or structure_tag(structures)
-        results = iter([new_job(workspace, arguments.template, files=files, tag=tag, **shared)])
+        results = iter([new_job(workspace, arguments.template, tag=arguments.tag or parameter_tag, **shared)])
     if arguments.json:
         # One self-describing report per job, as an array, exactly as `harvest
         # --json` prints one array of records.
@@ -383,16 +374,25 @@ def build_job_parser(
         help="stage PATH in the payload as NAME; a bare NAME lands in files/ (repeatable)",
     )
     new.add_argument(
-        "--from",
-        dest="structures",
-        metavar="PATH",
-        help="a structure file staged as files/POSCAR, or a directory of "
-        f"{' / '.join(STRUCTURE_PATTERNS)} files, one job each",
+        "--parameter",
+        action="append",
+        default=[],
+        dest="parameters",
+        metavar="NAME=VALUE",
+        help="one creation parameter; VALUE is passed verbatim (repeatable)",
+    )
+    new.add_argument(
+        "--parameter-from",
+        action="append",
+        nargs="+",
+        default=[],
+        metavar=("NAME", "SOURCE"),
+        help="load a creation parameter from one or more files, or readable files in a directory (repeatable)",
     )
     new.add_argument(
         "--tag",
         metavar="TAG",
-        help="the readable half of the job key (default: derived from --from)",
+        help="the readable half of the job key (default: derived from a parameter source)",
     )
     new.add_argument("--name", metavar="NAME", help="the human-readable job name")
     new.add_argument(

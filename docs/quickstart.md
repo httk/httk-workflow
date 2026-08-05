@@ -44,7 +44,7 @@ END
 
 ```console
 $ httk project init --name quickstart
-$ httk workflow job new --template vasp-relax --from POSCAR --tag silicon
+$ httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
 $ httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
 $ httk workflow run
 $ httk workflow harvest
@@ -64,7 +64,8 @@ calculation readable without looking inside a workdir.
 relaxation runner — one file, three steps, the reviewed remedy ladder — so no
 runner had to be written. The runner file is published into the workspace and the
 job pins its digest, so upgrading *httk-workflow* underneath a queued campaign
-cannot change what its jobs execute. `--from POSCAR` staged the structure as the
+cannot change what its jobs execute. `--parameter structure=POSCAR` copied the
+creation-time structure parameter as the
 `files/POSCAR` the runner reads, and `--tag silicon` made the job's key readable.
 The command printed the job key and the payload directory:
 
@@ -109,11 +110,11 @@ transition, which is the fastest loop while a runner is still being written.
 
 ## Many jobs at once
 
-Point `--from` at a *directory* and every `POSCAR*` or `*.vasp` file in it becomes
-one job, each tagged after its file:
+Point `--parameter-from structure` at a *directory* and every readable structure
+file in it becomes one job, each tagged after its file:
 
 ```console
-$ httk workflow job new quickstart-workspace --template vasp-relax --from structures/ \
+$ httk workflow job new quickstart-workspace --template vasp-relax --parameter-from structure structures/ \
       --input kpoint_density=30.0 --placement project/screening
 ```
 
@@ -127,8 +128,8 @@ from pathlib import Path
 from httk.workflow import Workspace
 from httk.workflow.scaffold import new_jobs, structure_tag
 
-workspace = Workspace("quickstart-workspace")
-items = ({"files": {"POSCAR": path}, "tag": structure_tag(path)} for path in Path("structures").glob("POSCAR.*"))
+workspace = Workspace.default()
+items = ({"parameters": {"structure": path}, "tag": structure_tag(path)} for path in Path("structures").glob("POSCAR.*"))
 for job in new_jobs(workspace, "vasp-relax", items, inputs={"kpoint_density": 30.0}):
     print(job.job_key)
 ```

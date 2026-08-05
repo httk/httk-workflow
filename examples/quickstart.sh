@@ -52,7 +52,7 @@ httk_project init --name quickstart
 #    command prints one tab-separated line with its key and payload.
 httk_workflow job new \
     --template vasp-relax \
-    --from POSCAR \
+    --parameter structure=POSCAR \
     --tag silicon
 
 # 3. Workspace state follows the job. Without VASP, the mock beside this file

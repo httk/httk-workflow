@@ -96,6 +96,10 @@ and {doc}`workflow_cli` for `workspace settings`.
 
 ## Job inputs
 
+The four templates declare one creation parameter: `structure` → `files/POSCAR`.
+Paths are copied verbatim; other objects are serialized with `httk.core.save`,
+which requires the `httk-io` and `httk-atomistic` packages for POSCAR/CIF writers.
+
 Every input is optional and every one is documented, with its default, in the API
 reference of {py:mod}`httk.workflow.vasp.runners`. The ones a campaign normally sets are
 `poscar`, `incar_tags`, `kpoint_density`, `pseudopotential_library`, `timeout`, and

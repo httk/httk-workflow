@@ -41,8 +41,12 @@ language, and compares everything both left behind.
 | Python | Bash | Semantics | Protocol artifact |
 | --- | --- | --- | --- |
 | `Runner` | `httk_workflow_runner` | Declare the workflow, and in Bash its complete step set, before any step runs. | none; registration is in-process |
+| `InstantiateHandler` | — | The callable type accepted by `Runner.instantiate`. | none |
 | `Runner.workflow` | — | The name of the workflow this runner implements. | the `workflow` member of the description |
+| `Runner.parameters` | — | Immutable creation-time payload declarations. | the optional `parameters` member of the description |
+| `Runner.has_instantiate` | — | Whether a creation-time instantiate hook is registered. | none |
 | `Runner.step` | **step_&lt;name&gt;** function | Register one handler for one step; the name is the function's unless overridden. | none |
+| `Runner.instantiate` | — | Register the Python-only creation-time hook receiving `scaffold.InstantiateContext`. | none |
 | `Runner.steps` | — | Every registered step name, against which every step name an outcome publishes is checked. | `.httk-job/runner-steps.json`, rewritten when the set changes |
 | `Runner.description` | `httk_workflow_main --describe` | Print this runner's own description and touch nothing else. | one `httk-workflow-runner-description` version 1 object on stdout |
 | `Runner.main` | `httk_workflow_main` | Dispatch the step the manager asked for, and turn every ending of it into exactly one outcome. | the published `outcome.ready/` of one attempt |

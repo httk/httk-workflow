@@ -39,6 +39,7 @@ from .sdk import (
     ChildrenView,
     ChildResult,
     ChildSpec,
+    InstantiateHandler,
     Runner,
     RunnerRef,
 )
@@ -51,6 +52,7 @@ __all__ = [
     "ChildrenView",
     "FormatError",
     "HarvestRecord",
+    "InstantiateHandler",
     "JobState",
     # Execution / authoring surface.
     "Runner",

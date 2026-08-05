@@ -27,6 +27,7 @@ PROVIDERS = (
         initial_step="prepare",
         steps=("collect", "prepare", "run"),
         data_mode="transactional",
+        parameters={"structure": "POSCAR"},
         summary="relax one structure with the reviewed remedy ladder",
     ),
     TemplateProvider(
@@ -37,6 +38,7 @@ PROVIDERS = (
         initial_step="prepare",
         steps=("collect", "prepare", "run"),
         data_mode="transactional",
+        parameters={"structure": "POSCAR"},
         summary="the same relaxation, authored in Bash",
     ),
     TemplateProvider(
@@ -47,6 +49,7 @@ PROVIDERS = (
         initial_step="prepare",
         steps=("collect", "prepare", "run"),
         data_mode="transactional",
+        parameters={"structure": "POSCAR"},
         summary="one single-point calculation of one structure",
     ),
     TemplateProvider(
@@ -57,6 +60,7 @@ PROVIDERS = (
         initial_step="prepare",
         steps=("collect", "prepare", "promote", "run", "static"),
         data_mode="transactional",
+        parameters={"structure": "POSCAR"},
         summary="relax, promote the relaxed structure, then run it statically",
     ),
 )
