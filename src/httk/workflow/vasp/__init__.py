@@ -15,7 +15,7 @@ vasp-relax`` resolves a runner the scaffold never names.
 from httk.core import register_citation
 
 register_citation(
-    applies_to="VASP workflow support builds on httk v1 contributions by Henrik Levämäki and Christopher Tholander",
+    applies_to="VASP workflow automation and results handling build on httk v1 contributions by Henrik Levämäki",
     references=(
         {
             "authors": (
@@ -34,6 +34,11 @@ register_citation(
             "doi": "10.1038/s41524-022-00698-7",
             "bib_type": "article",
         },
+    ),
+)
+register_citation(
+    applies_to="VASP relaxation workflow templates and task scheduling build on httk v1 contributions by Christopher Tholander",
+    references=(
         {
             "authors": (
                 {"name": "Christopher Tholander"},
