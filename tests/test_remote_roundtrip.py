@@ -67,6 +67,7 @@ def _campaign(tmp_path: Path, remote: Remote) -> Campaign:
 
     local_root = tmp_path / "local"
     initialize_project(local_root, name="roundtrip")
+    Workspace.initialize(local_root)
     local = Workspace(local_root)
     station = Workspace.initialize(remote.root / "runs" / "workspace")
     fake_remote(local_root, workspace=str(station.root))
@@ -168,7 +169,7 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     script = spooled[0].read_text(encoding="utf-8")
     assert script.startswith("#!/bin/bash\n")
     assert f"#SBATCH --chdir={campaign.station.root}" in script
-    assert f"exec httk workflow manager run {campaign.station.root} --by-path --workers 2" in script
+    assert "exec httk workflow manager run station --workers 2" in script
     _run_there(campaign)
     finished = campaign.station.find_marker_by_id(campaign.job_id)
     assert finished is not None and finished.kind == "succeeded"
@@ -212,10 +213,10 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
 
     # Every leg really used the stand-in transport rather than this filesystem.
     commands = remote.commands()
-    assert any("workspace status" in item for item in commands)
-    assert any("transfer receive" in item for item in commands)
-    assert any("transfer offer" in item for item in commands)
-    assert any("transfer retire" in item for item in commands)
+    assert any("workspace status station --json" in item for item in commands)
+    assert any("transfer receive --workspace station --bundle" in item for item in commands)
+    assert any("transfer offer station --destination-workspace-id" in item for item in commands)
+    assert any("transfer retire station" in item for item in commands)
     assert any("sbatch" in item for item in commands)
     assert any(item.startswith("rsync ") or " rsync " in item for item in commands)
 

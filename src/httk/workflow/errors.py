@@ -2,6 +2,7 @@
 
 __all__ = [
     "FormatError",
+    "ResolutionMiss",
     "RunnerResolutionError",
     "TransactionError",
     "TransitionLostError",
@@ -14,6 +15,10 @@ __all__ = [
 
 class WorkflowError(Exception):
     """Base class for workflow protocol failures."""
+
+
+class ResolutionMiss(ValueError):
+    """A name did not resolve, without indicating malformed configuration."""
 
 
 class FormatError(WorkflowError, ValueError):

@@ -1,5 +1,6 @@
 """Manager command group."""
 
+from ..adapters import submit_remote_managers
 from ._common import *
 from ._common import (
     _LOGGER,
@@ -210,7 +211,11 @@ def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namesp
     if arguments.gc_interval is not None:
         raise ValueError("--gc-interval cannot be used with a remote workspace binding")
     target = resolve_remote(binding.remote, project=context.cwd)
-    manager_argv = [*REMOTE_MANAGER_COMMAND, binding.path, "--by-path"]
+    from ._transfer import _remote_workspace_probe
+
+    name = binding.name.split(":", 1)[1]
+    _workspace_id, root = _remote_workspace_probe(target, name, timeout=arguments.adapter_timeout)
+    manager_argv: list[str] = []
     for pool in arguments.pool:
         manager_argv += ["--pool", pool]
     for capability in arguments.capability:
@@ -239,19 +244,16 @@ def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namesp
         manager_argv += ["--log-level", arguments.log_level]
     if arguments.json_logs:
         manager_argv.append("--json-logs")
-    request: dict[str, object] = {
-        "remote_settings": {},
-        "argv": manager_argv,
-        "workspace": binding.path,
-        "count": arguments.count,
-    }
     print(
         json.dumps(
-            run_adapter(
-                target.bundle,
-                "start-manager",
-                request,
+            submit_remote_managers(
+                target,
+                name,
+                root,
+                count=arguments.count,
+                argv_tail=manager_argv,
                 timeout=arguments.adapter_timeout,
+                adapter=run_adapter,
             ),
             indent=2,
         )

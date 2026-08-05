@@ -39,6 +39,18 @@ from .. import vasp as _vasp
 from .._logging import LOG_LEVELS, add_log_file, configure_logging
 from .._util import read_json, sha256_file, utc_now, write_json_atomic
 from ..adapters import (
+    REMOTE_MANAGER_COMMAND,
+    REMOTE_OFFER_COMMAND,
+    REMOTE_RECEIVE_COMMAND,
+    REMOTE_RETIRE_COMMAND,
+    REMOTE_STATUS_COMMAND,
+    REMOTE_WORKSPACE_DELETE_COMMAND,
+    REMOTE_WORKSPACE_FSCK_COMMAND,
+    REMOTE_WORKSPACE_GC_COMMAND,
+    REMOTE_WORKSPACE_INIT_COMMAND,
+    REMOTE_WORKSPACE_LIST_COMMAND,
+    REMOTE_WORKSPACE_MOVE_COMMAND,
+    REMOTE_WORKSPACE_SETTINGS_COMMAND,
     add_remote,
     import_v1_remote,
     list_remotes,
@@ -104,6 +116,7 @@ from ..registry import (
     delete_workspace,
     forget_workspace,
     list_workspaces,
+    register_workspace,
     remove_local_workspace,
     resolve_workspace,
     split_workspace_binding,
@@ -133,20 +146,6 @@ _LOGGER = logging.getLogger(__name__)
 #: Everything a handler may raise that is an operator's problem rather than a
 #: defect. Anything here is reported as ``PROGRAM: message`` and exits ``2``.
 _ERRORS = (WorkflowError, OSError, ValueError, RuntimeError, TimeoutError)
-
-#: The command vectors one machine runs on another over a remote adapter.
-#:
-#: These are *protocol*, not user interface. The far side may run an older or a
-#: newer *httk* than the side that composed the vector, so this is the frozen
-#: spelling both ends agree on: the ``transfer`` group commands, plus the two
-#: workspace/manager commands the transfer choreography reads. Only add a
-#: spelling here once every supported release understands it.
-REMOTE_RECEIVE_COMMAND = ("httk", "workflow", "transfer", "receive")
-REMOTE_OFFER_COMMAND = ("httk", "workflow", "transfer", "offer")
-REMOTE_RETIRE_COMMAND = ("httk", "workflow", "transfer", "retire")
-REMOTE_STATUS_COMMAND = ("httk", "workflow", "workspace", "status")
-REMOTE_WORKSPACE_SETTINGS_COMMAND = ("httk", "workflow", "workspace", "settings")
-REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
 
 #: The hidden protocol subcommands the ``transfer`` verb dispatches by name: the
 #: far-side halves one machine invokes on another. A workspace name can never be
@@ -470,7 +469,10 @@ def _resolve_binding(arguments: argparse.Namespace, context: CLIContext) -> tupl
         if arguments.workspace is None
         else resolve_workspace(arguments.workspace, project=context.cwd)
     )
-    return binding, (Path(binding.path) if binding.remote == LOCAL_REMOTE else None)
+    if binding.remote == LOCAL_REMOTE:
+        assert binding.path is not None
+        return binding, Path(binding.path)
+    return binding, None
 
 
 def _local_root(arguments: argparse.Namespace, context: CLIContext, *, action: str) -> Path:
@@ -496,8 +498,7 @@ def _run_remote_workspace(
 ) -> int:
     """Run one command against a remote binding's workspace and echo its output.
 
-    The workspace on the far side has no registry, so the command it is sent is
-    the path-based ``--by-path`` spelling built from the binding's remote path.
+    The workspace on the far side resolves its plain name in its own registry.
     Its standard output and error are relayed verbatim and its exit status is
     returned, so a read command reads exactly as it would locally.
     """
@@ -506,7 +507,7 @@ def _run_remote_workspace(
     result = _run_adapter(
         target.bundle,
         "invoke",
-        {"remote_settings": {}, "argv": ["httk", "workflow", *argv_tail]},
+        {"argv": list(argv_tail)},
         timeout=timeout,
     )
     stdout = str(result.get("stdout", ""))
@@ -529,14 +530,15 @@ def _remote_workspace_read(
 ) -> int:
     """Dispatch one read-style workspace command to a remote binding.
 
-    *command* is the group and verb, e.g. ``("workspace", "status")``; the remote
-    path and ``--by-path`` are appended, then whichever of *flags* the parsed
-    arguments set. This is the single path every remote-capable read command runs
+    *command* is a pinned far-side vector, e.g. ``REMOTE_STATUS_COMMAND``; the
+    remote plain name is appended, then whichever of *flags* the parsed arguments set. This is the single path every remote-capable read command runs
     through, so ``status``, ``gc``, ``fsck``, ``harvest``, and the ``job`` reads
     all reach a remote the same way.
     """
 
-    tail = [*command, binding.path, "--by-path", *tail]
+    if ":" not in binding.name:
+        raise ValueError(f"remote workspace binding has no remote-qualified name: {binding.name}")
+    tail = [*command, binding.name.split(":", 1)[1], *tail]
     for flag in flags:
         if getattr(arguments, flag.lstrip("-").replace("-", "_"), False):
             tail.append(flag)

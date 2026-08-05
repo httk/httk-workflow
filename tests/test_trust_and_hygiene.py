@@ -36,7 +36,6 @@ from httk.workflow.hygiene import (
     describe_project,
     describe_remote,
     project_doctor,
-    remove_remote,
 )
 from httk.workflow.manifests import (
     INVALID,
@@ -53,8 +52,9 @@ from httk.workflow.projects import (
     pin_project_key,
     read_project,
     trust_project_key,
+    write_project_section,
 )
-from httk.workflow.registry import forget_workspace, register_workspace
+from httk.workflow.registry import register_workspace
 from httk.workflow.workflow_cli import command
 
 
@@ -83,6 +83,7 @@ def _project(tmp_path: Path, monkeypatch, name: str = "trust") -> Path:
     _isolate(tmp_path, monkeypatch)
     project = tmp_path / name
     initialize_project(project, name=name)
+    Workspace.initialize(project)
     (project / "content.txt").write_text("original\n", encoding="utf-8")
     return project
 
@@ -451,14 +452,14 @@ def test_read_config_refuses_a_foreign_format_and_accepts_a_legacy_version(tmp_p
 
 def test_config_set_is_restricted_to_the_registry_and_unset_removes(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
-    assert settable_config_keys() == ("email", "name")
+    assert settable_config_keys() == ("email", "machine_names", "name")
     assert not CONFIG_KEYS["format"].settable
 
     set_config_key("name", "A User")
     set_config_key("email", "a@example.test")
     assert read_config()["name"] == "A User"
 
-    with pytest.raises(ValueError, match="unknown configuration key 'nmae'.*email, name"):
+    with pytest.raises(ValueError, match="unknown configuration key 'nmae'.*email, machine_names, name"):
         set_config_key("nmae", "A User")
     with pytest.raises(ValueError, match="cannot be set"):
         set_config_key("format_version", "2")
@@ -507,7 +508,7 @@ def test_describe_remote_never_reports_a_credential_value(tmp_path: Path, monkey
     bundle = add_remote("cluster", template="local", project=project)
     store_credentials(bundle, {"password": "hunter2", "token": "abc"})
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
-    metadata["settings"]["workspace_root"] = str(tmp_path / "remote")
+    metadata["settings"]["legacy_settings"] = {"workspace_root": str(tmp_path / "remote")}
     (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
 
     description = _fields(describe_remote("cluster", project=project))
@@ -516,48 +517,19 @@ def test_describe_remote_never_reports_a_credential_value(tmp_path: Path, monkey
     assert description["valid"] is True
     assert description["adapter"] == str(bundle / "adapter")
     remote_settings = description
-    assert remote_settings["settings"] == {"workspace_root": str(tmp_path / "remote")}
+    assert remote_settings["settings"] == {"legacy_settings": {"workspace_root": str(tmp_path / "remote")}}
     assert remote_settings["credential_keys"] == ["password", "token"]
     assert remote_settings["settings_source"] == {
-        "workspace_root": "remote.json",
+        "legacy_settings": "remote.json",
         "password": "credentials.json",
         "token": "credentials.json",
     }
     assert "hunter2" not in json.dumps(description) and "abc" not in json.dumps(description)
 
 
-def test_remove_remote_refuses_while_a_transfer_still_needs_it(tmp_path: Path, monkeypatch) -> None:
-    project = _project(tmp_path, monkeypatch, name="removal")
-    destination = Workspace.initialize(tmp_path / "remote")
-    bundle = add_remote("cluster", template="local", project=project)
-    metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
-    metadata["settings"]["workspace_root"] = str(destination.root)
-    (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
-    register_workspace("cluster:runs", "cluster", destination.root, scope="project", project=project)
-
-    workspace = Workspace(project)
-    payload, job_id = _payload(tmp_path)
-    workspace.submit(payload, "jobs")
-    sealed = workspace.detach(job_id, destination_workspace_id=destination.workspace_id)
-
-    with pytest.raises(ValueError, match="unretired transfer"):
-        remove_remote("cluster", project=project)
-    assert bundle.is_dir()
-
-    workspace.acknowledge_transfer(destination.import_bundle(sealed))
-    with pytest.raises(ValueError, match="workspace forget"):
-        remove_remote("cluster", project=project)
-    forget_workspace("cluster:runs", scope="project", project=project)
-    assert remove_remote("cluster", project=project)["removed"] is True
-    assert not bundle.exists()
-    with pytest.raises(ValueError, match="unknown remote"):
-        remove_remote("cluster", project=project)
-
-
 def test_project_doctor_reports_then_repairs(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch, name="doctored")
     metadata = read_project(project)
-    metadata["workspace_initialization_failed"] = True
     del metadata["public_key"]
     _write_project(project, metadata)
     lock = project / ".httk-workflow" / "maintenance.lock"
@@ -570,20 +542,18 @@ def test_project_doctor_reports_then_repairs(tmp_path: Path, monkeypatch) -> Non
     report = _fields(project_doctor(project))
     findings = _by_check(report)
     assert report["format"] == "httk-project-doctor" and report["repaired"] == 0
-    assert findings["workspace_initialization"]["status"] == "error"
     assert findings["maintenance_lock"]["status"] == "error"
     assert findings["key_pin"]["status"] == "warning"
     assert findings["tmp_leftovers"]["status"] == "warning"
     assert findings["manifest"]["status"] == "warning"
-    assert report["problems"] == 5
+    assert report["problems"] == 4
     assert lock.is_file() and leftover.is_dir()
 
     repaired = _fields(project_doctor(project, repair=True))
     fixed = _by_check(repaired)
-    assert repaired["repaired"] == 4
-    assert all(fixed[name]["repaired"] for name in ("workspace_initialization", "maintenance_lock", "key_pin"))
+    assert repaired["repaired"] == 3
+    assert all(fixed[name]["repaired"] for name in ("maintenance_lock", "key_pin", "tmp_leftovers"))
     assert not lock.exists() and not leftover.exists()
-    assert "workspace_initialization_failed" not in read_project(project)
     assert str(read_project(project)["public_key"]).startswith("ed25519:")
     # The manifest check is reported and never repaired behind an operator.
     assert fixed["manifest"]["repaired"] is False
@@ -682,6 +652,28 @@ def test_project_show_and_doctor_are_reachable_from_the_command_line(
     assert repaired["format"] == "httk-project-doctor" and repaired["repair"] is True
 
 
+def test_detached_project_manifests_and_reports_its_recorded_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
+    _isolate(tmp_path, monkeypatch)
+    project = tmp_path / "detached"
+    initialize_project(project, name="detached")
+    workspace = Workspace.initialize(tmp_path / "runs")
+    register_workspace("runs", workspace.root)
+    write_project_section(project, "workspace", {"default": "runs"})
+    (project / "content.txt").write_text("content\n", encoding="utf-8")
+
+    create_manifest(project)
+    assert not (project / ".httk-workflow").exists()
+    description = _fields(describe_project(project, verify=False))
+    assert description["workspace"]["present"] is False
+    assert description["workspace"]["default"] == {"name": "runs", "resolves": True}
+    report = _fields(project_doctor(project))
+    assert report["workspace"]["default"] == {"name": "runs", "resolves": True}
+    assert _by_check(report)["workspace_default"]["status"] == "ok"
+    context = CLIContext("httk", project)
+    assert command(["project", "show", "--json"], context) == 0
+    assert json.loads(capsys.readouterr().out)["workspace"]["default"]["name"] == "runs"
+
+
 def test_remote_show_and_remove_are_reachable_from_the_command_line(
     tmp_path: Path,
     monkeypatch,
@@ -710,27 +702,6 @@ def test_remote_show_and_remove_are_reachable_from_the_command_line(
     assert bundle.is_dir()
     assert command(["remote", "remove", "cluster", "--force"], context) == 0
     assert not bundle.exists()
-
-
-def test_remote_remove_force_does_not_skip_the_transfer_refusal(tmp_path: Path, monkeypatch, capsys) -> None:
-    """``--force`` answers the prompt; it does not overrule the refusal."""
-
-    project = _project(tmp_path, monkeypatch, name="forced-removal")
-    destination = Workspace.initialize(tmp_path / "remote")
-    bundle = add_remote("cluster", template="local", project=project)
-    metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
-    metadata["settings"]["workspace_root"] = str(destination.root)
-    (bundle / "remote.json").write_text(json.dumps(metadata), encoding="utf-8")
-    register_workspace("cluster:runs", "cluster", destination.root, scope="project", project=project)
-    workspace = Workspace(project)
-    payload, job_id = _payload(tmp_path)
-    workspace.submit(payload, "jobs")
-    workspace.detach(job_id, destination_workspace_id=destination.workspace_id)
-
-    context = CLIContext("httk", project)
-    assert command(["remote", "remove", "cluster", "--force"], context) == 2
-    assert "unretired transfer" in capsys.readouterr().err
-    assert bundle.is_dir()
 
 
 def test_legacy_manifest_verification_reraises_prerelease_refusal(tmp_path: Path) -> None:

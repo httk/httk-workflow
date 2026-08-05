@@ -5,7 +5,7 @@
 The mock VASP used below lives at `examples/mock_vasp.py` in that checkout; the
 walkthrough does not run from an arbitrary empty directory.
 
-Five commands from a checkout to a finished VASP relaxation whose results
+Six commands from a checkout to a finished VASP relaxation whose results
 you can read back. Nothing here needs a runner to be written, a graph to be
 declared, or a database to exist.
 
@@ -44,6 +44,7 @@ END
 
 ```console
 $ httk project init --name quickstart
+$ httk workflow workspace init . --name default
 $ httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
 $ httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
 $ httk workflow run
@@ -55,8 +56,9 @@ On a VASP machine, set `vasp.command` to a command such as
 
 ## What each command did
 
-**`project init`** created the project anchor. The first workflow command lazily
-created the project workspace at the project root and registered it as `default`.
+**`project init`** created the project anchor. The next command initialized and
+registered the workspace at the project root as `default`; project creation
+does not create or contain a workspace.
 The workspace is the state of the work, and transactional data makes a finished
 calculation readable without looking inside a workdir.
 

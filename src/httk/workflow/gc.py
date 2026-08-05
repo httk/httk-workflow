@@ -25,10 +25,9 @@ is exactly as consistent as it was before.
 
 import logging
 import os
-import shutil
 import time
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -115,6 +114,7 @@ class GcReport:
     categories: tuple[GcCategory, ...] = ()
     record_ref: str | None = None
     skipped: tuple[str, ...] = ()
+    skipped_foreign: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def candidates(self) -> int:
@@ -156,6 +156,7 @@ class GcReport:
             "removed": self.removed,
             "bytes_reclaimed": self.bytes_reclaimed,
             "skipped": list(self.skipped),
+            "skipped_foreign": dict(self.skipped_foreign),
             "categories": [category.as_mapping() for category in self.categories],
             **({} if self.record_ref is None else {"record_ref": self.record_ref}),
         }
@@ -206,7 +207,18 @@ def _tree_bytes(path: Path) -> int:
     return total
 
 
-def _remove_tree(path: Path) -> bool:
+def _owned_by_current_user(path: Path) -> bool:
+    """Return whether one entry may be removed by this process."""
+
+    try:
+        return path.lstat().st_uid == os.getuid()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def _remove_tree(path: Path, *, dry_run: bool = False, on_foreign: Callable[[], None] | None = None) -> bool:
     """Remove one entry bottom-up, reporting whether it is gone afterwards.
 
     A killed collection must leave a workspace no less consistent than it found
@@ -216,12 +228,66 @@ def _remove_tree(path: Path) -> bool:
     the partial remains are scratch that the next run collects again.
     """
 
+    def foreign() -> None:
+        if on_foreign is not None:
+            on_foreign()
+
+    if not _owned_by_current_user(path):
+        foreign()
+        return False
+    if path.is_dir() and not path.is_symlink():
+        failed = False
+
+        def traversal_error(_error: OSError) -> None:
+            nonlocal failed
+            failed = True
+            foreign()
+
+        try:
+            for directory, directories, files in os.walk(path, topdown=True, onerror=traversal_error):
+                for name in (*directories, *files):
+                    if not _owned_by_current_user(Path(directory, name)):
+                        failed = True
+                        foreign()
+        except OSError:
+            failed = True
+            foreign()
+        if failed or dry_run:
+            return not failed
+
+        def remove(entry: Path) -> bool:
+            if not _owned_by_current_user(entry):
+                foreign()
+                return False
+            if entry.is_dir() and not entry.is_symlink():
+                try:
+                    children = sorted(entry.iterdir())
+                except OSError:
+                    foreign()
+                    return False
+                if not all(remove(child) for child in children):
+                    return False
+                try:
+                    entry.rmdir()
+                except FileNotFoundError:
+                    return True
+                except OSError:
+                    return False
+                return True
+            try:
+                entry.unlink()
+            except FileNotFoundError:
+                return True
+            except OSError:
+                return False
+            return True
+
+        return remove(path)
+    if dry_run:
+        return True
     try:
-        if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path, onexc=lambda _function, _path, _error: None)
-        else:
-            path.unlink(missing_ok=True)
-    except OSError as exc:  # pragma: no cover - defensive; rmtree swallows its own
+        path.unlink(missing_ok=True)
+    except OSError as exc:
         _LOGGER.debug("cannot remove %s: %s", path, exc)
     return not path.exists()
 
@@ -262,6 +328,7 @@ class _Collection:
         self.retention = workspace.policy.retention
         self._accumulators = {name: _Accumulator(name) for name in GC_CATEGORIES}
         self._skipped: list[str] = []
+        self._skipped_foreign: dict[str, int] = {}
         self._markers: list[Marker] | None = None
         self._live_managers: dict[str, str | None] | None = None
         self._opaque_live_manager = False
@@ -372,9 +439,17 @@ class _Collection:
         accumulator.candidates += 1
         accumulator.entries.append(str(path))
         accumulator.bytes_reclaimed += _tree_bytes(path) if size is None else size
-        if self.dry_run:
-            return
-        if _remove_tree(path):
+        foreign = 0
+
+        def count_foreign() -> None:
+            nonlocal foreign
+            foreign += 1
+
+        removed = _remove_tree(path, dry_run=self.dry_run, on_foreign=count_foreign)
+        if foreign:
+            self._skipped_foreign[category] = self._skipped_foreign.get(category, 0) + foreign
+            _LOGGER.debug("skipping %s foreign entries below %s", foreign, path)
+        if not self.dry_run and removed:
             accumulator.removed += 1
             _LOGGER.debug("collected %s entry %s", category, path)
 
@@ -441,7 +516,7 @@ class _Collection:
                 for entry in _iterdir(trash):
                     if self._aged(entry, cutoff):
                         self._collect("transaction_trash", entry)
-                self._rmdir(trash)
+                self._rmdir(trash, "transaction_trash")
 
     def collect_retired_bundles(self) -> None:
         """Collect the transfer bundles a completed handover left behind.
@@ -512,7 +587,7 @@ class _Collection:
             for entry in _iterdir(manager_dir):
                 if entry.is_file() and self._aged(entry, cutoff):
                     self._collect("retired_requests", entry, size=_entry_bytes(entry))
-            self._rmdir(manager_dir)
+            self._rmdir(manager_dir, "retired_requests")
         for entry in _iterdir(self.control / "requests" / "retired"):
             if entry.is_file() and self._aged(entry, cutoff):
                 self._collect("retired_requests", entry, size=_entry_bytes(entry))
@@ -559,7 +634,7 @@ class _Collection:
                 self._collect("journal_segments", path, size=_entry_bytes(path))
             self._surviving_segments[writer_id] = surviving
             if surviving == 0:
-                self._rmdir(writer_dir)
+                self._rmdir(writer_dir, "journal_segments")
 
     def _count_all_segments(self, journal: Path) -> None:
         """Record every segment as surviving, for a run that prunes none."""
@@ -620,12 +695,17 @@ class _Collection:
                 accumulator.entries.append(directory)
                 accumulator.bytes_reclaimed += _entry_bytes(path)
                 if self.dry_run:
-                    emptied.add(directory)
-                elif self._rmdir(path):
+                    if _owned_by_current_user(path):
+                        emptied.add(directory)
+                    else:
+                        self._skipped_foreign["placement_directories"] = (
+                            self._skipped_foreign.get("placement_directories", 0) + 1
+                        )
+                elif self._rmdir(path, "placement_directories"):
                     accumulator.removed += 1
                     emptied.add(directory)
 
-    def _rmdir(self, path: Path) -> bool:
+    def _rmdir(self, path: Path, category: str) -> bool:
         """Remove one directory if it is empty, tolerating every reason not to.
 
         A directory that is not empty, that another process removed first, or
@@ -633,6 +713,10 @@ class _Collection:
         here, never faults.
         """
 
+        if not _owned_by_current_user(path):
+            self._skipped_foreign[category] = self._skipped_foreign.get(category, 0) + 1
+            _LOGGER.debug("skipping foreign %s directory %s", category, path)
+            return False
         if self.dry_run:
             return False
         try:
@@ -662,6 +746,7 @@ class _Collection:
             retention=self.retention.as_mapping(),
             categories=tuple(self._accumulators[name].frozen() for name in GC_CATEGORIES),
             skipped=tuple(self._skipped),
+            skipped_foreign=dict(self._skipped_foreign),
         )
         return self._journal(report)
 
@@ -683,6 +768,7 @@ class _Collection:
             "retention": dict(report.retention),
             "removed": report.removed,
             "bytes_reclaimed": report.bytes_reclaimed,
+            "skipped_foreign": dict(report.skipped_foreign),
             "categories": {
                 category.name: {
                     "candidates": category.candidates,
@@ -714,6 +800,7 @@ class _Collection:
             categories=report.categories,
             record_ref=record_ref,
             skipped=report.skipped,
+            skipped_foreign=report.skipped_foreign,
         )
 
 

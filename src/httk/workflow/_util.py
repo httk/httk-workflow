@@ -12,9 +12,7 @@ from typing import Any
 
 from .errors import FormatError
 
-#: The visibility deadline used by a caller that has no workspace policy to
-#: read. It is a local-filesystem value: a shared filesystem needs the far
-#: larger deadline its workspace policy configures.
+#: The visibility deadline used by a caller that has no workspace policy to read.
 DEFAULT_VISIBILITY_DEADLINE_SECONDS = 5.0
 #: The first backoff step of every visibility retry schedule. The first probes
 #: stay short so a local rename or read that is simply not yet settled costs
@@ -59,7 +57,7 @@ def read_json(path: Path) -> dict[str, Any]:
     return value
 
 
-def write_json_atomic(path: Path, value: object, *, durable: bool = False) -> None:
+def write_json_atomic(path: Path, value: object, *, durable: bool = False, mode: int | None = None) -> None:
     """Atomically replace *path* with JSON."""
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,6 +68,8 @@ def write_json_atomic(path: Path, value: object, *, durable: bool = False) -> No
             handle.write(json_bytes(value))
             handle.write(b"\n")
             handle.flush()
+            if mode is not None:
+                os.fchmod(handle.fileno(), mode)
             if durable:
                 os.fsync(handle.fileno())
         os.replace(temporary, path)

@@ -600,9 +600,9 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
             [
                 "workspace",
                 "init",
-                ws_name,
-                "--path",
                 str(root),
+                "--name",
+                ws_name,
             ],
             _context(tmp_path),
         )
@@ -676,7 +676,7 @@ def test_the_command_reports_what_it_cannot_do(
 ) -> None:
     name = "refusals"
     root = tmp_path / name
-    assert command(["workspace", "init", name, "--path", str(root)], _context(tmp_path)) == 0
+    assert command(["workspace", "init", str(root)], _context(tmp_path)) == 0
     capsys.readouterr()
 
     # A malformed assignment, an unknown template, and an empty structure directory.
@@ -701,7 +701,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
 ) -> None:
     name = "parameter-cli"
     root = tmp_path / name
-    assert command(["workspace", "init", name, "--path", str(root)], _context(tmp_path)) == 0
+    assert command(["workspace", "init", str(root)], _context(tmp_path)) == 0
     capsys.readouterr()
     assert (
         command(
@@ -809,7 +809,7 @@ def test_parameter_from_cif_is_written_as_a_poscar_when_domain_plugins_are_avail
         encoding="utf-8",
     )
     workspace = tmp_path / "cif-workspace"
-    assert command(["workspace", "init", "cif", "--path", str(workspace)], _context(tmp_path)) == 0
+    assert command(["workspace", "init", str(workspace), "--name", "cif"], _context(tmp_path)) == 0
     capsys.readouterr()
     assert (
         command(

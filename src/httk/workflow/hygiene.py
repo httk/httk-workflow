@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ._util import read_json, utc_now, write_json_atomic
+from ._util import read_json, utc_now
 from .adapters import (
     ADAPTER_EXECUTABLE,
     CREDENTIALS_FILE,
@@ -36,17 +36,17 @@ from .manifests import (
 from .models import STATE_KINDS
 from .projects import (
     PROJECT_DIRECTORY,
-    PROJECT_FILE,
     discover_project,
     key_fingerprint,
     pin_project_key,
     pinned_project_key,
     read_project,
+    read_project_section,
     read_public_key_file,
     require_project,
     trusted_project_keys,
 )
-from .registry import _read_global, _read_project
+from .registry import list_workspaces, resolve_workspace
 from .workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -97,6 +97,21 @@ def _workspace_summary(project: Path, metadata: Mapping[str, object]) -> dict[st
         "present": (project / ".httk-workflow" / "format.json").is_file(),
         "initialization_failed": metadata.get("workspace_initialization_failed") is True,
     }
+    section = read_project_section(project, "workspace")
+    recorded = section.get("default")
+    default: dict[str, object] = {"name": recorded if isinstance(recorded, str) else None, "resolves": False}
+    if isinstance(recorded, str):
+        try:
+            binding = resolve_workspace(recorded, project=project)
+            if binding.remote == "local" and (
+                binding.path is None or not (Path(binding.path) / ".httk-workflow" / "format.json").is_file()
+            ):
+                raise ValueError("registered workspace path is not reachable")
+        except (OSError, ValueError, WorkflowError):
+            pass
+        else:
+            default["resolves"] = True
+    summary["default"] = default
     workspace = _workspace_of(project)
     if workspace is None:
         return summary
@@ -271,60 +286,22 @@ def describe_remote(
     }
 
 
-def _remote_workspace_bindings(remote: str, project: Path | None) -> list[tuple[str, str]]:
-    """Return every registered workspace binding carried by *remote*."""
+def _pending_remote_transfers(remote: str) -> list[str]:
+    """Return registered local workspace names with live transfers to *remote*."""
 
-    records = list(_read_global().items())
-    if project is not None:
-        records += list(_read_project(project).items())
-    return [
-        (name, str(binding["path"]))
-        for name, binding in records
-        if ":" in name and binding.get("remote") == remote and isinstance(binding.get("path"), str)
-    ]
-
-
-def _configured_workspace_ids(remote: str, project: Path | None) -> set[str]:
-    """Return workspace UUIDs from registry bindings for *remote*."""
-
-    identifiers: set[str] = set()
-    for _name, location in _remote_workspace_bindings(remote, project):
-        format_path = Path(location).expanduser() / ".httk-workflow" / "format.json"
-        if format_path.is_file():
+    names: list[str] = []
+    for binding in list_workspaces():
+        assert binding.path is not None
+        directory = Path(binding.path) / ".httk-workflow" / "transfers"
+        for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
             try:
-                workspace_id = read_json(format_path).get("workspace_id")
-                if isinstance(workspace_id, str):
-                    identifiers.add(workspace_id)
+                ledger = read_json(path)
             except (WorkflowError, OSError, ValueError):
-                pass
-    return identifiers
-
-
-def _pending_transfers(project: Path, workspace_ids: set[str]) -> list[dict[str, object]]:
-    """Return every sealed, unretired transfer of *project* bound for *workspace_ids*."""
-
-    if not workspace_ids:
-        return []
-    directory = project / ".httk-workflow" / "transfers"
-    pending: list[dict[str, object]] = []
-    for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
-        try:
-            ledger = read_json(path)
-        except (WorkflowError, OSError, ValueError):
-            continue
-        if ledger.get("status") == "retired":
-            continue
-        if ledger.get("destination_workspace_id") not in workspace_ids:
-            continue
-        pending.append(
-            {
-                "transfer_id": ledger.get("transfer_id"),
-                "job_key": ledger.get("job_key"),
-                "status": ledger.get("status"),
-                "ledger": str(path),
-            }
-        )
-    return pending
+                continue
+            if ledger.get("status") != "retired" and ledger.get("destination_remote") == remote:
+                names.append(binding.name)
+                break
+    return names
 
 
 def remove_remote(
@@ -341,18 +318,12 @@ def remove_remote(
     """
 
     bundle, scope = _remote_bundle(name, project=project)
-    project_root = discover_project(project)
-    pending = _pending_transfers(project_root, _configured_workspace_ids(name, project_root)) if project_root else []
+    pending = _pending_remote_transfers(name)
     if pending:
-        jobs = ", ".join(str(item["job_key"]) for item in pending)
         raise ValueError(
-            f"remote {name!r} is still referenced by {len(pending)} unretired transfer(s): {jobs}; "
-            "fetch or retire them before removing the remote"
+            f"remote {name!r} still has unretired transfers from workspace {', '.join(pending)}; "
+            "fetch or retire them first"
         )
-    bindings = _remote_workspace_bindings(name, project_root)
-    if bindings:
-        names = ", ".join(binding_name for binding_name, _path in bindings)
-        raise ValueError(f"remote {name!r} still has workspace bindings: {names}; use workspace forget first")
     shutil.rmtree(bundle)
     _LOGGER.info(
         "removed the %s remote %s at %s",
@@ -390,31 +361,6 @@ class Finding:
         }
 
 
-def _check_workspace_initialization(project: Path, metadata: dict[str, object], repair: bool) -> Finding:
-    """A project whose workspace creation failed is left recognizable, not fixed."""
-
-    if metadata.get("workspace_initialization_failed") is not True:
-        return Finding("workspace_initialization", "ok", "the project workspace was initialized")
-    finding = Finding(
-        "workspace_initialization",
-        "error",
-        "project.json records workspace_initialization_failed: the project has no usable workspace",
-        repairable=True,
-    )
-    if not repair:
-        return finding
-    if not (project / ".httk-workflow" / "format.json").is_file():
-        Workspace.initialize(project)
-        finding.action = "initialized a detached-transfer workspace"
-    else:
-        finding.action = "the workspace already exists; cleared the failure flag"
-    del metadata["workspace_initialization_failed"]
-    write_json_atomic(project / PROJECT_DIRECTORY / PROJECT_FILE, metadata)
-    finding.repaired = True
-    finding.status = "ok"
-    return finding
-
-
 def _check_maintenance_lock(project: Path, repair: bool) -> Finding:
     """A stale maintenance lock fences every manager for nothing."""
 
@@ -445,6 +391,23 @@ def _check_maintenance_lock(project: Path, repair: bool) -> Finding:
     return finding
 
 
+def _check_workspace_default(project: Path) -> Finding | None:
+    """Report the recorded workspace name without creating a fallback."""
+
+    default = _workspace_summary(project, read_project(project))["default"]
+    if not isinstance(default, Mapping) or not isinstance(default.get("name"), str):
+        return None
+    name = str(default["name"])
+    if default.get("resolves"):
+        return Finding("workspace_default", "ok", f"recorded default workspace {name!r} resolves")
+    return Finding(
+        "workspace_default",
+        "error",
+        f"recorded default workspace {name!r} does not resolve",
+        details={"name": name, "resolves": False},
+    )
+
+
 def _check_key_pin(project: Path, metadata: dict[str, object], repair: bool) -> Finding:
     """Without a pin, manifest verification has no anchor but the manifest itself."""
 
@@ -472,7 +435,15 @@ def _check_tmp_leftovers(project: Path, repair: bool) -> Finding:
     if not tmp.is_dir():
         return Finding("tmp_leftovers", "ok", "there is no workspace staging directory")
     deadline = time.time() - TMP_MAXIMUM_AGE_SECONDS
-    stale = [entry for entry in sorted(tmp.iterdir()) if entry.lstat().st_mtime < deadline]
+    try:
+        stale = [entry for entry in sorted(tmp.iterdir()) if entry.lstat().st_mtime < deadline]
+    except PermissionError as exc:
+        return Finding(
+            "tmp_leftovers",
+            "warning",
+            f"cannot inspect workspace staging directory {tmp}: {exc}",
+            details={"path": str(tmp), "error": str(exc)},
+        )
     if not stale:
         return Finding("tmp_leftovers", "ok", "the workspace staging directory holds nothing abandoned")
     finding = Finding(
@@ -483,11 +454,16 @@ def _check_tmp_leftovers(project: Path, repair: bool) -> Finding:
         details={"entries": [entry.name for entry in stale]},
     )
     if repair:
-        for entry in stale:
-            if entry.is_dir() and not entry.is_symlink():
-                shutil.rmtree(entry)
-            else:
-                entry.unlink(missing_ok=True)
+        try:
+            for entry in stale:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink(missing_ok=True)
+        except PermissionError as exc:
+            finding.message = f"cannot remove abandoned staging entries below {tmp}: {exc}"
+            finding.details["error"] = str(exc)
+            return finding
         finding.action = f"removed {len(stale)} staging entries"
         finding.repaired = True
         finding.status = "ok"
@@ -552,8 +528,7 @@ def project_doctor(
 
     project = require_project(project_root)
     metadata = read_project(project)
-    findings: list[Finding] = [
-        _check_workspace_initialization(project, metadata, repair),
+    findings: list[Finding] = [finding for finding in (_check_workspace_default(project),) if finding is not None] + [
         _check_maintenance_lock(project, repair),
         _check_key_pin(project, metadata, repair),
         _check_tmp_leftovers(project, repair),
@@ -570,6 +545,7 @@ def project_doctor(
         "findings": [finding.as_mapping() for finding in findings],
         "problems": sum(finding.status != "ok" for finding in findings),
         "repaired": sum(finding.repaired for finding in findings),
+        "workspace": _workspace_summary(project, metadata),
     }
     _journal_repairs(project, report, findings)
     return report

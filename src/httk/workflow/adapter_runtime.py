@@ -420,6 +420,8 @@ def _manager_workspace(argv: Sequence[str]) -> str | None:
 
 
 def _workspace(request: Mapping[str, object], settings: Mapping[str, object], argv: Sequence[str]) -> str:
+    """Return the real path; argv fallback is for hand-written path vectors only."""
+
     value = request.get("workspace")
     if isinstance(value, str) and value:
         return value
@@ -586,16 +588,6 @@ def _install(kind: str, request: Mapping[str, object]) -> None:
         "httk_command": command,
         "httk_version": version,
     }
-    workspace = _text(settings, "workspace_root")
-    if workspace is not None:
-        existed = run(["test", "-d", workspace]).returncode == 0
-        if not existed:
-            created = run(["mkdir", "-p", workspace])
-            if created.returncode != 0:
-                _refusal("install", f"cannot create workspace directory {workspace}: {created.stderr.strip()}")
-                return
-        values["workspace"] = workspace
-        values["workspace_created"] = not existed
     _result("install", **values)
 
 

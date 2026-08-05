@@ -116,7 +116,7 @@ from ._transfer import (
     _fetch_jobs_from_remote,
     _remote_offer,
     _remote_retire,
-    _remote_workspace_id,
+    _remote_workspace_probe,
     _render_remote,
     _report_transfer,
     _run_transfer_verb,

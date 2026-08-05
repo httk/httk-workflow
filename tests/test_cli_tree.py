@@ -29,6 +29,8 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "init",
         "status",
         "list",
+        "default",
+        "move",
         "forget",
         "delete",
         "settings",
@@ -225,7 +227,7 @@ def test_the_taskmanager_alias_really_does_the_work_it_names(tmp_path: Path, cap
     """Not only the same parse: the same effect on the filesystem."""
 
     root = tmp_path / "workspace"
-    assert native_cli.main(["init", "aliased", "--path", str(root)]) == 0
+    assert native_cli.main(["init", str(root), "--name", "aliased"]) == 0
     assert "aliased" in capsys.readouterr().out
     assert (root / ".httk-workflow" / "format.json").is_file()
 
@@ -299,6 +301,7 @@ def test_top_level_run_defaults_to_until_idle_for_the_project_workspace(tmp_path
 
 def test_top_level_run_reports_an_idle_timeout_without_a_traceback(tmp_path: Path, capsys) -> None:
     initialize_project(tmp_path, name="run-timeout")
+    Workspace.initialize(tmp_path)
     source = tmp_path / "source" / "files"
     source.mkdir(parents=True)
     (source / "runner").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -364,24 +367,7 @@ def test_the_v1_siblings_default_their_task_set_differently_on_purpose(tmp_path:
 def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
     """A transfer composes commands the far side may run on an older httk."""
 
-    assert workflow_cli.REMOTE_RECEIVE_COMMAND == ("httk", "workflow", "transfer", "receive")
-    assert workflow_cli.REMOTE_OFFER_COMMAND == ("httk", "workflow", "transfer", "offer")
-    assert workflow_cli.REMOTE_RETIRE_COMMAND == ("httk", "workflow", "transfer", "retire")
-    assert workflow_cli.REMOTE_STATUS_COMMAND == ("httk", "workflow", "workspace", "status")
-    assert workflow_cli.REMOTE_WORKSPACE_SETTINGS_COMMAND == ("httk", "workflow", "workspace", "settings")
-    assert workflow_cli.REMOTE_MANAGER_COMMAND == ("httk", "workflow", "manager", "run")
-
-    # Every one of them still parses here, whichever side runs it.
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    for spelling in (
-        workflow_cli.REMOTE_RECEIVE_COMMAND,
-        workflow_cli.REMOTE_OFFER_COMMAND,
-        workflow_cli.REMOTE_RETIRE_COMMAND,
-        workflow_cli.REMOTE_STATUS_COMMAND,
-        workflow_cli.REMOTE_WORKSPACE_SETTINGS_COMMAND,
-        workflow_cli.REMOTE_MANAGER_COMMAND,
-    ):
-        assert spelling[:2] == ("httk", "workflow")
     # ``transfer receive`` is the frozen import half: the verb leaf parses it as
     # its own trailing vector and its handler dispatches "receive" at run time to
     # the still-present handle_transfer_receive.

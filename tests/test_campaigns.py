@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 from httk.core.cli import CLIContext
 
+from conftest import Remote, fake_remote
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.campaigns import (
     assign_partition,
@@ -23,7 +24,7 @@ from httk.workflow.campaigns import (
     write_campaign,
 )
 from httk.workflow.projects import initialize_project
-from httk.workflow.registry import LOCAL_REMOTE, register_workspace
+from httk.workflow.registry import register_workspace
 from httk.workflow.workflow_cli import command
 
 pytestmark = pytest.mark.xdist_group("campaign-manager-timing")
@@ -88,7 +89,7 @@ def _campaign_project(tmp_path: Path, assignment: str) -> tuple[Path, dict[str, 
     workspaces: dict[str, Workspace] = {}
     for partition in ("north", "south"):
         workspace = Workspace.initialize(tmp_path / partition)
-        register_workspace(partition, LOCAL_REMOTE, workspace.root, scope="project", project=root)
+        register_workspace(partition, workspace.root)
         workspaces[partition] = workspace
     write_campaign({"north": "north", "south": "south"}, assignment=assignment, project=root)
     return root, workspaces
@@ -237,7 +238,6 @@ def test_harvest_refuses_and_names_a_remote_partition(tmp_path: Path) -> None:
     from httk.workflow.adapters import add_remote
 
     add_remote("cluster", template="local", project=root)
-    register_workspace("cluster:far", "cluster", tmp_path / "far-runs", scope="project", project=root)
     write_campaign({"far": "cluster:far"}, assignment="explicit", project=root)
 
     with pytest.raises(ValueError, match="remote workspace"):
@@ -261,3 +261,21 @@ def test_start_managers_runs_a_manager_per_selected_local_partition(tmp_path: Pa
 
     campaign_managers(project=root)
     assert all(marker.kind == "succeeded" for marker in workspaces["south"].scan_markers())
+
+
+def test_start_managers_reports_the_qualified_remote_workspace_name(
+    tmp_path: Path, remote: Remote, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "project"
+    initialize_project(root, name="remote-campaign-managers")
+    fake_remote(root)
+    context = CLIContext("httk", root)
+    assert command(["workspace", "init", "cluster:runs"], context) == 0
+    capsys.readouterr()
+    write_campaign({"kappa": "cluster:runs"}, assignment="explicit", project=root)
+
+    report = campaign_managers(project=root)
+
+    assert report[0]["partition"] == "kappa"
+    assert report[0]["workspace"] == "cluster:runs"
+    assert report[0]["mode"] == "remote"

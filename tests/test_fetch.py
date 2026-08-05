@@ -123,6 +123,8 @@ def _build(root: Path) -> dict[str, str]:
     remote_root = root / "remote"
     initialize_project(local_root, name="fetch-local")
     initialize_project(remote_root, name="fetch-remote")
+    Workspace.initialize(local_root)
+    Workspace.initialize(remote_root)
     add_remote("cluster", template="local", project=local_root)
 
     remote = Workspace(remote_root)

@@ -189,6 +189,12 @@ def _render_project(description: dict[str, Any]) -> str:
     workspace = description.get("workspace", {})
     manifest = description.get("manifest", {})
     public = keys.get("public_key") or {}
+    default = workspace.get("default")
+    workspace_text = workspace.get("workspace_id") or ("present" if workspace.get("present") else "-")
+    if isinstance(default, dict) and isinstance(default.get("name"), str):
+        workspace_text = (
+            f"{workspace_text}; default {default['name']} ({'resolves' if default.get('resolves') else 'missing'})"
+        )
     lines = [
         _field("root", description.get("root")),
         _field("name", project.get("name") or "-"),
@@ -198,7 +204,7 @@ def _render_project(description: dict[str, Any]) -> str:
         _field("trusted_keys", len(keys.get("trusted_keys", []))),
         _field(
             "workspace",
-            workspace.get("workspace_id") or ("present" if workspace.get("present") else "-"),
+            workspace_text,
         ),
         _field("jobs", workspace.get("jobs", 0)),
         _field(

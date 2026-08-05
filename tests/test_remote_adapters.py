@@ -412,7 +412,7 @@ def test_start_manager_from_the_command_line_counts_managers_and_defers_workers(
     assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
     # No --workers on the command line, so the workspace's setting is what runs.
     script = Path(str(submitted["script"])).read_text(encoding="utf-8")
-    assert f"exec httk workflow manager run {workspace.root} --by-path --workers 4" in script
+    assert "exec httk workflow manager run station --workers 4" in script
 
     assert command(["manager", "run", "cluster:station", "--workers", "1"], context) == 0
     explicit = json.loads(capsys.readouterr().out)
@@ -540,7 +540,7 @@ def test_install_reports_a_missing_remote_httk_with_the_packaging_hint(tmp_path:
         run_adapter(bundle, "install", {"remote_settings": {}})
 
 
-def test_install_finds_the_remote_httk_and_creates_the_workspace(tmp_path: Path, remote: Remote) -> None:
+def test_install_finds_the_remote_httk_without_creating_a_workspace(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="install-found")
     workspace = remote.root / "runs" / "fresh"
@@ -552,9 +552,8 @@ def test_install_finds_the_remote_httk_and_creates_the_workspace(tmp_path: Path,
     assert result["bootstrapped"] is False
     assert result["httk_command"] == ["httk"]
     assert str(result["httk_version"]).strip()
-    assert result["workspace_created"] is True
-    assert workspace.is_dir()
-    assert run_adapter(bundle, "install", {"remote_settings": {}})["workspace_created"] is False
+    assert "workspace_created" not in result
+    assert not workspace.exists()
 
 
 def test_install_refuses_an_unreachable_host(tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -639,6 +638,7 @@ def test_an_unrecognized_adapter_kind_still_refuses(tmp_path: Path, remote: Remo
 def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote: Remote) -> None:
     source_root = tmp_path / "project"
     initialize_project(source_root, name="end-to-end")
+    Workspace.initialize(source_root)
     destination = Workspace.initialize(remote.root / "runs" / "workspace")
     fake_remote(source_root, workspace=str(destination.root))
     payload, job_id = _payload(tmp_path / "incoming")
@@ -658,6 +658,6 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     assert finished is not None and finished.kind == "succeeded"
     # Every step of the flow really crossed the stand-in transport.
     commands = [json.loads(line)["command"] for line in remote.log.read_text(encoding="utf-8").splitlines()]
-    assert any("workspace status" in item for item in commands)
-    assert any("transfer receive" in item for item in commands)
+    assert any("workspace status station --json" in item for item in commands)
+    assert any("transfer receive --workspace station --bundle" in item for item in commands)
     assert any(item.startswith("rsync ") or " rsync " in item for item in commands)

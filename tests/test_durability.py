@@ -63,7 +63,7 @@ def test_durable_global_workspace_registration_syncs_its_publication(
 
     monkeypatch.setattr(registry, "workspaces_path", lambda: tmp_path / "config" / "workspaces.json")
     events = _install_spies(monkeypatch)
-    registry.register_workspace("durable", "local", tmp_path / "workspace", durable=True)
+    registry.register_workspace("durable", tmp_path / "workspace", durable=True)
     assert sum(event[0] == "fsync" for event in events) >= 2
 
 
