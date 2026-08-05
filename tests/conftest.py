@@ -52,14 +52,12 @@ def register_ws(
 ) -> str:
     """Register *path* under *name* and return the name.
 
-    Every CLI command now takes a *registered* workspace name, never a bare path,
-    so a test that used to pass ``str(workspace.root)`` registers a name for it
-    first with this helper and passes the name instead.
+    ``remote`` and ``scope`` remain accepted because many tests share this
+    fixture; v2 has one local per-user registry, so both values are ignored.
     """
 
-    qualified = name if remote == "local" else f"{remote}:{name}"
-    register_workspace(qualified, remote, str(path), scope=scope, project=getattr(context, "cwd", None))
-    return qualified
+    register_workspace(name, str(path))
+    return name
 
 
 #: The host every fake ``ssh-slurm`` remote is pointed at. The stand-in ``ssh``
@@ -115,8 +113,13 @@ def main(argv):
         print(banner, flush=True)
     root = pathlib.Path(os.environ["HTTK_FAKE_SSH_ROOT"])
     root.mkdir(parents=True, exist_ok=True)
+    environment = os.environ.copy()
+    # The fake transport loops back into this process, so the far side shares
+    # the machine-owned workspace registry with the client.
+    environment["HTTK_CONFIG_HOME"] = os.environ["HTTK_CONFIG_HOME"]
+    environment["HTTK_DATA_HOME"] = os.environ["HTTK_DATA_HOME"]
     # sshd hands the joined command words to a login shell; do exactly that.
-    return subprocess.run(["/bin/sh", "-c", command], cwd=root).returncode
+    return subprocess.run(["/bin/sh", "-c", command], cwd=root, env=environment).returncode
 
 
 if __name__ == "__main__":
@@ -214,8 +217,6 @@ def fake_remote(
     remote_settings = dict(metadata["settings"])
     if template == "ssh-slurm":
         remote_settings.update({"host": FAKE_HOST, "username": "someone"})
-    if "workspace" in settings:
-        settings["workspace_root"] = settings.pop("workspace")
     remote_settings.update(settings)
     metadata["settings"] = remote_settings
     (bundle / "remote.json").write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")

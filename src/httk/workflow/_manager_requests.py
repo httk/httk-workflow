@@ -1,16 +1,46 @@
 """Private operator-request validation and classification helpers."""
 
+import json
 import logging
 import os
 from collections.abc import Mapping
 from typing import Any
 
-from ._util import read_json
 from .configuration import verify_document
 from .errors import FormatError, TransitionLostError, WorkflowError
-from .models import TERMINAL_KINDS, StateFrame, normalize_placement, validate_step
+from .models import TERMINAL_KINDS, StateFrame, normalize_placement, parse_job_key, validate_step
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
+
+
+class _IndeterminateRequestRead(Exception):
+    """A request's bytes or identity could not be observed and must be retried."""
+
+
+def _read_request(path: Any) -> tuple[dict[str, Any], os.stat_result]:
+    """Read one request and bind its ownership to the bytes read."""
+
+    try:
+        try:
+            before = path.lstat()
+        except OSError as exc:
+            raise _IndeterminateRequestRead(f"cannot observe request identity {path}: {exc}") from exc
+        descriptor = os.open(path, os.O_RDONLY)
+        with os.fdopen(descriptor, "rb") as handle:
+            try:
+                after = os.fstat(handle.fileno())
+            except OSError as exc:
+                raise _IndeterminateRequestRead(f"cannot observe request identity {path}: {exc}") from exc
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                raise FormatError(f"request changed while it was opened: {path}")
+            value = json.load(handle)
+    except OSError as exc:
+        raise _IndeterminateRequestRead(f"cannot read request {path}: {exc}") from exc
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise FormatError(f"cannot read JSON object {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise FormatError(f"expected JSON object in {path}")
+    return value, after
 
 
 def operator_key(request: Mapping[str, Any], log: Any, event: Any) -> str | None:
@@ -37,9 +67,12 @@ def operator_key(request: Mapping[str, Any], log: Any, event: Any) -> str | None
 
 def resolve_marker(manager: Any, request: Mapping[str, Any]) -> Any:
     job_key = request.get("job_key")
+    job_id = request.get("job_id")
     placement = request.get("placement")
-    if not isinstance(job_key, str) or not isinstance(placement, str):
-        raise FormatError("request must carry a job_key and placement")
+    if not isinstance(job_key, str) or not isinstance(job_id, str) or not isinstance(placement, str):
+        raise FormatError("request must carry a job_id, job_key, and placement")
+    if parse_job_key(job_key)[1] != job_id:
+        raise FormatError("request job_id disagrees with job_key")
     return manager.workspace.find_marker_at(job_key, normalize_placement(placement))
 
 
@@ -134,17 +167,80 @@ def apply(manager: Any, request: Mapping[str, Any]) -> str | None:
 
 def handle(manager: Any) -> bool:
     ready_dir = manager.workspace.control / "requests" / "ready"
+    claimed_dir = manager.workspace.control / "requests" / "claimed" / manager.manager_id
+    if claimed_dir.is_dir():
+        for claimed_path in sorted(claimed_dir.iterdir()):
+            if not claimed_path.is_file():
+                continue
+            ready_path = ready_dir / claimed_path.name
+            try:
+                os.rename(claimed_path, ready_path)
+            except OSError as exc:
+                try:
+                    ready_path.lstat()
+                except FileNotFoundError:
+                    _LOGGER.debug("request %s remains claimed for retry: %s", claimed_path.name, exc)
+                except OSError as stat_error:
+                    _LOGGER.debug("request %s restoration is indeterminate: %s", claimed_path.name, stat_error)
+                else:
+                    _LOGGER.debug(
+                        "request %s restoration reported failure but reached ready: %s", claimed_path.name, exc
+                    )
     changed = False
     for request_path in sorted(ready_dir.iterdir()) if ready_dir.exists() else ():
         if not request_path.is_file() or request_path.name in manager._deferred_requests:
             continue
         manager._pace()
+        refusal: str | None = None
+        request: dict[str, Any] | None = None
+        request_stat: os.stat_result | None = None
+        preflight_error: Exception | None = None
         try:
-            request = read_json(request_path)
-            marker = manager._resolve_request_marker(request)
+            request, request_stat = _read_request(request_path)
+            # The fd stat is authoritative. Keep the path check as a cheap
+            # replacement detector and compatibility seam for owner tests.
+            request_owner = request_stat.st_uid
+            try:
+                observed_owner = manager._request_owner(request_path)
+            except OSError as exc:
+                _LOGGER.debug("deferring request %s: request ownership is indeterminate: %s", request_path.name, exc)
+                continue
+            if observed_owner != request_owner:
+                refusal = (
+                    f"request author (uid {observed_owner}) does not own this request's "
+                    f"read bytes (uid {request_owner})"
+                )
+            marker = None
+            if isinstance(request.get("job_key"), str) and isinstance(request.get("placement"), str):
+                marker = manager._resolve_request_marker(request)
             if marker is not None:
-                job = manager.workspace.load_job(marker)
-                if manager._executor_for(job) is None:
+                try:
+                    marker_owner = manager._request_owner(marker.path)
+                except OSError as exc:
+                    _LOGGER.debug("deferring request %s: target ownership is indeterminate: %s", request_path.name, exc)
+                    continue
+                if marker_owner is not None and request_owner != marker_owner:
+                    refusal = f"request author (uid {request_owner}) does not own this job (uid {marker_owner})"
+                elif marker_owner is not None:
+                    ownership = manager._owns(marker)
+                    if ownership is None:
+                        _LOGGER.debug("deferring request %s: target ownership is indeterminate", request_path.name)
+                        continue
+                    if ownership is False:
+                        _LOGGER.debug(
+                            "deferring request %s: job %s is owned by uid %d and this manager runs uid %d",
+                            request_path.name,
+                            marker.job_key,
+                            marker_owner,
+                            manager.uid,
+                        )
+                        manager._deferred_requests.add(request_path.name)
+                        continue
+                if refusal is not None:
+                    job = None
+                else:
+                    job = manager.workspace.load_job(marker)
+                if job is not None and manager._executor_for(job) is None:
                     _LOGGER.info(
                         "leaving request %s to another manager: runner executor %s is not served here",
                         request_path.name,
@@ -155,21 +251,66 @@ def handle(manager: Any) -> bool:
                     )
                     manager._deferred_requests.add(request_path.name)
                     continue
-        except (WorkflowError, OSError):
-            pass
-        claimed_dir = manager.workspace.control / "requests" / "claimed" / manager.manager_id
-        claimed_dir.mkdir(parents=True, exist_ok=True)
+        except _IndeterminateRequestRead as exc:
+            _LOGGER.debug("deferring request %s: %s", request_path.name, exc)
+            continue
+        except OSError as exc:
+            _LOGGER.debug("deferring request %s: preflight observation is indeterminate: %s", request_path.name, exc)
+            continue
+        except (WorkflowError, FormatError) as exc:
+            preflight_error = exc
+        manager.workspace.ensure_directory(claimed_dir)
         claimed_path = claimed_dir / request_path.name
         try:
             os.rename(request_path, claimed_path)
         except OSError as exc:
-            _LOGGER.debug("request %s was claimed elsewhere: %s", request_path.name, exc)
-            continue
+            # Match Workspace._verified_marker_rename: a failed rename does
+            # not decide whether the destination was installed, so inspect it.
+            try:
+                claimed_path.lstat()
+            except FileNotFoundError:
+                _LOGGER.debug("request %s was not claimed; retrying: %s", request_path.name, exc)
+                continue
+            except OSError as stat_error:
+                _LOGGER.debug("request %s claim outcome is indeterminate; retrying: %s", request_path.name, stat_error)
+                continue
+            _LOGGER.debug("request %s was claimed despite rename failure: %s", request_path.name, exc)
         try:
-            unactionable = manager._apply_request(read_json(claimed_path))
+            if preflight_error is not None:
+                raise preflight_error
+            if request is None or request_stat is None:
+                raise FormatError("request was not read")
+            try:
+                claimed_stat = claimed_path.lstat()
+            except OSError as exc:
+                try:
+                    os.rename(claimed_path, request_path)
+                except OSError as restore_error:
+                    _LOGGER.debug(
+                        "request %s remains claimed after an indeterminate identity stat: %s",
+                        request_path.name,
+                        restore_error,
+                    )
+                else:
+                    _LOGGER.debug(
+                        "returned request %s to ready after an indeterminate identity stat: %s",
+                        request_path.name,
+                        exc,
+                    )
+                changed = True
+                continue
+            if (claimed_stat.st_dev, claimed_stat.st_ino) != (request_stat.st_dev, request_stat.st_ino):
+                raise FormatError("request changed while it was claimed")
+            unactionable = refusal or manager._apply_request(request)
         except TransitionLostError:
             manager._retire_request(claimed_path, "the job moved to another state first")
-        except (WorkflowError, OSError, ValueError) as exc:
+        except OSError as exc:
+            _LOGGER.debug(
+                "leaving request %s claimed for retry after indeterminate application I/O: %s",
+                claimed_path.name,
+                exc,
+            )
+        except (WorkflowError, ValueError) as exc:
             try:
                 manager.workspace.quarantine(claimed_path, reason=f"invalid request: {exc}")
             except OSError as failure:

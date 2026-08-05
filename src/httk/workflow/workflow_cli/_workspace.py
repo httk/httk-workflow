@@ -1,5 +1,14 @@
 """Workspace command group."""
 
+import os
+
+from ..adapters import REMOTE_WORKSPACE_DELETE_COMMAND, REMOTE_WORKSPACE_INIT_COMMAND, seed_application_settings
+from ..configuration import machine_names
+from ..introspection import read_managers
+from ..manifests import read_maintenance_lock, workspace_maintenance_guard
+from ..models import DEFAULT_LEASE_SECONDS
+from ..projects import read_project_section, require_project, write_project_section
+from ..registry import _update_workspace_path, valid_workspace_name
 from ._common import *
 from ._common import (
     _add_by_path_argument,
@@ -12,6 +21,7 @@ from ._common import (
     _pairs,
     _remote_workspace_read,
     _resolve_binding,
+    _run_adapter,
 )
 
 # ---------------------------------------------------------------------------
@@ -22,18 +32,8 @@ from ._common import (
 def add_workspace_init_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`workspace init`, shared with ``httk-taskmanager init``."""
 
-    parser.add_argument("workspace", metavar="NAME", help="the name to register this workspace under")
-    parser.add_argument(
-        "--path",
-        metavar="PATH",
-        help="where the workspace lives; defaults to ./NAME locally or REMOTE's workspace_root remotely",
-    )
-    parser.add_argument(
-        "--scope",
-        choices=("global", "project"),
-        default="global",
-        help="register the name globally (default) or in this project",
-    )
+    parser.add_argument("workspace", metavar="PATH", help="the local path, or REMOTE:PATH, to initialize")
+    parser.add_argument("--name", metavar="NAME", help="the registry name (default: the path basename)")
     parser.add_argument(
         "--setting",
         action="append",
@@ -52,13 +52,7 @@ def _init_settings(arguments: argparse.Namespace) -> dict[str, object]:
 
 
 def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Create one workflow workspace, register it, and print its name.
-
-    The user form takes a plain local NAME or a ``REMOTE:NAME`` binding and an
-    optional path. The protocol form (``--by-path``) initializes a workspace directly
-    at a path with no registration: it is what one machine runs on another, where
-    the far side keeps no registry.
-    """
+    """Initialize a local path or ask its owning machine to do so."""
 
     settings = _init_settings(arguments)
     if _by_path(arguments):
@@ -70,29 +64,38 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
             workspace.set_setting(key, value)
         print(workspace.root)
         return 0
-    binding = split_workspace_binding(arguments.workspace)
-    if binding is None:
-        remote = LOCAL_REMOTE
-        path = arguments.path or str(Path(context.cwd) / arguments.workspace)
-    else:
-        remote, plain_name = binding
+    remote, separator, remote_path = arguments.workspace.partition(":")
+    remote_form = bool(separator) and remote not in machine_names()
+    if remote_form:
+        if not remote_path:
+            raise ValueError("remote workspace init requires a path after REMOTE:")
         target = resolve_remote(remote, project=context.cwd)
-        if arguments.path:
-            path = arguments.path
-        else:
-            configured_root = remote_settings(target.bundle).get("workspace_root")
-            if not isinstance(configured_root, str) or not configured_root:
-                raise ValueError(f"remote {remote!r} has no workspace_root; configure it before workspace init")
-            path = f"{configured_root.rstrip('/')}/{plain_name}"
-    created = create_workspace(
-        arguments.workspace,
-        remote=remote,
-        path=path,
-        scope=arguments.scope,
-        project=context.cwd,
-        durable=_durable(arguments),
-        settings=settings,
-    )
+        name = arguments.name or Path(remote_path).name
+        valid_workspace_name(name)
+        argv = [*REMOTE_WORKSPACE_INIT_COMMAND, remote_path]
+        if arguments.name:
+            argv += ["--name", name]
+        merged = {**seed_application_settings(target.bundle), **settings}
+        for key, value in merged.items():
+            argv += ["--setting", f"{key}={json.dumps(value)}"]
+        result = _run_adapter(target.bundle, "invoke", {"argv": argv})
+        if result.get("returncode") != 0:
+            raise RuntimeError(f"remote workspace init failed: {result.get('stderr', '')}")
+        print(name)
+        return 0
+
+    local_path = remote_path if separator and remote in machine_names() else arguments.workspace
+    root = (Path(context.cwd) / local_path).resolve()
+    name = arguments.name or root.name
+    valid_workspace_name(name)
+    format_path = root / ".httk-workflow" / "format.json"
+    if format_path.exists():
+        if settings:
+            raise ValueError("existing workspace adopted unchanged; use `workspace settings set`")
+        Workspace(root)
+        created = register_workspace(name, root, durable=_durable(arguments))
+    else:
+        created = create_workspace(name, root, durable=_durable(arguments), settings=settings)
     print(created.name)
     return 0
 
@@ -116,7 +119,7 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
-        return _remote_workspace_read(binding, context, ("workspace", "status"), arguments, flags=("--json",))
+        return _remote_workspace_read(binding, context, REMOTE_STATUS_COMMAND, arguments, flags=("--json",))
     workspace = Workspace(root, mutable=False, durable=_durable(arguments))
     counts: dict[str, int] = {}
     rows: list[dict[str, object]] = []
@@ -139,6 +142,7 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
                     "format": "httk-workflow-status",
                     "format_version": 1,
                     "workspace_id": workspace.workspace_id,
+                    "root": str(workspace.root),
                     "workspace_format_version": workspace.format["format_version"],
                     "core_profile": workspace.format["core_profile"],
                     "extensions": sorted(workspace.extensions),
@@ -208,7 +212,7 @@ def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) ->
         return _remote_workspace_read(
             binding,
             context,
-            ("workspace", "fsck"),
+            REMOTE_WORKSPACE_FSCK_COMMAND,
             arguments,
             flags=("--repair", "--quarantine-unrepairable", "--json"),
         )
@@ -237,7 +241,7 @@ def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> i
         return _remote_workspace_read(
             binding,
             context,
-            ("workspace", "gc"),
+            REMOTE_WORKSPACE_GC_COMMAND,
             arguments,
             flags=("--dry-run", "--json"),
         )
@@ -251,6 +255,9 @@ def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> i
         print(f"{name:<24}{candidates:>12}{removed:>9}{reclaimed:>14}")
     for skipped in report.skipped:
         print(f"skipped {skipped}")
+    if report.skipped_foreign:
+        details = ", ".join(f"{category}={count}" for category, count in sorted(report.skipped_foreign.items()))
+        print(f"skipped foreign: {details}")
     if arguments.dry_run:
         print("dry run: nothing was removed")
     return 0
@@ -267,22 +274,33 @@ def handle_workspace_unlock(arguments: argparse.Namespace, context: CLIContext) 
 def handle_workspace_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     """List the registered workspaces and where each resolves to."""
 
-    rows: list[dict[str, object]] = []
-    for binding in list_workspaces(project=context.cwd):
-        reachable: object
-        if binding.remote == LOCAL_REMOTE:
-            reachable = (Path(binding.path) / ".httk-workflow" / "format.json").is_file()
+    if arguments.remote is not None:
+        remote_name, separator, empty = arguments.remote.partition(":")
+        if not separator or empty:
+            raise ValueError("workspace list expects REMOTE:")
+        target = resolve_remote(remote_name, project=context.cwd)
+        result = _run_adapter(target.bundle, "invoke", {"argv": [*REMOTE_WORKSPACE_LIST_COMMAND, "--json"]})
+        if result.get("returncode") != 0:
+            raise RuntimeError(f"remote workspace list failed: {result.get('stderr', '')}")
+        remote_rows = json.loads(str(result.get("stdout", "[]")))
+        remote_display_rows = [dict(row) for row in remote_rows]
+        for row in remote_display_rows:
+            row["name"] = f"{remote_name}:{row['name']}"
+        if arguments.json:
+            print(json.dumps(remote_display_rows, indent=2, sort_keys=True))
         else:
-            # A remote is not probed here: reachability would need a live adapter
-            # call per row, which listing must not require. The binding is shown
-            # so `workspace status NAME` can check it deliberately.
-            reachable = None
+            for row in remote_display_rows:
+                print(f"{row['name']}\t{row.get('path', '')}")
+        return 0
+
+    rows: list[dict[str, object]] = []
+    for binding in list_workspaces():
+        assert binding.path is not None
+        reachable = (Path(binding.path) / ".httk-workflow" / "format.json").is_file()
         rows.append(
             {
                 "name": binding.name,
-                "remote": binding.remote,
                 "path": binding.path,
-                "scope": binding.scope,
                 "reachable": reachable,
             }
         )
@@ -294,15 +312,15 @@ def handle_workspace_list(arguments: argparse.Namespace, context: CLIContext) ->
         return 0
     for row in rows:
         mark = "?" if row["reachable"] is None else ("ok" if row["reachable"] else "missing")
-        print(f"{row['name']}\t{row['remote']}\t{row['path']}\t{row['scope']}\t{mark}")
+        print(f"{row['name']}\t{row['path']}\t{mark}")
     return 0
 
 
 def handle_workspace_forget(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Deregister one workspace name, leaving the workspace itself in place."""
 
-    binding = forget_workspace(arguments.workspace, project=context.cwd)
-    print(f"forgot {binding.name} ({binding.scope})")
+    binding = forget_workspace(arguments.workspace)
+    print(f"forgot {binding.name}")
     return 0
 
 
@@ -320,8 +338,95 @@ def handle_workspace_delete(arguments: argparse.Namespace, context: CLIContext) 
         remove_local_workspace(Path(arguments.workspace))
         print(arguments.workspace)
         return 0
-    binding = delete_workspace(arguments.workspace, project=context.cwd, force=arguments.force)
+    binding = resolve_workspace(arguments.workspace, project=context.cwd)
+    if binding.remote != LOCAL_REMOTE and not arguments.force:
+        raise ValueError("workspace delete requires --force")
+    if binding.remote != LOCAL_REMOTE:
+        target = resolve_remote(binding.remote, project=context.cwd)
+        name = binding.name.split(":", 1)[1]
+        result = _run_adapter(
+            target.bundle,
+            "invoke",
+            {"argv": [*REMOTE_WORKSPACE_DELETE_COMMAND, name, "--force"]},
+        )
+        if result.get("returncode") != 0:
+            raise RuntimeError(f"remote workspace delete failed: {result.get('stderr', '')}")
+        print(f"deleted {name}")
+        return 0
+    delete_workspace(arguments.workspace, force=arguments.force)
     print(f"deleted {binding.name}")
+    return 0
+
+
+def handle_workspace_default(arguments: argparse.Namespace, context: CLIContext) -> int:
+    project = require_project(context.cwd)
+    section = read_project_section(project, "workspace")
+    if arguments.unset:
+        if arguments.workspace is not None:
+            raise ValueError("workspace default --unset does not take a NAME")
+        section.pop("default", None)
+        write_project_section(project, "workspace", section)
+        return 0
+    if arguments.workspace is None:
+        recorded = section.get("default")
+        if isinstance(recorded, str):
+            print(recorded)
+        else:
+            print("none recorded; the per-user default applies")
+        return 0
+    resolve_workspace(arguments.workspace, project=project)
+    section["default"] = arguments.workspace
+    write_project_section(project, "workspace", section)
+    print(arguments.workspace)
+    return 0
+
+
+def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) -> int:
+    binding = resolve_workspace(arguments.workspace, project=context.cwd)
+    if binding.remote != LOCAL_REMOTE:
+        target = resolve_remote(binding.remote, project=context.cwd)
+        name = binding.name.split(":", 1)[1]
+        result = _run_adapter(
+            target.bundle, "invoke", {"argv": [*REMOTE_WORKSPACE_MOVE_COMMAND, name, arguments.destination]}
+        )
+        if result.get("returncode") != 0:
+            raise RuntimeError(f"remote workspace move failed: {result.get('stderr', '')}")
+        sys.stdout.write(str(result.get("stdout", "")))
+        return 0
+    assert binding.path is not None
+    workspace = Workspace(binding.path, mutable=False)
+    for manager in read_managers(workspace):
+        if manager.alive(lease_seconds=DEFAULT_LEASE_SECONDS):
+            raise ValueError(f"cannot move workspace while manager {manager.manager_id!r} has a fresh heartbeat")
+    lock = read_maintenance_lock(workspace)
+    if lock is not None and not lock.is_stale():
+        raise ValueError(f"cannot move workspace while the maintenance lock is held by {lock.describe()}")
+    destination = (Path(context.cwd) / arguments.destination).resolve()
+    if destination.exists():
+        raise ValueError(f"workspace move destination already exists: {destination}")
+    renamed = False
+    try:
+        with workspace_maintenance_guard(workspace):
+            for manager in read_managers(workspace):
+                if manager.alive(lease_seconds=DEFAULT_LEASE_SECONDS):
+                    raise ValueError(
+                        f"cannot move workspace while manager {manager.manager_id!r} has a fresh heartbeat"
+                    )
+            try:
+                os.rename(binding.path, destination)
+            except OSError as exc:
+                if exc.errno != getattr(os, "EXDEV", 18):
+                    raise
+                raise ValueError(
+                    "workspace move must stay within one filesystem; stop managers, copy the workspace manually, "
+                    "then forget the old name and run `workspace init <newpath> --name NAME`"
+                ) from exc
+            renamed = True
+            updated = _update_workspace_path(binding.name, destination, durable=_durable(arguments))
+    finally:
+        if renamed:
+            release_maintenance_lock(Workspace(destination), force=True)
+    print(updated.path)
     return 0
 
 
@@ -345,7 +450,7 @@ def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLICo
         return _remote_workspace_read(
             binding,
             context,
-            ("workspace", "settings", "show"),
+            (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "show"),
             arguments,
             flags=("--json",),
             tail=() if arguments.key is None else (arguments.key,),
@@ -379,7 +484,7 @@ def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLICon
         return _remote_workspace_read(
             binding,
             context,
-            ("workspace", "settings", "set"),
+            (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "set"),
             arguments,
             flags=("--durable", "--no-durable"),
             tail=(arguments.key, arguments.value),
@@ -399,7 +504,7 @@ def handle_workspace_settings_unset(arguments: argparse.Namespace, context: CLIC
         return _remote_workspace_read(
             binding,
             context,
-            ("workspace", "settings", "unset"),
+            (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "unset"),
             arguments,
             flags=("--durable", "--no-durable"),
             tail=(arguments.key,),
@@ -443,14 +548,14 @@ def build_workspace_parser(
     _, policy_actions = _group(
         group,
         "policy",
-        summary="show or set the shared workspace policy",
-        description="Show or set the tunables one workspace shares with every attacher",
+        summary="show or set the workspace policy",
+        description="Show or set the tunables one workspace publishes to every attacher",
     )
     show = _leaf(
         policy_actions,
         "show",
         summary="print the current policy",
-        description="Print the shared policy of one workflow workspace",
+        description="Print the policy of one workflow workspace",
         handler=handle_workspace_policy_show,
     )
     add_workspace_argument(show, help_text="the workspace whose policy to print")
@@ -459,7 +564,7 @@ def build_workspace_parser(
         policy_actions,
         "set",
         summary="store one policy member",
-        description="Store one member of the shared policy of a workflow workspace",
+        description="Store one member of the policy of a workflow workspace",
         handler=handle_workspace_policy_set,
     )
     add_workspace_argument(store, help_text="the workspace whose policy to change")
@@ -478,7 +583,18 @@ def build_workspace_parser(
         description="List the registered workspaces and where each name resolves to",
         handler=handle_workspace_list,
     )
+    listing.add_argument("remote", metavar="REMOTE:", nargs="?", help="list a remote machine's workspaces")
     listing.add_argument("--json", action="store_true", help="print the registry as one JSON document")
+
+    default = _leaf(
+        group,
+        "default",
+        summary="read or set the project's default name",
+        description="Read or record the workspace name this project uses by default",
+        handler=handle_workspace_default,
+    )
+    default.add_argument("workspace", metavar="NAME", nargs="?", help="the workspace name to record")
+    default.add_argument("--unset", action="store_true", help="clear the recorded project default")
 
     forget = _leaf(
         group,
@@ -499,6 +615,17 @@ def build_workspace_parser(
     delete.add_argument("workspace", metavar="NAME", help="the registered workspace to destroy")
     delete.add_argument("--force", action="store_true", help="confirm the irreversible destruction")
     _add_by_path_argument(delete)
+
+    move = _leaf(
+        group,
+        "move",
+        summary="move a workspace and update its registry path",
+        description="Move one local workspace to a new path",
+        handler=handle_workspace_move,
+    )
+    move.add_argument("workspace", metavar="NAME", help="the local workspace name")
+    move.add_argument("destination", metavar="DEST_DIR", help="the new workspace path")
+    add_durability_arguments(move)
 
     _, settings_actions = _group(
         group,

@@ -74,7 +74,7 @@ satisfying it stops being usable, which is the point.
   "format": "httk-computer-adapter",
   "format_version": 1,
   "kind": "pbs",
-  "settings": {"host": "login.example.org", "workspace_root": "/scratch/me/runs"},
+  "settings": {"host": "login.example.org"},
   "required_binaries": ["rsync", "ssh"],
   "timeout_seconds": 300
 }
@@ -155,7 +155,7 @@ envelope is always present:
   "format_version": 1,
   "operation": "invoke",
   "adapter_dir": "/home/me/project/httk_project/remotes/my-cluster",
-  "remote_settings": {"host": "login.example.org", "workspace_root": "/scratch/me/runs"}
+  "remote_settings": {"host": "login.example.org"}
 }
 ```
 
@@ -200,7 +200,7 @@ validate the first configuration of a host. Merge `settings` over
 ```json
 {"format": "httk-computer-request", "format_version": 1, "operation": "configure",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
- "remote_settings": {"workspace_root": "/scratch/me/runs"},
+ "remote_settings": {},
  "settings": {"host": "login.example.org", "username": "me"}}
 ```
 
@@ -224,7 +224,7 @@ No request members beyond the envelope.
 {"format": "httk-computer-request", "format_version": 1, "operation": "install",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
  "remote_settings": {"host": "login.example.org", "username": "me",
-                      "workspace_root": "/scratch/me/runs", "bootstrap": "pip"}}
+                      "bootstrap": "pip"}}
 ```
 
 ```json
@@ -240,7 +240,6 @@ No request members beyond the envelope.
 | `httk_command` | the argument vector that answered, as an array |
 | `httk_version` | its `--version` output, stripped |
 | `bootstrapped` | whether this call installed anything (only ever under `bootstrap=pip`) |
-| `workspace`, `workspace_created` | present when the remote configures a `workspace_root` |
 
 Answering "httk-core is installed" is not enough: the maintained implementation
 also runs `httk workflow workspace --help`, because the `workflow` command group
@@ -354,12 +353,17 @@ it is absent the maintained implementation reads it back out of a
 hand-written requests and is not the normal path.
 
 ```json
-{"argv": ["httk", "workflow", "manager", "run", "/scratch/me/runs"], "count": 2,
+{"argv": ["httk", "workflow", "manager", "run", "runs"], "count": 2,
  "format": "httk-computer-request", "format_version": 1, "operation": "start-manager",
- "workspace": "/scratch/me/runs",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
- "remote_settings": {"host": "login.example.org", "workspace_root": "/scratch/me/runs"}}
+ "remote_settings": {"host": "login.example.org"},
+ "workspace": "/scratch/me/runs"}
 ```
+
+The maintained protocol names the workspace first. A hand-written request may
+use a path only when it contains a path separator or already names an existing
+workspace directory; registry format and corruption errors are not treated as
+paths.
 
 Batch implementations report the submitted identifiers:
 
@@ -389,7 +393,7 @@ in two, by name:
 
 - keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS` —
   `bootstrap`, `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
-  `port`, `username`, `vasp_command`, `vasp_pseudo_library`, and `workspace_root` —
+  `port`, `username`, `vasp_command`, and `vasp_pseudo_library` —
   are written into the flat `settings` object of the shareable, signable
   `remote.json`;
 - **every other key** is a credential. It is written into
@@ -508,7 +512,7 @@ rule cheap to hold, because no request value is ever visible to `sh`.
   "format": "httk-computer-adapter",
   "format_version": 1,
   "kind": "pbs",
-  "settings": {"host": "login.hpc.example.org", "workspace_root": "/scratch/me/runs"},
+  "settings": {"host": "login.hpc.example.org"},
   "required_binaries": ["rsync", "ssh"],
   "timeout_seconds": 300
 }
@@ -617,10 +621,10 @@ remote:
 ```console
 mkdir -p httk_project/remotes/my-cluster
 cp -a my-cluster/. httk_project/remotes/my-cluster/
-httk workflow remote configure my-cluster --set username=me --set workspace_root=/scratch/me/runs
+httk workflow remote configure my-cluster --set username=me
 httk workflow remote install my-cluster
-httk workflow workspace init my-cluster:runs
-httk workflow run my-cluster:runs --workers 8
+httk workflow workspace init my-cluster:/scratch/me/runs --name runs
+httk workflow manager run my-cluster:runs --workers 8
 ```
 
 Jobs reach the bundle through `transfer SRC DST`; the same adapter operations

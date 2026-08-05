@@ -30,6 +30,7 @@ def _project(tmp_path: Path, monkeypatch, name: str = "locking") -> Path:
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     project = tmp_path / name
     initialize_project(project, name=name)
+    Workspace.initialize(project)
     return project
 
 
@@ -67,7 +68,7 @@ def test_guard_records_json_and_removes_it(tmp_path: Path, monkeypatch) -> None:
         assert holder is not None
         assert holder.pid == os.getpid() and holder.hostname == socket.gethostname()
         assert holder.created is not None and not holder.is_stale()
-        assert path.stat().st_mode & 0o777 == 0o600
+        assert path.stat().st_mode & 0o777 == 0o644
     assert not path.exists()
     assert read_maintenance_lock(workspace) is None
 
@@ -226,9 +227,6 @@ print(json.dumps({{"format":"httk-computer-result","format_version":1,
 def test_whitelisted_setting_still_lands_in_remote_json(tmp_path: Path, monkeypatch, capsys) -> None:
     project = _project(tmp_path, monkeypatch, name="whitelisted")
     destination = tmp_path / "elsewhere"
-    remote, code = _configured(project, f"workspace_root={destination}", "username=someone")
-    assert code == 0
-    assert "credentials.json" not in capsys.readouterr().err
-    metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
-    assert metadata["settings"] == {"workspace_root": str(destination), "username": "someone"}
-    assert not (remote / "credentials.json").exists()
+    _remote, code = _configured(project, f"workspace_root={destination}", "username=someone")
+    assert code == 2
+    assert "the machine that owns a workspace places it" in capsys.readouterr().err

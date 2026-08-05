@@ -1,6 +1,7 @@
 """Claim-precondition and job-progress diagnosis."""
 
 import json
+import stat
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -48,6 +49,7 @@ class ManagerRecord:
     started_at: str | None
     heartbeat_at: str | None
     heartbeat_age_seconds: float | None
+    uid: int | None = None
 
     def alive(self, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> bool:
         """Whether this manager's heartbeat is still inside *lease_seconds*."""
@@ -83,6 +85,7 @@ class ManagerRecord:
             "placement_prefixes": list(self.placement_prefixes),
             "executors": sorted(self.executors),
             "accept_any_pool": self.accept_any_pool,
+            "uid": self.uid,
             "started_at": self.started_at,
             "heartbeat_at": self.heartbeat_at,
             "heartbeat_age_seconds": self.heartbeat_age_seconds,
@@ -139,6 +142,7 @@ def read_managers(workspace: Workspace) -> list[ManagerRecord]:
                 placement_prefixes=_label_sequence(manifest.get("placement_prefixes")),
                 executors=_label_set(manifest.get("executors")),
                 accept_any_pool=bool(manifest.get("accept_any_pool", False)),
+                uid=_optional_int(manifest.get("uid")),
                 started_at=_optional_string(manifest.get("started_at")),
                 heartbeat_at=heartbeat_at,
                 heartbeat_age_seconds=age,
@@ -186,15 +190,40 @@ def _placement_covered(record: ManagerRecord, placement: str) -> bool:
     return False
 
 
+def _payload_ownership_issue(workspace: Workspace, marker: Marker) -> str | None:
+    """Describe a marker/payload ownership failure visible to ``job why``."""
+
+    try:
+        marker_uid = marker.path.lstat().st_uid
+        payload = workspace.payload_path(marker.placement, marker.job_key)
+        payload_stat = payload.lstat()
+        if stat.S_ISLNK(payload_stat.st_mode) or not stat.S_ISDIR(payload_stat.st_mode):
+            return "payload path is a symlink or not a directory"
+        job_stat = (payload / "job.json").lstat()
+        if stat.S_ISLNK(job_stat.st_mode) or not stat.S_ISREG(job_stat.st_mode):
+            return "payload job.json is a symlink or not a regular file"
+        if {marker_uid, payload_stat.st_uid, job_stat.st_uid} != {marker_uid}:
+            return (
+                f"marker uid {marker_uid} does not match payload uid {payload_stat.st_uid} "
+                f"and job.json uid {job_stat.st_uid}"
+            )
+    except OSError as exc:
+        return f"payload ownership cannot be checked: {exc}"
+    return None
+
+
 def manager_refusals(
     record: ManagerRecord,
     requirements: ClaimRequirements,
     *,
     placement: str | None = None,
+    owner_uid: int | None = None,
 ) -> list[str]:
     """Return why *record* would not claim a job with *requirements*."""
 
     reasons: list[str] = []
+    if owner_uid is not None and record.uid is not None and record.uid != owner_uid:
+        reasons.append(f"is owned by another user (uid {owner_uid}); managers run only jobs owned by their account")
     if requirements.executor not in record.executors:
         reasons.append(f"does not serve runner executor {requirements.executor}")
     if not record.accept_any_pool and requirements.pool not in record.pools:
@@ -438,6 +467,7 @@ def _manager_checks(
     *,
     executor_only: bool,
     placement: str | None = None,
+    owner_uid: int | None = None,
 ) -> None:
     """Record which registered managers would accept one job, and why not."""
 
@@ -463,10 +493,14 @@ def _manager_checks(
         return
     accepting: list[ManagerRecord] = []
     for record in live:
-        reasons = manager_refusals(record, requirements, placement=placement)
+        reasons = manager_refusals(record, requirements, placement=placement, owner_uid=owner_uid)
         if executor_only:
             reasons = [
-                reason for reason in reasons if "runner executor" in reason or "does not scan placement" in reason
+                reason
+                for reason in reasons
+                if "runner executor" in reason
+                or "does not scan placement" in reason
+                or "owned by another user" in reason
             ]
         if reasons:
             report.check("live manager", False, f"{record.describe()} {'; '.join(reasons)}")
@@ -633,6 +667,17 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
     kind = marker.kind
     blocked = kind not in {"claimed", "running", "committing", "succeeded"}
     summary = f"state {kind}"
+    try:
+        owner_uid: int | None = marker.path.lstat().st_uid
+    except FileNotFoundError:
+        owner_uid = None
+    ownership_issue = _payload_ownership_issue(workspace, marker)
+    if ownership_issue is not None:
+        report.check(
+            "payload ownership",
+            False,
+            f"marker and payload ownership mismatch: {ownership_issue}; managers refuse this job by default",
+        )
 
     if kind == "submitted":
         summary = (
@@ -649,6 +694,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 report,
                 executor_only=True,
                 placement=marker.placement.as_posix(),
+                owner_uid=owner_uid,
             )
     elif kind == "ready":
         summary = "this job is ready and waiting to be claimed; every claim precondition is listed below"
@@ -661,6 +707,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 report,
                 executor_only=False,
                 placement=marker.placement.as_posix(),
+                owner_uid=owner_uid,
             )
             _budget_checks(job, state, report)
         paused = _maintenance_check(workspace, report)
@@ -693,6 +740,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 report,
                 executor_only=True,
                 placement=marker.placement.as_posix(),
+                owner_uid=owner_uid,
             )
     elif kind == "waiting":
         join = state.get("join")
@@ -729,6 +777,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 report,
                 executor_only=True,
                 placement=marker.placement.as_posix(),
+                owner_uid=owner_uid,
             )
     elif kind == "failed":
         failure = state.get("failure")
@@ -791,6 +840,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 report,
                 executor_only=True,
                 placement=marker.placement.as_posix(),
+                owner_uid=owner_uid,
             )
         if alive:
             blocked = False

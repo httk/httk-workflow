@@ -10,13 +10,15 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ._util import write_json_atomic
 from .configuration import remotes_home
+from .errors import ResolutionMiss
+from .models import CORE_PROFILE
 from .projects import PROJECT_DIRECTORY, discover_project
 
 _LOGGER = logging.getLogger(__name__)
@@ -28,6 +30,18 @@ __all__ = [
     "CREDENTIALS_FILE",
     "METADATA_FILE",
     "PERSISTABLE_REMOTE_SETTINGS",
+    "REMOTE_MANAGER_COMMAND",
+    "REMOTE_OFFER_COMMAND",
+    "REMOTE_RECEIVE_COMMAND",
+    "REMOTE_RETIRE_COMMAND",
+    "REMOTE_STATUS_COMMAND",
+    "REMOTE_WORKSPACE_DELETE_COMMAND",
+    "REMOTE_WORKSPACE_FSCK_COMMAND",
+    "REMOTE_WORKSPACE_GC_COMMAND",
+    "REMOTE_WORKSPACE_INIT_COMMAND",
+    "REMOTE_WORKSPACE_LIST_COMMAND",
+    "REMOTE_WORKSPACE_MOVE_COMMAND",
+    "REMOTE_WORKSPACE_SETTINGS_COMMAND",
     "REQUEST_FORMAT",
     "RESULT_FORMAT",
     "SEED_SETTING_MAP",
@@ -36,6 +50,7 @@ __all__ = [
     "import_v1_remote",
     "list_remotes",
     "metadata_path",
+    "probe_remote_workspace",
     "project_remote_roots",
     "read_credentials",
     "read_metadata",
@@ -45,6 +60,7 @@ __all__ = [
     "seed_application_settings",
     "split_settings",
     "store_credentials",
+    "submit_remote_managers",
     "valid_remote_name",
     "validate_adapter_bundle",
 ]
@@ -92,13 +108,102 @@ PERSISTABLE_REMOTE_SETTINGS = frozenset(
         "username",
         "vasp_command",
         "vasp_pseudo_library",
-        "workspace_root",
     }
 )
 
 _RETIRED_REMOTE_SETTINGS = frozenset(
-    {"account", "constraint", "cpus_per_task", "nodes", "partition", "reservation", "time_limit", "workers"}
+    {
+        "account",
+        "constraint",
+        "cpus_per_task",
+        "nodes",
+        "partition",
+        "reservation",
+        "time_limit",
+        "workers",
+        "workspace_root",
+    }
 )
+
+REMOTE_WORKSPACE_INIT_COMMAND = ("httk", "workflow", "workspace", "init")
+REMOTE_WORKSPACE_DELETE_COMMAND = ("httk", "workflow", "workspace", "delete")
+REMOTE_WORKSPACE_FSCK_COMMAND = ("httk", "workflow", "workspace", "fsck")
+REMOTE_WORKSPACE_GC_COMMAND = ("httk", "workflow", "workspace", "gc")
+REMOTE_WORKSPACE_LIST_COMMAND = ("httk", "workflow", "workspace", "list")
+REMOTE_WORKSPACE_MOVE_COMMAND = ("httk", "workflow", "workspace", "move")
+REMOTE_RECEIVE_COMMAND = ("httk", "workflow", "transfer", "receive")
+REMOTE_OFFER_COMMAND = ("httk", "workflow", "transfer", "offer")
+REMOTE_RETIRE_COMMAND = ("httk", "workflow", "transfer", "retire")
+REMOTE_STATUS_COMMAND = ("httk", "workflow", "workspace", "status")
+REMOTE_WORKSPACE_SETTINGS_COMMAND = ("httk", "workflow", "workspace", "settings")
+REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
+
+
+def submit_remote_managers(
+    target: "RemoteTarget",
+    name: str,
+    root: str,
+    *,
+    count: int,
+    argv_tail: Sequence[str],
+    timeout: float | None,
+    adapter: Callable[..., dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Submit managers for a far-side workspace name using its probed root."""
+
+    if count < 1:
+        raise ValueError("manager count must be a positive integer")
+    runner = run_adapter if adapter is None else adapter
+    return runner(
+        target.bundle,
+        "start-manager",
+        {
+            "argv": [*REMOTE_MANAGER_COMMAND, name, *argv_tail],
+            "workspace": root,
+            "count": count,
+        },
+        timeout=timeout,
+    )
+
+
+def probe_remote_workspace(
+    target: "RemoteTarget",
+    name: str,
+    *,
+    timeout: float | None,
+    noun: str = "workspace",
+    adapter: Callable[..., dict[str, Any]] | None = None,
+) -> tuple[str, str]:
+    """Return the UUID and current root reported for a remote workspace name."""
+
+    runner = run_adapter if adapter is None else adapter
+    status = runner(
+        target.bundle,
+        "status",
+        {"argv": [*REMOTE_STATUS_COMMAND, name, "--json"]},
+        timeout=timeout,
+    )
+    if status.get("returncode") != 0:
+        raise RuntimeError(f"{noun} workspace compatibility check failed: {status.get('stderr', '')}")
+    try:
+        document = json.loads(str(status.get("stdout", "")))
+        if (
+            document.get("format") != "httk-workflow-status"
+            or document.get("format_version") != 1
+            or document.get("core_profile") != CORE_PROFILE
+        ):
+            raise ValueError
+        workspace_id = document["workspace_id"]
+        root = document["root"]
+        if not isinstance(workspace_id, str) or not isinstance(root, str) or not root:
+            raise ValueError
+        import uuid
+
+        uuid.UUID(workspace_id)
+    except (AttributeError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
+        raise ValueError(f"{noun} did not return a compatible workflow workspace status") from exc
+    return workspace_id, root
+
 
 #: How a remote definition's settings seed the application settings of a
 #: workspace created against it. A workspace bound to a remote should not make
@@ -190,7 +295,7 @@ def validate_adapter_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
 
 def valid_remote_name(name: str) -> str:
     if not name or "/" in name or ":" in name or name in {".", ".."}:
-        raise ValueError(f"invalid remote name: {name!r}; ':' is reserved for workspace bindings")
+        raise ResolutionMiss(f"invalid remote name: {name!r}; ':' is reserved for workspace bindings")
     return name
 
 
@@ -211,7 +316,7 @@ def resolve_remote(
         if bundle.is_dir():
             validate_adapter_bundle(bundle)
             return RemoteTarget(name, bundle, local)
-    raise ValueError(f"unknown remote: {name}")
+    raise ResolutionMiss(f"unknown remote: {name}")
 
 
 def project_remote_roots(project_root: Path) -> tuple[Path, ...]:
@@ -280,6 +385,11 @@ def split_settings(settings: Mapping[str, str]) -> tuple[dict[str, str], dict[st
     retired = sorted(set(settings) & _RETIRED_REMOTE_SETTINGS)
     if retired:
         names = ", ".join(retired)
+        if "workspace_root" in retired:
+            raise ValueError(
+                "remote setting 'workspace_root' is retired; the machine that owns a workspace places it; "
+                "pass the path to `workspace init REMOTE:PATH` instead"
+            )
         raise ValueError(f"unknown remote setting {names!r}; set scheduler values in the workspace settings")
     persistable = {key: value for key, value in settings.items() if key in PERSISTABLE_REMOTE_SETTINGS}
     credentials = {key: value for key, value in settings.items() if key not in PERSISTABLE_REMOTE_SETTINGS}
@@ -395,14 +505,15 @@ def import_v1_remote(
         project=project,
     )
     metadata = read_metadata(destination)
-    settings: dict[str, object] = {"legacy_settings": selected}
+    legacy_settings = dict(selected)
+    settings: dict[str, object] = {"legacy_settings": legacy_settings}
     if template in {"local", "local-slurm"} and "LOCAL_HTTK_DIR" in selected:
         root = Path(selected["LOCAL_HTTK_DIR"]).expanduser()
         if not root.is_absolute():
             root = (legacy / root).resolve()
-        settings["workspace_root"] = str(root / "Runs")
+        legacy_settings["workspace_root"] = str(root / "Runs")
     elif template == "ssh-slurm" and "REMOTE_HTTK_DIR" in selected:
-        settings["workspace_root"] = f"{selected['REMOTE_HTTK_DIR'].rstrip('/')}/Runs"
+        legacy_settings["workspace_root"] = f"{selected['REMOTE_HTTK_DIR'].rstrip('/')}/Runs"
         settings["host"] = selected.get("REMOTE_HOST", "")
         settings["username"] = selected.get("USERNAME", "")
     metadata["settings"] = settings

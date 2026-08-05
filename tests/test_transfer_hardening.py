@@ -5,6 +5,7 @@ import json
 import os
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,7 @@ from httk.workflow.transfers import (
     offer_transfers,
     validate_bundle,
 )
+from httk.workflow.workflow_cli import _transfer as transfer_cli
 
 
 def _payload(root: Path, *, tag: str = "test") -> tuple[Path, str]:
@@ -57,6 +59,216 @@ def _pair(tmp_path: Path) -> tuple[Workspace, Workspace]:
     source = Workspace.initialize(tmp_path / "source")
     destination = Workspace.initialize(tmp_path / "destination")
     return source, destination
+
+
+def test_resuming_a_transfer_requires_the_destination_remote_to_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = Workspace.initialize(tmp_path / "source")
+    transfer_dir = source.control / "transfers"
+    transfer_dir.mkdir(parents=True, exist_ok=True)
+    foreign_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    (transfer_dir / f"{foreign_id}.json").write_text(
+        json.dumps(
+            {
+                "transfer_id": foreign_id,
+                "job_id": job_id,
+                "destination_workspace_id": "destination-id",
+                "destination_remote": "other-cluster",
+                "status": "sealed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    target = SimpleNamespace(name="cluster", bundle=tmp_path / "adapter")
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(transfer_cli, "_remote_workspace_probe", lambda *_args, **_kwargs: ("destination-id", "/dest"))
+
+    def detach(_job_id: str, **kwargs: object) -> Path:
+        calls.append(kwargs)
+        return bundle
+
+    monkeypatch.setattr(source, "detach", detach)
+    monkeypatch.setattr(source, "acknowledge_transfer", lambda _acknowledgement: None)
+
+    def adapter(
+        _bundle: Path, operation: str, _request: dict[str, object], *, timeout: float | None
+    ) -> dict[str, object]:
+        if operation == "push":
+            return {"path": "/dest/incoming"}
+        return {"returncode": 0, "stdout": json.dumps({"transfer_id": str(uuid.uuid4())})}
+
+    monkeypatch.setattr(transfer_cli, "run_adapter", adapter)
+    transfer_cli._send_jobs_to_remote(source, target, "destination", [job_id], destination_placement=None, timeout=None)
+    assert calls and calls[0]["destination_remote"] == "cluster"
+    assert calls[0]["transfer_id"] != foreign_id
+
+
+def test_resuming_adopts_an_unambiguous_legacy_sealed_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = Workspace.initialize(tmp_path / "source")
+    transfer_dir = source.control / "transfers"
+    transfer_dir.mkdir(parents=True, exist_ok=True)
+    transfer_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    ledger_path = transfer_dir / f"{transfer_id}.json"
+    ledger_path.write_text(
+        json.dumps(
+            {
+                "transfer_id": transfer_id,
+                "job_id": job_id,
+                "destination_workspace_id": "destination-id",
+                "status": "sealed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    target = SimpleNamespace(name="cluster", bundle=tmp_path / "adapter")
+    calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(transfer_cli, "_remote_workspace_probe", lambda *_args, **_kwargs: ("destination-id", "/dest"))
+
+    def detach(_job_id: str, **kwargs: object) -> Path:
+        calls.append(kwargs)
+        return bundle
+
+    monkeypatch.setattr(source, "detach", detach)
+    monkeypatch.setattr(source, "acknowledge_transfer", lambda _acknowledgement: None)
+
+    def adapter(
+        _bundle: Path, operation: str, _request: dict[str, object], *, timeout: float | None
+    ) -> dict[str, object]:
+        if operation == "push":
+            return {"path": "/dest/incoming"}
+        return {"returncode": 0, "stdout": json.dumps({"transfer_id": transfer_id})}
+
+    monkeypatch.setattr(transfer_cli, "run_adapter", adapter)
+    transfer_cli._send_jobs_to_remote(source, target, "destination", [job_id], destination_placement=None, timeout=None)
+
+    adopted = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert adopted["destination_remote"] == "cluster"
+    assert calls and calls[0]["transfer_id"] == transfer_id
+
+
+def test_ambiguous_legacy_sealed_ledgers_fail_with_recovery_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = Workspace.initialize(tmp_path / "source")
+    transfer_dir = source.control / "transfers"
+    transfer_dir.mkdir(parents=True, exist_ok=True)
+    job_id = str(uuid.uuid4())
+    ledger_paths = []
+    for _ in range(2):
+        transfer_id = str(uuid.uuid4())
+        ledger_path = transfer_dir / f"{transfer_id}.json"
+        ledger_path.write_text(
+            json.dumps(
+                {
+                    "transfer_id": transfer_id,
+                    "job_id": job_id,
+                    "destination_workspace_id": "destination-id",
+                    "status": "sealed",
+                }
+            ),
+            encoding="utf-8",
+        )
+        ledger_paths.append(ledger_path)
+    target = SimpleNamespace(name="cluster", bundle=tmp_path / "adapter")
+    monkeypatch.setattr(transfer_cli, "_remote_workspace_probe", lambda *_args, **_kwargs: ("destination-id", "/dest"))
+
+    with pytest.raises(ValueError, match="destination_remote.*ambiguous.*retire.*fetch") as exc_info:
+        transfer_cli._send_jobs_to_remote(
+            source, target, "destination", [job_id], destination_placement=None, timeout=None
+        )
+    assert str(ledger_paths[0]) in str(exc_info.value) or str(ledger_paths[1]) in str(exc_info.value)
+
+
+def test_transfer_adapter_requests_are_exact_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = Workspace.initialize(tmp_path / "source")
+    target = SimpleNamespace(name="cluster", bundle=tmp_path / "adapter")
+    captured: list[tuple[str, ...]] = []
+    detached: list[dict[str, object]] = []
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    job_id = str(uuid.uuid4())
+
+    def adapter(
+        _bundle: Path, operation: str, request: dict[str, object], *, timeout: float | None
+    ) -> dict[str, object]:
+        if operation == "invoke":
+            captured.append(tuple(request["argv"]))  # type: ignore[arg-type]
+            if captured[-1][3] == "offer":
+                return {
+                    "returncode": 0,
+                    "stdout": json.dumps({"format": "httk-workflow-transfer-offer", "format_version": 1, "offers": []}),
+                }
+            if captured[-1][3] == "retire":
+                return {"returncode": 0, "stdout": json.dumps({"retired": []})}
+            return {"returncode": 0, "stdout": json.dumps({"transfer_id": detached[0]["transfer_id"]})}
+        return {"path": f"/dest/incoming/{detached[0]['transfer_id']}"}
+
+    monkeypatch.setattr(transfer_cli, "run_adapter", adapter)
+    monkeypatch.setattr(transfer_cli, "_remote_workspace_probe", lambda *_args, **_kwargs: ("destination-id", "/dest"))
+
+    def detach(_job_id: str, **kwargs: object) -> Path:
+        detached.append(kwargs)
+        return bundle
+
+    monkeypatch.setattr(source, "detach", detach)
+    monkeypatch.setattr(source, "acknowledge_transfer", lambda _acknowledgement: None)
+
+    transfer_cli._remote_offer(
+        target,
+        "station",
+        "destination-id",
+        states=("succeeded",),
+        placement=None,
+        timeout=None,
+    )
+    transfer_cli._remote_retire(target, "station", [job_id], "destination-id", timeout=None)
+    transfer_cli._send_jobs_to_remote(source, target, "destination", [job_id], destination_placement=None, timeout=None)
+
+    transfer_id = str(detached[0]["transfer_id"])
+    assert captured == [
+        (
+            "httk",
+            "workflow",
+            "transfer",
+            "offer",
+            "station",
+            "--destination-workspace-id",
+            "destination-id",
+            "--json",
+            "--state",
+            "succeeded",
+        ),
+        (
+            "httk",
+            "workflow",
+            "transfer",
+            "retire",
+            "station",
+            job_id,
+            "--destination-workspace-id",
+            "destination-id",
+            "--json",
+        ),
+        (
+            "httk",
+            "workflow",
+            "transfer",
+            "receive",
+            "--workspace",
+            "destination",
+            "--bundle",
+            f"/dest/incoming/{transfer_id}",
+        ),
+    ]
 
 
 # ---------------------------------------------------------------------------

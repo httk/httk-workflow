@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from httk.core.cli import CLIContext
 
 from conftest import fake_remote
 from httk.workflow import Workspace
@@ -25,8 +26,8 @@ from httk.workflow.adapters import SEED_SETTING_MAP, seed_application_settings
 from httk.workflow.manager import TaskManager
 from httk.workflow.projects import initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
-from httk.workflow.registry import create_workspace
 from httk.workflow.sdk import Attempt
+from httk.workflow.workflow_cli import command
 
 _BASH_API = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "shell" / "httk-workflow.sh"
 
@@ -174,6 +175,12 @@ def _bash_setting(
         "HTTK_WORKFLOW_PYTHON": sys.executable,
         "PYTHONPATH": str(Path(__file__).parents[1] / "src"),
         "PATH": os.environ.get("PATH", ""),
+        # The bash SDK boots a Python that imports NumPy through httk-core; cap
+        # its thread pools exactly as conftest does for the test process itself,
+        # or parallel runs exhaust the pid limit on constrained machines.
+        "OPENBLAS_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
     }
     return subprocess.run(["bash", "-c", script], env=child, text=True, capture_output=True, check=False)
 
@@ -243,16 +250,13 @@ def test_a_remote_definition_seeds_the_new_workspaces_settings(tmp_path: Path) -
     seeds = seed_application_settings(bundle)
     assert seeds == {"vasp.command": "srun vasp_std", "vasp.pseudo_library": "/data/potpaw"}
 
-    binding = create_workspace(
-        "cluster:station",
-        remote="cluster",
-        path=tmp_path / "runs",
-        scope="project",
-        project=project,
+    destination = tmp_path / "runs"
+    assert (
+        command(["workspace", "init", f"cluster:{destination}", "--name", "station"], CLIContext("httk", project)) == 0
     )
     # A `local`-template remote runs the adapter here, so the seeded workspace is
     # the one on disk and its settings carry the remote's command.
-    assert Workspace(binding.path).settings == {
+    assert Workspace(destination).settings == {
         "vasp.command": "srun vasp_std",
         "vasp.pseudo_library": "/data/potpaw",
     }

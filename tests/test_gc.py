@@ -474,6 +474,26 @@ def test_empty_placement_mirrors_are_pruned_below_every_state_kind(tmp_path: Pat
     assert (state / "succeeded" / "project" / "deep" / "nested" / "leaf").is_dir()
 
 
+def test_tree_ownership_preflight_counts_nested_foreign_entries_and_keeps_siblings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = tmp_path / "candidate"
+    foreign = tree / "nested" / "foreign"
+    foreign.parent.mkdir(parents=True)
+    foreign.write_text("keep", encoding="utf-8")
+    sibling = tree / "sibling"
+    sibling.write_text("keep", encoding="utf-8")
+    seen: list[Path] = []
+
+    def owner(path: Path) -> bool:
+        return path != foreign
+
+    monkeypatch.setattr(gc_module, "_owned_by_current_user", owner)
+    assert not gc_module._remove_tree(tree, on_foreign=lambda: seen.append(foreign))
+    assert len(seen) == 1
+    assert foreign.is_file() and sibling.is_file()
+
+
 def test_a_concurrent_removal_or_repopulation_is_tolerated(aged: _Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
     """Another actor may remove or recreate a directory under the collector."""
 

@@ -10,7 +10,8 @@ from conftest import register_ws
 from httk.workflow import Workspace
 from httk.workflow.adapters import add_remote, import_v1_remote, run_adapter
 from httk.workflow.configuration import identity_key_paths
-from httk.workflow.manifests import create_manifest, verify_manifest
+from httk.workflow.journal import JournalWriter
+from httk.workflow.manifests import create_manifest, verify_manifest, workspace_maintenance_guard
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import command
 
@@ -79,6 +80,7 @@ def test_noninteractive_project_init_requires_explicit_name(tmp_path: Path) -> N
 def test_manifest_determinism_special_names_exclusions_and_tampering(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="manifest-test", manifest_exclusions=("ignored*",))
+    Workspace.initialize(project)
     (project / "space and\nnewline").write_bytes(b"content")
     (project / "empty").mkdir()
     (project / "link").symlink_to("space and\nnewline")
@@ -98,6 +100,7 @@ def test_manifest_determinism_special_names_exclusions_and_tampering(tmp_path: P
 def test_manifest_refuses_active_workspace(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="active")
+    Workspace.initialize(project)
     workspace = Workspace(project)
     payload, job_id = _payload(tmp_path)
     submitted = workspace.submit(payload, "jobs")
@@ -109,6 +112,17 @@ def test_manifest_refuses_active_workspace(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="quiescent"):
         create_manifest(project)
     assert workspace.find_marker_by_id(job_id) is not None
+
+
+def test_maintenance_guard_refuses_cancelling_workspace(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, _job_id = _payload(tmp_path)
+    submitted = workspace.submit(payload, "jobs")
+    with JournalWriter(workspace.control) as writer:
+        running = workspace.transition(writer, submitted, "running", {"reason": "test"})
+        workspace.transition(writer, running, "cancelling", {"reason": "test"})
+    with pytest.raises(ValueError, match="quiescent workspace"), workspace_maintenance_guard(workspace):
+        pass
 
 
 def test_adapter_json_contract_and_no_shell_interpolation(tmp_path: Path) -> None:
@@ -188,6 +202,8 @@ def test_tasks_send_uses_adapter_status_push_import_and_ack(tmp_path: Path) -> N
     destination_root = tmp_path / "destination"
     initialize_project(source_root, name="source")
     initialize_project(destination_root, name="destination")
+    Workspace.initialize(source_root)
+    Workspace.initialize(destination_root)
     remote = add_remote("cluster", template="local", project=source_root)
     metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
     metadata["settings"]["workspace_root"] = str(destination_root)
@@ -208,6 +224,8 @@ def test_transfer_send_resumes_after_copy_before_import(tmp_path: Path, monkeypa
     destination_root = tmp_path / "destination"
     initialize_project(source_root, name="source")
     initialize_project(destination_root, name="destination")
+    Workspace.initialize(source_root)
+    Workspace.initialize(destination_root)
     remote = add_remote("cluster", template="local", project=source_root)
     metadata = json.loads((remote / "remote.json").read_text(encoding="utf-8"))
     metadata["settings"]["workspace_root"] = str(destination_root)

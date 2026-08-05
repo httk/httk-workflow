@@ -141,8 +141,16 @@ httk workflow project import-v1 . --source ./ht.project
 
 This imports safe metadata and public identities. It does not import private
 keys or the *httk* v1 queue. Imported project metadata records
-`legacy_queue_imported: false`. The project workspace is a core-v2 workspace,
-with detached transfer and transactional data available to native jobs.
+`legacy_queue_imported: false`. The imported project can record a workspace
+default, but the core-v2 workspace itself remains outside the project; detached
+transfer and transactional data are available to native jobs.
+
+The workspace registry is machine-owned in *httk₂*. An old `workspaces.json`
+is refused with a teaching error; remove it and re-register local workspaces
+with `workspace init PATH` (remote names are registered on their owning
+machine). `workspace default NAME` replaces project workspace bindings: it
+records only the name in `project.json`, while the workspace remains outside
+the project.
 
 Recognized *httk* v1 computer definitions can be mapped explicitly into
 *httk₂* remotes:
@@ -150,10 +158,15 @@ Recognized *httk* v1 computer definitions can be mapped explicitly into
 ```console
 httk workflow remote import-v1 ~/.httk/computers/cluster-a \
   --name cluster-a
-httk workflow remote configure cluster-a \
-  --set workspace_root=/remote/path/to/workflow-workspace
-httk workflow workspace init cluster-a:default
+httk workflow workspace init cluster-a:/remote/path/to/workflow-workspace \
+  --name default
 ```
+
+`workspace_root` is retired. `workspace init REMOTE:PATH` performs the remote
+initialization and registration; `workspace settings set REMOTE:NAME …` then
+sets scheduler and application settings on that workspace. `remote import-v1`
+does not create a workspace: it preserves the legacy Runs hint in the remote's
+`legacy_settings` so an operator can choose the path explicitly.
 
 Review every generated adapter before installation. Legacy shell executables
 and credentials are not copied or executed by the importer.

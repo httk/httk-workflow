@@ -1,5 +1,9 @@
 """Remote and transfer command groups."""
 
+import os
+
+from ..adapters import probe_remote_workspace
+from ..errors import ResolutionMiss
 from ._common import *
 from ._common import (
     _TRANSFER_PROTOCOL,
@@ -55,7 +59,7 @@ def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIC
     result = run_adapter(
         target.bundle,
         operation,
-        {"remote_settings": {}, "settings": settings},
+        {"settings": settings},
         timeout=arguments.adapter_timeout,
     )
     if operation == "configure" and settings:
@@ -114,7 +118,6 @@ def _render_remote(description: dict[str, Any]) -> str:
             "required_binaries",
             ", ".join(description.get("required_binaries", [])) or "-",
         ),
-        _field("workspace_root", description.get("settings", {}).get("workspace_root", "-")),
         _field("credentials_file", description.get("credentials_file") or "-"),
     ]
     settings = description.get("settings", {})
@@ -271,53 +274,22 @@ def build_remote_parser(
 # ---------------------------------------------------------------------------
 
 
-def _remote_workspace_id(target: Any, root: str, *, timeout: float | None, noun: str = "destination") -> str:
-    """Probe one remote workspace over the adapter and return its UUID.
+def _remote_workspace_probe(
+    target: Any,
+    name: str,
+    *,
+    timeout: float | None,
+    noun: str = "destination",
+) -> tuple[str, str]:
+    """Probe a remote workspace through the CLI adapter seam."""
 
-    The probe is the same for both directions of a transfer: nothing is sealed,
-    pushed, or pulled until the far side has answered with a status of the
-    profile this protocol needs, so an incompatible or absent
-    workspace is reported before any state moves. The status is asked for
-    ``--by-path`` because the far side keeps no registry: it addresses its own
-    workspace by the path this client resolved the binding to.
-    """
-
-    status = run_adapter(
-        target.bundle,
-        "status",
-        {
-            "remote_settings": {},
-            "argv": [*REMOTE_STATUS_COMMAND, root, "--by-path", "--json"],
-        },
-        timeout=timeout,
-    )
-    if status.get("returncode") != 0:
-        raise RuntimeError(f"{noun} workspace compatibility check failed: {status.get('stderr', '')}")
-    try:
-        status_data = json.loads(str(status.get("stdout", "")))
-        if (
-            status_data.get("format") != "httk-workflow-status"
-            or status_data.get("format_version") != 1
-            or status_data.get("core_profile") != CORE_PROFILE
-        ):
-            raise ValueError
-        workspace_id = str(status_data["workspace_id"])
-        uuid.UUID(workspace_id)
-    except (
-        AttributeError,
-        json.JSONDecodeError,
-        KeyError,
-        ValueError,
-        TypeError,
-    ) as exc:
-        raise ValueError(f"{noun} did not return a compatible workflow workspace status") from exc
-    return workspace_id
+    return probe_remote_workspace(target, name, timeout=timeout, noun=noun, adapter=run_adapter)
 
 
 def _send_jobs_to_remote(
     source: Workspace,
     target: Any,
-    destination_root: str,
+    destination_name: str,
     jobs: Sequence[str],
     *,
     destination_placement: str | None,
@@ -331,29 +303,47 @@ def _send_jobs_to_remote(
     finished by running the same command again.
     """
 
-    destination_workspace_id = _remote_workspace_id(target, destination_root, timeout=timeout)
+    destination_workspace_id, destination_root = _remote_workspace_probe(target, destination_name, timeout=timeout)
     acknowledgements: list[dict[str, object]] = []
     for job_id in jobs:
         source.recover_transfers()
-        candidates: list[dict[str, object]] = []
+        candidates: list[tuple[Path, dict[str, object]]] = []
+        sealed_for_job: list[tuple[Path, dict[str, object]]] = []
         for ledger_path in (source.control / "transfers").glob("*.json"):
             ledger = read_json(ledger_path)
-            if (
-                ledger.get("job_id") == job_id
-                and ledger.get("destination_workspace_id") == destination_workspace_id
-                and ledger.get("status") == "sealed"
-            ):
-                candidates.append(ledger)
+            if ledger.get("job_id") != job_id or ledger.get("status") != "sealed":
+                continue
+            sealed_for_job.append((ledger_path, ledger))
+            if ledger.get("destination_workspace_id") != destination_workspace_id:
+                continue
+            if ledger.get("destination_remote") == target.name or "destination_remote" not in ledger:
+                candidates.append((ledger_path, ledger))
+        legacy = [item for item in candidates if "destination_remote" not in item[1]]
+        if legacy and len(sealed_for_job) != 1:
+            ledger_path = legacy[0][0]
+            raise ValueError(
+                f"cannot resume job {job_id}: sealed transfer ledger {ledger_path} has no destination_remote "
+                "and is ambiguous; retire that ledger or fetch the job from the destination"
+            )
         if len(candidates) > 1:
-            raise ValueError(f"multiple resumable transfers exist for job: {job_id}")
-        transfer_id = str(candidates[0]["transfer_id"]) if candidates else str(uuid.uuid4())
+            ledger_path = candidates[0][0]
+            raise ValueError(
+                f"cannot resume job {job_id}: sealed transfer ledger {ledger_path} is ambiguous; "
+                "retire it or fetch the job from the destination"
+            )
+        transfer_id = str(candidates[0][1]["transfer_id"]) if candidates else str(uuid.uuid4())
         if candidates and destination_placement:
             requested = str(destination_placement).strip("/")
-            if candidates[0].get("destination_placement") != requested:
+            if candidates[0][1].get("destination_placement") != requested:
                 raise ValueError("resumed transfer destination placement disagrees with the request")
+        if legacy:
+            ledger_path, ledger = legacy[0]
+            ledger["destination_remote"] = target.name
+            write_json_atomic(ledger_path, ledger, durable=source.durable)
         bundle = source.detach(
             job_id,
             destination_workspace_id=destination_workspace_id,
+            destination_remote=target.name,
             destination_placement=destination_placement,
             transfer_id=transfer_id,
         )
@@ -361,7 +351,7 @@ def _send_jobs_to_remote(
         push = run_adapter(
             target.bundle,
             "push",
-            {"remote_settings": {}, "source": str(bundle), "destination": incoming},
+            {"source": str(bundle), "destination": incoming},
             timeout=timeout,
         )
         remote_bundle = str(push.get("path", incoming))
@@ -369,11 +359,10 @@ def _send_jobs_to_remote(
             target.bundle,
             "invoke",
             {
-                "remote_settings": {},
                 "argv": [
                     *REMOTE_RECEIVE_COMMAND,
                     "--workspace",
-                    destination_root,
+                    destination_name,
                     "--bundle",
                     remote_bundle,
                 ],
@@ -393,10 +382,36 @@ def _send_jobs_to_remote(
     return acknowledgements
 
 
-def handle_transfer_receive(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Import one sealed detached transfer bundle into this workspace."""
+def _protocol_workspace(value: str, context: CLIContext) -> Workspace:
+    """Resolve a protocol workspace name, with narrow legacy path support."""
 
-    acknowledgement = Workspace(arguments.workspace).import_bundle(arguments.bundle)
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = Path(context.cwd) / candidate
+    path_like = (
+        value in {".", ".."} or ":" in value or os.sep in value or (os.altsep is not None and os.altsep in value)
+    )
+    list_workspaces()
+    try:
+        binding = resolve_workspace(value, project=context.cwd)
+    except ResolutionMiss:
+        if not path_like and not candidate.is_dir():
+            raise
+        return Workspace(candidate)
+    if binding.remote != LOCAL_REMOTE or binding.path is None:
+        raise ValueError(f"protocol workspace must be local on this machine: {value}")
+    return Workspace(binding.path)
+
+
+def handle_transfer_receive(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Import by registry name, with an explicit-path compatibility fallback.
+
+    Names are tried first. A path is accepted only when it contains a path
+    separator or already names an existing directory; receive has no hidden
+    ``--by-path`` spelling.
+    """
+
+    acknowledgement = _protocol_workspace(arguments.workspace, context).import_bundle(arguments.bundle)
     print(json.dumps(acknowledgement, sort_keys=True, separators=(",", ":")))
     return 0
 
@@ -404,7 +419,7 @@ def handle_transfer_receive(arguments: argparse.Namespace, context: CLIContext) 
 def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Seal the finished jobs of this workspace for one that will fetch them."""
 
-    workspace = Workspace(arguments.workspace)
+    workspace = _protocol_workspace(arguments.workspace, context)
     offers = offer_transfers(
         workspace,
         destination_workspace_id=arguments.destination_workspace_id,
@@ -430,7 +445,7 @@ def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -
     """Retire the sealed source bundles of jobs another workspace has imported."""
 
     retired = retire_transfers(
-        Workspace(arguments.workspace),
+        _protocol_workspace(arguments.workspace, context),
         arguments.jobs,
         destination_workspace_id=arguments.destination_workspace_id,
     )
@@ -449,7 +464,7 @@ def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -
 
 def _remote_offer(
     target: Any,
-    remote_root: str,
+    remote_name: str,
     destination_workspace_id: str,
     *,
     states: Sequence[str] | None,
@@ -460,7 +475,7 @@ def _remote_offer(
 
     argv = [
         *REMOTE_OFFER_COMMAND,
-        remote_root,
+        remote_name,
         "--destination-workspace-id",
         destination_workspace_id,
         "--json",
@@ -469,7 +484,7 @@ def _remote_offer(
         argv += ["--state", state]
     if placement:
         argv += ["--placement", placement]
-    offered = run_adapter(target.bundle, "invoke", {"remote_settings": {}, "argv": argv}, timeout=timeout)
+    offered = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=timeout)
     if offered.get("returncode") != 0:
         raise RuntimeError(f"remote offer failed: {offered.get('stderr', '')}")
     try:
@@ -492,7 +507,7 @@ def _remote_offer(
 
 def _remote_retire(
     target: Any,
-    remote_root: str,
+    remote_name: str,
     job_ids: Sequence[str],
     destination_workspace_id: str,
     *,
@@ -504,13 +519,13 @@ def _remote_retire(
         return []
     argv = [
         *REMOTE_RETIRE_COMMAND,
-        remote_root,
+        remote_name,
         *job_ids,
         "--destination-workspace-id",
         destination_workspace_id,
         "--json",
     ]
-    response = run_adapter(target.bundle, "invoke", {"remote_settings": {}, "argv": argv}, timeout=timeout)
+    response = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=timeout)
     if response.get("returncode") != 0:
         raise RuntimeError(f"remote retirement failed: {response.get('stderr', '')}")
     try:
@@ -523,7 +538,7 @@ def _remote_retire(
 def _fetch_jobs_from_remote(
     local: Workspace,
     target: Any,
-    remote_root: str,
+    remote_name: str,
     *,
     states: Sequence[str] | None,
     placement: str | None,
@@ -537,10 +552,10 @@ def _fetch_jobs_from_remote(
     interrupted fetch is finished by running the same command again.
     """
 
-    _remote_workspace_id(target, remote_root, timeout=timeout, noun="remote")
+    _remote_workspace_probe(target, remote_name, timeout=timeout, noun="remote")
     offers = _remote_offer(
         target,
-        remote_root,
+        remote_name,
         local.workspace_id,
         states=states,
         placement=placement,
@@ -555,7 +570,6 @@ def _fetch_jobs_from_remote(
             target.bundle,
             "pull",
             {
-                "remote_settings": {},
                 "source": str(offer["bundle_path"]),
                 "destination": str(staging),
             },
@@ -569,7 +583,7 @@ def _fetch_jobs_from_remote(
         acknowledgements.append(acknowledgement)
     retired = _remote_retire(
         target,
-        remote_root,
+        remote_name,
         [str(acknowledgement["job_id"]) for acknowledgement in acknowledgements],
         local.workspace_id,
         timeout=timeout,
@@ -616,11 +630,17 @@ def _transfer_remote_to_remote(
 
     source_target = resolve_remote(source_binding.remote, project=context.cwd)
     destination_target = resolve_remote(destination_binding.remote, project=context.cwd)
-    destination_workspace_id = _remote_workspace_id(destination_target, destination_binding.path, timeout=timeout)
-    _remote_workspace_id(source_target, source_binding.path, timeout=timeout, noun="source")
+    destination_name = destination_binding.name.split(":", 1)[1]
+    source_name = source_binding.name.split(":", 1)[1]
+    destination_workspace_id, destination_root = _remote_workspace_probe(
+        destination_target, destination_name, timeout=timeout
+    )
+    _source_workspace_id, _source_root = _remote_workspace_probe(
+        source_target, source_name, timeout=timeout, noun="source"
+    )
     offers = _remote_offer(
         source_target,
-        source_binding.path,
+        source_name,
         destination_workspace_id,
         states=states,
         placement=placement,
@@ -635,19 +655,17 @@ def _transfer_remote_to_remote(
                 source_target.bundle,
                 "pull",
                 {
-                    "remote_settings": {},
                     "source": str(offer["bundle_path"]),
                     "destination": str(staging),
                 },
                 timeout=timeout,
             )
             local_bundle = str(pulled.get("path", staging))
-            incoming = f"{destination_binding.path.rstrip('/')}/.httk-workflow/transfers/incoming/{transfer_id}"
+            incoming = f"{destination_root.rstrip('/')}/.httk-workflow/transfers/incoming/{transfer_id}"
             pushed = run_adapter(
                 destination_target.bundle,
                 "push",
                 {
-                    "remote_settings": {},
                     "source": local_bundle,
                     "destination": incoming,
                 },
@@ -658,11 +676,10 @@ def _transfer_remote_to_remote(
                 destination_target.bundle,
                 "invoke",
                 {
-                    "remote_settings": {},
                     "argv": [
                         *REMOTE_RECEIVE_COMMAND,
                         "--workspace",
-                        destination_binding.path,
+                        destination_name,
                         "--bundle",
                         remote_bundle,
                     ],
@@ -680,7 +697,7 @@ def _transfer_remote_to_remote(
             acknowledgements.append(acknowledgement)
     retired = _remote_retire(
         source_target,
-        source_binding.path,
+        source_name,
         [str(acknowledgement["job_id"]) for acknowledgement in acknowledgements],
         destination_workspace_id,
         timeout=timeout,
@@ -757,30 +774,33 @@ def _run_transfer_verb(
     timeout = arguments.adapter_timeout
 
     if source_local and not destination_local:
+        assert source_binding.path is not None
         target = resolve_remote(destination_binding.remote, project=context.cwd)
         if not arguments.jobs:
             raise ValueError("a local-to-remote transfer needs at least one --job JOB_ID")
         acknowledgements = _send_jobs_to_remote(
             Workspace(source_binding.path),
             target,
-            destination_binding.path,
+            destination_binding.name.split(":", 1)[1],
             arguments.jobs,
             destination_placement=arguments.destination_placement,
             timeout=timeout,
         )
         return _report_transfer(arguments, {"moved": acknowledgements})
     if destination_local and not source_local:
+        assert destination_binding.path is not None
         target = resolve_remote(source_binding.remote, project=context.cwd)
         acknowledgements, retired = _fetch_jobs_from_remote(
             Workspace(destination_binding.path),
             target,
-            source_binding.path,
+            source_binding.name.split(":", 1)[1],
             states=arguments.state,
             placement=arguments.placement,
             timeout=timeout,
         )
         return _report_transfer(arguments, {"moved": acknowledgements, "retired": retired})
     if source_local and destination_local:
+        assert source_binding.path is not None and destination_binding.path is not None
         acknowledgements = _transfer_local_to_local(
             Workspace(source_binding.path),
             Workspace(destination_binding.path),

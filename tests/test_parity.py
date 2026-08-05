@@ -1,8 +1,8 @@
 """One campaign, two languages: the Bash and Python SDKs publish the same bytes.
 
 The same defect campaign is authored twice — once as a Python ``Runner`` file,
-once as a Bash ``httk_workflow_runner`` script — published as a shared workspace
-runner, and run through the real manager. Everything the two runs leave behind is
+once as a Bash ``httk_workflow_runner`` script — published to the workspace
+runner store, and run through the real manager. Everything the two runs leave behind is
 then compared: the published outcomes, the staged data transactions, the
 synthesized child jobs, the final states, the job state, and the files in every
 workdir and data directory. Only the identifiers and paths that must differ

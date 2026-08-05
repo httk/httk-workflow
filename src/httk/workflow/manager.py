@@ -5,6 +5,7 @@ import os
 import re
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -120,6 +121,7 @@ class RunningAttempt:
     # its exit has been verified, because the verification is exactly what the
     # cancelled state has to record.
     cancelling: bool = False
+    owner_uid: int | None = None
 
     def close_logs(self) -> None:
         self.stdout.close()
@@ -174,6 +176,7 @@ class TaskManager:
                 f"cannot serve a {workspace.core_profile!r} workspace: this manager writes {CORE_PROFILE!r}"
             )
         self.workspace = workspace
+        self.uid = os.getuid()
         # Ordered roots for jobs whose runner.source is installed, plus the
         # module prefixes the reserved pkg: form may name. Both are deployment
         # policy of this manager and never taken from a job.
@@ -225,6 +228,9 @@ class TaskManager:
         self._manager_dir = workspace.control / "managers" / self.manager_id
         self._manager_dir.mkdir(parents=True, exist_ok=False)
         self._running: dict[str, RunningAttempt] = {}
+        # Running markers whose ownership could not be checked this pass are
+        # preserved from orphan sweeping until the next pass can retry them.
+        self._indeterminate_ownership: set[str] = set()
         # Parent job key -> (unresolvable child job id, monotonic first-seen).
         self._join_unresolved: dict[str, tuple[str, float]] = {}
         # Bounded pass name -> its streaming walker. Each keeps a per-root cursor
@@ -255,6 +261,7 @@ class TaskManager:
                 "writer_id": self.writer.writer_id,
                 "hostname": self.hostname,
                 "pid": os.getpid(),
+                "uid": self.uid,
                 "pools": sorted(self.pools),
                 "capabilities": sorted(self.capabilities),
                 "placement_prefixes": [prefix.as_posix() for prefix in self.placement_prefixes],
@@ -378,6 +385,67 @@ class TaskManager:
 
         self.heartbeat()
 
+    def _owns(self, marker: Marker) -> bool | None:
+        """Check kernel-enforced same-user provenance, not authentication.
+
+        The conjunction proves that this manager's uid owns the marker, payload
+        directory, and job definition; it deliberately does not authenticate
+        the contents.
+        """
+        try:
+            marker_stat = marker.path.lstat()
+        except FileNotFoundError:
+            _LOGGER.debug("skipping job %s: marker no longer exists", marker.job_key)
+            return False
+        except OSError as exc:
+            _LOGGER.debug("deferring job %s: ownership check is indeterminate: %s", marker.job_key, exc)
+            return None
+        try:
+            if not stat.S_ISREG(marker_stat.st_mode):
+                _LOGGER.debug("skipping job %s: marker is not an owned regular file", marker.job_key)
+                return False
+            if marker_stat.st_uid != self.uid:
+                _LOGGER.debug(
+                    "skipping job %s: marker is owned by uid %d, manager runs uid %d",
+                    marker.job_key,
+                    marker_stat.st_uid,
+                    self.uid,
+                )
+                return False
+            payload = self.workspace.payload_path(marker.placement, marker.job_key)
+            payload_stat = payload.lstat()
+            if stat.S_ISLNK(payload_stat.st_mode) or not stat.S_ISDIR(payload_stat.st_mode):
+                _LOGGER.debug(
+                    "skipping job %s: payload path is not an owned directory (marker/payload ownership mismatch)",
+                    marker.job_key,
+                )
+                return False
+            job_path = payload / "job.json"
+            job_stat = job_path.lstat()
+            if stat.S_ISLNK(job_stat.st_mode) or not stat.S_ISREG(job_stat.st_mode):
+                _LOGGER.debug(
+                    "skipping job %s: job.json is not an owned regular file (marker/payload ownership mismatch)",
+                    marker.job_key,
+                )
+                return False
+            if payload_stat.st_uid != marker_stat.st_uid or job_stat.st_uid != marker_stat.st_uid:
+                _LOGGER.debug(
+                    "skipping job %s: marker, payload, and job.json ownership mismatch",
+                    marker.job_key,
+                )
+                return False
+            return True
+        except FileNotFoundError as exc:
+            _LOGGER.debug("deferring job %s: ownership check is indeterminate: %s", marker.job_key, exc)
+            return None
+        except OSError as exc:
+            _LOGGER.debug("deferring job %s: ownership check is indeterminate: %s", marker.job_key, exc)
+            return None
+
+    @staticmethod
+    def _request_owner(path: Path) -> int:
+        return path.lstat().st_uid
+
     def _window(self, pass_name: str, kind: str) -> list[Marker]:
         """Return the *kind* markers *pass_name* processes this tick.
 
@@ -396,12 +464,16 @@ class TaskManager:
         if stream is None:
             stream = MarkerStream(self.workspace, kind, prefixes=self.placement_prefixes)
             self._streams[pass_name] = stream
-        return stream.advance(
-            processing_budget=self.maximum_pass_markers,
-            discovery_budget=self.discovery_budget,
-            heartbeat=self.heartbeat,
-            heartbeat_every=DISCOVERY_HEARTBEAT_STRIDE,
-        )
+        return [
+            marker
+            for marker in stream.advance(
+                processing_budget=self.maximum_pass_markers,
+                discovery_budget=self.discovery_budget,
+                heartbeat=self.heartbeat,
+                heartbeat_every=DISCOVERY_HEARTBEAT_STRIDE,
+            )
+            if self._owns(marker) is True
+        ]
 
     def _walk(self, kinds: Sequence[str]) -> Iterable[Marker]:
         """Stream every marker of *kinds* this manager may schedule, exhaustively.
@@ -414,7 +486,13 @@ class TaskManager:
         its heartbeat and never touches a placement outside its assignment.
         """
 
-        return self.workspace.walk_markers(kinds, roots=self.placement_prefixes, heartbeat=self.heartbeat)
+        self._indeterminate_ownership.clear()
+        for marker in self.workspace.walk_markers(kinds, roots=self.placement_prefixes, heartbeat=self.heartbeat):
+            ownership = self._owns(marker)
+            if ownership is None:
+                self._indeterminate_ownership.add(marker.job_key)
+            elif ownership is True:
+                yield marker
 
     def _report_tick_duration(self, seconds: float) -> None:
         """Report a tick that spent a dangerous fraction of the lease."""
@@ -743,6 +821,18 @@ class TaskManager:
     def _claim_and_launch(self, marker: Marker) -> bool:
         """Claim one ready job and launch its attempt, reporting local faults."""
 
+        ownership = self._owns(marker)
+        if ownership is not True:
+            if ownership is None:
+                return False
+            try:
+                marker.path.lstat()
+            except FileNotFoundError:
+                # Let the verified transition report a stale candidate as a
+                # lost race; a missing marker is not an ownership refusal.
+                pass
+            else:
+                return False
         loaded = self._load_job_and_state(marker, "claim")
         if loaded is None:
             return False
@@ -864,6 +954,17 @@ class TaskManager:
 
     def _launch_claimed(self, marker: Marker, job: JobDefinition, previous_state: StateFrame) -> None:
         claimed_state = self._read_frame(marker)
+        try:
+            launch_job = self.workspace.load_job(marker)
+        except (WorkflowError, OSError) as exc:
+            raise RunnerResolutionError(
+                "payload.tampered", f"cannot re-validate job.json for {marker.job_key}: {exc}"
+            ) from exc
+        if launch_job.digest != job.digest:
+            raise RunnerResolutionError(
+                "payload.tampered",
+                f"job.json digest changed for {marker.job_key} after claim",
+            )
         executor = self._executor_for(job)
         if executor is None:
             raise FormatError(f"runner executor is unavailable: {job.runner_executor}")
@@ -1050,7 +1151,7 @@ class TaskManager:
         os.close(gate_write)
         assert process is not None
         assert running is not None
-        self._running[attempt_id] = RunningAttempt(running, process, stdout, stderr, attempt_id)
+        self._running[attempt_id] = RunningAttempt(running, process, stdout, stderr, attempt_id, owner_uid=self.uid)
         _LOGGER.info(
             "launched attempt %s for %s as pid %d in %s",
             attempt_id,
@@ -1108,6 +1209,7 @@ class TaskManager:
                 # alone rather than allowed to stop the pass.
                 self._handle_attempt_failure(marker, job, "protocol_error", f"running state is unusable: {exc}")
                 changed = True
+        unreadable.update(self._indeterminate_ownership)
         self._sweep_untracked_attempts(current_by_attempt, unreadable)
         return changed
 
@@ -1240,6 +1342,13 @@ class TaskManager:
 
         for attempt_id, local in list(self._running.items()):
             if attempt_id in current_by_attempt or local.marker.job_key in unreadable:
+                continue
+            if local.owner_uid is not None and local.owner_uid != self.uid:
+                _LOGGER.debug(
+                    "skipping sweep of attempt %s of %s: attempt belongs to another user",
+                    attempt_id,
+                    local.marker.job_key,
+                )
                 continue
             if local.cancelling:
                 # A cancellation owns this attempt until it has proven that the

@@ -11,7 +11,7 @@ import stat
 import tempfile
 import time
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -20,6 +20,7 @@ from httk.core.crypto import ed25519_public_key, ed25519_sign, ed25519_verify
 from httk.core.project import LegacyProjectError
 
 from ._util import json_bytes, retry_delay, sha256_file, timestamp_seconds, utc_now
+from .models import QUIESCENT_KINDS, STATE_KINDS
 from .projects import (
     PROJECT_DIRECTORY,
     PROJECT_FILE,
@@ -130,6 +131,7 @@ class MaintenanceLock:
     pid: int | None
     hostname: str | None
     created: str | None
+    readable: bool = True
 
     @property
     def age_seconds(self) -> float | None:
@@ -166,6 +168,8 @@ class MaintenanceLock:
     def is_stale(self, *, max_age_seconds: float = MAINTENANCE_LOCK_MAX_AGE_SECONDS) -> bool:
         """Whether the lock can be reclaimed without operator confirmation."""
 
+        if not self.readable:
+            return False
         if self.pid is None or self.hostname is None or self.created is None:
             return True
         if self.dead:
@@ -191,6 +195,8 @@ def _read_maintenance_lock(path: Path) -> MaintenanceLock | None:
             raw = path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return None
+        except PermissionError:
+            return MaintenanceLock(path=path, pid=None, hostname=None, created=None, readable=False)
         except (OSError, UnicodeError):
             raw = ""
         try:
@@ -224,7 +230,7 @@ def _acquire_maintenance_lock(path: Path) -> None:
     body = json_bytes({"created": utc_now(), "hostname": socket.gethostname(), "pid": os.getpid()}) + b"\n"
     for _ in range(3):
         try:
-            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
         except FileExistsError:
             holder = _read_maintenance_lock(path)
             if holder is not None and not holder.is_stale():
@@ -237,6 +243,7 @@ def _acquire_maintenance_lock(path: Path) -> None:
             continue
         try:
             # One write keeps readers from ever observing a partial record.
+            os.fchmod(descriptor, 0o644)
             os.write(descriptor, body)
         finally:
             os.close(descriptor)
@@ -265,7 +272,8 @@ def workspace_maintenance_guard(workspace: Workspace) -> Iterator[None]:
     path = workspace.control / MAINTENANCE_LOCK_FILE
     _acquire_maintenance_lock(path)
     try:
-        unresolved = list(workspace.scan_markers(("claimed", "running", "committing", "transferring")))
+        guarded_kinds = tuple(kind for kind in STATE_KINDS if kind not in QUIESCENT_KINDS)
+        unresolved = list(workspace.scan_markers(guarded_kinds))
         if unresolved:
             states = ", ".join(f"{item.job_key}:{item.kind}" for item in unresolved)
             raise ValueError(f"manifest requires a quiescent workspace; unresolved work: {states}")
@@ -289,8 +297,13 @@ def create_manifest(
     exclusions = project_exclusions(metadata)
     if destination.is_relative_to(root):
         exclusions = (*exclusions, destination.relative_to(root).as_posix())
-    workspace = Workspace(root)
-    with workspace_maintenance_guard(workspace):
+    workspace = (
+        Workspace(root)
+        if (root / PROJECT_DIRECTORY).is_dir() and (root / ".httk-workflow" / "format.json").is_file()
+        else None
+    )
+    guard = workspace_maintenance_guard(workspace) if workspace is not None else nullcontext()
+    with guard:
         seed = _seed(root)
         header = {
             "format": "httk-project-manifest",

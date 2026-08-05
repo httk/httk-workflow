@@ -124,8 +124,8 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
 ) -> None:
     commands = [line.replace(" --remote local", "") for line in _documented_commands(_QUICKSTART)]
 
-    # The page really is five commands, and they are the ones a newcomer types.
-    assert sum(1 for line in commands if line.startswith("httk")) == 5
+    # The page really is six commands, including explicit workspace setup.
+    assert sum(1 for line in commands if line.startswith("httk")) == 6
     assert "httk project init --name quickstart" in commands
     assert any(line.startswith("httk workflow job new --template vasp-relax") for line in commands)
 

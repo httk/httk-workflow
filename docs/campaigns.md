@@ -7,8 +7,8 @@ A **campaign** is how one project runs work at a scale a single workspace should
 not hold: not a new graph, not a new engine, not a sharding policy inside the
 scheduler, but a *partition map* over the ordinary workspaces you already
 {doc}`register <workflow_cli>`. Each partition is a named bucket that points at
-one registered workspace; every command that drives a workspace drives a
-partition's workspace unchanged. Multi-workspace partitioning is the intended
+one workspace name in the machine registry; every command that drives a
+workspace drives a partition's workspace unchanged. Multi-workspace partitioning is the intended
 route to a campaign larger than one measured workspace: its partition sizes are
 chosen from the local measurements in {doc}`benchmarks`, with each partition an
 ordinary workspace a manager serves and a harvest reads.
@@ -43,7 +43,7 @@ south	screening-b
 ```
 
 `campaign init` writes the map: each `--partition NAME=WORKSPACE` names a bucket
-and the registered workspace it points at, and `--assignment` sets how a root
+and the workspace name it points at, and `--assignment` sets how a root
 job's partition is chosen. The workspaces must be registered first with
 {doc}`workspace init <workflow_cli>` — a partition names a workspace the same way
 every other command does, never a bare path.

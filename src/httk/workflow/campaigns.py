@@ -165,6 +165,7 @@ def _local_partition_workspace(partition: str, project: str | os.PathLike[str] |
             f"campaign partition {partition!r} is the remote workspace {name!r} on {binding.remote!r}; "
             "submit locally and move it with `httk workflow transfer`, or run this on the remote"
         )
+    assert binding.path is not None
     return Workspace(binding.path)
 
 
@@ -243,6 +244,7 @@ def campaign_harvest(
                 f"campaign partition {partition!r} is the remote workspace {name!r} on {binding.remote!r}; "
                 "fetch it home with `httk workflow transfer` before harvesting the campaign"
             )
+        assert binding.path is not None
         yield from harvest(Workspace(binding.path, mutable=False), states=states, placement=placement)
 
 
@@ -264,30 +266,32 @@ def campaign_managers(
     The report has one row per partition, so a caller sees where work ran.
     """
 
-    from .adapters import resolve_remote, run_adapter
+    from .adapters import probe_remote_workspace, resolve_remote, submit_remote_managers
     from .manager import TaskManager
 
-    # The frozen remote-manager spelling, duplicated from the CLI's REMOTE_MANAGER_COMMAND
-    # so this module never imports the CLI it is invoked from.
-    remote_manager_command = ("httk", "workflow", "manager", "run")
     config = read_campaign(project)
     report: list[dict[str, object]] = []
     for partition in _selected(config, partitions):
         name = config.partitions[partition]
         binding: WorkspaceBinding = resolve_workspace(name, project=project)
         if binding.remote == LOCAL_REMOTE:
+            assert binding.path is not None
             with TaskManager(Workspace(binding.path), maximum_workers=workers or 1) as manager:
                 manager.run_until_idle(timeout=idle_timeout, poll_interval=poll_interval)
             report.append({"partition": partition, "workspace": name, "mode": "local", "ran": True})
         else:
             target = resolve_remote(binding.remote, project=project)
-            manager_argv = [*remote_manager_command, binding.path, "--by-path"]
+            remote_name = binding.name.split(":", 1)[1]
+            _workspace_id, root = probe_remote_workspace(target, remote_name, timeout=adapter_timeout)
+            manager_argv: list[str] = []
             if workers is not None:
                 manager_argv += ["--workers", str(workers)]
-            result = run_adapter(
-                target.bundle,
-                "start-manager",
-                {"remote_settings": {}, "argv": manager_argv, "workspace": binding.path, "count": count},
+            result = submit_remote_managers(
+                target,
+                remote_name,
+                root,
+                count=count,
+                argv_tail=manager_argv,
                 timeout=adapter_timeout,
             )
             report.append({"partition": partition, "workspace": name, "mode": "remote", "result": result})

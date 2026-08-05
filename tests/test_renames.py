@@ -254,6 +254,7 @@ def test_both_roots_present_prefers_the_new_one_and_reports_the_stale_copy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog,
+    capsys,
 ) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
@@ -266,7 +267,7 @@ def test_both_roots_present_prefers_the_new_one_and_reports_the_stale_copy(
 
     with caplog.at_level(logging.WARNING, logger="httk.workflow.configuration"):
         assert remotes_home() == config_home() / "remotes"
-    assert "stale legacy directory" in caplog.text
+    assert "stale legacy directory" in (caplog.text + capsys.readouterr().err)
     # Nothing was merged: the new root is exactly what it was.
     assert sorted(path.name for path in (config_home() / "remotes").iterdir()) == ["elsewhere"]
     assert (legacy_remotes / "cluster" / METADATA_FILE).is_file()

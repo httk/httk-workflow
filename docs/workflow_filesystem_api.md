@@ -342,7 +342,22 @@ component must fit the underlying filesystem's filename limit. A workspace MAY s
 policy limits on depth and total relative path length, but these are operational
 limits rather than a protocol sharding scheme.
 
+## Workspace ownership
+
+A workspace is single-user. Multi-user shared workspaces are not supported yet;
+the ownership model needs more work before they can be safe.
+
+The kernel ownership chain of a job marker, its payload directory, and that
+payload's `job.json` is the ownership oracle: all three entries must be regular,
+non-symlink entries owned by the manager's uid. A manager claims only such jobs.
+Child jobs belong to the manager's account, and imported jobs belong to the
+account that imports them.
+
 ## Managing and combining workspaces
+
+A workspace name is a client and user-interface concept. This filesystem API
+remains path- and `workspace_id`-based: callers provide paths, and the protocol
+identifies the workspace by its immutable ID.
 
 A core manager may attach several independent workspaces for operational
 convenience, but jobs and joins remain within their own workspaces. Cross-workspace

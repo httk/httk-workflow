@@ -43,6 +43,7 @@ __all__ = [
     "import_v1_configuration",
     "initialize_config",
     "keys_home",
+    "machine_names",
     "read_config",
     "remotes_home",
     "set_config_key",
@@ -78,6 +79,7 @@ class ConfigKey:
 #: that silently does nothing, so ``config set`` refuses anything not listed
 #: here, and the members that describe or derive the document are not settable.
 CONFIG_KEYS: Mapping[str, ConfigKey] = {
+    "machine_names": ConfigKey("machine_names", "comma-separated names this machine answers to"),
     "name": ConfigKey("name", "the operator's name, recorded on requests and in reports"),
     "email": ConfigKey("email", "the operator's email address"),
     "format": ConfigKey("format", "the document format; written by httk", settable=False),
@@ -226,6 +228,20 @@ def read_config() -> dict[str, object]:
     return value
 
 
+def machine_names() -> frozenset[str]:
+    """Return the configured names by which this machine is addressed."""
+
+    value = read_config().get("machine_names")
+    if value is None:
+        return frozenset()
+    if not isinstance(value, str):
+        raise ValueError("configuration key 'machine_names' must be a comma-separated string")
+    names = [item.strip() for item in value.split(",")]
+    if any(not item for item in names):
+        raise ValueError("configuration key 'machine_names' contains an empty name")
+    return frozenset(names)
+
+
 def write_config(values: Mapping[str, object]) -> Path:
     """Write a versioned user configuration."""
 
@@ -256,6 +272,10 @@ def set_config_key(key: str, value: str) -> Path:
     """Set one registered configuration key and return the written path."""
 
     _settable(key)
+    if key == "machine_names":
+        names = [item.strip() for item in value.split(",")]
+        if any(not item for item in names):
+            raise ValueError("configuration key 'machine_names' contains an empty name")
     values = read_config()
     values[key] = value
     return write_config(values)

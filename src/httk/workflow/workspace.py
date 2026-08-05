@@ -245,6 +245,17 @@ class Workspace:
         # than pick a winner.
         self._marker_duplicates: frozenset[str] = frozenset()
 
+    def ensure_directory(self, path: Path) -> Path:
+        """Create a directory below the workspace root."""
+
+        path = Path(path)
+        try:
+            path.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError(f"directory must be below workspace root: {path}") from exc
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     @classmethod
     def initialize(
         cls,
@@ -256,9 +267,9 @@ class Workspace:
     ) -> "Workspace":
         """Create and return a new workspace."""
 
+        initial_policy = WorkspacePolicy.from_mapping({} if policy is None else policy)
         root_path = Path(root).resolve()
         root_path.mkdir(parents=True, exist_ok=True)
-        initial_policy = WorkspacePolicy.from_mapping({} if policy is None else policy)
         extension_set = frozenset(extensions)
         unsupported = extension_set - SUPPORTED_EXTENSIONS
         if unsupported:
@@ -279,9 +290,11 @@ class Workspace:
             "requests/claimed",
             "state/submitted",
         ):
-            (control / relative).mkdir(parents=True, exist_ok=True)
+            directory = control / relative
+            directory.mkdir(parents=True, exist_ok=True)
         for relative in ("transfers/acks", "transfers/imported", "transfers/incoming", "transfers/retired"):
-            (control / relative).mkdir(parents=True, exist_ok=True)
+            directory = control / relative
+            directory.mkdir(parents=True, exist_ok=True)
         write_json_atomic(
             control / "format.json",
             {
@@ -305,11 +318,12 @@ class Workspace:
         from . import registry
 
         binding = registry.default_workspace()
+        assert binding.path is not None
         return cls(binding.path)
 
     @property
     def policy(self) -> WorkspacePolicy:
-        """Return the shared tunables this workspace publishes to every attacher."""
+        """Return the tunables this workspace publishes to every attacher."""
 
         return self._policy
 
@@ -515,7 +529,7 @@ class Workspace:
     def _install_runner_file(self, source: Path, target: Path) -> None:
         """Atomically replace one store entry with the bytes of *source*."""
 
-        target.parent.mkdir(parents=True, exist_ok=True)
+        self.ensure_directory(target.parent)
         staging = self.control / "tmp" / f"runner.{uuid.uuid4()}"
         staging.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, staging)
@@ -530,6 +544,7 @@ class Workspace:
         job_id: str,
         *,
         destination_workspace_id: str,
+        destination_remote: str | None = None,
         destination_placement: str | PurePosixPath | None = None,
         transfer_id: str | None = None,
     ) -> Path:
@@ -541,6 +556,7 @@ class Workspace:
             self,
             job_id,
             destination_workspace_id=destination_workspace_id,
+            destination_remote=destination_remote,
             destination_placement=destination_placement,
             transfer_id=transfer_id,
         )
@@ -627,14 +643,14 @@ class Workspace:
                 yield position, None
                 continue
             path = directory / entry.name
-            if not path.is_file():
-                # A directory entry that does not resolve to a file is not a
-                # marker the scan may report: it is a name the readdir surfaced
-                # before the inode is visible, or one a concurrent transition
-                # has already renamed away. Honouring the same ``is_file`` probe
-                # the rename verification uses keeps discovery inside the one
-                # visibility model, so a momentarily-invisible destination is
-                # treated as absent rather than as a marker.
+            try:
+                visible = path.is_file()
+                regular = entry.is_file(follow_symlinks=False)
+            except OSError:
+                visible = regular = False
+            if not visible or not regular:
+                # Marker discovery must not follow a symlink: ownership is
+                # meaningful only for the marker inode itself.
                 yield position, None
                 continue
             try:
@@ -1046,7 +1062,7 @@ class Workspace:
         frame.update(updates)
         record_ref = writer.append(frame)
         destination = self.marker_path(kind, marker.placement, marker.job_key, next_priority, generation, record_ref)
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        self.ensure_directory(destination.parent)
         _LOGGER.debug(
             "moving marker %s from %s to %s at generation %d",
             marker.job_key,
@@ -1090,7 +1106,7 @@ class Workspace:
         last_error: OSError | None = None
         for attempt in visibility_attempts(self.visibility_deadline):
             try:
-                destination.parent.mkdir(parents=True, exist_ok=True)
+                self.ensure_directory(destination.parent)
                 os.rename(source, destination)
             except OSError as exc:
                 last_error = exc
@@ -1120,7 +1136,7 @@ class Workspace:
         last_error: OSError | None = None
         for attempt in visibility_attempts(self.visibility_deadline):
             try:
-                destination.parent.mkdir(parents=True, exist_ok=True)
+                self.ensure_directory(destination.parent)
                 os.rename(source, destination)
             except OSError as exc:
                 last_error = exc
@@ -1180,7 +1196,7 @@ class Workspace:
                 raise
         else:
             shutil.copytree(source_path, staging, symlinks=False)
-        target.parent.mkdir(parents=True, exist_ok=True)
+        self.ensure_directory(target.parent)
         self._publish_path(staging, target)
         temporary_marker = self.control / "tmp" / f"marker.{uuid.uuid4()}"
         temporary_marker.touch(exist_ok=False)
@@ -1201,7 +1217,7 @@ class Workspace:
 
         identifier = f"{int(time.time())}-{uuid.uuid4()}"
         destination = self.control / "quarantine" / identifier
-        destination.mkdir(parents=True)
+        self.ensure_directory(destination)
         moved = destination / "entry"
         os.rename(path, moved)
         # A quarantined marker leaves the state tree, so a cached location for it
@@ -1237,7 +1253,7 @@ class Workspace:
 
         temporary = self.control / "requests" / "tmp" / f"{uuid.uuid4()}.json"
         ready = self.control / "requests" / "ready" / temporary.name
-        write_json_atomic(temporary, dict(request), durable=self.durable)
+        write_json_atomic(temporary, dict(request), durable=self.durable, mode=0o644)
         self._publish_path(temporary, ready)
         return ready
 

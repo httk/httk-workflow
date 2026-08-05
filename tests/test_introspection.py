@@ -453,6 +453,28 @@ def test_why_reports_a_submitted_job_that_no_manager_registers(tmp_path: Path) -
     assert any("httk workflow manager run" in hint for hint in diagnosis.hints)
 
 
+def test_why_reports_marker_owner_to_a_manager_of_another_user(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER)
+    workspace.submit(payload, "project/foreign-owner")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        marker = resolve_job(workspace, job_id)
+
+        class ForeignMarkerPath:
+            def lstat(self):
+                return type("Stat", (), {"st_uid": manager.uid + 1})()
+
+        foreign_marker = dataclasses.replace(marker, path=ForeignMarkerPath())  # type: ignore[arg-type]
+        diagnosis = explain_job(workspace, foreign_marker)
+
+    assert any(
+        "is owned by another user (uid" in check.detail
+        and "managers run only jobs owned by their account" in check.detail
+        for check in diagnosis.checks
+    )
+
+
 def test_why_names_the_claim_pool_no_live_manager_serves(tmp_path: Path, capsys) -> None:
     workspace = _workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER, pool="gpu", capabilities=["cuda"])

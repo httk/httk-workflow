@@ -44,9 +44,9 @@ Direct
 0.5000000000 0.5000000000 0.5000000000
 END
 
-# 1. The project anchor. Its first workflow command creates the default workspace
-#    lazily at this project root.
+# 1. The project anchor and an explicit workspace at its root.
 httk_project init --name quickstart
+httk_workflow workspace init . --name default
 
 # 2. One job of the packaged relaxation runner, starting from that structure. The
 #    command prints one tab-separated line with its key and payload.

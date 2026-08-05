@@ -9,20 +9,22 @@ Every command below is spelled the canonical way, `httk workflow …`. The
 
 ## Initialize a workspace
 
-`WORKSPACE` is optional inside a project: omitting it uses the project workspace,
-creating it lazily at the project root and registering it as `default`. Outside a
-project, commands use the per-user default workspace. Explicit local names are
-created with `workspace init NAME`; `REMOTE:NAME` creates a workspace on that
-remote.
+`WORKSPACE` is optional inside a project: omitting it uses the project's
+recorded default, or the per-user default workspace when none is recorded. A
+project does not contain workspaces; record its routing explicitly with
+`workspace default NAME`. Explicit local names are created with
+`workspace init PATH`; an existing path is adopted and registered. `REMOTE:PATH`
+initializes and names a workspace on that remote.
 
 ```console
-httk workflow workspace init WORKSPACE --path runs/WORKSPACE
+httk workflow workspace init runs/WORKSPACE --name WORKSPACE
 ```
 
-A workspace on a cluster is created there over the adapter and its name is
-registered here. `workspace list` shows every registered name and where it
-resolves, `workspace forget` deregisters a name, and `workspace delete --force`
-destroys the workspace and deregisters it.
+A workspace on a cluster is created there over the adapter; its owning machine
+registers the basename (or `--name`) in its own registry. `workspace list` shows
+this machine's names and paths, while `workspace list kappa:` asks kappa.
+`workspace forget` deregisters a name, and `workspace delete --force` destroys
+the workspace and deregisters it.
 A library caller still constructs `Workspace(path)` directly; the registry is the
 command-line contract. See {doc}`workflow_cli` for the whole `workspace` group and
 {doc}`campaigns` for spreading a very large run across many workspaces.
@@ -42,9 +44,9 @@ The canonical remote flow keeps scheduler settings with the remote workspace:
 httk workflow remote add kappa --template ssh-slurm
 httk workflow remote configure kappa \
     --set host=kappa.example.org --set username=rar \
-    --set workspace_root=/scratch/rar/httk
+    --set check_connectivity=yes
 httk workflow remote install kappa
-httk workflow workspace init kappa:runs
+httk workflow workspace init kappa:/scratch/rar/httk/runs
 httk workflow workspace settings set kappa:runs slurm.partition batch
 httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
 httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
@@ -53,7 +55,8 @@ httk workflow run kappa:runs --workers 8
 httk workflow workspace status kappa:runs
 ```
 
-`workspace_root` is required for the derived `kappa:runs` path. `transfer`
+The remote init command creates and registers `runs` on kappa; `kappa:runs` is
+resolved by kappa at use time. `transfer`
 detaches the selected job from the local default workspace, and `run` submits a
 manager through the remote adapter. Use `transfer kappa:runs default` after the
 remote job stops, then `httk workflow harvest` locally.
@@ -151,10 +154,10 @@ logged rather than allowed to disturb scheduling. Keep the interval long: a
 collection walks the state tree and the journal directory, which is work the
 scheduling passes do not need done often.
 
-## Shared filesystems
+## Filesystem visibility
 
-A workspace is designed to be attached from several nodes at once, which makes
-the metadata behavior of the shared filesystem part of the configuration.
+A workspace may be attached from several nodes under the same account, which
+makes metadata visibility part of the filesystem configuration.
 
 **Mount options.** Renames and directory listings must be seen by other clients
 promptly, so an aggressively cached mount needs its attribute caching bounded:
@@ -239,6 +242,11 @@ against the ordered `--runner-search-path` roots of the manager.
 ```console
 httk workflow manager run WORKSPACE --workers 8
 ```
+
+Safety property: a task manager claims and runs only jobs whose marker, payload
+directory, and `job.json` are regular, non-symlink entries owned by the account
+running that manager. Child jobs belong to the manager's account; imported jobs
+belong to the account that imports them.
 
 Without pool configuration, a manager advertises the reserved `default` pool.
 Additional routing and capability labels are explicit:

@@ -16,7 +16,6 @@ the pieces that are workflow policy rather than anchor:
 
 import os
 from collections.abc import Iterable
-from pathlib import Path
 
 # The anchor API, re-exported so existing imports of httk.workflow.projects keep
 # resolving. httk.core.project owns every one of these now.
@@ -43,8 +42,6 @@ from httk.core.project import (
 )
 from httk.core.project import import_v1_project as _import_v1_anchor
 from httk.core.project import initialize_project as _initialize_anchor
-
-from ._util import write_json_atomic
 
 __all__ = [
     "DEFAULT_MANIFEST_EXCLUSIONS",
@@ -124,20 +121,14 @@ def initialize_project(
     description: str = "",
     manifest_exclusions: Iterable[str] = (),
 ) -> dict[str, object]:
-    """Initialize the project anchor and its registered default workspace.
+    """Initialize the project anchor without creating a workspace."""
 
-    The anchor is created by :func:`httk.core.project.initialize_project`; a workflow
-    project additionally gets its project's registered default workspace.
-    """
-
-    metadata = _initialize_anchor(
+    return _initialize_anchor(
         root,
         name=name,
         description=description,
         manifest_exclusions=manifest_exclusions,
     )
-    _add_workspace(Path(root).expanduser().resolve(), metadata)
-    return metadata
 
 
 def import_v1_project(
@@ -146,31 +137,9 @@ def import_v1_project(
     source: str | os.PathLike[str] | None = None,
     name: str | None = None,
 ) -> dict[str, object]:
-    """Create v2 project metadata from a legacy ``ht.project`` directory.
+    """Create v2 project metadata from a legacy ``ht.project`` directory."""
 
-    The anchor and its adopted legacy identities come from
-    :func:`httk.core.project.import_v1_project`; this adds the workflow workspace on
-    top, exactly as it did before the anchor moved.
-    """
-
-    metadata = _import_v1_anchor(root, source=source, name=name)
-    _add_workspace(Path(root).expanduser().resolve(), metadata)
-    return metadata
-
-
-def _add_workspace(project: Path, metadata: dict[str, object]) -> None:
-    """Give one freshly created project its workflow workspace."""
-
-    try:
-        from .registry import default_workspace
-
-        default_workspace(project=project)
-    except Exception:
-        # Leave a recognizable project rather than guessing whether it is safe
-        # to remove a directory that may already contain user files.
-        metadata["workspace_initialization_failed"] = True
-        write_json_atomic(project / PROJECT_DIRECTORY / PROJECT_FILE, metadata)
-        raise
+    return _import_v1_anchor(root, source=source, name=name)
 
 
 def project_exclusions(metadata: dict[str, object]) -> tuple[str, ...]:

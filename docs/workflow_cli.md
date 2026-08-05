@@ -46,7 +46,7 @@ carries the same switch on the leaf that acts on it, so both spellings work.
 ## The complete tree
 
 ```text
-httk workflow workspace  init | list | forget | delete | status | settings show | settings set | settings unset | policy show | policy set | fsck | gc | unlock
+httk workflow workspace  init | list | default | move | forget | delete | status | settings show | settings set | settings unset | policy show | policy set | fsck | gc | unlock
 httk workflow runner     publish | describe
 httk workflow job        new | submit | request | list | show | log | why | debug
 httk workflow import     pwd | cwl
@@ -62,24 +62,16 @@ httk workflow transfer   SRC DST      (plus the protocol spellings: receive | of
 
 ### Workspace selection
 
-A `WORKSPACE` is an optional registered name. Inside a project, omitting it uses
-the project workspace and creates it lazily on the first workflow command,
-registering it as `default`; outside a project, commands use the per-user default
-workspace. Explicit local names are created with `workspace init NAME`, and
-remote names use `REMOTE:NAME`.
+A `WORKSPACE` is an optional registered local name. A project may record a
+default name with `workspace default NAME`; otherwise commands use the per-user
+default workspace. Explicit local names are created with `workspace init PATH`,
+and remote names use `REMOTE:NAME` at use time.
 
-A binding lives in one of two scopes — **global**
-(`$XDG_CONFIG_HOME/httk/workspaces.json`, shared by every project) or **project**
-(the `workspaces` member of `httk_project/project.json`, travelling with the
-project). A project binding shadows a global one of the same name, exactly as a
-project-local remote shadows a global one.
-
-The registry is the CLI's contract, and a *client-side* concept: it names the
-places you address, but a remote never sees it. When a command reaches a remote
-workspace, the client resolves the name to its remote path and sends the **path**
-(with the hidden `--by-path` switch) to the far side, whose wire protocol has
-always been path-based. The Python API keeps `Workspace(path)` for library use;
-the registry is what the command line speaks.
+The registry is machine-owned: it stores only absolute local paths in
+`$XDG_CONFIG_HOME/httk/workspaces.json`. When a command reaches a remote
+workspace, the far side resolves the plain name in its own registry. The Python
+API keeps `Workspace(path)` for library use; the registry is what the command
+line speaks.
 
 Remote-capable workspace commands use the adapter; this includes status and
 settings. Jobs are created in the local default workspace, then `transfer` moves
@@ -89,31 +81,40 @@ them to a remote workspace for execution.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workspace init NAME` | create a workspace **and** register the name | `--path`, `--scope`, `--setting`, `--no-durable` |
-| `workspace list` | list the registered workspaces and where each resolves | `--json` |
+| `workspace init PATH` | create or adopt a workspace and register its basename | `--name`, `--setting`, `--no-durable` |
+| `workspace list [REMOTE:]` | list local or owning-machine workspaces | `--json` |
+| `workspace default [NAME]` | read or record this project's default name | `--unset` |
+| `workspace move NAME DEST_DIR` | move a local workspace and update its registry path | `--no-durable` |
 | `workspace forget NAME` | deregister a name, leaving the workspace on disk | |
 | `workspace delete NAME` | destroy the workspace and deregister it | `--force` (required) |
 | `workspace status NAME` | summarize the authoritative markers (remote: over the adapter) | `--json` |
 | `workspace settings show NAME [KEY]` | print the application settings, or one | `--json` |
 | `workspace settings set NAME KEY VALUE` | store one application setting | |
 | `workspace settings unset NAME KEY` | remove one application setting | |
-| `workspace policy show NAME` | print the shared policy | `--json` |
+| `workspace policy show NAME` | print the workspace policy | `--json` |
 | `workspace policy set NAME KEY VALUE` | store one policy member | `--json` |
 | `workspace fsck NAME` | check every marker against its journal frame (remote: over the adapter) | `--repair`, `--quarantine-unrepairable`, `--json` |
 | `workspace gc NAME` | collect what the retention policy allows (remote: over the adapter) | `--dry-run`, `--json` |
 | `workspace unlock NAME` | release a maintenance lock | `--force` |
 
-`workspace init` creates and registers an explicit workspace:
+`workspace init` creates and registers an explicit workspace. A canonical path may
+have only one registered name:
 
 ```console
-httk workflow workspace init my-workspace --path runs/my-workspace
+httk workflow workspace init runs/my-workspace --name my-workspace
 ```
 
-A workspace on a cluster is addressed as `REMOTE:NAME`; its path defaults to
-`<workspace_root>/NAME` after the remote is configured. `--setting KEY=VALUE`
+A workspace on a cluster is addressed as `REMOTE:NAME`; its owning machine
+chooses the path supplied to `workspace init REMOTE:PATH`. `--setting KEY=VALUE`
 seeds an application setting at creation. `workspace delete` destroys the
 workspace (locally, or on its remote over the adapter) and is refused without
-`--force`; `workspace forget` only removes the name.
+`--force`; `workspace forget` only removes the name when there are no unretired
+outbound transfers. Fetch or retire those first, or use `workspace delete
+--force` when destruction is intentional.
+
+`workspace move NAME DEST_DIR` is an atomic same-filesystem rename. It refuses
+cross-filesystem moves; stop managers, copy the tree manually, forget the old
+name, and re-register it with `workspace init <newpath> --name NAME` instead.
 
 ### `runner` — the shared runners a workspace publishes
 
@@ -192,7 +193,7 @@ named `any`.
 | --- | --- | --- |
 | `config init` | write the configuration and the identity key | `--name`, `--email`, `--non-interactive` |
 | `config show [KEY]` | print the configuration, or one member | |
-| `config set KEY VALUE` | store one member | |
+| `config set KEY VALUE` | store one member | `machine_names` is a comma-separated list of names this machine answers to |
 | `config unset KEY` | remove one member | |
 | `config import-v1 [SOURCE]` | read a legacy `~/.httk` configuration | |
 
@@ -205,13 +206,14 @@ belongs to *httk-core*, which owns the umbrella `httk project` command.
 
 The anchor's own leaves — `httk project init` and `httk project show` — are
 provided by *httk-core*. `httk project init` creates only the anchor, whereas
-`httk workflow project init` also creates the workflow workspace:
+`httk workflow project init` creates the project anchor; initialize a workspace
+separately with `workspace init PATH`:
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `project init [PATH]` | create a project, its key, and its workflow workspace | `--name`, `--description`, `--exclude`, `--non-interactive` |
-| `project import-v1 [PATH]` | read a legacy `ht.project` | `--source`, `--name` |
-| `project show [PATH]` | describe the project, its keys, its workspace, its manifest | `--no-verify`, `--json` |
+| `project init [PATH]` | create a project and its key | `--name`, `--description`, `--exclude`, `--non-interactive` |
+| `project import-v1 [PATH]` | read a legacy `ht.project` without creating a workspace | `--source`, `--name` |
+| `project show [PATH]` | describe the project, its keys, workspace default, and manifest | `--no-verify`, `--json` |
 | `project doctor [PATH]` | check, and optionally repair, the project | `--repair`, `--json` |
 | `project manifest create [PROJECT]` | write the signed manifest | `--manifest` |
 | `project manifest verify [PROJECT]` | verify the manifest against the tree | `--manifest`, `--trusted-key` |
@@ -271,8 +273,9 @@ had, and `--adapter-timeout` bounds every adapter operation the move runs.
 ### The protocol spellings, and what is gone
 
 `transfer` also carries the frozen argument vectors one machine runs on another
-over an adapter. They are path-based, because the far side keeps no registry, and
-they are protocol rather than operator interface — a local→remote move invokes
+over an adapter. Operator-facing vectors use workspace names; the hidden
+`--by-path` spelling is the path-only protocol form used after the client probes
+the owning machine. They are protocol rather than operator interface — a local→remote move invokes
 `receive` on the destination, a fetch invokes `offer` then `retire` on the source.
 Their spelling is frozen, because the machine that answers may run an *httk* older
 or newer than yours:
@@ -419,21 +422,22 @@ httk workflow project init . --name example
 
 The project *anchor* is owned by *httk-core*, which provides the umbrella
 `httk project` command. `httk project init` creates the anchor alone;
-`httk workflow project init` above is the explicit variant that also creates the
-workflow workspace. The manifest, doctor, and workflow-aware `show` commands are
+`httk workflow project init` creates the project anchor; initialize a workspace
+separately with `workspace init PATH`. The manifest, doctor, and workflow-aware `show` commands are
 provided by
 *httk-workflow* under `httk workflow project`.
 
-`config set` accepts only the keys the configuration actually has — `name` and
-`email` — and names them when it refuses another, so a typo cannot become a
+`config set` accepts only the keys the configuration actually has — including
+`machine_names`, `name`, and `email` — and names them when it refuses another, so a typo cannot become a
 member that nothing ever reads. `format` and `format_version` describe the
 document and are written by *httk* itself. A configuration whose `format` is
 something else is refused rather than read as if its members meant what *httk*
 means by them; one with no `format_version` at all predates versioning and is
 read as version 1.
 
-A project has `httk_project/project.json`, a standard 32-byte Ed25519 seed
-stored with mode `0600`, and a core-v2 workflow workspace. Commands discover the nearest project in the
+A project has `httk_project/project.json` and a standard 32-byte Ed25519 seed
+stored with mode `0600`. Its default workflow workspace is recorded by name and
+may live outside the project; commands discover the nearest project in the
 working directory's parent chain.
 
 ### Describing and checking a project
@@ -445,14 +449,14 @@ httk workflow project doctor
 httk workflow project doctor --repair
 ```
 
-`project show` reports the project's metadata, whether it pins a key and which,
-its workspace and job counts, and what its manifest currently verifies as;
+`project show` reports the project's metadata, workspace default and job counts,
+whether it pins a key and which, and what its manifest currently verifies as;
 `--no-verify` skips the tree walk that last part needs; by design, this makes the
 command cheap when verification is not required.
 
-`project doctor` checks the conditions that quietly break a project later — an
-uninitialized workspace, a stale maintenance lock, an unpinned key, staging
-leftovers, a legacy identity, an unverifiable manifest — and reports them all.
+`project doctor` checks the conditions that quietly break a project later — a
+stale maintenance lock, an unpinned key, staging leftovers, a legacy identity,
+an unverifiable manifest — and reports them all.
 `--repair` fixes the ones that can be fixed automatically, says exactly what it
 did, and journals it in the project's workspace, so the repair is part of that
 workspace's durable history. The command exits `1` only when a check is actually
@@ -471,7 +475,9 @@ The *httk₂* manifest is deterministic canonical JSON-lines compressed with bzi
 It records sorted POSIX paths, regular-file sizes and SHA-256 hashes, empty
 directories, and symlink targets. Special files are rejected. A
 domain-separated body digest is signed with Ed25519. Creation fences manager
-launches and refuses active work. Verification also recognizes the legacy
+launches only when a workspace is co-located with the project, and refuses
+active work there. A detached project needs no workspace to create its
+manifest. Verification also recognizes the legacy
 `ht.project/manifest.bz2` format without changing it.
 
 ### What a verified manifest actually proves
@@ -517,7 +523,7 @@ is explicit, because it is the whole trust model in one act:
 ```python
 from httk.workflow.projects import pin_project_key, trust_project_key
 
-pin_project_key("/path/to/project")                 # adopt keys/project.pub
+pin_project_key("/path/to/project")  # adopt keys/project.pub
 trust_project_key("/path/to/project", "ed25519:…")  # adopt somebody else's key
 ```
 
@@ -700,7 +706,7 @@ executed in the wrong place.
 
 `remote configure --set KEY=VALUE` persists only the machine-level keys
 `bootstrap`, `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
-`port`, `username`, `vasp_command`, `vasp_pseudo_library`, and `workspace_root`
+`port`, `username`, `vasp_command`, and `vasp_pseudo_library`
 in the shareable `remote.json`. Scheduler profile values are workspace
 settings: use `slurm.account`, `slurm.partition`, `slurm.time_limit`,
 `slurm.nodes`, `slurm.cpus_per_task`, `slurm.reservation`, and
@@ -729,7 +735,7 @@ configured host, where the manager is submitted with `sbatch`. Only `ssh` and
 | Operation | `ssh-slurm` behaviour | Settings used |
 | --- | --- | --- |
 | `configure` | verifies the host answers with a cheap remote `true`, so a mistyped host fails immediately instead of at the first transfer | `host`, `username`, `port`, `check_connectivity` |
-| `install` | checks that `httk` answers on the far side, reports its version, and creates the remote's workspace root when it is missing | `host`, `username`, `port`, `workspace_root`, `httk_command`, `bootstrap` |
+| `install` | checks that `httk` answers on the far side and reports its version | `host`, `username`, `port`, `httk_command`, `bootstrap` |
 | `push` / `pull` | one `rsync --archive` transfer, creating missing destination components; a `pull` is always the whole remote directory, a `push` is the whole tree or the request's explicit relative `files` batch | `host`, `username`, `port` |
 | `invoke` | runs the request's argument vector on the host, optionally in the request's directory, and returns its status, stdout and stderr | `host`, `username`, `port`, `httk_command` |
 | `status` | the same machinery running `httk workflow workspace status PATH --by-path --json` remotely | as `invoke` |
@@ -742,10 +748,10 @@ command. The workspace's `manager.workers` count is appended only when the
 request did not already choose one, so an explicit `--workers` always wins. Both kinds report
 the submitted job identifiers.
 
-A `start-manager` request names the workspace outright in its `workspace` field.
-When that field is absent the workspace is read back out of the request's
-`manager run PATH --by-path` argument vector; the argv reading is a documented fallback for hand-written
-requests, not the normal path. `local` starts `count` detached processes and
+A `start-manager` request names the client-probed workspace root in its
+`workspace` field. When that field is absent the root is read back out of the
+request's `manager run PATH --by-path` argument vector; argv reading is a
+documented fallback for hand-written requests, not the normal path. `local` starts `count` detached processes and
 reports their `pids`.
 
 `httk_command` overrides how `httk` is spelled on the far side, for example
@@ -798,9 +804,9 @@ workspace, then send and run a job:
 httk workflow remote add kappa --template ssh-slurm
 httk workflow remote configure kappa \
     --set host=kappa.example.org --set username=rar \
-    --set workspace_root=/scratch/rar/httk
+    --set check_connectivity=yes
 httk workflow remote install kappa
-httk workflow workspace init kappa:runs
+httk workflow workspace init kappa:/scratch/rar/httk/runs
 httk workflow workspace settings set kappa:runs slurm.partition batch
 httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
 httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
@@ -809,12 +815,9 @@ httk workflow run kappa:runs --workers 8
 httk workflow workspace status kappa:runs
 ```
 
-`remote configure --set` accepts machine-level settings, including
-`workspace_root`; scheduler settings belong to the workspace instead. The
-`workspace init` command therefore derives `kappa:runs` as
-`<workspace_root>/runs`, and the `slurm.*` and `manager.workers` settings travel
-with that workspace. The explicit `workspace_root` assignment above is required;
-the adapter template does not invent a site path.
+The machine that owns a workspace chooses its path; scheduler settings belong
+to the workspace instead. Remote init sends the path and registers its basename
+on the owning machine.
 
 `transfer default kappa:runs` detaches each selected job from the local default
 workspace and imports it on the remote, at the placement it had here unless
@@ -837,8 +840,8 @@ placement it had on the remote, so `httk workflow harvest` then reports it
 exactly like a job that ran at home.
 
 Under the fetch leg run the two far-side protocol commands, invoked over the
-adapter but usable on their own on the remote itself. They are path-based, because
-the far side keeps no registry:
+adapter but usable on their own on the remote itself. They use literal paths
+because they bypass the owning machine's registry:
 
 ```console
 httk workflow transfer offer PATH --destination-workspace-id UUID --json

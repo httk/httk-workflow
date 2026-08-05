@@ -1,5 +1,6 @@
 """Manager scheduling hardening: typed frames, bounded ticks, fenced cancels."""
 
+import errno
 import json
 import logging
 import os
@@ -18,7 +19,7 @@ from typing import Any
 import pytest
 
 from conftest import TestProfile as _TestProfile
-from httk.workflow import TaskManager, Workspace
+from httk.workflow import TaskManager, Workspace, _manager_requests
 from httk.workflow._logging import reset_logging
 from httk.workflow._util import tree_digest
 from httk.workflow.journal import JournalWriter
@@ -582,6 +583,38 @@ def test_a_dead_writer_is_taken_over_at_once_without_waiting_out_the_grace(tmp_p
     assert workspace.read_state(marker)["takeover_evidence"]["evidence"] == "writer_process_dead"
 
 
+def test_transient_marker_ownership_failure_preserves_a_live_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="transient-ownership")
+    workspace.submit(payload, "project/transient-ownership")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        running = _drive_until(workspace, manager, job_id, {"running"})
+        attempt: RunningAttempt = next(iter(manager._running.values()))
+        marker_path = running.path
+        real_lstat = Path.lstat
+        failed = False
+
+        def flaky_lstat(path: Path):
+            nonlocal failed
+            if path == marker_path and not failed:
+                failed = True
+                raise OSError(errno.EIO, "transient filesystem failure")
+            return real_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", flaky_lstat)
+        manager._poll_running()
+        assert failed
+        assert attempt.process.poll() is None
+        assert attempt.attempt_id in manager._running
+
+        manager._poll_running()
+        assert attempt.attempt_id in manager._running
+        assert attempt.process.poll() is None
+
+
 # ---------------------------------------------------------------------------
 # 4. Fenced cancellation
 # ---------------------------------------------------------------------------
@@ -807,3 +840,307 @@ def test_a_registered_child_bundle_is_not_hashed_again_after_it_is_published(
     # publication rename is the very tree just verified and is never rehashed.
     assert len(published) == 2, hashed
     assert registered == [], hashed
+
+
+def test_marker_ownership_filters_scheduling_and_recovery(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="owned")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        workspace.submit(payload, "project/owned")
+        manager.uid += 1
+        assert manager._eligible_ready() == []
+        assert manager._register_submissions() is False
+        assert not manager._has_actionable_work()
+        assert workspace.find_marker_by_id(job_id).kind == "submitted"  # type: ignore[union-attr]
+
+        manager.uid -= 1
+        assert manager._register_submissions() is True
+        ready = workspace.find_marker_by_id(job_id)
+        assert ready is not None and ready.kind == "ready"
+        assert manager._eligible_ready() == [ready]
+        assert manager._has_actionable_work()
+
+        manager._transition(
+            ready,
+            "claimed",
+            StateFrame.of(
+                manager._read_frame(ready).carried(),
+                manager_id=str(uuid.uuid4()),
+                writer_id=manager.writer.writer_id,
+                claim_id=str(uuid.uuid4()),
+                attempt_id=str(uuid.uuid4()),
+                attempt_control=".httk-attempt.test",
+                lease_seconds=manager.lease_seconds,
+                matched_pool="default",
+                matched_capabilities=[],
+                reason="claim",
+            ),
+        )
+        manager.uid += 1
+        assert manager._recover_abandoned_claims() is False
+        assert workspace.find_marker_by_id(job_id).kind == "claimed"  # type: ignore[union-attr]
+
+
+def test_request_owner_mismatch_is_retired(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="request-owner")
+    workspace.submit(payload, "project/request-owner")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        marker = workspace.find_marker_by_id(job_id)
+        assert marker is not None
+        request_path = _publish_cancel(workspace, marker)
+        real_owner = manager._request_owner
+        monkeypatch.setattr(
+            manager,
+            "_request_owner",
+            lambda path: manager.uid + 1 if path == request_path else real_owner(path),
+        )
+        manager._handle_requests()
+
+    retirement = workspace.control / "requests" / "retired" / f"{request_path.name}.retirement"
+    assert retirement.is_file()
+    assert "request author" in json.loads(retirement.read_text(encoding="utf-8"))["reason"]
+    assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
+
+
+def test_transient_target_ownership_failure_retries_the_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="request-transient-owner")
+    workspace.submit(payload, "project/request-transient-owner")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        marker = workspace.find_marker_by_id(job_id)
+        assert marker is not None
+        request_path = _publish_cancel(workspace, marker)
+        real_lstat = Path.lstat
+        failed = False
+
+        def flaky_lstat(path: Path):
+            nonlocal failed
+            if path == marker.path and not failed:
+                failed = True
+                raise OSError(errno.EIO, "transient filesystem failure")
+            return real_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", flaky_lstat)
+        assert manager._handle_requests() is False
+        assert failed
+        assert request_path.is_file()
+        assert request_path.name not in manager._deferred_requests
+        quarantine = workspace.control / "quarantine"
+        assert not quarantine.exists() or not list(quarantine.iterdir())
+        assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
+
+        assert manager._handle_requests() is True
+        assert not request_path.exists()
+        assert workspace.find_marker_by_id(job_id).kind == "cancelled"  # type: ignore[union-attr]
+
+
+def test_transient_request_identity_stat_retries_without_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="request-read-transient")
+    workspace.submit(payload, "project/request-read-transient")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        marker = workspace.find_marker_by_id(job_id)
+        assert marker is not None
+        request_path = _publish_cancel(workspace, marker)
+        real_lstat = Path.lstat
+        failed = False
+
+        def flaky_lstat(path: Path):
+            nonlocal failed
+            if path == request_path and not failed:
+                failed = True
+                raise OSError(errno.EIO, "transient request identity failure")
+            return real_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", flaky_lstat)
+        assert manager._handle_requests() is False
+        assert failed
+        assert request_path.is_file()
+        quarantine = workspace.control / "quarantine"
+        assert not quarantine.exists() or not list(quarantine.iterdir())
+        assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
+
+        assert manager._handle_requests() is True
+        assert not request_path.exists()
+        assert workspace.find_marker_by_id(job_id).kind == "cancelled"  # type: ignore[union-attr]
+
+
+def test_transient_claimed_identity_stat_returns_request_to_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="request-claimed-transient")
+    workspace.submit(payload, "project/request-claimed-transient")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        marker = workspace.find_marker_by_id(job_id)
+        assert marker is not None
+        request_path = _publish_cancel(workspace, marker)
+        claimed_path = workspace.control / "requests" / "claimed" / manager.manager_id / request_path.name
+        real_lstat = Path.lstat
+        failed = False
+
+        def flaky_lstat(path: Path):
+            nonlocal failed
+            if path == claimed_path and not failed:
+                failed = True
+                raise OSError(errno.EIO, "transient claimed identity failure")
+            return real_lstat(path)
+
+        monkeypatch.setattr(Path, "lstat", flaky_lstat)
+        assert manager._handle_requests() is True
+        assert failed
+        assert request_path.is_file()
+        assert not claimed_path.exists()
+        quarantine = workspace.control / "quarantine"
+        assert not quarantine.exists() or not list(quarantine.iterdir())
+        assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
+
+        assert manager._handle_requests() is True
+        assert not request_path.exists()
+        assert workspace.find_marker_by_id(job_id).kind == "cancelled"  # type: ignore[union-attr]
+
+
+def test_failed_claim_rename_that_landed_is_processed_by_the_claimer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="request-claim-uncertain")
+    workspace.submit(payload, "project/request-claim-uncertain")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        marker = workspace.find_marker_by_id(job_id)
+        assert marker is not None
+        request_path = _publish_cancel(workspace, marker)
+        claimed_path = workspace.control / "requests" / "claimed" / manager.manager_id / request_path.name
+        real_rename = os.rename
+        reported = False
+
+        def rename(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
+            nonlocal reported
+            real_rename(source, destination)
+            if Path(source) == request_path and Path(destination) == claimed_path and not reported:
+                reported = True
+                raise OSError(errno.EIO, "rename reply was lost")
+
+        monkeypatch.setattr(_manager_requests.os, "rename", rename)
+        assert manager._handle_requests() is True
+        assert reported
+        assert not request_path.exists()
+        assert not claimed_path.exists()
+        assert workspace.find_marker_by_id(job_id).kind == "cancelled"  # type: ignore[union-attr]
+        assert not list((workspace.control / "quarantine").iterdir())
+
+
+def test_failed_claim_restoration_is_retried_by_the_live_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="request-restore-uncertain")
+    workspace.submit(payload, "project/request-restore-uncertain")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        marker = workspace.find_marker_by_id(job_id)
+        assert marker is not None
+        request_path = _publish_cancel(workspace, marker)
+        claimed_path = workspace.control / "requests" / "claimed" / manager.manager_id / request_path.name
+        real_lstat = Path.lstat
+        real_rename = os.rename
+        stat_failed = False
+        restore_failed = False
+
+        def flaky_lstat(path: Path):
+            nonlocal stat_failed
+            if path == claimed_path and not stat_failed:
+                stat_failed = True
+                raise OSError(errno.EIO, "claimed identity unavailable")
+            return real_lstat(path)
+
+        def rename(source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> None:
+            nonlocal restore_failed
+            if Path(source) == claimed_path and Path(destination) == request_path and not restore_failed:
+                restore_failed = True
+                raise OSError(errno.EIO, "restore reply was lost")
+            real_rename(source, destination)
+
+        monkeypatch.setattr(Path, "lstat", flaky_lstat)
+        monkeypatch.setattr(_manager_requests.os, "rename", rename)
+        assert manager._handle_requests() is True
+        assert stat_failed and restore_failed
+        assert not request_path.exists()
+        assert claimed_path.is_file()
+        assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
+
+        assert manager._handle_requests() is True
+        assert not request_path.exists()
+        assert not claimed_path.exists()
+        assert workspace.find_marker_by_id(job_id).kind == "cancelled"  # type: ignore[union-attr]
+        assert not list((workspace.control / "quarantine").iterdir())
+
+
+def test_apply_io_failure_leaves_request_recoverable_for_next_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="request-apply-uncertain")
+    workspace.submit(payload, "project/request-apply-uncertain")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        marker = workspace.find_marker_by_id(job_id)
+        assert marker is not None
+        request_path = _publish_cancel(workspace, marker)
+        claimed_path = workspace.control / "requests" / "claimed" / manager.manager_id / request_path.name
+        real_apply = manager._apply_request
+        failed = False
+
+        def apply(request):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise OSError(errno.EIO, "state write reply was lost")
+            return real_apply(request)
+
+        monkeypatch.setattr(manager, "_apply_request", apply)
+        assert manager._handle_requests() is True
+        assert failed
+        assert not request_path.exists()
+        assert claimed_path.is_file()
+        assert not list((workspace.control / "quarantine").iterdir())
+        assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
+
+        assert manager._handle_requests() is True
+        assert not request_path.exists()
+        assert not claimed_path.exists()
+        assert workspace.find_marker_by_id(job_id).kind == "cancelled"  # type: ignore[union-attr]
+
+
+def test_owner_request_waits_for_owner_manager(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="request-deferred")
+    workspace.submit(payload, "project/request-deferred")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        marker = workspace.find_marker_by_id(job_id)
+        assert marker is not None
+        request_path = _publish_cancel(workspace, marker)
+        manager.uid += 1
+        assert manager._handle_requests() is False
+        assert request_path.is_file()
+        assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
