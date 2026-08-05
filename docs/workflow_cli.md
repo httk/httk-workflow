@@ -109,8 +109,8 @@ chooses the path supplied to `workspace init REMOTE:PATH`. `--setting KEY=VALUE`
 seeds an application setting at creation. `workspace delete` destroys the
 workspace (locally, or on its remote over the adapter) and is refused without
 `--force`; `workspace forget` only removes the name when there are no unretired
-outbound transfers. Fetch or retire those first, or use `workspace delete
---force` when destruction is intentional.
+outbound transfers. Fetch or retire those first, or pass `workspace forget
+--force` to deregister the name anyway.
 
 `workspace move NAME DEST_DIR` is an atomic same-filesystem rename. It refuses
 cross-filesystem moves; stop managers, copy the tree manually, forget the old
@@ -738,7 +738,7 @@ configured host, where the manager is submitted with `sbatch`. Only `ssh` and
 | `install` | checks that `httk` answers on the far side and reports its version | `host`, `username`, `port`, `httk_command`, `bootstrap` |
 | `push` / `pull` | one `rsync --archive` transfer, creating missing destination components; a `pull` is always the whole remote directory, a `push` is the whole tree or the request's explicit relative `files` batch | `host`, `username`, `port` |
 | `invoke` | runs the request's argument vector on the host, optionally in the request's directory, and returns its status, stdout and stderr | `host`, `username`, `port`, `httk_command` |
-| `status` | the same machinery running `httk workflow workspace status PATH --by-path --json` remotely | as `invoke` |
+| `status` | the same machinery running `httk workflow workspace status NAME --json` remotely | as `invoke` |
 | `start-manager` | writes a generated batch script into `WORKSPACE/.httk-workflow/batch/`, then submits it with `sbatch` once, or the request's `count` times | workspace settings `slurm.*`, `manager.workers`, `workspace` |
 
 The generated batch script is a `#!/bin/bash` file carrying one `#SBATCH`

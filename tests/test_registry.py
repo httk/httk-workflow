@@ -42,7 +42,7 @@ def test_forget_refuses_unretired_outbound_transfer(tmp_path: Path) -> None:
     ledger = workspace.control / "transfers" / "transfer.json"
     ledger.parent.mkdir(parents=True, exist_ok=True)
     ledger.write_text(json.dumps({"status": "sealed"}), encoding="utf-8")
-    with pytest.raises(ValueError, match="fetch or retire.*workspace delete --force"):
+    with pytest.raises(ValueError, match="fetch or retire.*workspace forget --force"):
         forget_workspace("home")
     assert resolve_workspace("home") == binding
     forget_workspace("home", force=True)

@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -197,8 +198,6 @@ def probe_remote_workspace(
         root = document["root"]
         if not isinstance(workspace_id, str) or not isinstance(root, str) or not root:
             raise ValueError
-        import uuid
-
         uuid.UUID(workspace_id)
     except (AttributeError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
         raise ValueError(f"{noun} did not return a compatible workflow workspace status") from exc

@@ -1343,6 +1343,8 @@ class TaskManager:
         for attempt_id, local in list(self._running.items()):
             if attempt_id in current_by_attempt or local.marker.job_key in unreadable:
                 continue
+            # owner_uid is stamped with self.uid at launch, so this differs only
+            # when the uid test seam was reassigned after the attempt started.
             if local.owner_uid is not None and local.owner_uid != self.uid:
                 _LOGGER.debug(
                     "skipping sweep of attempt %s of %s: attempt belongs to another user",

@@ -1,5 +1,6 @@
 """Workspace command group."""
 
+import errno
 import os
 
 from ..adapters import REMOTE_WORKSPACE_DELETE_COMMAND, REMOTE_WORKSPACE_INIT_COMMAND, seed_application_settings
@@ -319,7 +320,7 @@ def handle_workspace_list(arguments: argparse.Namespace, context: CLIContext) ->
 def handle_workspace_forget(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Deregister one workspace name, leaving the workspace itself in place."""
 
-    binding = forget_workspace(arguments.workspace)
+    binding = forget_workspace(arguments.workspace, force=arguments.force)
     print(f"forgot {binding.name}")
     return 0
 
@@ -415,7 +416,7 @@ def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) ->
             try:
                 os.rename(binding.path, destination)
             except OSError as exc:
-                if exc.errno != getattr(os, "EXDEV", 18):
+                if exc.errno != errno.EXDEV:
                     raise
                 raise ValueError(
                     "workspace move must stay within one filesystem; stop managers, copy the workspace manually, "
@@ -604,6 +605,9 @@ def build_workspace_parser(
         handler=handle_workspace_forget,
     )
     forget.add_argument("workspace", metavar="NAME", help="the registered workspace name to forget")
+    forget.add_argument(
+        "--force", action="store_true", help="deregister the name even when unretired outbound transfers remain"
+    )
 
     delete = _leaf(
         group,

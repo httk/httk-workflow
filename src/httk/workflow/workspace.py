@@ -290,11 +290,9 @@ class Workspace:
             "requests/claimed",
             "state/submitted",
         ):
-            directory = control / relative
-            directory.mkdir(parents=True, exist_ok=True)
+            (control / relative).mkdir(parents=True, exist_ok=True)
         for relative in ("transfers/acks", "transfers/imported", "transfers/incoming", "transfers/retired"):
-            directory = control / relative
-            directory.mkdir(parents=True, exist_ok=True)
+            (control / relative).mkdir(parents=True, exist_ok=True)
         write_json_atomic(
             control / "format.json",
             {

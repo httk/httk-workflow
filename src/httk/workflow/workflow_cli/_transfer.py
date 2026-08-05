@@ -391,6 +391,9 @@ def _protocol_workspace(value: str, context: CLIContext) -> Workspace:
     path_like = (
         value in {".", ".."} or ":" in value or os.sep in value or (os.altsep is not None and os.altsep in value)
     )
+    # A path-like value never reads the registry through resolve_workspace (it
+    # fails name validation first), so read it explicitly: a corrupt registry
+    # must surface rather than be masked by the path fallback.
     list_workspaces()
     try:
         binding = resolve_workspace(value, project=context.cwd)
