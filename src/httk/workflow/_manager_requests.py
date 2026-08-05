@@ -219,9 +219,9 @@ def handle(manager: Any) -> bool:
                 except OSError as exc:
                     _LOGGER.debug("deferring request %s: target ownership is indeterminate: %s", request_path.name, exc)
                     continue
-                if marker_owner is not None and request_owner != marker_owner:
+                if request_owner != marker_owner:
                     refusal = f"request author (uid {request_owner}) does not own this job (uid {marker_owner})"
-                elif marker_owner is not None:
+                else:
                     ownership = manager._owns(marker)
                     if ownership is None:
                         _LOGGER.debug("deferring request %s: target ownership is indeterminate", request_path.name)

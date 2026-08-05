@@ -153,6 +153,17 @@ def _local_binding(name: str) -> WorkspaceBinding:
     return WorkspaceBinding(name, LOCAL_REMOTE, record["path"])
 
 
+def _refuse_registered(workspaces: Mapping[str, Mapping[str, str]], name: str, location: str) -> None:
+    """Refuse a name or canonical path that is already registered."""
+
+    valid_workspace_name(name)
+    if name in workspaces:
+        raise ValueError(f"workspace {name!r} is already registered; forget it first")
+    for existing_name, record in workspaces.items():
+        if Path(record["path"]).resolve() == Path(location):
+            raise ValueError(f"workspace path is already registered as {existing_name!r}")
+
+
 def register_workspace(
     name: str,
     path: str | os.PathLike[str],
@@ -161,14 +172,9 @@ def register_workspace(
 ) -> WorkspaceBinding:
     """Register one absolute local workspace path under a plain name."""
 
-    valid_workspace_name(name)
     workspaces = _read_global()
-    if name in workspaces:
-        raise ValueError(f"workspace {name!r} is already registered; forget it first")
     location = str(Path(path).expanduser().resolve())
-    for existing_name, record in workspaces.items():
-        if Path(record["path"]).resolve() == Path(location):
-            raise ValueError(f"workspace path is already registered as {existing_name!r}")
+    _refuse_registered(workspaces, name, location)
     workspaces[name] = {"path": location}
     _write_global(workspaces, durable=durable)
     return WorkspaceBinding(name, LOCAL_REMOTE, location)
@@ -198,7 +204,7 @@ def forget_workspace(name: str, *, durable: bool = True, force: bool = False) ->
         if pending:
             raise ValueError(
                 f"workspace {name!r} has unretired outbound transfers; fetch or retire them first, "
-                "or use `workspace delete --force` if you truly mean to destroy it"
+                "or use `workspace forget --force` to deregister the name anyway"
             )
     workspaces = _read_global()
     del workspaces[name]
@@ -230,9 +236,8 @@ def default_workspace(*, project: str | os.PathLike[str] | None = None, durable:
             return resolve_workspace(recorded, project=project_root)
     try:
         return _local_binding(DEFAULT_WORKSPACE_NAME)
-    except ValueError as exc:
-        if not str(exc).startswith("unknown workspace:"):
-            raise
+    except ResolutionMiss:
+        pass
 
     root = data_home() / "workspace"
     format_path = root / ".httk-workflow" / "format.json"
@@ -280,12 +285,7 @@ def create_workspace(
     if path is None:
         raise TypeError("create_workspace requires a path")
     location = str(Path(path).expanduser().resolve())
-    workspaces = _read_global()
-    if name in workspaces:
-        raise ValueError(f"workspace {name!r} is already registered; forget it first")
-    for existing_name, record in workspaces.items():
-        if Path(record["path"]).resolve() == Path(location):
-            raise ValueError(f"workspace path is already registered as {existing_name!r}")
+    _refuse_registered(_read_global(), name, location)
     workspace = Workspace.initialize(path, durable=durable, policy=policy)
     for key, value in (settings or {}).items():
         workspace.set_setting(key, value)
