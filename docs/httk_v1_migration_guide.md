@@ -46,7 +46,7 @@ Make a copy of an instantiated task directory and record:
   checkpoints;
 - files that are final results rather than attempt scratch;
 - task-set, priority, timeout, retry-limit, and resource assumptions;
-- any `ht.instantiate.py` imports from the old httk Python package;
+- any `ht.instantiate.py` imports from the old httk Python package (convert them as described in section 12);
 - automatic VASP remedies on which the workflow depends;
 - child tasks that may still be running independently.
 
@@ -670,7 +670,88 @@ that published nothing, and a step that raised as the corresponding outcome.
 As in the Bash example, the transaction requires a transactional-data job in a
 core-v2 workspace.
 
-## 12. Validate before switching production work
+## 12. Converting your `ht.instantiate.py`
+
+In v1, `create_batch_task` copied the template, changed into the new task
+directory, and `exec`'d `ht.instantiate.py` with the `args` dictionary as its
+globals. The script wrote the task files and could set `finalname` in `args` to
+name the task.
+
+### The script only wrote the structure
+
+This is the overwhelmingly common case: every template shipped with v1 did
+exactly this. You need no code. Use a packaged template, or declare the
+parameter on your own Python runner:
+
+```python
+run = Runner("example.structure", parameters={"structure": "POSCAR"})
+```
+
+Callers pass the structure object. The scaffold writes it to `files/POSCAR`
+using the registered writer (the *httk-io* and *httk-atomistic* distributions
+provide the POSCAR writer). A path parameter is copied instead; for example,
+the Python API uses `new_job(ws, template, parameters={"structure": obj})`,
+and a batch uses `new_jobs(...)` items such as
+`{"parameters": {"structure": obj}}`. The command-line spellings are
+documented in {doc}`workflow_cli`.
+
+### The script produced derived creation-time files
+
+If everything the script produced was derivable from its arguments, declare a
+parameter for every argument. Use a destination for values that can be staged
+directly and `None` for values consumed by a creation hook. Move the remaining
+logic to `@run.instantiate`:
+
+```python
+from httk.workflow import Runner
+
+run = Runner(
+    "example.supercell",
+    parameters={"structure": "POSCAR", "supercell": None},
+)
+
+
+@run.instantiate
+def instantiate(ctx):
+    from httk.atomistic import build_supercell
+    from httk.core import save
+
+    result = build_supercell(ctx.parameters["structure"], ctx.parameters["supercell"])
+    save(result.structure, ctx.payload / "files" / "POSCAR")
+    ctx.inputs.setdefault("supercell", ctx.parameters["supercell"])
+    ctx.suggest_tag("supercell")
+```
+
+For a v1 script whose `args` contained `structure` and `supercell`, the
+mapping is:
+
+| v1 | v2 |
+| --- | --- |
+| `args` dictionary | `parameters=` declaration and each job item's `{"parameters": ...}` |
+| script current directory | `ctx.payload` |
+| writing a file | a declared destination, or a write below `ctx.payload` |
+| `finalname` | `ctx.suggest_tag(...)` |
+| a value the runner needs later | `ctx.inputs` |
+
+Declarative staging happens before the hook. `ctx.parameters` is read-only;
+`ctx.inputs` is mutable and becomes the job's run-time inputs. The hook runs
+in-process on the creating machine. See {doc}`runtime_helpers` for the hook
+reference and {doc}`workflow_cli` for `--parameter NAME=VALUE` and
+`--parameter-from NAME SOURCE...`.
+
+### The work belongs at run time
+
+If the script's work is really run-time preparation — for example, deriving
+INCAR values or k-points, as v1 `ht_steps` commonly did — put it in the
+runner's `prepare` step. Use the instantiate hook only for creation-time work
+that needs the supplied domain objects or must happen before submission.
+
+The hook is template code imported and executed at creation on the creating
+machine, with the same trust and locality implications as v1's `exec`. The
+template's Python file must therefore be available there. Bash runners do not
+support `@run.instantiate`.
+
+## 13. Validate before switching production work
 
 For each migrated job type:
 
@@ -691,7 +772,7 @@ For each migrated job type:
 Keep the original template and the known-good compatibility payload until the
 native result has passed these checks.
 
-## 13. Cut over and retire compatibility deliberately
+## 14. Cut over and retire compatibility deliberately
 
 Stop instantiating new compatibility jobs first. Let submitted *httk* v1 jobs reach a
 terminal state or cancel them through recorded operator requests:
@@ -723,6 +804,7 @@ read-only according to the project's provenance and retention policy.
 - [ ] Native Bash commands use quoted argv elements and no `eval`.
 - [ ] Compatibility and native reference results agree.
 - [ ] Restart and interruption boundaries were exercised.
+- [ ] Every `ht.instantiate.py` is converted to declared parameters or `@run.instantiate`.
 - [ ] New production submissions use native payloads and new UUIDs.
 
 For API details, continue with {doc}`native_bash_api`,

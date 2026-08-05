@@ -6,6 +6,7 @@ from ._common import (
     _group,
     _json_value,
     _leaf,
+    _load_parameters,
     _pairs,
 )
 
@@ -48,22 +49,31 @@ def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -
 
     inputs = {name: _json_value(text, f"job input {name!r}") for name, text in _pairs(arguments.inputs, "a job input")}
     files: dict[str, str | Path] = {name: Path(text) for name, text in _pairs(arguments.files, "a staged file")}
-    job = campaign_submit(
-        arguments.template,
-        key=arguments.key,
-        index=arguments.index,
-        project=context.cwd,
-        inputs=inputs,
-        files=files,
-        tag=arguments.tag,
-        placement=arguments.placement or DEFAULT_PLACEMENT,
-        priority=arguments.priority,
-        name=arguments.name,
-    )
+    parameters, items, parameter_tag = _load_parameters(arguments.parameters, arguments.parameter_from)
+    shared = {
+        "inputs": inputs,
+        "files": files,
+        "parameters": parameters,
+        "tag": arguments.tag or parameter_tag,
+        "placement": arguments.placement or DEFAULT_PLACEMENT,
+        "priority": arguments.priority,
+        "name": arguments.name,
+    }
+    if items:
+        for item in items:
+            item["tag"] = arguments.tag or item.get("tag")
+        jobs = campaign_submit_many(
+            arguments.template, items, key=arguments.key, index=arguments.index, project=context.cwd, **shared
+        )
+    else:
+        jobs = [
+            campaign_submit(arguments.template, key=arguments.key, index=arguments.index, project=context.cwd, **shared)
+        ]
     if arguments.json:
-        print(json.dumps(job.as_mapping(), indent=2))
+        print(json.dumps([job.as_mapping() for job in jobs] if len(jobs) > 1 else jobs[0].as_mapping(), indent=2))
         return 0
-    print(f"{job.job_key}\t{job.payload}")
+    for job in jobs:
+        print(f"{job.job_key}\t{job.payload}")
     return 0
 
 
@@ -182,6 +192,22 @@ def build_campaign_parser(
         dest="files",
         metavar="NAME=PATH",
         help="one staged file (repeatable)",
+    )
+    submit.add_argument(
+        "--parameter",
+        action="append",
+        default=[],
+        dest="parameters",
+        metavar="NAME=VALUE",
+        help="one creation parameter; VALUE is passed verbatim (repeatable)",
+    )
+    submit.add_argument(
+        "--parameter-from",
+        action="append",
+        nargs="+",
+        default=[],
+        metavar=("NAME", "SOURCE"),
+        help="load a creation parameter from one or more files, or readable files in a directory (repeatable)",
     )
     submit.add_argument("--tag", metavar="TAG", help="the job tag")
     submit.add_argument("--placement", metavar="PLACEMENT", help="where the job lands in its workspace")

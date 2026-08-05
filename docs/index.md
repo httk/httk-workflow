@@ -67,7 +67,7 @@ One workspace, one job of a packaged runner, and one manager that runs it:
 
 ```console
 httk project init --name quickstart
-httk workflow job new --template vasp-relax --from POSCAR --tag silicon
+httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
 httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
 httk workflow run
 httk workflow harvest

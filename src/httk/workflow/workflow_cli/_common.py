@@ -29,6 +29,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+import httk.core
 from httk.core.cli import CLIContext
 
 # The packaged domains register their templates as an import side effect, so the
@@ -54,6 +55,7 @@ from ..campaigns import (
     campaign_harvest,
     campaign_managers,
     campaign_submit,
+    campaign_submit_many,
     read_campaign,
     write_campaign,
 )
@@ -108,13 +110,12 @@ from ..registry import (
 )
 from ..scaffold import (
     DEFAULT_PLACEMENT,
-    STRUCTURE_PATTERNS,
     JobItem,
     ScaffoldedJob,
+    _sanitize_tag,
     new_job,
     new_jobs,
     registered_templates,
-    structure_files,
     structure_tag,
 )
 from ..transfers import (
@@ -362,6 +363,57 @@ def _pairs(values: Sequence[str], label: str) -> list[tuple[str, str]]:
             raise ValueError(f"{label} must be spelled NAME=VALUE, not {item!r}")
         result.append((name, text))
     return result
+
+
+def _load_parameters(
+    values: Sequence[str], occurrences: Sequence[Sequence[str]]
+) -> tuple[dict[str, object], list[JobItem], str | None]:
+    """Load parameter sources and split shared values from a batch source."""
+
+    shared: dict[str, object] = {name: text for name, text in _pairs(values, "a job parameter")}
+    batch: list[JobItem] = []
+    batch_occurrence: Sequence[str] | None = None
+    single_files: list[Path] = []
+    single_tags: list[str | None] = []
+    for occurrence in occurrences:
+        if len(occurrence) < 2 or not occurrence[0]:
+            raise ValueError("--parameter-from requires NAME followed by at least one SOURCE")
+        name = occurrence[0]
+        found: list[Path] = []
+        for source in occurrence[1:]:
+            path = Path(source).expanduser()
+            if path.is_dir():
+                children = sorted(
+                    (
+                        child
+                        for child in path.iterdir()
+                        if child.is_file() and not child.is_symlink() and httk.core.has_reader_for(child.name)
+                    ),
+                    key=lambda child: child.name,
+                )
+                if not children:
+                    raise ValueError(f"no readable parameter files in {path}")
+                found.extend(children)
+            else:
+                if not path.is_file():
+                    raise ValueError(f"parameter source does not exist: {path}")
+                found.append(path)
+        loaded = [(path, httk.core.load(str(path))) for path in found]
+        if len(loaded) > 1:
+            if batch_occurrence is not None:
+                raise ValueError("only one --parameter-from occurrence may contain multiple files")
+            batch_occurrence = occurrence
+            batch = [
+                {"parameters": {name: value}, "tag": structure_tag(path) or _sanitize_tag(path.stem)}
+                for path, value in loaded
+            ]
+        else:
+            path, value = loaded[0]
+            shared[name] = value
+            single_files.append(path)
+            single_tags.append(structure_tag(path) or _sanitize_tag(path.stem))
+    tag = single_tags[0] if len(single_files) == 1 else None
+    return shared, batch, tag
 
 
 def _settings(values: Sequence[str]) -> dict[str, str]:

@@ -176,6 +176,21 @@ def require_string(value: object, name: str) -> str:
     return value
 
 
+def validate_parameters(value: object, name: str = "parameters") -> dict[str, str | None]:
+    """Validate a creation-parameter declaration."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be an object")
+    result: dict[str, str | None] = {}
+    for parameter, destination in value.items():
+        if not isinstance(parameter, str) or not parameter:
+            raise ValueError(f"{name} names must be nonempty strings")
+        if destination is not None and (not isinstance(destination, str) or not destination):
+            raise ValueError(f"{name} destination for {parameter!r} must be a nonempty string or null")
+        result[parameter] = destination
+    return result
+
+
 def require_int(value: object, name: str, *, minimum: int = 0, maximum: int | None = None) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise FormatError(f"{name} must be an integer")

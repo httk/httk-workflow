@@ -63,7 +63,7 @@ an index map to a partition reproducibly, run after run.
 
 ```console
 $ httk workflow campaign submit --template vasp-relax --key silicon \
-      --file POSCAR=structures/Si.vasp --tag silicon
+      --parameter structure=structures/Si.vasp --tag silicon
 silicon--0c4f…	/…/screening-a/jobs/silicon--0c4f…
 ```
 

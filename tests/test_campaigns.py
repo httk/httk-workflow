@@ -11,6 +11,7 @@ a harvest reads exactly as any other.
 from pathlib import Path
 
 import pytest
+from httk.core.cli import CLIContext
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.campaigns import (
@@ -23,6 +24,7 @@ from httk.workflow.campaigns import (
 )
 from httk.workflow.projects import initialize_project
 from httk.workflow.registry import LOCAL_REMOTE, register_workspace
+from httk.workflow.workflow_cli import command
 
 pytestmark = pytest.mark.xdist_group("campaign-manager-timing")
 
@@ -143,6 +145,49 @@ def test_submit_routes_a_root_into_its_assigned_partition(tmp_path: Path) -> Non
 
     assert workspaces["south"].find_marker_by_id(job.job_id) is not None
     assert workspaces["north"].find_marker_by_id(job.job_id) is None
+
+
+def test_campaign_submit_passes_creation_parameters_to_the_scaffold(tmp_path: Path) -> None:
+    root, workspaces = _campaign_project(tmp_path, "explicit")
+    structure = tmp_path / "POSCAR"
+    structure.write_text("structure\n", encoding="utf-8")
+    job = campaign_submit("vasp-relax", key="north", project=root, parameters={"structure": structure})
+    assert (job.payload / "files" / "POSCAR").read_text(encoding="utf-8") == "structure\n"
+    assert workspaces["north"].find_marker_by_id(job.job_id) is not None
+
+
+def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path, capsys) -> None:
+    root, workspaces = _campaign_project(tmp_path, "round-robin")
+    structures = tmp_path / "structures"
+    structures.mkdir()
+    for name in ("a.vasp", "b.vasp"):
+        (structures / name).write_text(
+            "silicon\n1.0\n2 0 0\n0 2 0\n0 0 2\nSi\n1\nDirect\n0 0 0\n",
+            encoding="utf-8",
+        )
+
+    assert (
+        command(
+            [
+                "campaign",
+                "submit",
+                "--template",
+                "vasp-relax",
+                "--key",
+                "silicon",
+                "--index",
+                "1",
+                "--parameter-from",
+                "structure",
+                str(structures),
+            ],
+            CLIContext("httk", root),
+        )
+        == 0
+    )
+    assert len(capsys.readouterr().out.splitlines()) == 2
+    assert len(list(workspaces["north"].scan_markers())) == 0
+    assert len(list(workspaces["south"].scan_markers())) == 2
 
 
 def test_children_stay_in_their_parents_workspace(tmp_path: Path) -> None:

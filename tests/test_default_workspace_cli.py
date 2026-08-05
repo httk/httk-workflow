@@ -38,6 +38,12 @@ def test_omitted_workspace_uses_the_global_default_outside_a_project(tmp_path: P
     assert (Path(binding.path) / ".httk-workflow" / "format.json").is_file()
 
 
+def test_workspace_default_resolves_the_isolated_global_default() -> None:
+    workspace = Workspace.default()
+    assert workspace.root == data_home() / "workspace"
+    assert (workspace.control / "format.json").is_file()
+
+
 def test_by_path_requires_an_explicit_path(tmp_path: Path, capsys) -> None:
     assert command(["workspace", "status", "--by-path"], _context(tmp_path)) == 2
     assert "--by-path requires an explicit path" in capsys.readouterr().err
