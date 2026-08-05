@@ -12,6 +12,47 @@ also registers the packaged VASP templates with the generic scaffold (see the
 vasp-relax`` resolves a runner the scaffold never names.
 """
 
+from httk.core import register_citation
+
+register_citation(
+    applies_to="VASP workflow support builds on httk v1 contributions by Henrik Levämäki and Christopher Tholander",
+    references=(
+        {
+            "authors": (
+                {"name": "Henrik Levämäki"},
+                {"name": "Ferenc Tasnádi"},
+                {"name": "Davide G. Sangiovanni"},
+                {"name": "Lars J. S. Johnson"},
+                {"name": "Rickard Armiento"},
+                {"name": "Igor A. Abrikosov"},
+            ),
+            "title": "Predicting elastic properties of hard-coating alloys using ab-initio and machine learning methods",
+            "journal": "npj Computational Materials",
+            "volume": "8",
+            "pages": "17",
+            "year": "2022",
+            "doi": "10.1038/s41524-022-00698-7",
+            "bib_type": "article",
+        },
+        {
+            "authors": (
+                {"name": "Christopher Tholander"},
+                {"name": "Carina B. A. Andersson"},
+                {"name": "Rickard Armiento"},
+                {"name": "Ferenc Tasnádi"},
+                {"name": "Björn Alling"},
+            ),
+            "title": "Strong piezoelectric response in stable TiZnN2, ZrZnN2, and HfZnN2 found by ab initio high-throughput approach",
+            "journal": "Journal of Applied Physics",
+            "volume": "120",
+            "pages": "225102",
+            "year": "2016",
+            "doi": "10.1063/1.4971248",
+            "bib_type": "article",
+        },
+    ),
+)
+
 # Imported for its registration side effect: the packaged VASP templates join
 # the scaffold's provider registry when this package is imported.
 from . import templates as _templates  # noqa: F401 - import registers packaged templates
