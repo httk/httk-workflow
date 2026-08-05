@@ -21,7 +21,7 @@ from ._util import (
 from .errors import FormatError
 
 CORE_PROFILE = "core-v2"
-SUPPORTED_EXTENSIONS = frozenset()
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset()
 RUNNER_SOURCES = frozenset({"payload", "workspace", "installed"})
 PACKAGE_RUNNER_PREFIX = "pkg:"
 STATE_KINDS = (

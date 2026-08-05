@@ -84,7 +84,7 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
             if not isinstance(configured_root, str) or not configured_root:
                 raise ValueError(f"remote {remote!r} has no workspace_root; configure it before workspace init")
             path = f"{configured_root.rstrip('/')}/{plain_name}"
-    binding = create_workspace(
+    created = create_workspace(
         arguments.workspace,
         remote=remote,
         path=path,
@@ -93,7 +93,7 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
         durable=_durable(arguments),
         settings=settings,
     )
-    print(binding.name)
+    print(created.name)
     return 0
 
 
