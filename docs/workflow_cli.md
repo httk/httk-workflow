@@ -49,6 +49,7 @@ carries the same switch on the leaf that acts on it, so both spellings work.
 httk workflow workspace  init | list | default | move | forget | delete | status | settings show | settings set | settings unset | policy show | policy set | fsck | gc | unlock
 httk workflow runner     publish | describe
 httk workflow job        new | submit | request | list | show | log | why | debug
+httk workflow describe   TARGET [--json]
 httk workflow import     pwd | cwl
 httk workflow collect
 httk workflow manager    run
@@ -156,7 +157,16 @@ See {doc}`importing_workflows`.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--raw` |
+| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--raw`, `--allow-job-postprocessor`, `--into PATH` |
+
+### `describe` — inspect a workflow without publishing it
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `describe TARGET` | describe a registered id/alias, runner file, or package directory | `--json` |
+
+Directory package authoring, manifest validation, publication, and hook trust
+tiers are documented in {doc}`workflow_packages`.
 
 ### `manager` — the process that runs the jobs
 

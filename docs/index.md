@@ -31,6 +31,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`native_bash_api` — the same surface in Bash
 - {doc}`sdk_parity` — the normative table both of the above must agree with
 - {doc}`vasp_runners` — the packaged runners, for campaigns that write none
+- {doc}`workflow_packages` — authoring directory packages and their manifest
 - {doc}`declarations` — saying what a workflow *is*, for a data layer
 - {doc}`provenance` — turning one `JobRecord` into one `httk.core.Run`
 - {doc}`collecting` — collecting provider-postprocessed outputs and products
@@ -94,6 +95,7 @@ runtime_helpers
 native_bash_api
 sdk_parity
 vasp_runners
+workflow_packages
 declarations
 provenance
 collecting

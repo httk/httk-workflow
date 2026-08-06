@@ -34,6 +34,9 @@ built-in VASP workflows declare their `workflow` `$id` using the published
 `schemas.httk.org` IRIs. See {doc}`provenance` for the rule that uses this `$id`
 as the workflow URI fallback.
 
+Directory packages can generate this declaration from their manifest or carry
+an externally authored, validated declaration file; see {doc}`workflow_packages`.
+
 ## Declared and observed
 
 A declaration attaches in two places, and the two are never merged.

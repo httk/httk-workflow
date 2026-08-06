@@ -63,6 +63,10 @@ its own `Run`; a parent names child products explicitly in its observed
 declaration. Runner identity, the attempt timeline, and failure remain on the
 `JobRecord` for callers that need them.
 
+For directory workflows, the runner tree digest and generated or external
+workflow declaration travel with the job and anchor this provenance chain to
+the exact published package. See {doc}`workflow_packages`.
+
 VASP runners will adopt this declaration in future work.
 
 Built-in VASP result collection and postprocessing are documented in {doc}`collecting`.
