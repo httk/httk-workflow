@@ -32,6 +32,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`sdk_parity` — the normative table both of the above must agree with
 - {doc}`vasp_runners` — the packaged runners, for campaigns that write none
 - {doc}`declarations` — saying what a workflow *is*, for a data layer
+- {doc}`provenance` — turning one harvest record into one `httk.core.Run`
 - {doc}`importing_workflows` — running PWD and CWL documents as ordinary jobs
 - {doc}`notebooks/examples` — worked examples as a notebook
 
@@ -93,6 +94,7 @@ native_bash_api
 sdk_parity
 vasp_runners
 declarations
+provenance
 importing_workflows
 taskmanager
 workflow_cli

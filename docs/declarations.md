@@ -157,4 +157,5 @@ other damaged evidence a harvest still reports rather than hides.
 See {doc}`harvest` for the record as a whole, {doc}`runtime_helpers` and
 {doc}`native_bash_api` for the two authoring APIs, and
 {doc}`workflow_filesystem_api` for the normative statement of the `declarations`
-member and the payload area it is stored in.
+member and the payload area it is stored in. See {doc}`provenance` for the
+interpretation of the `provenance` declaration.

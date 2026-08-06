@@ -92,6 +92,8 @@ understanding the vocabulary the document names itself — which is the consumer
 job, not this module's. An observed document that cannot be read is reported as
 `null` and sets `provenance.gaps`. The declared documents are not repeated inside
 `job`; `declarations` is where they are read. See {doc}`declarations`.
+The `provenance` declaration can be interpreted as a stored `httk.core.Run`; see
+{doc}`provenance`.
 
 ## Selecting what to harvest
 
