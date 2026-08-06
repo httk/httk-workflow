@@ -2,6 +2,8 @@
 
 import argparse
 import json
+from pathlib import Path
+from typing import Any, cast
 
 from httk.core import Run
 
@@ -46,10 +48,100 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
     }
 
 
+def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, ...]], dict[int, str]]:
+    """Resolve the lazy core entry registry for the values this sweep stores."""
+
+    from httk.core.register import known_entry_families, known_entry_records, resolve_entry_family, resolve_entry_record
+
+    required_types = {"_httk_records", "_httk_runs"}
+    failures: dict[int, str] = {}
+    for index, item in enumerate(items):
+        for value in item.outputs.values():
+            entry_type = getattr(value, "type", None)
+            if not isinstance(entry_type, str):
+                failures[index] = "cannot store an output without a string entry type"
+                continue
+            required_types.add(entry_type)
+
+    configurations: dict[str, tuple[type, tuple[type, ...]]] = {}
+    for entry_type in required_types:
+        family_name: str | None = None
+        import_failures: list[BaseException] = []
+        for candidate in known_entry_families():
+            try:
+                family = resolve_entry_family(candidate)
+            except (ImportError, ModuleNotFoundError) as exc:
+                import_failures.append(exc)
+                continue
+            if getattr(family, "type", None) == entry_type:
+                family_name = candidate
+                break
+        if family_name is None:
+            detail = f": {import_failures[-1]}" if import_failures else ""
+            message = f"cannot store entry type {entry_type!r}: no registered entry family{detail}"
+            for index, item in enumerate(items):
+                if any(getattr(value, "type", None) == entry_type for value in item.outputs.values()):
+                    failures[index] = message
+            continue
+        try:
+            records = tuple(resolve_entry_record(name) for name in known_entry_records(family_name))
+        except (ImportError, ModuleNotFoundError, TypeError, ValueError) as exc:
+            message = f"cannot store entry type {entry_type!r}: {exc}"
+            for index, item in enumerate(items):
+                if any(getattr(value, "type", None) == entry_type for value in item.outputs.values()):
+                    failures[index] = message
+            continue
+        configurations[entry_type] = (resolve_entry_family(family_name), records)
+
+    layout: dict[type, tuple[type, ...]] = {}
+    for family, records in configurations.values():
+        layout[family] = records
+    return layout, failures
+
+
+def _store_collected(items: list[CollectedJob], path: str) -> list[dict[str, object]]:
+    """Save one bounded collected sweep into a file-backed SQLite store."""
+
+    try:
+        from httk.data.db import Database, SqlStore
+    except ImportError as exc:
+        raise ValueError("--into requires httk-data with its database dependencies") from exc
+
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    layout, failures = _storage_layout(items)
+    reports: list[dict[str, object]] = []
+    with Database.sqlite(target) as database:
+        store = SqlStore(database, entry_records=layout)
+        for index, item in enumerate(items):
+            report = _collected_mapping(item)
+            error = failures.get(index)
+            if error is not None:
+                report["storage_error"] = error
+                reports.append(report)
+                continue
+            try:
+                with store.transaction():
+                    entry_ids = []
+                    for value in item.outputs.values():
+                        store.save(value)
+                        entry_ids.append(str(cast(Any, value).id))
+                    store.save(item.run)
+                    for product in item.products:
+                        store.save(product)
+                report["stored"] = {"entries": entry_ids, "run": item.run.id}
+            except Exception as exc:
+                report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
+            reports.append(report)
+    return reports
+
+
 def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Stream collected workflow summaries, or raw job records."""
 
     workspace = Workspace(_local_root(arguments, context, action="collect from"), mutable=False)
+    if arguments.into is not None and (arguments.raw or arguments.json):
+        raise ValueError("--into cannot be combined with --raw")
     if arguments.raw or arguments.json:
         records = job_records(
             workspace, states=arguments.state or DEFAULT_COLLECT_STATES, placement=arguments.placement
@@ -60,13 +152,21 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
         for record in records:
             print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
         return 0
-    for item in collect(
-        workspace,
-        states=arguments.state or DEFAULT_COLLECT_STATES,
-        placement=arguments.placement,
-        allow_job_postprocessor=arguments.allow_job_postprocessor,
-    ):
-        print(json.dumps(_collected_mapping(item), sort_keys=True, separators=(",", ":")))
+    items = list(
+        collect(
+            workspace,
+            states=arguments.state or DEFAULT_COLLECT_STATES,
+            placement=arguments.placement,
+            allow_job_postprocessor=arguments.allow_job_postprocessor,
+        )
+    )
+    reports = (
+        _store_collected(items, arguments.into)
+        if arguments.into is not None
+        else [_collected_mapping(item) for item in items]
+    )
+    for report in reports:
+        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     return 0
 
 
@@ -93,5 +193,10 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
     parser.add_argument(
         "--allow-job-postprocessor",
         action="store_true",
-        help="allow job postprocessors (reserved; not functional until the tree fallback phase)",
+        help="allow postprocessors loaded and verified from a pinned workspace workflow tree",
+    )
+    parser.add_argument(
+        "--into",
+        metavar="PATH",
+        help="save collected entries, runs, and products into a file-backed SQLite store",
     )
