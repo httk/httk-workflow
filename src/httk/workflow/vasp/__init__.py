@@ -60,6 +60,7 @@ register_citation(
 
 # Imported for its registration side effect: the packaged VASP templates join
 # the scaffold's provider registry when this package is imported.
+from . import interpret as _interpret  # noqa: F401 - import registers VASP interpreters
 from . import templates as _templates  # noqa: F401 - import registers packaged templates
 from .diagnostics import (
     VASP_RESTART_ARTIFACTS,

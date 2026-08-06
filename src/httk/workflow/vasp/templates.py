@@ -29,6 +29,7 @@ PROVIDERS = (
         data_mode="transactional",
         parameters={"structure": "POSCAR"},
         summary="relax one structure with the reviewed remedy ladder",
+        declarations={"workflow": {"$id": "https://schemas.httk.org/defs/v0.1/workflows/vasp-relax"}},
     ),
     TemplateProvider(
         name="vasp-relax-bash",
@@ -40,6 +41,7 @@ PROVIDERS = (
         data_mode="transactional",
         parameters={"structure": "POSCAR"},
         summary="the same relaxation, authored in Bash",
+        declarations={"workflow": {"$id": "https://schemas.httk.org/defs/v0.1/workflows/vasp-relax"}},
     ),
     TemplateProvider(
         name="vasp-static",
@@ -51,6 +53,7 @@ PROVIDERS = (
         data_mode="transactional",
         parameters={"structure": "POSCAR"},
         summary="one single-point calculation of one structure",
+        declarations={"workflow": {"$id": "https://schemas.httk.org/defs/v0.1/workflows/vasp-static"}},
     ),
     TemplateProvider(
         name="vasp-relax-static",
@@ -62,6 +65,7 @@ PROVIDERS = (
         data_mode="transactional",
         parameters={"structure": "POSCAR"},
         summary="relax, promote the relaxed structure, then run it statically",
+        declarations={"workflow": {"$id": "https://schemas.httk.org/defs/v0.1/workflows/vasp-relax-static"}},
     ),
 )
 
