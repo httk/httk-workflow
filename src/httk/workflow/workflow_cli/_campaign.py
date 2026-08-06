@@ -63,11 +63,11 @@ def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -
         for item in items:
             item["tag"] = arguments.tag or item.get("tag")
         jobs = campaign_submit_many(
-            arguments.template, items, key=arguments.key, index=arguments.index, project=context.cwd, **shared
+            arguments.workflow, items, key=arguments.key, index=arguments.index, project=context.cwd, **shared
         )
     else:
         jobs = [
-            campaign_submit(arguments.template, key=arguments.key, index=arguments.index, project=context.cwd, **shared)
+            campaign_submit(arguments.workflow, key=arguments.key, index=arguments.index, project=context.cwd, **shared)
         ]
     if arguments.json:
         print(json.dumps([job.as_mapping() for job in jobs] if len(jobs) > 1 else jobs[0].as_mapping(), indent=2))
@@ -77,20 +77,35 @@ def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -
     return 0
 
 
-def handle_campaign_harvest(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Harvest every partition of this campaign, one workspace after another."""
+def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Collect every partition of this campaign, one workspace after another."""
 
-    records = campaign_harvest(
-        states=arguments.state or DEFAULT_HARVEST_STATES,
+    records = campaign_collect(
+        states=arguments.state or DEFAULT_COLLECT_STATES,
         placement=arguments.placement,
         partitions=arguments.partition or None,
         project=context.cwd,
     )
-    if arguments.json:
-        print(json.dumps([record.as_mapping() for record in records], indent=2, sort_keys=True))
+    if arguments.raw:
+        for record in records:
+            print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
         return 0
-    for record in records:
-        print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
+    from ..collecting import collect as collect_jobs
+    from ._collect import _collected_mapping
+
+    config = read_campaign(context.cwd)
+    selected = sorted(arguments.partition or config.partitions)
+    for partition in selected:
+        binding = resolve_workspace(config.partitions[partition], project=context.cwd)
+        if binding.remote != LOCAL_REMOTE:
+            raise ValueError(f"campaign partition {partition!r} is remote; collect it at its workspace first")
+        assert binding.path is not None
+        for item in collect_jobs(
+            Workspace(binding.path, mutable=False),
+            states=arguments.state or DEFAULT_COLLECT_STATES,
+            placement=arguments.placement,
+        ):
+            print(json.dumps(_collected_mapping(item), sort_keys=True, separators=(",", ":")))
     return 0
 
 
@@ -159,10 +174,10 @@ def build_campaign_parser(
         handler=handle_campaign_submit,
     )
     submit.add_argument(
-        "--template",
-        metavar="TEMPLATE",
+        "--workflow",
+        metavar="WORKFLOW",
         required=True,
-        help="the runner template to scaffold",
+        help="the workflow id, alias, or path of a runner file to scaffold",
     )
     submit.add_argument(
         "--key",
@@ -219,33 +234,33 @@ def build_campaign_parser(
         help="print the scaffolded job as one JSON object",
     )
 
-    harvest_parser = _leaf(
+    collect_parser = _leaf(
         group,
-        "harvest",
-        summary="harvest every partition of the campaign",
-        description="Harvest the finished jobs of every campaign partition, one workspace after another",
-        handler=handle_campaign_harvest,
+        "collect",
+        summary="collect every partition of the campaign",
+        description="Collect the finished jobs of every campaign partition, one workspace after another",
+        handler=handle_campaign_collect,
     )
-    harvest_parser.add_argument(
+    collect_parser.add_argument(
         "--partition",
         action="append",
         default=[],
         metavar="NAME",
-        help="harvest only this partition (repeatable, default: all of them)",
+        help="collect only this partition (repeatable, default: all of them)",
     )
-    harvest_parser.add_argument(
+    collect_parser.add_argument(
         "--state",
         action="append",
         metavar="STATE",
-        choices=HARVESTABLE_KINDS,
-        help=f"state kind to harvest (repeatable, default: {', '.join(DEFAULT_HARVEST_STATES)})",
+        choices=COLLECTABLE_KINDS,
+        help=f"state kind to collect (repeatable, default: {', '.join(DEFAULT_COLLECT_STATES)})",
     )
-    harvest_parser.add_argument(
+    collect_parser.add_argument(
         "--placement",
         metavar="PLACEMENT",
-        help="harvest only jobs at or below this placement",
+        help="collect only jobs at or below this placement",
     )
-    harvest_parser.add_argument("--json", action="store_true", help="print every record as one JSON array")
+    collect_parser.add_argument("--raw", action="store_true", help="print raw collect records")
 
     managers = _leaf(
         group,

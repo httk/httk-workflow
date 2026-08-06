@@ -150,7 +150,7 @@ _INTERNAL_MODULES = (
     "vasp.diagnostics",
     "vasp.remedies",
     "vasp.reports",
-    "vasp.templates",
+    "vasp.workflows",
 )
 nitpick_ignore_regex = [
     (r"py:.*", r"httk\.workflow\.(" + "|".join(_INTERNAL_MODULES) + r")(\..+)?"),
@@ -194,9 +194,8 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.executors",
         "httk.workflow.shell_bridge",
         # Orchestration and management.
-        "httk.workflow.harvesting",
+        "httk.workflow.collecting",
         "httk.workflow.provenance",
-        "httk.workflow.interpretation",
         "httk.workflow.supervision",
         "httk.workflow.transfers",
         "httk.workflow.manifests",

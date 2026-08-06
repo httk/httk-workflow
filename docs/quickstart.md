@@ -14,7 +14,7 @@ declared, or a database to exist.
 
 Every command below works without VASP installed: `examples/mock_vasp.py` writes
 the output files a finished run leaves behind, so the whole path — prepare, run,
-collect, harvest — is exercised for real, with meaningless numbers.
+publish, collect — is exercised for real, with meaningless numbers.
 
 The complete sequence of this page is also `examples/quickstart.sh`, which runs
 it in whatever directory you start it in.
@@ -45,10 +45,10 @@ END
 ```console
 $ httk project init --name quickstart
 $ httk workflow workspace init . --name default
-$ httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
+$ httk workflow job new --workflow vasp-relax --parameter structure=POSCAR --tag silicon
 $ httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
 $ httk workflow run
-$ httk workflow harvest
+$ httk workflow collect
 ```
 
 On a VASP machine, set `vasp.command` to a command such as
@@ -62,7 +62,7 @@ does not create or contain a workspace.
 The workspace is the state of the work, and transactional data makes a finished
 calculation readable without looking inside a workdir.
 
-**`job new`** built and submitted one job. `--template vasp-relax` is the packaged
+**`job new`** built and submitted one job. `--workflow vasp-relax` is the packaged
 relaxation runner — one file, three steps, the reviewed remedy ladder — so no
 runner had to be written. The runner file is published into the workspace and the
 job pins its digest, so upgrading *httk-workflow* underneath a queued campaign
@@ -82,19 +82,19 @@ runs. The manager exports scalar settings into each attempt environment, so
 override and wins over the workspace setting.
 
 **`run`** ran a task manager until nothing was ready, driving the job through
-`prepare`, `run`, and `collect`. With `--idle` the same manager keeps serving
+`prepare`, `run`, and `publish`. With `--idle` the same manager keeps serving
 the workspace, which is how a campaign is run.
 
-**`harvest`** printed one JSON record per finished job: what ran, where its files
+**`collect`** printed one JSON summary per finished job: what ran, where its files
 are, and everything that happened on the way. That record is the boundary to a
-data layer — see {doc}`harvest`.
+data layer — see {doc}`collecting`.
 
 ## Looking at a job
 
 ```console
 $ httk workflow job list
 JOB                                  STATE       STEP             PRI PLACEMENT
-silicon--0c4f…                       succeeded   collect          500 jobs
+silicon--0c4f…                       succeeded   publish          500 jobs
 
 $ httk workflow job show silicon
 $ httk workflow job why silicon
@@ -116,7 +116,7 @@ Point `--parameter-from structure` at a *directory* and every readable structure
 file in it becomes one job, each tagged after its file:
 
 ```console
-$ httk workflow job new quickstart-workspace --template vasp-relax --parameter-from structure structures/ \
+$ httk workflow job new quickstart-workspace --workflow vasp-relax --parameter-from structure structures/ \
       --input kpoint_density=30.0 --placement project/screening
 ```
 
@@ -144,7 +144,7 @@ marker.
 
 - {doc}`vasp_runners` — what the packaged VASP runners do, every job input they
   read, and the failure codes they publish.
-- {doc}`runtime_helpers` — authoring a runner of your own. `job new --template
+- {doc}`runtime_helpers` — authoring a runner of your own. `job new --workflow
   ./my_runner.py --step characterize` scaffolds jobs for it exactly as for a
   packaged one; the file is published into the workspace and pinned by digest.
   Two complete campaign runners are in `examples/defect_campaign.py` and
@@ -153,7 +153,7 @@ marker.
 - {doc}`importing_workflows` — a Python Workflow Definition or CWL workflow you
   already have becomes one job with `httk workflow import pwd` or
   `httk workflow import cwl`, without being rewritten and without a runner file.
-- {doc}`harvest` — turning finished jobs into stored results.
+- {doc}`collecting` — turning finished jobs into stored results.
 - Running on a cluster — add and configure a remote, initialize `R:NAME`, then
   `transfer LOCAL R:NAME --job JOB` puts jobs there and `run R:NAME` submits a
   manager through its scheduler; a very large run spread across many workspaces

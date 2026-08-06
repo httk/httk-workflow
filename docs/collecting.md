@@ -1,22 +1,22 @@
-# Harvesting results
+# Collecting results
 
 *For data-layer authors and anyone reading finished jobs back out of a workspace.*
 
-A harvest is the read-only counterpart of running work: it iterates the jobs of
+A collect is the read-only counterpart of running work: it iterates the jobs of
 one workspace that stopped and yields, per job, everything a data layer needs to
 store the result — where the files are, what produced them, and what happened on
 the way.
 
-`HarvestRecord` is the layering boundary of *httk₂*. *httk-workflow* has no
+`JobRecord` is the layering boundary of *httk₂*. *httk-workflow* has no
 database dependency: it produces records, and something else — `httk-data` —
 consumes them. A consumer therefore reads results like this, and nothing in
 *httk-workflow* knows what `store` or `load_vasp` are:
 
 ```python
-from httk.workflow import Workspace, harvest
+from httk.workflow import Workspace, job_records
 
 workspace = Workspace("workflow-workspace", mutable=False)
-for record in harvest(workspace):
+for record in job_records(workspace):
     store.save(load_vasp(record))
 ```
 
@@ -34,17 +34,17 @@ reserved `pkg:` form additionally reports the installed distribution and its
 version, so a stored result names the software that produced it.
 
 **Damage is reported, never guessed.** A job whose journal chain is broken is
-still harvested, with whatever remains readable and `provenance.gaps` set to
+still collected, with whatever remains readable and `provenance.gaps` set to
 `true`. A result that exists must not become invisible because part of its
 history did not survive. Only a job whose `job.json` cannot be read at all is
 skipped, loudly, through the module logger: the contract of a record is the
 *validated* job behind a result.
 
-**Harvesting scales by iteration.** `harvest` is a lazy iterator over one scan of
+**Collecting scales by iteration.** `collect` is a lazy iterator over one scan of
 the requested state directories, and building one record reads only that job's
 own payload and journal chain. The measured local snapshot in
 {doc}`benchmarks` establishes a reference point; larger campaigns should be
-partitioned across workspaces and harvested one partition at a time, never
+partitioned across workspaces and collected one partition at a time, never
 materialized as one in-memory result array.
 
 ## Members
@@ -80,8 +80,8 @@ the recorded `claimed_at`, `started_at`, and `finished_at` timestamps, the
 `outcome_action` it published, and its `failure`.
 
 `children` maps each spawn label to `job_id`, `job_key`, and the child's `kind`
-when the parent's own frames recorded it. A campaign therefore harvests as a
-tree: each named child is a job a consumer harvests in its own right.
+when the parent's own frames recorded it. A campaign therefore collects as a
+tree: each named child is a job a consumer collects in its own right.
 
 `declarations` reports every declaration name either source knows. `declared` is
 the document `job.json` carried, pinned by the immutable job digest; `observed`
@@ -95,10 +95,10 @@ job, not this module's. An observed document that cannot be read is reported as
 The `provenance` declaration can be interpreted as a stored `httk.core.Run`; see
 {doc}`provenance`.
 
-## Selecting what to harvest
+## Selecting records
 
 ```python
-records = harvest(
+records = job_records(
     workspace,
     states=("succeeded", "failed"),
     placement="project/campaign",
@@ -107,32 +107,32 @@ records = harvest(
 
 `states` defaults to `("succeeded",)` and accepts only the kinds a stopped job
 can be in — `succeeded`, `failed`, `cancelled`, and `paused`; anything else is
-refused by name. `placement` restricts the harvest to the jobs at or below one
+refused by name. `placement` restricts the collect to the jobs at or below one
 placement, exactly as `httk workflow job list --placement` does.
 
 ## From the command line
 
 ```console
-httk workflow harvest WORKSPACE
-httk workflow harvest WORKSPACE --state succeeded --state failed
-httk workflow harvest WORKSPACE --placement project/campaign --json
+httk workflow collect WORKSPACE
+httk workflow collect WORKSPACE --state succeeded --state failed
+httk workflow collect WORKSPACE --placement project/campaign --json
 ```
 
-The workspace is attached read-only. The default `--jsonl` prints one record
-object per line as each is produced, which is what a pipeline consumes;
-`--json` prints a single array instead and therefore materializes the whole
-harvest in memory.
+The workspace is attached read-only. The default `collect` command prints one
+`CollectedJob` summary per line. `--raw` prints one `JobRecord` per line, while
+the hidden compatibility `--json` form materializes those raw records as an
+array.
 
 ```console
-$ httk workflow harvest workflow-workspace | head -1
+$ httk workflow collect workflow-workspace | head -1
 {"children":{},"data_generation":null,"data_path":null,"declarations":{},"failure":null,
- "format":"httk-workflow-harvest","format_version":1,
+ "format":"httk-workflow-collect","format_version":1,
  "job":{"claim":{"pool":"default","required_capabilities":[]},"data":{"mode":"none"},
  "digest":"0e6f…","id":"5c0a…","initial_step":"only","inputs":{},"job_key":"single--5c0a…",
- "name":"Harvest single","parent":null,"priority":500,
+ "name":"collect single","parent":null,"priority":500,
  "runner":{"arguments":[],"executor":"path","path":"single/run.py","sha256":"41b1…",
  "source":"workspace"},"retry_policy":{…},"resources":{},"tag":"single",
- "workdir":{"mode":"persistent","path":"run"},"workflow":"tests.harvest.single"},
+ "workdir":{"mode":"persistent","path":"run"},"workflow":"tests.collect.single"},
  "job_id":"5c0a…","job_key":"single--5c0a…","payload_path":"project/single/single--5c0a…",
  "placement":"project/single","provenance":{"activations":[…],"gaps":false},
  "runner_description":null,"runner_provenance":null,"runner_steps":["only"],
@@ -140,12 +140,12 @@ $ httk workflow harvest workflow-workspace | head -1
  "workspace":"/…/workflow-workspace","workspace_id":"a2d1…"}
 ```
 
-Jobs that ran on a remote are harvested the same way once they are
+Jobs that ran on a remote are collected the same way once they are
 home: `httk workflow transfer REMOTE:NAME default` imports them into the local
-default workspace in the terminal state they stopped in, and the harvest that
+default workspace in the terminal state they stopped in, and the collect that
 follows cannot tell them from jobs that ran locally. See
 {doc}`workflow_cli`.
 
-Each line is exactly `HarvestRecord.as_mapping()`, and
-`HarvestRecord.from_mapping()` rebuilds the record from it, so a harvest survives
+Each line is exactly `JobRecord.as_mapping()`, and
+`JobRecord.from_mapping()` rebuilds the record from it, so a collect survives
 being written to a file, shipped, and read back by the process that stores it.

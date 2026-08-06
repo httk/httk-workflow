@@ -487,7 +487,7 @@ class Attempt:
 
         The write is runner-private, so it never disturbs the payload digest, and
         repeating it overwrites: what a job observed is whatever its last word on
-        the subject was. A harvest reports the observed document beside the
+        the subject was. A collect reports the observed document beside the
         declared one and never merges the two.
         """
 

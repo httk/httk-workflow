@@ -50,9 +50,9 @@ httk workflow workspace  init | list | default | move | forget | delete | status
 httk workflow runner     publish | describe
 httk workflow job        new | submit | request | list | show | log | why | debug
 httk workflow import     pwd | cwl
-httk workflow harvest
+httk workflow collect
 httk workflow manager    run
-httk workflow campaign   init | show | submit | harvest | start-managers
+httk workflow campaign   init | show | submit | collect | start-managers
 httk workflow v1         prepare | submit | run
 httk workflow config     init | show | set | unset | import-v1
 httk workflow project    init | import-v1 | show | doctor | manifest create | manifest verify
@@ -127,7 +127,7 @@ name, and re-register it with `workspace init <newpath> --name NAME` instead.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `job new WORKSPACE` | scaffold and submit jobs from a template | `--template` (required), `--parameter`, `--parameter-from`, `--file`, `--input`, `--tag`, `--placement`, `--json` |
+| `job new WORKSPACE` | scaffold and submit jobs from a workflow | `--workflow` (required), `--parameter`, `--parameter-from`, `--file`, `--input`, `--tag`, `--placement`, `--json` |
 | `job submit WORKSPACE SOURCE` | submit one prepared payload directory | `--placement` (required), `--move` |
 | `job request WORKSPACE JOB_ID ACTION` | publish an operator request | `--operator`, `--reason` (both required), `--priority`, `--step`, `--force` |
 | `job list WORKSPACE` | list the jobs as a cheap table | `--kind`, `--placement`, `--json` |
@@ -152,11 +152,11 @@ reserved installed form. `import cwl` needs `pip install httk-workflow[cwl]` on
 the machine that imports, and nothing extra on the machine that runs the result.
 See {doc}`importing_workflows`.
 
-### `harvest` — the finished jobs, as records
+### `collect` — the finished jobs, as summaries
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `harvest WORKSPACE` | stream one record per finished job | `--state`, `--placement`, `--jsonl` (default), `--json` |
+| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--raw` |
 
 ### `manager` — the process that runs the jobs
 
@@ -229,7 +229,7 @@ unambiguous.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `remote list` | list the remotes this project can reach | |
-| `remote add NAME` | create a remote from a packaged template | `--template`, `--global`, `--non-interactive` |
+| `remote add NAME` | create a remote from a packaged adapter template | `--template`, `--global`, `--non-interactive` |
 | `remote configure REMOTE` | run the adapter's `configure` operation | `--set KEY=VALUE`, `--adapter-timeout` |
 | `remote install REMOTE` | run the adapter's `install` operation | `--set KEY=VALUE`, `--adapter-timeout` |
 | `remote import-v1 SOURCE` | map a legacy *httk* v1 computer bundle | `--name`, `--global` |
@@ -321,8 +321,8 @@ job again, or edit the one `runner.path` member.
 | --- | --- | --- |
 | `campaign init` | define the project's partition map and assignment policy | `--partition NAME=WORKSPACE`, `--assignment` |
 | `campaign show` | show the partition map | `--json` |
-| `campaign submit` | assign one root job to a partition and submit it there | `--template` (required), `--key` (required), `--index`, `--input`, `--parameter`, `--parameter-from`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
-| `campaign harvest` | harvest every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--json` |
+| `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--key` (required), `--index`, `--input`, `--parameter`, `--parameter-from`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
+| `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--json` |
 | `campaign start-managers` | start a manager per selected partition | `--partition`, `--workers`, `--count`, `--adapter-timeout` |
 
 A campaign is a thin convention over the *registered workspaces* above: a
@@ -337,9 +337,9 @@ children always inherit their parent's workspace. See {doc}`campaigns`.
 the path of a runner file of your own — and needs no prepared payload:
 
 ```console
-httk workflow job new WORKSPACE --template vasp-relax --parameter structure=POSCAR --tag silicon
-httk workflow job new WORKSPACE --template vasp-relax --parameter-from structure structures/ --placement project/screening
-httk workflow job new WORKSPACE --template ./my_runner.py --step characterize --input sites=8
+httk workflow job new WORKSPACE --workflow vasp-relax --parameter structure=POSCAR --tag silicon
+httk workflow job new WORKSPACE --workflow vasp-relax --parameter-from structure structures/ --placement project/screening
+httk workflow job new WORKSPACE --workflow ./my_runner.py --step characterize --input sites=8
 ```
 
 `--parameter NAME=VALUE` supplies a creation-time value verbatim; `--parameter-from
@@ -365,7 +365,7 @@ httk workflow import cwl WORKSPACE flow.cwl job.yml --tag echo --data-mode trans
 
 The imported job runs on httk's own runner and manager — no other engine is
 invoked, and `cwltool` is neither used nor bundled — and it is claimed, retried,
-journalled and harvested like every other job. {doc}`importing_workflows`
+journalled and collected like every other job. {doc}`importing_workflows`
 documents both formats, the supported CWL subset, everything that is refused and
 why, and what running a PWD document means for security.
 
@@ -388,8 +388,8 @@ each command takes `--json`. `job debug` exits `0` on success, `3` on failure, a
 `4` when the job stopped without finishing. See
 {doc}`taskmanager` for what each command reports.
 
-`httk workflow harvest WORKSPACE` streams one record per finished job for a data
-layer to store, as JSON lines by default; see {doc}`harvest`.
+`httk workflow collect WORKSPACE` streams one record per finished job for a data
+layer to store, as JSON lines by default; see {doc}`collect`.
 
 ## Configuration and projects
 
@@ -681,7 +681,7 @@ was, and running it again simply finishes the job.
 
 Collecting journal segments has one honest cost. Only the segment a marker
 points into is protected, so the deep history of an old job goes with the
-segments behind it; `harvest` and `job log` then report that job's timeline
+segments behind it; `collect` and `job log` then report that job's timeline
 with `gaps` set. Its state, payload, and outcome are unaffected.
 
 ## Remote adapters
@@ -809,7 +809,7 @@ httk workflow remote install kappa
 httk workflow workspace init kappa:/scratch/rar/httk/runs
 httk workflow workspace settings set kappa:runs slurm.partition batch
 httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
-httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
+httk workflow job new --workflow vasp-relax --parameter structure=POSCAR --tag silicon
 httk workflow transfer default kappa:runs --job JOB-ID
 httk workflow run kappa:runs --workers 8
 httk workflow workspace status kappa:runs
@@ -825,7 +825,7 @@ workspace and imports it on the remote, at the placement it had here unless
 generated manager through the remote adapter; `--workers` fixes its worker count.
 `manager run` is the advanced spelling for the same operation.
 
-To bring stopped jobs home, use the reverse transfer and then harvest:
+To bring stopped jobs home, use the reverse transfer and then collect:
 
 ```console
 httk workflow transfer kappa:runs default \
@@ -836,7 +836,7 @@ httk workflow transfer kappa:runs default \
 and `failed`; `--placement` restricts the fetch to one subtree; `--adapter-timeout`
 bounds every adapter operation the fetch runs. A fetched job arrives as an
 ordinary job of the local default workspace, in the terminal state and at the
-placement it had on the remote, so `httk workflow harvest` then reports it
+placement it had on the remote, so `httk workflow collect` then reports it
 exactly like a job that ran at home.
 
 Under the fetch leg run the two far-side protocol commands, invoked over the

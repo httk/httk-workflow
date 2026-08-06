@@ -51,7 +51,7 @@ httk_workflow workspace init . --name default
 # 2. One job of the packaged relaxation runner, starting from that structure. The
 #    command prints one tab-separated line with its key and payload.
 httk_workflow job new \
-    --template vasp-relax \
+    --workflow vasp-relax \
     --parameter structure=POSCAR \
     --tag silicon
 
@@ -63,6 +63,6 @@ httk_workflow workspace settings set vasp.command "$here/mock_vasp.py"
 httk_workflow run
 
 # 5. What happened, and what it produced.
-httk_workflow harvest
+httk_workflow collect
 
 printf '\nthe published result is in jobs/*/data/vasp/\n'

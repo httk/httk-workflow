@@ -10,7 +10,7 @@
 set -euo pipefail
 source "$HTTK_WORKFLOW_BASH_API"
 source "$HTTK_WORKFLOW_VASP_BASH_API"
-httk_workflow_runner httk.vasp.relax prepare run collect
+httk_workflow_runner httk.vasp.relax-bash prepare run publish
 
 _vasp_collect_default="INCAR KPOINTS OUTCAR CONTCAR OSZICAR vasprun.xml vasp-run-report.json POTCAR.provenance.json"
 
@@ -98,9 +98,9 @@ step_run() {
     httk_workflow_runlog_note "VASP $classification"
     if [ "$classification" = completed ]; then
         if [ -n "$energy" ]; then
-            httk_workflow_advance collect --state classification="$classification" --state energy="$energy"
+            httk_workflow_advance publish --state classification="$classification" --state energy="$energy"
         else
-            httk_workflow_advance collect --state classification="$classification"
+            httk_workflow_advance publish --state classification="$classification"
         fi
         return
     fi
@@ -141,7 +141,7 @@ step_run() {
 
 # Publish the collected files, or leave them in the persistent workdir when this
 # job has no transactional data.
-step_collect() {
+step_publish() {
     local prefix name published=
     prefix=$(httk_workflow_input data_prefix vasp)
     for name in $(httk_workflow_input collect "$_vasp_collect_default"); do

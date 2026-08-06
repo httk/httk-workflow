@@ -4,7 +4,7 @@
 The workflow is the relaxation workflow with the ionic loop switched off:
 ``prepare`` stages the structure and the INCAR of the job payload and adds the
 static tags — ``IBRION = -1`` and ``NSW = 0`` unless the job says otherwise —
-``run`` executes VASP with the reviewed remedy ladder, and ``collect`` publishes
+``run`` executes VASP with the reviewed remedy ladder, and ``publish`` publishes
 the result. The structure may be a POSCAR or the CONTCAR of an earlier
 relaxation, staged as an input file of this job and named by the ``poscar`` input.
 
@@ -248,7 +248,7 @@ def execute(a: Attempt, *, next_step: str) -> None:
     a.retry(f"applied the {decision.policy} remedy for {decision.problem}")
 
 
-def publish(a: Attempt, *, prefix: str) -> None:
+def publish_files(a: Attempt, *, prefix: str) -> None:
     """Publish the collected files of a finished calculation."""
 
     names = names_input(a, "collect", DEFAULT_COLLECT)
@@ -281,14 +281,14 @@ def prepare(a: Attempt) -> None:
 def run_step(a: Attempt) -> None:
     """Run VASP, remedy a recognized failure, or fail with what was diagnosed."""
 
-    execute(a, next_step="collect")
+    execute(a, next_step="publish")
 
 
 @run.step
-def collect(a: Attempt) -> None:
+def publish(a: Attempt) -> None:
     """Publish the finished calculation and complete the job."""
 
-    publish(a, prefix=text_input(a, "data_prefix", "vasp"))
+    publish_files(a, prefix=text_input(a, "data_prefix", "vasp"))
     a.succeed()
 
 

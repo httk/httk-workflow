@@ -21,8 +21,8 @@ Two rules make this safe at scale without new machinery:
   workspace its parent runs in — so a campaign never has to re-route a subtree,
   and this module deliberately changes nothing about spawning.
 
-Harvest and management simply cross the partition list: :func:`campaign_harvest`
-chains :func:`~httk.workflow.harvesting.harvest` across every partition lazily,
+Collect and management simply cross the partition list: :func:`campaign_collect`
+chains :func:`~httk.workflow.collecting.job_records` across every partition lazily,
 and :func:`campaign_managers` starts a manager per selected partition — in this
 process for a local partition, through the remote's scheduler for a remote one.
 """
@@ -32,7 +32,7 @@ import os
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
-from .harvesting import DEFAULT_HARVEST_STATES, HarvestRecord, harvest
+from .collecting import DEFAULT_COLLECT_STATES, JobRecord, job_records
 from .projects import read_project_section, write_project_section
 from .registry import LOCAL_REMOTE, WorkspaceBinding, resolve_workspace
 from .scaffold import JobItem, ScaffoldedJob, new_job, new_jobs
@@ -43,7 +43,7 @@ __all__ = [
     "CAMPAIGN_SECTION",
     "CampaignConfig",
     "assign_partition",
-    "campaign_harvest",
+    "campaign_collect",
     "campaign_managers",
     "campaign_partitions",
     "campaign_submit",
@@ -170,7 +170,7 @@ def _local_partition_workspace(partition: str, project: str | os.PathLike[str] |
 
 
 def campaign_submit(
-    template: str,
+    workflow: str,
     *,
     key: str,
     index: int = 0,
@@ -185,11 +185,11 @@ def campaign_submit(
 
     partition = assign_partition(key, index=index, project=project)
     workspace = _local_partition_workspace(partition, project)
-    return new_job(workspace, template, **job)  # type: ignore[arg-type]
+    return new_job(workspace, workflow, **job)  # type: ignore[arg-type]
 
 
 def campaign_submit_many(
-    template: str,
+    workflow: str,
     items: Iterable[JobItem],
     *,
     key: str,
@@ -205,7 +205,7 @@ def campaign_submit_many(
 
     partition = assign_partition(key, index=index, project=project)
     workspace = _local_partition_workspace(partition, project)
-    return list(new_jobs(workspace, template, items, **shared))  # type: ignore[arg-type]
+    return list(new_jobs(workspace, workflow, items, **shared))  # type: ignore[arg-type]
 
 
 def _selected(config: CampaignConfig, partitions: Sequence[str] | None) -> tuple[str, ...]:
@@ -219,19 +219,19 @@ def _selected(config: CampaignConfig, partitions: Sequence[str] | None) -> tuple
     return tuple(sorted(partitions))
 
 
-def campaign_harvest(
+def campaign_collect(
     *,
-    states: Iterable[str] = DEFAULT_HARVEST_STATES,
+    states: Iterable[str] = DEFAULT_COLLECT_STATES,
     placement: str | None = None,
     partitions: Sequence[str] | None = None,
     project: str | os.PathLike[str] | None = None,
-) -> Iterator[HarvestRecord]:
-    """Harvest the finished jobs of every partition, one workspace after another.
+) -> Iterator[JobRecord]:
+    """Collect the finished jobs of every partition, one workspace after another.
 
-    The partitions are visited in stable order and each is harvested lazily, so a
-    campaign spread over many workspaces streams as one harvest without ever
+    The partitions are visited in stable order and each is collected lazily, so a
+    campaign spread over many workspaces streams as one job_records without ever
     materializing more than the record in hand. Remote partitions are fetched
-    home first — a remote workspace is harvested where it runs — so this crosses
+    home first — a remote workspace is collected where it runs — so this crosses
     only the local partitions and names any remote one it skips.
     """
 
@@ -242,10 +242,10 @@ def campaign_harvest(
         if binding.remote != LOCAL_REMOTE:
             raise ValueError(
                 f"campaign partition {partition!r} is the remote workspace {name!r} on {binding.remote!r}; "
-                "fetch it home with `httk workflow transfer` before harvesting the campaign"
+                "fetch it home with `httk workflow transfer` before collecting the campaign"
             )
         assert binding.path is not None
-        yield from harvest(Workspace(binding.path, mutable=False), states=states, placement=placement)
+        yield from job_records(Workspace(binding.path, mutable=False), states=states, placement=placement)
 
 
 def campaign_managers(

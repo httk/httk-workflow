@@ -706,7 +706,7 @@ class Workspace:
         One unusable entry must never hide the rest of the workspace, so a
         marker-shaped basename that fails validation is reported as a
         :class:`MarkerFault` instead of aborting the scan. This is the exhaustive
-        walk the workspace tools (fsck, collection, status, harvest) use; the
+        walk the workspace tools (fsck, collection, status, collect) use; the
         scheduling passes use the bounded :class:`~httk.workflow.workspace.MarkerStream` instead.
         """
 

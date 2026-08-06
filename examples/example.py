@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""A tour of the *httk-workflow* Python API: init, scaffold, run, harvest.
+"""A tour of the *httk-workflow* Python API: instantiate, run, collect.
 
 The same path as ``docs/quickstart.md``, one call per command:
 
 * :meth:`httk.workflow.Workspace.initialize` creates the workspace;
-* importing :mod:`httk.workflow.vasp` registers its packaged templates, which is
+* importing :mod:`httk.workflow.vasp` registers its packaged workflows, which is
   what lets :func:`~httk.workflow.scaffold.new_job` resolve ``vasp-relax`` by
   name — the generic scaffold never names a domain itself;
 * :func:`httk.workflow.scaffold.new_job` builds and submits one job of the
-  packaged ``vasp-relax`` template;
+  packaged ``vasp-relax`` workflow;
 * :class:`httk.workflow.TaskManager` runs everything that is ready;
-* :func:`httk.workflow.harvest` reads the finished jobs back.
+* :func:`httk.workflow.collect` reads the finished jobs back.
 
 Run it in an empty directory:
 
@@ -26,8 +26,8 @@ to use the real thing.
 import os
 from pathlib import Path
 
-import httk.workflow.vasp  # noqa: F401 - registers the packaged vasp-relax template used below
-from httk.workflow import TaskManager, Workspace, harvest
+import httk.workflow.vasp  # noqa: F401 - registers the packaged vasp-relax workflow used below
+from httk.workflow import TaskManager, Workspace, collect
 from httk.workflow.scaffold import new_job
 
 POSCAR = """silicon
@@ -75,7 +75,8 @@ def main() -> int:
         manager.run_until_idle(timeout=300.0)
 
     # Reading results back is a read-only iteration over the finished jobs.
-    for record in harvest(workspace, states=("succeeded", "failed")):
+    for item in collect(workspace, states=("succeeded", "failed")):
+        record = item.record
         print(f"{record.state} {record.job_key} ({record.job['workflow']})")
         if record.failure is not None:
             print(f"  failure {record.failure.code}: {record.failure.message}")

@@ -23,7 +23,7 @@ Available runners
 -----------------
 
 ``vasp_relax.py``
-    Prepare inputs, run VASP with the reviewed remedy ladder, collect the result.
+    Prepare inputs, run VASP with the reviewed remedy ladder, publish the result.
 ``vasp_relax.sh``
     The same workflow authored in Bash, publishing the same outcomes.
 ``vasp_static.py``

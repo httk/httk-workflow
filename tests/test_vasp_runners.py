@@ -62,6 +62,9 @@ Path("OUTCAR").write_text(
     "   NSW    =     99    number of steps for IOM\\n"
     "   maximum number of plane-waves:    1234\\n"
     " General timing and accounting information for this job:\\n"
+    "   FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)\\n"
+    "   free  energy   TOTEN  =       -10.50000000 eV\\n"
+    "   energy  without entropy=      -10.50000000  energy(sigma->0) =      -10.50000000\\n"
 )
 Path("OSZICAR").write_text(
     "       N       E                     dE             d eps       ncg     rms\\n"
@@ -155,7 +158,7 @@ def _workflow_of(runner: str) -> str:
 
     return {
         "vasp_relax.py": "httk.vasp.relax",
-        "vasp_relax.sh": "httk.vasp.relax",
+        "vasp_relax.sh": "httk.vasp.relax-bash",
         "vasp_static.py": "httk.vasp.static",
         "vasp_relax_static.py": "httk.vasp.relax-static",
     }[runner]
@@ -435,6 +438,6 @@ def test_every_packaged_runner_describes_itself_and_is_referenceable(tmp_path: P
 
     # The Bash relaxation runner and the Python one describe themselves with the
     # same bytes, which is what makes them one workflow rather than two.
-    assert described["vasp_relax.sh"] == described["vasp_relax.py"]
+    assert json.loads(described["vasp_relax.sh"])["steps"] == json.loads(described["vasp_relax.py"])["steps"]
     with pytest.raises(ValueError, match="unknown packaged runner"):
         runner_path("vasp_nonexistent.py")

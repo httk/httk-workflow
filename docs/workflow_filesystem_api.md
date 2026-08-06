@@ -1887,7 +1887,7 @@ scheduling tick. A reference that lacks a placement is a protocol error of
 whatever published it, and the manager rejects the outcome rather than rescanning
 the workspace per child. The whole-workspace scan of step 4 survives for the
 forwarding record of step 3 and for interactive resolution — `job show`, `job
-why`, `job log`, and harvest resolve — where locating an arbitrary and possibly
+why`, `job log`, and collect resolve — where locating an arbitrary and possibly
 finished job by one exhaustive scan is acceptable; it is never entered on the
 scheduling hot path. The
 consequence that matters at scale is that a waiting parent's per-tick cost is
@@ -2413,7 +2413,7 @@ one.
 Only the segment a marker's `record_ref` points *into* is protected, not the
 whole chain behind it. Collecting older segments of the same writer is exactly
 what `journal_days` buys, and the consequence must be stated plainly: the deep
-history of an old job goes with those segments. `harvest` and `job log` then
+history of an old job goes with those segments. `collect` and `job log` then
 report that job's timeline from whatever frames remain and set `gaps` — the
 job's current state, marker, payload, and terminal outcome are unaffected,
 because they never depended on the older frames.

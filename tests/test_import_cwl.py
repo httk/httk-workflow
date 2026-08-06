@@ -495,7 +495,7 @@ def test_the_import_command_submits_a_cwl_job(flows: Path, workspace: Workspace,
         == 0
     )
     report = json.loads(capsys.readouterr().out)
-    assert report["template"] == "cwl" and report["workflow"] == "cwl.workflow"
+    assert report["workflow"] == "cwl.workflow" and "template" not in report
 
     _drive(workspace)
     payload = Path(report["payload_path"])

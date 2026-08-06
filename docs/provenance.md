@@ -1,6 +1,6 @@
 # Run provenance
 
-*For workflow authors and data-layer authors connecting one harvest record to
+*For workflow authors and data-layer authors connecting one collect record to
 one stored `httk.core.Run`.*
 
 The `provenance` declaration describes the entries one workflow execution
@@ -17,7 +17,7 @@ consumed, created, and returned. All members are optional:
 
 The object keys are labels, unique per side. Targets are loose served-entry
 references. The declaration is carried verbatim by workflow; this page
-documents the interpretation used by `run_record`.
+documents the collection used by `run_record`.
 
 ## Declared and observed
 
@@ -50,19 +50,19 @@ from the `workflow` declaration when available.
 The end-to-end handoff is:
 
 ```python
-from httk.workflow import harvest
+from httk.workflow import collect
 from httk.workflow.provenance import run_record
 
-record = next(harvest(workspace))
+record = next(collect(workspace))
 run = run_record(record)
 store.save(run)  # the httk-data side
 ```
 
-`run_record` does not fold children into the parent run. Each child harvests to
+`run_record` does not fold children into the parent run. Each child collects to
 its own `Run`; a parent names child products explicitly in its observed
 declaration. Runner identity, the attempt timeline, and failure remain on the
-`HarvestRecord` for callers that need them.
+`JobRecord` for callers that need them.
 
 VASP runners will adopt this declaration in future work.
 
-Built-in VASP result interpretation is documented in {doc}`interpretation`.
+Built-in VASP result collection is documented in {doc}`collection`.

@@ -391,7 +391,7 @@ class _Collection:
 
         Only the segment a marker points *into* is protected. The frames behind
         it are deep history: collecting them is exactly what ``journal_days``
-        buys, and the cost is that ``harvest`` and ``job log`` report the job's
+        buys, and the cost is that ``collect`` and ``job log`` report the job's
         timeline with ``gaps`` set rather than in full.
 
         A sealed transfer bundle keeps its marker inside the payload instead of
@@ -600,7 +600,7 @@ class _Collection:
         of a bundle awaiting handover — references it, and the writer that
         produced it belongs to no manager still heartbeating. The consequence
         is honest and worth stating: the deep history of an old job goes with
-        the segments, and ``harvest`` and ``job log`` then report that job's
+        the segments, and ``collect`` and ``job log`` then report that job's
         timeline with ``gaps`` set.
         """
 

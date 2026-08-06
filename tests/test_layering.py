@@ -186,9 +186,9 @@ def test_the_manager_never_falls_back_to_a_whole_workspace_lookup() -> None:
 def test_scaffold_holds_no_vasp_knowledge() -> None:
     """The generic scaffold registers no domain: a domain self-registers instead.
 
-    Templates reach the generic scaffold only through its provider registry, so
-    the module carries no hardcoded VASP template table, no VASP runner, workflow
-    or template identifier, and no import of the science that owns them. What a
+    Workflows reach the generic scaffold only through its provider registry, so
+    the module carries no hardcoded VASP workflow table, no VASP runner, workflow
+    or workflow identifier, and no import of the science that owns them. What a
     provider supplies at import is data; the scaffold never names the domain, and
     it registers nothing itself.
     """
@@ -202,7 +202,7 @@ def test_scaffold_holds_no_vasp_knowledge() -> None:
         "vasp_relax",
         "vasp-static",
         "vasp_static",
-        "TemplateProvider(",
+        "WorkflowProvider(",
     ):
         assert token not in source, f"scaffold must not name the VASP domain: {token!r}"
     for imported in _imported_modules(WORKFLOW / "scaffold.py"):

@@ -204,7 +204,7 @@ because a dynamic campaign refines what it declares as it learns it:
 a.declare("workflow", {**a.declaration("workflow"), "outputs": {"structures": 3}})
 ```
 
-See {doc}`declarations` for the declared/observed contract and what a harvest
+See {doc}`declarations` for the declared/observed contract and what a collect
 reports.
 
 `a.children` is empty unless this activation followed a `gather`. Every child is

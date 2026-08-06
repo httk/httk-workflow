@@ -4,11 +4,11 @@
 The five steps are the whole workflow: ``prepare`` and ``run`` are the relaxation,
 ``promote`` archives the relaxation, makes its CONTCAR the new structure, and
 re-derives the inputs for a single point, ``static`` runs that single point, and
-``collect`` publishes both stages — the relaxation under ``relax/`` and the single
+``publish`` publishes both stages — the relaxation under ``relax/`` and the single
 point under ``static/``.
 
 This is the *httk* v1 formation-energy template without its database half: a
-formation energy is assembled at harvest time from the total energies of several
+formation energy is assembled at job_records time from the total energies of several
 such jobs and the elemental references they are compared against, which is an
 analysis over finished jobs rather than a step of one job. What this runner
 guarantees is the pair of numbers that assembly needs — one relaxed structure and
@@ -259,7 +259,7 @@ def execute(a: Attempt, *, next_step: str) -> None:
     a.retry(f"applied the {decision.policy} remedy for {decision.problem}")
 
 
-def publish(a: Attempt, *, prefix: str, directory: Path | None = None) -> None:
+def publish_files(a: Attempt, *, prefix: str, directory: Path | None = None) -> None:
     """Publish the collected files of one finished calculation stage."""
 
     root = a.workdir if directory is None else directory
@@ -336,16 +336,16 @@ def promote(a: Attempt) -> None:
 def static(a: Attempt) -> None:
     """Run the single point, remedy a recognized failure, or fail."""
 
-    execute(a, next_step="collect")
+    execute(a, next_step="publish")
 
 
 @run.step
-def collect(a: Attempt) -> None:
+def publish(a: Attempt) -> None:
     """Publish both stages and complete the job."""
 
     prefix = text_input(a, "data_prefix", "")
-    publish(a, prefix=f"{prefix}/static" if prefix else "static")
-    publish(
+    publish_files(a, prefix=f"{prefix}/static" if prefix else "static")
+    publish_files(
         a,
         prefix=f"{prefix}/{RELAX_ARCHIVE}" if prefix else RELAX_ARCHIVE,
         directory=a.workdir / RELAX_ARCHIVE,

@@ -221,7 +221,7 @@ jq '.outputs = {"structures": 3}' declared.json >refined.json
 httk_workflow_declare workflow refined.json
 ```
 
-See {doc}`declarations` for the declared/observed contract and what a harvest
+See {doc}`declarations` for the declared/observed contract and what a collect
 reports.
 
 `httk_workflow_children` prints `label`, terminal state, job key, workdir, and

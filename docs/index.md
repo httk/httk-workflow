@@ -9,7 +9,7 @@ three layers, each with its own import home: the **filesystem protocol**
 (`httk.workflow.protocol`), the **execution and authoring** surface
 (`httk.workflow` — `Runner`, `Attempt` — with lower-level helpers in
 `httk.workflow.runtime`), and **orchestration and management** (`Workspace`,
-`TaskManager`, `harvest`, and named submodules for transfers, remotes, and
+`TaskManager`, `collect`, and named submodules for transfers, remotes, and
 compatibility). Installations register the canonical `httk workflow` command
 tree, plus the `httk-taskmanager` and `httk-v1-taskmanager` executables, which
 are aliases of it.
@@ -32,8 +32,8 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`sdk_parity` — the normative table both of the above must agree with
 - {doc}`vasp_runners` — the packaged runners, for campaigns that write none
 - {doc}`declarations` — saying what a workflow *is*, for a data layer
-- {doc}`provenance` — turning one harvest record into one `httk.core.Run`
-- {doc}`interpretation` — interpreting harvested workflows into entries and products
+- {doc}`provenance` — turning one `JobRecord` into one `httk.core.Run`
+- {doc}`collecting` — collecting provider-postprocessed outputs and products
 - {doc}`importing_workflows` — running PWD and CWL documents as ordinary jobs
 - {doc}`notebooks/examples` — worked examples as a notebook
 
@@ -43,7 +43,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`workflow_cli` — the whole `httk workflow` tree: projects, config, remotes
 - {doc}`campaigns` — partitioning a very large campaign across many workspaces
 - {doc}`benchmarks` — measured local scale snapshot and benchmark methodology
-- {doc}`harvest` — reading finished jobs back out as records
+- {doc}`collecting` — reading finished jobs back out as records and collected outputs
 - {doc}`adapter_authoring` — reaching a machine the packaged adapters do not cover
 - {doc}`reference/index` — the generated API reference
 
@@ -70,10 +70,10 @@ One workspace, one job of a packaged runner, and one manager that runs it:
 ```console
 httk project init --name quickstart
 httk workflow workspace init . --name default
-httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
+httk workflow job new --workflow vasp-relax --parameter structure=POSCAR --tag silicon
 httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
 httk workflow run
-httk workflow harvest
+httk workflow collect
 ```
 
 {doc}`quickstart` walks through exactly those commands, including how to run them
@@ -96,13 +96,12 @@ sdk_parity
 vasp_runners
 declarations
 provenance
-interpretation
+collecting
 importing_workflows
 taskmanager
 workflow_cli
 campaigns
 benchmarks
-harvest
 adapter_authoring
 reference/index
 notebooks/examples

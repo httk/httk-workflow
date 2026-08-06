@@ -412,7 +412,7 @@ def test_the_import_command_submits_a_job_and_reports_it(
         == 0
     )
     report = json.loads(capsys.readouterr().out)
-    assert report["template"] == "pwd" and report["workflow"] == "pwd.workflow"
+    assert report["workflow"] == "pwd.workflow" and "template" not in report
     assert report["runner"]["path"] == f"pkg:{PACKAGE}/pwd_runner.py"
 
     _drive(workspace)

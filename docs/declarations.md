@@ -6,7 +6,7 @@ A *workflow declaration* is a property-like document that says what a workflow
 **is** — the inputs it consumes, the method it applies, the outputs it produces —
 without describing a graph. It is what a data layer stores next to a result so
 the result can later be explained: not the trace of what ran, which is the
-{doc}`harvest <harvest>` provenance, but the statement of what was meant to run.
+{doc}`collect <collect>` provenance, but the statement of what was meant to run.
 
 OPTIMADE is standardizing exactly this document, graph-free and versioned like
 its other property definitions. That work is in progress, so *httk-workflow*
@@ -26,7 +26,7 @@ vocabulary and which version it follows, and a consumer that understands that
 vocabulary interprets it. An engine that wrapped or reinterpreted the document
 could only ever come to disagree with the standard it is carrying.
 
-Interpretation therefore belongs to *httk-data* and OPTIMADE tooling. Carriage,
+collection therefore belongs to *httk-data* and OPTIMADE tooling. Carriage,
 digest coverage, and honest reporting belong here.
 
 Packaged templates may carry declarations into every scaffolded `job.json`; the
@@ -54,7 +54,7 @@ whole `.httk-job/` directory is excluded from every payload digest — so declar
 can never disturb the immutability check of a payload, a child registration, or a
 detached transfer.
 
-A harvest reports both, side by side, per name. Reconciling them requires
+A collect reports both, side by side, per name. Reconciling them requires
 understanding the vocabulary, which is the consumer's job, not the engine's.
 
 ## A job that declares
@@ -137,9 +137,9 @@ one `job.json` is limited to 262144 serialized bytes, the same allowance
 `inputs` has and for the same reason — bulk content belongs in the payload or in
 transactional `data/`.
 
-## What a harvest reports
+## What a collect reports
 
-`HarvestRecord.declarations` maps every name either source knows to both sides:
+`JobRecord.declarations` maps every name either source knows to both sides:
 
 ```json
 {
@@ -157,10 +157,10 @@ transactional `data/`.
 A name that only `job.json` declared has `"observed": null`; a name only the
 runner wrote has `"declared": null`. An observed document that cannot be read is
 reported as `null` and sets `provenance.gaps` on the record, exactly like every
-other damaged evidence a harvest still reports rather than hides.
+other damaged evidence a collect still reports rather than hides.
 
-See {doc}`harvest` for the record as a whole, {doc}`runtime_helpers` and
+See {doc}`collect` for the record as a whole, {doc}`runtime_helpers` and
 {doc}`native_bash_api` for the two authoring APIs, and
 {doc}`workflow_filesystem_api` for the normative statement of the `declarations`
 member and the payload area it is stored in. See {doc}`provenance` for the
-interpretation of the `provenance` declaration.
+collection of the `provenance` declaration.

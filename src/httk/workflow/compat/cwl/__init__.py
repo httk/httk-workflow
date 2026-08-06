@@ -896,7 +896,6 @@ def import_cwl(
         data_mode=data_mode,
         required_capabilities=tuple(sorted(context.capabilities)),
         maximum_attempts_per_activation=maximum_attempts,
-        template="cwl",
     )
     for warning in context.warnings:
         _LOGGER.warning("%s", warning)
