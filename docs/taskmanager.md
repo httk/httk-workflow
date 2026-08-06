@@ -514,9 +514,9 @@ whichever manager is running and is read from the manifest each manager
 publishes, so a manager that is not running is reported as absent rather than
 assumed.
 
-Reading *results* rather than status is a collect: `httk workflow collect
-WORKSPACE`, or `httk.workflow.collect`, streams one record per finished job for a
-data layer to store; see {doc}`collect`.
+Reading *results* rather than status is collecting: `httk workflow collect
+WORKSPACE` streams `CollectedJob` summaries, while `--raw` exposes the
+`JobRecord` stream for a data layer; see {doc}`collecting`.
 
 ## The foreground debug runner
 

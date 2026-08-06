@@ -333,8 +333,8 @@ children always inherit their parent's workspace. See {doc}`campaigns`.
 
 ## Creating jobs
 
-`job new` scaffolds and submits jobs from a template — a packaged runner name or
-the path of a runner file of your own — and needs no prepared payload:
+`job new` scaffolds and submits jobs from a workflow — a registered workflow id,
+alias, or the path of a runner file — and needs no prepared payload:
 
 ```console
 httk workflow job new WORKSPACE --workflow vasp-relax --parameter structure=POSCAR --tag silicon
@@ -388,8 +388,9 @@ each command takes `--json`. `job debug` exits `0` on success, `3` on failure, a
 `4` when the job stopped without finishing. See
 {doc}`taskmanager` for what each command reports.
 
-`httk workflow collect WORKSPACE` streams one record per finished job for a data
-layer to store, as JSON lines by default; see {doc}`collect`.
+`httk workflow collect WORKSPACE` streams one `CollectedJob` summary per finished
+job as JSON lines by default. Use `--raw` to stream `JobRecord` records for a
+data layer; see {doc}`collecting`.
 
 ## Configuration and projects
 
