@@ -147,6 +147,7 @@ class WorkflowProvider:
     inputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
+    declaration_file: str | None = None
     _parameter_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -155,7 +156,12 @@ class WorkflowProvider:
             raise ValueError("a workflow provider must supply both runner_package and runner_file")
         if packaged == (self.directory is not None):
             raise ValueError("a workflow provider must be packaged or directory-sourced, exclusively")
-        if packaged and (self.entry != "run" or self.instantiate_file is not None or self.postprocess_file is not None):
+        if packaged and (
+            self.entry != "run"
+            or self.instantiate_file is not None
+            or self.postprocess_file is not None
+            or self.declaration_file is not None
+        ):
             raise ValueError("directory-only fields are not allowed on a packaged workflow provider")
         if self.directory is not None and (not self.entry or PurePosixPath(self.entry).is_absolute()):
             raise ValueError(f"workflow directory entry must be a relative member: {self.entry!r}")
@@ -267,13 +273,17 @@ class ResolvedWorkflow:
     inputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
+    declaration_file: str | None = None
     _parameter_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         if self.packaged is not None and self.directory is not None:
             raise ValueError("a resolved workflow cannot be packaged and directory-sourced")
         if self.packaged is not None and (
-            self.entry != "run" or self.instantiate_file is not None or self.postprocess_file is not None
+            self.entry != "run"
+            or self.instantiate_file is not None
+            or self.postprocess_file is not None
+            or self.declaration_file is not None
         ):
             raise ValueError("directory-only fields are not allowed on a packaged resolved workflow")
 
@@ -526,6 +536,7 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
         inputs=provider.inputs,
         outputs=provider.outputs,
         declaration_uri=provider.declaration_uri,
+        declaration_file=provider.declaration_file,
         _parameter_metadata=provider._parameter_metadata,
     )
 
@@ -574,6 +585,7 @@ def resolve_workflow(
                 inputs=provider.inputs,
                 outputs=provider.outputs,
                 declaration_uri=provider.declaration_uri,
+                declaration_file=provider.declaration_file,
                 _parameter_metadata=provider._parameter_metadata,
             )
         elif not path.is_file():

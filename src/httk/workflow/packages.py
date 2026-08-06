@@ -392,8 +392,10 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         inputs=inputs,
         outputs=outputs,
         declaration_uri=declaration_uri,
+        declaration_file=None,
         _parameter_metadata=parameter_metadata,
     )
+    declaration_member: str | None = None
     if "declaration_file" in workflow:
         declaration_member = _member(root, workflow["declaration_file"], "[workflow].declaration_file")
         try:
@@ -408,6 +410,8 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     except (FormatError, ValueError, TypeError) as exc:
         raise _error(root, f"workflow declaration exceeds or violates the declaration limit: {exc}") from exc
     provider = replace(provider, declarations=validated)
+    if declaration_member is not None:
+        provider = replace(provider, declaration_file=declaration_member)
     if postprocess_file is not None:
         provider = replace(provider, postprocessor=cast(Any, _source_hook(root, postprocess_file, "postprocess")))
     return provider

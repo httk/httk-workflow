@@ -1,5 +1,7 @@
 """Runner and job command groups."""
 
+import os
+
 from ._common import *
 from ._common import (
     _durable,
@@ -130,6 +132,13 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Scaffold and submit one job or a parameter-source batch."""
 
     workspace = Workspace(_local_root(arguments, context, action="submit into it"))
+    if arguments.workflow_dir is not None:
+        workflow_dir = Path(arguments.workflow_dir).expanduser()
+        if not workflow_dir.is_dir() or not (workflow_dir / "workflow.toml").is_file():
+            raise ValueError(f"--workflow-dir must name a directory containing workflow.toml: {workflow_dir}")
+        workflow_target: str | os.PathLike[str] = workflow_dir.resolve()
+    else:
+        workflow_target = arguments.workflow
     inputs = {name: _json_value(text, f"job input {name!r}") for name, text in _pairs(arguments.inputs, "a job input")}
     files: dict[str, str | Path] = {name: Path(text) for name, text in _pairs(arguments.files, "a staged file")}
     parameters, items, parameter_tag = _load_parameters(arguments.parameters, arguments.parameter_from)
@@ -148,9 +157,9 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
     if items:
         for item in items:
             item["tag"] = arguments.tag or item.get("tag")
-        results: Iterator[ScaffoldedJob] = new_jobs(workspace, arguments.workflow, items, **shared)
+        results: Iterator[ScaffoldedJob] = new_jobs(workspace, workflow_target, items, **shared)
     else:
-        results = iter([new_job(workspace, arguments.workflow, tag=arguments.tag or parameter_tag, **shared)])
+        results = iter([new_job(workspace, workflow_target, tag=arguments.tag or parameter_tag, **shared)])
     if arguments.json:
         # One self-describing report per job, as an array, exactly as `job_records
         # --json` prints one array of records.
@@ -365,11 +374,18 @@ def build_job_parser(
     for workflow_id in registered_workflows():
         provider = workflow_provider(workflow_id)
         workflow_names.append(f"{workflow_id} ({provider.alias})" if provider and provider.alias else workflow_id)
-    new.add_argument(
+    workflow_group = new.add_mutually_exclusive_group(required=True)
+    workflow_group.add_argument(
         "--workflow",
         metavar="WORKFLOW",
-        required=True,
-        help="a registered workflow (" + ", ".join(workflow_names) + ") or the path of a runner file",
+        help="a registered workflow ("
+        + ", ".join(workflow_names)
+        + ") or the path of a runner file or package directory",
+    )
+    workflow_group.add_argument(
+        "--workflow-dir",
+        metavar="PATH",
+        help="a workflow package directory containing workflow.toml (path-only; no registry lookup)",
     )
     new.add_argument(
         "--input",
