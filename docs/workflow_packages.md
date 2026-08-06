@@ -149,16 +149,18 @@ description = "Sampling density."
 ### `[workflow.outputs.<NAME>]`
 
 `entry_type` is required. The other accepted keys are `ref`, `description`,
-`product_of`, and `role`. `role` defaults to the output key. `product_of`, when
-present, must name an entry-typed `[workflow.parameters]` key; generated declarations resolve
-that parameter key to its declaration `role`.
+`product_of`, and `role`. `role` defaults to the output key. `product_of` is a
+scalar role reference: it may name a parameter role or another output role. It
+means “the single entity this output is an attribute-like property of”; joint
+derivations stay unmarked—the `Run` carries them. Self-references, output
+cycles, ambiguous parameter/output names, and unknown roles are rejected.
 
 ```toml
 [workflow.outputs.relaxed]
 entry_type = "structures"
 ref = "https://example.org/types/structure"
 description = "The relaxed structure."
-product_of = "structure"
+product_of = "initial_structure"
 role = "relaxed_structure"
 ```
 
@@ -166,16 +168,16 @@ role = "relaxed_structure"
 
 Without `declaration_file`, `workflow_declaration_from_manifest(provider)`
 generates an OPTIMADE-format document with optional `$id` and `description`,
-entry-typed parameter entries, and output entries with `product_of` role names.
-It becomes `provider.declarations["workflow"]` and is embedded in `job.json`.
+entry-typed parameter entries, and output entries. `product_of` is curation
+metadata and is never emitted in this declaration. It becomes
+`provider.declarations["workflow"]` and is embedded in `job.json`.
 
 With `declaration_file`, the JSON document is loaded and embedded verbatim after
 validation. Its `$id` must equal `declaration_uri` when both are supplied. Every
 external parameter and output role maps must exactly cover the manifest's
-entry-typed parameters and outputs, and output `entry_type` and `product_of`
-values must agree with the manifest. Every product source must be emitted by an
-entry-typed parameter. The declaration remains the authoritative OPTIMADE
-document; the manifest remains the authoritative strictly httk-owned package glue.
+entry-typed parameters and outputs. An external declaration must not contain
+`product_of`; the declaration remains the authoritative OPTIMADE document, and
+the manifest remains the authoritative strictly httk-owned package glue.
 
 ## Hooks and trust
 
@@ -195,10 +197,18 @@ def postprocess(record):
 An instantiate hook runs during scaffolding and may write the payload or update
 inputs. A postprocess hook runs during `collect`; it returns role-keyed outputs.
 The framework validates those roles, derives unfulfilled roles, overlays output
-edges onto the `Run`, and emits `ProductLink` values from `product_of`. A direct
+edges onto the `Run`, and emits `ProductLink` values from manifest/provider
+`product_of`. A direct
 package path's instantiate hook and the job-pinned postprocess fallback execute
 from the published, digest-pinned tree; registered-directory postprocessors
 instead execute current source bytes by explicit registration consent.
+
+The job-embedded declaration governs the Run (immutable facts per job). ProductLinks
+come from the live registered provider's manifest and therefore apply today's
+curation; if collection uses the job-pinned fallback instead, they come from
+that job's own verified pinned manifest and preserve its historical curation,
+not today's. If no provider or pinned manifest is reachable, no products are
+emitted.
 
 There are THREE TRUST TIERS:
 

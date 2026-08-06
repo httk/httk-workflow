@@ -518,7 +518,10 @@ def test_collect_assembles_overlay_edges_and_products(
     document = {
         "$id": "https://schemas.example.test/workflows/collect",
         "parameters": [{"name": "initial_structure", "entry_type": "structures"}],
-        "output_types": [{"name": "relaxed_structure", "entry_type": "structures", "product_of": "initial_structure"}],
+        "output_types": [
+            {"name": "relaxed_structure", "entry_type": "structures"},
+            {"name": "total_energy", "entry_type": "records"},
+        ],
     }
     record = replace(
         record,
@@ -543,6 +546,10 @@ def test_collect_assembles_overlay_edges_and_products(
         type = "structures"
         id = "new-structure"
 
+    class Energy:
+        type = "records"
+        id = "new-energy"
+
     provider = WorkflowProvider(
         workflow_id="tests.framework.collect",
         alias="tests-framework-collect",
@@ -550,16 +557,29 @@ def test_collect_assembles_overlay_edges_and_products(
         runner_file="runner.py",
         initial_step="run",
         declarations={"workflow": document},
-        postprocessor=lambda _record: {"relaxed_structure": Structure()},
+        outputs={
+            "relaxed_structure": {
+                "entry_type": "structures",
+                "role": "relaxed_structure",
+                "product_of": "initial_structure",
+            },
+            "total_energy": {
+                "entry_type": "records",
+                "role": "total_energy",
+                "product_of": "relaxed_structure",
+            },
+        },
+        postprocessor=lambda _record: {"relaxed_structure": Structure(), "total_energy": Energy()},
     )
     monkeypatch.setitem(scaffold_module._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
     monkeypatch.setattr(collecting_module, "job_records", lambda *_args, **_kwargs: iter((record,)))
 
     collected = next(collecting_module.collect(workspace))
     assert cast(Any, collected.outputs["relaxed_structure"]).id == "new-structure"
+    assert cast(Any, collected.outputs["total_energy"]).id == "new-energy"
     assert [edge.label for edge in collected.run.inputs] == ["initial_structure"]
-    assert [edge.label for edge in collected.run.artifacts] == ["unrelated", "relaxed_structure"]
-    assert [edge.label for edge in collected.run.outputs] == ["relaxed_structure", "unrelated"]
+    assert [edge.label for edge in collected.run.artifacts] == ["unrelated", "relaxed_structure", "total_energy"]
+    assert [edge.label for edge in collected.run.outputs] == ["relaxed_structure", "unrelated", "total_energy"]
     assert collected.products == (
         httk.core.ProductLink(
             source_type="structures",
@@ -567,6 +587,14 @@ def test_collect_assembles_overlay_edges_and_products(
             target_type="structures",
             target_id="new-structure",
             label="relaxed_structure",
+            workflow_declaration_uri=str(document["$id"]),
+        ),
+        httk.core.ProductLink(
+            source_type="structures",
+            source_id="new-structure",
+            target_type="records",
+            target_id="new-energy",
+            label="total_energy",
             workflow_declaration_uri=str(document["$id"]),
         ),
     )
@@ -578,13 +606,22 @@ def test_collect_assembles_overlay_edges_and_products(
         runner_file="runner.py",
         initial_step="run",
         declarations={"workflow": {"output_types": [{"name": "different", "entry_type": "records"}]}},
-        postprocessor=lambda _record: {"relaxed_structure": Structure()},
+        postprocessor=lambda _record: {"relaxed_structure": Structure(), "total_energy": Energy()},
     )
     monkeypatch.setitem(scaffold_module._WORKFLOW_PROVIDERS, changed_provider.workflow_id, changed_provider)
     recollected = next(collecting_module.collect(workspace))
     assert recollected.outputs.keys() == collected.outputs.keys()
     assert recollected.run == collected.run
-    assert recollected.products == collected.products
+    assert recollected.products == ()
+
+    incomplete_provider = replace(
+        provider,
+        postprocessor=lambda _record: {"total_energy": Energy()},
+    )
+    monkeypatch.setitem(scaffold_module._WORKFLOW_PROVIDERS, incomplete_provider.workflow_id, incomplete_provider)
+    incomplete = next(collecting_module.collect(workspace))
+    assert incomplete.unfulfilled == ("relaxed_structure",)
+    assert incomplete.products == ()
 
 
 def test_a_record_refuses_a_mapping_of_another_format() -> None:

@@ -806,6 +806,13 @@ def _output_roles(document: Mapping[str, object]) -> dict[str, Mapping[str, obje
     return {item["name"]: item for item in raw if isinstance(item, Mapping) and isinstance(item.get("name"), str)}
 
 
+def _provider_output_roles(provider: object | None) -> dict[str, Mapping[str, object]]:
+    raw = getattr(provider, "outputs", {}) if provider is not None else {}
+    if not isinstance(raw, Mapping):
+        return {}
+    return {str(entry.get("role", name)): entry for name, entry in raw.items() if isinstance(entry, Mapping)}
+
+
 def _entry_edge(identity: str, role: str, value: object, declared: Mapping[str, object]) -> httk.core.RunEdge:
     entry_id = getattr(value, "id", None)
     if not isinstance(entry_id, str):
@@ -962,10 +969,14 @@ def collect(
             )
             products: list[httk.core.ProductLink] = []
             input_edges = {edge.label: edge for edge in run.inputs}
-            for role, declaration in roles.items():
-                source_role = declaration.get("product_of")
-                output_edge = next((edge for edge in owned if edge.label == role), None)
-                source_edge = input_edges.get(source_role) if isinstance(source_role, str) else None
+            owned_edges = {edge.label: edge for edge in owned}
+            for role, curation in _provider_output_roles(provider).items():
+                source_role = curation.get("product_of")
+                output_edge = owned_edges.get(role)
+                if isinstance(source_role, str):
+                    source_edge = input_edges.get(source_role) or owned_edges.get(source_role)
+                else:
+                    source_edge = None
                 if output_edge is not None and source_edge is not None:
                     products.append(
                         core.ProductLink(

@@ -47,7 +47,7 @@ default = "test"
 entry_type = "structures"
 ref = "https://example.test/structures"
 description = "The output structure."
-product_of = "structure"
+product_of = "initial_structure"
 role = "relaxed_structure"
 '''
 
@@ -55,7 +55,7 @@ _DECLARATION = {
     "$id": "https://example.test/workflows/package",
     "description": "External declaration.",
     "parameters": [{"name": "initial_structure", "entry_type": "structures"}],
-    "output_types": [{"name": "relaxed_structure", "entry_type": "structures", "product_of": "initial_structure"}],
+    "output_types": [{"name": "relaxed_structure", "entry_type": "structures"}],
 }
 
 
@@ -102,11 +102,11 @@ def test_manifest_parses_and_generates_the_declared_roles(tmp_path: Path) -> Non
                 "entry_type": "structures",
                 "ref": "https://example.test/structures",
                 "description": "The output structure.",
-                "product_of": "initial_structure",
             }
         ],
     }
     assert provider.declarations["workflow"] == workflow_declaration_from_manifest(provider)
+    assert provider.outputs["relaxed"]["product_of"] == "initial_structure"
 
 
 def test_manifest_rejects_duplicate_output_roles(tmp_path: Path) -> None:
@@ -127,6 +127,24 @@ def test_external_declaration_is_embedded_verbatim(tmp_path: Path) -> None:
     declaration["$id"] = "https://example.test/workflows/external"
     (package / "declaration.json").write_text(json.dumps(declaration), encoding="utf-8")
     assert parse_workflow_manifest(package).declarations == {"workflow": declaration}
+
+
+def test_external_declaration_rejects_product_of(tmp_path: Path) -> None:
+    package = _package(
+        tmp_path / "package",
+        _MANIFEST.replace(
+            'declaration_uri = "https://example.test/workflows/package"',
+            'declaration_uri = "https://example.test/workflows/external"\ndeclaration_file = "declaration.json"',
+        ),
+    )
+    declaration = dict(_DECLARATION)
+    declaration["$id"] = "https://example.test/workflows/external"
+    declaration["output_types"] = [
+        {"name": "relaxed_structure", "entry_type": "structures", "product_of": "initial_structure"}
+    ]
+    (package / "declaration.json").write_text(json.dumps(declaration), encoding="utf-8")
+    with pytest.raises(ValueError, match="must not carry product_of"):
+        parse_workflow_manifest(package)
 
 
 @pytest.mark.parametrize(
@@ -171,7 +189,7 @@ def test_external_declaration_must_match_the_manifest(tmp_path: Path, field: str
         ),
         ("steps = []", "steps must be a nonempty list"),
         ("steps = [\"one\", \"two\"]", "initial_step is required"),
-        ("product_of = \"missing\"", "product_of names missing parameter"),
+        ("product_of = \"missing\"", "product_of names unknown parameter or output role"),
         ("[workflow.inputs.label]\ntype = \"integer\"\ndefault = \"bad\"", "default does not match type"),
     ],
 )
@@ -190,10 +208,33 @@ def test_manifest_validation_errors_are_pathful(tmp_path: Path, change: str, mes
     elif change == "steps = []" or change.startswith("steps ="):
         manifest = manifest.replace('steps = ["start"]', change)
     elif change.startswith("product_of"):
-        manifest = manifest.replace('product_of = "structure"', change)
+        manifest = manifest.replace('product_of = "initial_structure"', change)
     else:
         manifest = manifest.replace('type = "string"\ndefault = "test"', 'type = "integer"\ndefault = "bad"')
     with pytest.raises(ValueError, match=message):
+        parse_workflow_manifest(_package(tmp_path / "package", manifest))
+
+
+@pytest.mark.parametrize(
+    ("product", "extra", "message"),
+    [
+        ("relaxed_structure", "", "cannot reference its own output role"),
+        (
+            "other",
+            '\n[workflow.outputs.other]\nentry_type = "records"\nproduct_of = "relaxed_structure"',
+            "forms an output cycle",
+        ),
+    ],
+)
+def test_manifest_rejects_output_product_cycles(tmp_path: Path, product: str, extra: str, message: str) -> None:
+    manifest = _MANIFEST.replace('product_of = "initial_structure"', f'product_of = "{product}"') + extra
+    with pytest.raises(ValueError, match=message):
+        parse_workflow_manifest(_package(tmp_path / "package", manifest))
+
+
+def test_manifest_rejects_ambiguous_product_role(tmp_path: Path) -> None:
+    manifest = _MANIFEST + '\n[workflow.outputs.initial]\nentry_type = "structures"\nrole = "initial_structure"\n'
+    with pytest.raises(ValueError, match="both a parameter and output role"):
         parse_workflow_manifest(_package(tmp_path / "package", manifest))
 
 
