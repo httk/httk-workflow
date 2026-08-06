@@ -9,6 +9,13 @@ framework-level `collect()` iterator dispatches each record through its
 registered workflow postprocessor and yields a `CollectedJob` with role-keyed
 outputs, provenance, products, and any unfulfilled roles.
 
+The job-embedded declaration governs the Run (immutable facts per job). ProductLinks
+come from the live registered provider's manifest and therefore apply today's
+curation; if collection uses the job-pinned fallback instead, they come from
+that job's own verified pinned manifest and preserve its historical curation,
+not today's. Postprocessing is the workflow-owned substep of collecting. If no
+provider or pinned manifest is reachable, no products are emitted.
+
 `JobRecord` is the layering boundary of *httk₂*. *httk-workflow* has no
 database dependency: it produces records, and something else — `httk-data` —
 consumes them. A consumer therefore reads results like this, and nothing in
@@ -159,7 +166,10 @@ stores it.
 workflow id through `workflow_provider()`, calls that provider's callable or
 lazy `module:function` postprocessor, validates role names against declared
 `output_types` in the job's embedded workflow declaration, and assembles the
-`Run` and `ProductLink` values. Old jobs without that declaration fall back to
+`Run` and `ProductLink` values. Product curation is read from the live
+registered provider's manifest, or from the job's own verified pinned manifest
+when the fallback is enabled; the embedded declaration supplies only the
+immutable Run facts. Old jobs without that declaration fall back to
 the currently registered provider declaration, so their role interpretation is
 necessarily live rather than historical. A workflow
 without a provider or postprocessor is represented as a degraded `CollectedJob`

@@ -163,6 +163,7 @@ def _validate_outputs(
 ) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
     roles: set[str] = set()
+    parameter_roles = {str(entry.get("role", name)): name for name, entry in parameters.items()}
     for name, value in raw.items():
         output = _validate_name(name, "[workflow.outputs] name", directory)
         table = _table(value, f"[workflow.outputs.{output}]", directory)
@@ -174,10 +175,6 @@ def _validate_outputs(
             raise _error(directory, f"{path}.role is duplicated")
         roles.add(role)
         product_of = _optional_string(table, "product_of", path, directory)
-        if product_of is not None and product_of not in parameters:
-            raise _error(directory, f"{path}.product_of names missing parameter {product_of!r}")
-        if product_of is not None and "entry_type" not in parameters[product_of]:
-            raise _error(directory, f"{path}.product_of parameter {product_of!r} is not entry-typed")
         entry: dict[str, object] = {"entry_type": entry_type, "role": role}
         for key in ("ref", "description"):
             optional = _optional_string(table, key, path, directory)
@@ -186,6 +183,47 @@ def _validate_outputs(
         if product_of is not None:
             entry["product_of"] = product_of
         result[output] = entry
+    for name, entry in result.items():
+        source_role = entry.get("product_of")
+        if not isinstance(source_role, str):
+            continue
+        path = f"[workflow.outputs.{name}]"
+        role = str(entry["role"])
+        if source_role == role:
+            raise _error(directory, f"{path}.product_of cannot reference its own output role {role!r}")
+        parameter_match = source_role in parameter_roles
+        output_match = source_role in roles
+        if parameter_match and output_match:
+            raise _error(
+                directory,
+                f"{path}.product_of role {source_role!r} is both a parameter and output role; rename one",
+            )
+        if not parameter_match and not output_match:
+            raise _error(directory, f"{path}.product_of names unknown parameter or output role {source_role!r}")
+    output_paths = {str(entry["role"]): f"[workflow.outputs.{name}]" for name, entry in result.items()}
+    graph = {
+        str(entry["role"]): str(entry["product_of"])
+        for entry in result.values()
+        if isinstance(entry.get("product_of"), str) and str(entry["product_of"]) in roles
+    }
+    visiting: list[str] = []
+    visited: set[str] = set()
+
+    def visit(role: str) -> None:
+        if role in visiting:
+            cycle = " -> ".join([*visiting[visiting.index(role) :], role])
+            raise _error(directory, f"{output_paths[role]}.product_of forms an output cycle: {cycle}")
+        if role in visited:
+            return
+        visiting.append(role)
+        source = graph.get(role)
+        if source is not None:
+            visit(source)
+        visiting.pop()
+        visited.add(role)
+
+    for role in graph:
+        visit(role)
     return result
 
 
@@ -247,14 +285,11 @@ def _validate_external_declaration(
             raise _error(directory, f"external declaration output {name!r} is not a manifest output role")
         if entry.get("entry_type") != expected.get("entry_type"):
             raise _error(directory, f"external declaration output {name!r} has an incompatible entry_type")
-        expected_product = None
-        if "product_of" in expected:
-            parameter = provider._parameter_metadata.get(str(expected["product_of"]))
-            expected_product = parameter.get("role", expected["product_of"]) if parameter is not None else None
-            if expected_product is None:
-                raise _error(directory, f"manifest output {name!r} has a dangling product_of")
-        if entry.get("product_of") != expected_product:
-            raise _error(directory, f"external declaration output {name!r} has an incompatible product_of")
+        if "product_of" in entry:
+            raise _error(
+                directory,
+                f"external declaration output {name!r} must not carry product_of; curation belongs in the manifest",
+            )
     missing = sorted(set(output_roles) - set(actual_outputs))
     extra = sorted(set(actual_outputs) - set(output_roles))
     if missing:
@@ -287,9 +322,6 @@ def workflow_declaration_from_manifest(provider: WorkflowProvider) -> dict[str, 
         for key in ("ref", "description"):
             if key in entry:
                 output[key] = entry[key]
-        if "product_of" in entry:
-            parameter_metadata = provider._parameter_metadata[str(entry["product_of"])]
-            output["product_of"] = parameter_metadata.get("role", entry["product_of"])
         outputs.append(output)
     document["parameters"] = parameters
     document["output_types"] = outputs

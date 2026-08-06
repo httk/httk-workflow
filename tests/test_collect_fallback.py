@@ -3,12 +3,14 @@
 import json
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace, collect, job_records
+from httk.workflow import scaffold as scaffold_module
 from httk.workflow._util import tree_digest
 from httk.workflow.collecting import JobRecord
 from httk.workflow.scaffold import new_job
@@ -25,6 +27,15 @@ _DATA_POSTPROCESS = """from httk.core import DataRecord
 
 def postprocess(record):
     return {"relaxed_structure": DataRecord.from_value("https://example.test/energy", "total", 1.5)}
+"""
+_CHAIN_POSTPROCESS = """from httk.core import DataRecord
+
+
+def postprocess(record):
+    return {
+        "relaxed_structure": DataRecord.from_value("https://example.test/structure", "relaxed", 1.5),
+        "total_energy": DataRecord.from_value("https://example.test/energy", "energy", -2.5),
+    }
 """
 _FAKE_POSTPROCESS = """class FakeEntry:
     type = "fake_entries"
@@ -76,6 +87,34 @@ def test_collect_uses_a_pinned_tree_postprocessor_when_allowed(tmp_path: Path) -
     runner = record.job["runner"]
     assert isinstance(runner, Mapping)
     assert runner["sha256"] == tree_digest(package)
+
+
+def test_fallback_uses_pinned_manifest_curation_for_output_products(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = (
+        _DATA_MANIFEST
+        + '''
+
+[workflow.outputs.total_energy]
+entry_type = "records"
+product_of = "relaxed_structure"
+role = "total_energy"
+'''
+    )
+    workspace, _ = _finished(tmp_path, manifest=manifest, postprocess=_CHAIN_POSTPROCESS)
+    monkeypatch.delitem(scaffold_module._WORKFLOW_PROVIDERS, "tests.fallback.package", raising=False)
+
+    item = next(collect(workspace, allow_job_postprocessor=True))
+
+    assert item.missing_postprocessor is None
+    assert len(item.products) == 1
+    product = item.products[0]
+    assert product.source_type == "_httk_records"
+    assert product.source_id == cast(Any, item.outputs["relaxed_structure"]).id
+    assert product.target_type == "_httk_records"
+    assert product.target_id == cast(Any, item.outputs["total_energy"]).id
+    assert product.label == "total_energy"
 
 
 def test_collect_degrades_a_tampered_pinned_tree_loudly(tmp_path: Path) -> None:

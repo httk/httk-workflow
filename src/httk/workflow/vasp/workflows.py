@@ -31,7 +31,6 @@ _RELAX_DECLARATION = {
             "name": "relaxed_structure",
             "entry_type": "structures",
             "ref": "https://schemas.optimade.org/defs/v1.3/entrytypes/optimade/structures",
-            "product_of": "initial_structure",
             "description": "The relaxed geometry.",
         },
         {
@@ -94,7 +93,6 @@ _RELAX_STATIC_DECLARATION = {
             "name": "relaxed_structure",
             "entry_type": "structures",
             "ref": "https://schemas.optimade.org/defs/v1.3/entrytypes/optimade/structures",
-            "product_of": "initial_structure",
             "description": "The relaxed geometry.",
         },
         {
@@ -104,6 +102,48 @@ _RELAX_STATIC_DECLARATION = {
             "description": "The total energy of the relaxed structure from the final static calculation.",
         },
     ],
+}
+
+_RELAX_OUTPUTS = {
+    "relaxed_structure": {
+        "entry_type": "structures",
+        "role": "relaxed_structure",
+        "ref": "https://schemas.optimade.org/defs/v1.3/entrytypes/optimade/structures",
+        "description": "The relaxed geometry.",
+        "product_of": "initial_structure",
+    },
+    "total_energy": {
+        "entry_type": "records",
+        "role": "total_energy",
+        "ref": "https://schemas.httk.org/defs/v0.1/properties/core/total_energy",
+        "description": "The final total energy of the relaxed structure.",
+        "product_of": "relaxed_structure",
+    },
+}
+_STATIC_OUTPUTS = {
+    "total_energy": {
+        "entry_type": "records",
+        "role": "total_energy",
+        "ref": "https://schemas.httk.org/defs/v0.1/properties/core/total_energy",
+        "description": "The total energy of the structure.",
+        "product_of": "initial_structure",
+    },
+}
+_RELAX_STATIC_OUTPUTS = {
+    "relaxed_structure": {
+        "entry_type": "structures",
+        "role": "relaxed_structure",
+        "ref": "https://schemas.optimade.org/defs/v1.3/entrytypes/optimade/structures",
+        "description": "The relaxed geometry.",
+        "product_of": "initial_structure",
+    },
+    "total_energy": {
+        "entry_type": "records",
+        "role": "total_energy",
+        "ref": "https://schemas.httk.org/defs/v0.1/properties/core/total_energy",
+        "description": "The total energy of the relaxed structure from the final static calculation.",
+        "product_of": "relaxed_structure",
+    },
 }
 
 PROVIDERS = (
@@ -116,6 +156,7 @@ PROVIDERS = (
         steps=("publish", "prepare", "run"),
         data_mode="transactional",
         parameters={"structure": "POSCAR"},
+        outputs=_RELAX_OUTPUTS,
         summary="relax one structure with the reviewed remedy ladder",
         declarations={"workflow": _RELAX_DECLARATION},
         postprocessor=postprocess_vasp_relax,
@@ -129,6 +170,7 @@ PROVIDERS = (
         steps=("publish", "prepare", "run"),
         data_mode="transactional",
         parameters={"structure": "POSCAR"},
+        outputs=_RELAX_OUTPUTS,
         summary="the same relaxation, authored in Bash",
         declarations={"workflow": _RELAX_DECLARATION},
         postprocessor=postprocess_vasp_relax,
@@ -142,6 +184,7 @@ PROVIDERS = (
         steps=("publish", "prepare", "run"),
         data_mode="transactional",
         parameters={"structure": "POSCAR"},
+        outputs=_STATIC_OUTPUTS,
         summary="one single-point calculation of one structure",
         declarations={"workflow": _STATIC_DECLARATION},
         postprocessor=postprocess_vasp_static,
@@ -155,6 +198,7 @@ PROVIDERS = (
         steps=("publish", "prepare", "promote", "run", "static"),
         data_mode="transactional",
         parameters={"structure": "POSCAR"},
+        outputs=_RELAX_STATIC_OUTPUTS,
         summary="relax, promote the relaxed structure, then run it statically",
         declarations={"workflow": _RELAX_STATIC_DECLARATION},
         postprocessor=postprocess_vasp_relax_static,
