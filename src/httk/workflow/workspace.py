@@ -496,14 +496,22 @@ class Workspace:
         """
 
         source_path = Path(source).expanduser()
-        if source_path.is_symlink() or not source_path.is_file():
-            raise FormatError(f"a published runner must be a regular file: {source_path}")
-        digest = sha256_file(source_path)
+        if source_path.is_symlink():
+            raise FormatError(f"a published runner must be a regular file or directory: {source_path}")
+        is_directory = source_path.is_dir()
+        if not is_directory and not source_path.is_file():
+            raise FormatError(f"a published runner must be a regular file or directory: {source_path}")
+        digest = tree_digest(source_path) if is_directory else sha256_file(source_path)
         target = self.runner_store_path(name if name is not None else source_path.name)
-        if target.exists():
-            if target.is_symlink() or not target.is_file():
+        if target.exists() or target.is_symlink():
+            if target.is_symlink() or is_directory != target.is_dir():
+                raise FormatError(f"workspace runner store entry type does not match the published runner: {target}")
+            if is_directory:
+                existing = tree_digest(target)
+            elif not target.is_file():
                 raise FormatError(f"workspace runner store entry is not a regular file: {target}")
-            existing = sha256_file(target)
+            else:
+                existing = sha256_file(target)
             if existing == digest:
                 _LOGGER.debug("workspace runner %s already holds digest %s", target, digest)
             elif not replace:
@@ -512,9 +520,15 @@ class Workspace:
                     f"different digest {existing}; pass replace to overwrite it"
                 )
             else:
-                self._install_runner_file(source_path, target)
+                if is_directory:
+                    self._install_runner_tree(source_path, target)
+                else:
+                    self._install_runner_file(source_path, target)
         else:
-            self._install_runner_file(source_path, target)
+            if is_directory:
+                self._install_runner_tree(source_path, target)
+            else:
+                self._install_runner_file(source_path, target)
         relative = target.relative_to(self.runners)
         _LOGGER.info(
             "published workspace runner %s with digest %s",
@@ -536,6 +550,40 @@ class Workspace:
             os.replace(staging, target)
         finally:
             staging.unlink(missing_ok=True)
+
+    def _install_runner_tree(self, source: Path, target: Path) -> None:
+        """Install a runner tree, replacing an existing tree when requested."""
+
+        self.ensure_directory(target.parent)
+        staging = self.control / "tmp" / f"runner.{uuid.uuid4()}"
+        staging.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source, staging, symlinks=False)
+        for entry in sorted(staging.rglob("*")):
+            entry.chmod(0o555)
+        # Linux requires write permission on a directory itself to rename it;
+        # the installed root is made read-only immediately after the rename.
+        staging.chmod(0o755)
+        old: Path | None = None
+        try:
+            if target.exists():
+                target.chmod(0o755)
+                old = staging.parent / f"runner-old.{uuid.uuid4()}"
+                os.replace(target, old)
+                # Explicit replacement has a small non-atomic window while the old tree is aside.
+            os.replace(staging, target)
+            target.chmod(0o555)
+            if old is not None:
+                for entry in sorted(old.rglob("*")):
+                    entry.chmod(0o755 if entry.is_dir() else 0o644)
+                old.chmod(0o755)
+                shutil.rmtree(old)
+                old = None
+        finally:
+            if staging.exists():
+                staging.chmod(0o755)
+                shutil.rmtree(staging)
+            if old is not None and not target.exists():
+                os.replace(old, target)
 
     def detach(
         self,

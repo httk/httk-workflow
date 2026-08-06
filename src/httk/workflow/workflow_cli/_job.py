@@ -17,7 +17,7 @@ from ._common import (
 
 
 def handle_runner_publish(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Publish one runner file into a workspace runner store."""
+    """Publish one runner file or directory into a workspace runner store."""
 
     reference = Workspace(_local_root(arguments, context, action="publish a runner into it")).publish_runner(
         arguments.file,
@@ -35,16 +35,27 @@ def handle_runner_describe(arguments: argparse.Namespace, context: CLIContext) -
     store = workspace.runners
     if arguments.name is not None:
         target = workspace.runner_store_path(arguments.name)
-        if not target.is_file():
+        if not target.is_file() and not target.is_dir():
             raise ValueError(f"no such workspace runner: {arguments.name}")
         found = [target]
     else:
-        found = sorted(path for path in store.rglob("*") if path.is_file()) if store.is_dir() else []
+
+        def published_entries(directory: Path) -> Iterator[Path]:
+            for path in sorted(directory.iterdir()):
+                if path.is_file():
+                    yield path
+                elif path.is_dir():
+                    if (path / RUNNER_TREE_ENTRY).is_file():
+                        yield path
+                    else:
+                        yield from published_entries(path)
+
+        found = list(published_entries(store)) if store.is_dir() else []
     references = [
         {
             "source": "workspace",
             "path": path.relative_to(store).as_posix(),
-            "sha256": sha256_file(path),
+            "sha256": tree_digest(path) if path.is_dir() else sha256_file(path),
         }
         for path in found
     ]
@@ -72,10 +83,10 @@ def build_runner_parser(
         group,
         "publish",
         summary="publish one runner into a workspace runner store",
-        description="Publish one runner into a workspace runner store, pinned by digest",
+        description="Publish one runner file or directory into a workspace runner store, pinned by digest",
         handler=handle_runner_publish,
     )
-    publish.add_argument("file", metavar="FILE", help="the runner file to publish")
+    publish.add_argument("file", metavar="FILE_OR_DIRECTORY", help="the runner file or directory to publish")
     publish.add_argument(
         "--workspace",
         metavar="WORKSPACE",
@@ -85,7 +96,7 @@ def build_runner_parser(
     publish.add_argument(
         "--name",
         metavar="NAME",
-        help="store name, including any subdirectory (default: the file name)",
+        help="store name, including any subdirectory (default: the source name)",
     )
     publish.add_argument(
         "--replace",

@@ -11,7 +11,8 @@ from httk.core.cli import CLIContext
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._util import tree_digest
-from httk.workflow.errors import WorkspaceCorruptionError
+from httk.workflow.errors import FormatError, WorkspaceCorruptionError
+from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.workflow_cli import command as workflow_command
 
 _SUCCEED_RUNNER = """#!/usr/bin/env python3
@@ -44,6 +45,18 @@ def _runner_file(root: Path, source: str = _SUCCEED_RUNNER, *, name: str = "succ
     path.write_text(source, encoding="utf-8")
     path.chmod(0o755)
     return path
+
+
+def _runner_tree(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "outcome.py").write_text(_SUCCEED_RUNNER, encoding="utf-8")
+    entry = root / "run"
+    entry.write_text(
+        "#!/usr/bin/env bash\nset -eu\nexec python3 \"$(dirname \"$0\")/outcome.py\"\n",
+        encoding="utf-8",
+    )
+    entry.chmod(0o755)
+    return root
 
 
 def _payload(root: Path, runner: dict[str, object], *, tag: str = "shared") -> tuple[Path, str]:
@@ -222,6 +235,84 @@ def test_publish_refuses_a_different_digest_without_replace(tmp_path: Path) -> N
     assert (workspace.runners / "tools" / "step.py").read_text(encoding="utf-8") == _OTHER_RUNNER
 
 
+def test_workspace_runner_tree_is_content_addressed_read_only_and_replaceable(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = _runner_tree(tmp_path / "source" / "toolbox")
+    first = workspace.publish_runner(source, name="tools/toolbox")
+    stored = workspace.runners / "tools" / "toolbox"
+    assert first == {
+        "source": "workspace",
+        "path": "tools/toolbox",
+        "sha256": tree_digest(source),
+    }
+    assert stored.is_dir()
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o555 for path in (stored, *stored.rglob("*")))
+    assert workspace.publish_runner(source, name="tools/toolbox") == first
+
+    (source / "outcome.py").write_text(_OTHER_RUNNER, encoding="utf-8")
+    changed_digest = tree_digest(source)
+    with pytest.raises(FileExistsError, match="already holds a different digest"):
+        workspace.publish_runner(source, name="tools/toolbox")
+    replaced = workspace.publish_runner(source, name="tools/toolbox", replace=True)
+    assert replaced["sha256"] == changed_digest != first["sha256"]
+    assert (stored / "outcome.py").read_text(encoding="utf-8") == _OTHER_RUNNER
+    assert not any(path.name.startswith("runner-old.") for path in workspace.control.joinpath("tmp").iterdir())
+
+
+def test_publish_runner_tree_rejects_symlinks_and_type_mismatches(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = _runner_tree(tmp_path / "source" / "toolbox")
+    with pytest.raises(FormatError, match="symlink"):
+        (source / "link").symlink_to(source / "run")
+        workspace.publish_runner(source)
+    (source / "link").unlink()
+
+    file_source = _runner_file(tmp_path / "file-source", name="entry")
+    workspace.publish_runner(file_source, name="same")
+    with pytest.raises(FormatError, match="type does not match"):
+        workspace.publish_runner(source, name="same")
+    workspace.publish_runner(source, name="tree")
+    with pytest.raises(FormatError, match="type does not match"):
+        workspace.publish_runner(file_source, name="tree")
+
+
+def test_workspace_runner_tree_is_staged_and_verified_by_manager(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    reference = workspace.publish_runner(_runner_tree(tmp_path / "source" / "toolbox"), name="toolbox")
+    payload = tmp_path / "payload"
+    job = prepare_job_payload(
+        payload,
+        JobSpec(
+            name="workspace tree",
+            workflow="tests.shared",
+            runner_path=str(reference["path"]),
+            runner_source="workspace",
+            runner_sha256=str(reference["sha256"]),
+            initial_step="only",
+        ),
+    )
+    workspace.submit(payload, "project/workspace-tree")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+
+    marker = workspace.find_marker_by_id(job.id)
+    assert marker is not None and marker.kind == "succeeded"
+    job_root = workspace.payload_path(marker.placement, marker.job_key)
+    staged = sorted(job_root.glob(".httk-attempt.*/runner"))
+    assert len(staged) == 1 and staged[0].is_dir()
+    assert (staged[0] / "run").is_file()
+
+
+def test_published_runner_tree_tampering_changes_its_pinned_digest(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    reference = workspace.publish_runner(_runner_tree(tmp_path / "source" / "toolbox"), name="toolbox")
+    stored = workspace.runners / "toolbox"
+    stored.chmod(0o755)
+    (stored / "outcome.py").chmod(0o644)
+    (stored / "outcome.py").write_text(_OTHER_RUNNER, encoding="utf-8")
+    assert tree_digest(stored) != reference["sha256"]
+
+
 def test_runner_publish_command_prints_the_job_reference(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     context = CLIContext("httk", tmp_path)
@@ -310,10 +401,11 @@ def test_runner_describe_reports_every_published_reference(tmp_path: Path, capsy
         _runner_file(tmp_path / "other", _OTHER_RUNNER, name="step.py"),
         name="campaign/step.py",
     )
+    tree = workspace.publish_runner(_runner_tree(tmp_path / "tree" / "toolbox"), name="campaign/toolbox")
 
     assert workflow_command(["runner", "describe", "--workspace", ws, "--json"], context) == 0
     described = json.loads(capsys.readouterr().out)
-    assert described == sorted([first, second], key=lambda reference: str(reference["path"]))
+    assert described == sorted([first, second, tree], key=lambda reference: str(reference["path"]))
 
     assert workflow_command(["runner", "describe", "--workspace", ws], context) == 0
     lines = capsys.readouterr().out.splitlines()
@@ -323,5 +415,7 @@ def test_runner_describe_reports_every_published_reference(tmp_path: Path, capsy
     argv = ["runner", "describe", "campaign/step.py", "--workspace", ws, "--json"]
     assert workflow_command(argv, context) == 0
     assert json.loads(capsys.readouterr().out) == [second]
+    assert workflow_command(["runner", "describe", "campaign/toolbox", "--workspace", ws, "--json"], context) == 0
+    assert json.loads(capsys.readouterr().out) == [tree]
     assert workflow_command(["runner", "describe", "absent.py", "--workspace", ws], context) == 2
     assert "no such workspace runner" in capsys.readouterr().err

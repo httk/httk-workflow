@@ -217,6 +217,8 @@ the runner once into the workspace runner store instead:
 
 ```console
 httk workflow runner publish ./relax.py --workspace WORKSPACE --name relax.py
+# A runner directory is published the same way and pinned by its tree digest.
+httk workflow runner publish ./relax-runner --workspace WORKSPACE --name relax-runner
 ```
 
 The command prints the reference to embed in every `job.json` that uses it:

@@ -120,7 +120,7 @@ name, and re-register it with `workspace init <newpath> --name NAME` instead.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `runner publish FILE` | publish one runner, pinned by digest | `--workspace` (required), `--name`, `--replace` |
+| `runner publish FILE_OR_DIRECTORY` | publish one runner file or directory, pinned by digest | `--workspace` (required), `--name`, `--replace` |
 | `runner describe [NAME]` | report the published runners and their digests | `--workspace` (required), `--json` |
 
 ### `job` — making jobs, and finding out about them
