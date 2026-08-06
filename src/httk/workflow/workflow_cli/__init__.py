@@ -66,6 +66,7 @@ from ._compat import (
     handle_v1_run,
     handle_v1_submit,
 )
+from ._describe import build_describe_parser, handle_workflow_describe
 from ._job import (
     _add_job_selector,
     add_job_request_arguments,
@@ -172,6 +173,7 @@ def build_parser(program: str, context: CLIContext) -> argparse.ArgumentParser:
     build_workspace_parser(groups)
     build_runner_parser(groups)
     build_job_parser(groups)
+    build_describe_parser(groups)
     build_import_parser(groups)
     build_collect_parser(groups)
     build_run_parser(groups)
