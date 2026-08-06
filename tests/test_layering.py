@@ -33,6 +33,7 @@ COMMON_LAYER = (
     "models",
     "journal",
     "transactions",
+    "packages",
 )
 
 #: The consumer packages. Each is a domain or a compat language; none may import

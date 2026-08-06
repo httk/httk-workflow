@@ -60,7 +60,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 if TYPE_CHECKING:
     from .collecting import JobRecord
 
-from ._util import sha256_file, validate_parameters
+from ._util import sha256_file, tree_digest, validate_parameters
 from .errors import FormatError
 from .models import (
     ATTEMPT_CONTROL_PREFIX,
@@ -128,9 +128,9 @@ class WorkflowProvider:
     """
 
     workflow_id: str
-    runner_package: str
-    runner_file: str
-    initial_step: str
+    runner_package: str | None = None
+    runner_file: str | None = None
+    initial_step: str = "start"
     alias: str | None = None
     steps: tuple[str, ...] = ()
     data_mode: DataMode = "none"
@@ -140,8 +140,25 @@ class WorkflowProvider:
     instantiate: bool = False
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     postprocessor: Callable[[JobRecord], Mapping[str, object]] | str | None = None
+    directory: Path | None = None
+    entry: str = "run"
+    instantiate_file: str | None = None
+    postprocess_file: str | None = None
+    inputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    declaration_uri: str | None = None
+    _parameter_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
+        packaged = self.runner_package is not None or self.runner_file is not None
+        if packaged != (self.runner_package is not None and self.runner_file is not None):
+            raise ValueError("a workflow provider must supply both runner_package and runner_file")
+        if packaged == (self.directory is not None):
+            raise ValueError("a workflow provider must be packaged or directory-sourced, exclusively")
+        if packaged and (self.entry != "run" or self.instantiate_file is not None or self.postprocess_file is not None):
+            raise ValueError("directory-only fields are not allowed on a packaged workflow provider")
+        if self.directory is not None and (not self.entry or PurePosixPath(self.entry).is_absolute()):
+            raise ValueError(f"workflow directory entry must be a relative member: {self.entry!r}")
         parameters = validate_parameters(self.parameters)
         if any(destination is None for destination in parameters.values()) and not self.instantiate:
             raise ValueError(
@@ -152,6 +169,9 @@ class WorkflowProvider:
         ):
             raise ValueError(f"workflow alias must match [a-z0-9._-]+: {self.alias!r}")
         object.__setattr__(self, "parameters", MappingProxyType(parameters))
+        object.__setattr__(self, "inputs", MappingProxyType(dict(self.inputs)))
+        object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
+        object.__setattr__(self, "_parameter_metadata", MappingProxyType(dict(self._parameter_metadata)))
 
 
 #: Every registered workflow, keyed by name in registration order. The scaffold
@@ -240,6 +260,22 @@ class ResolvedWorkflow:
     instantiate: bool = False
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     postprocessor: Callable[[JobRecord], Mapping[str, object]] | str | None = None
+    directory: Path | None = None
+    entry: str = "run"
+    instantiate_file: str | None = None
+    postprocess_file: str | None = None
+    inputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    declaration_uri: str | None = None
+    _parameter_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.packaged is not None and self.directory is not None:
+            raise ValueError("a resolved workflow cannot be packaged and directory-sourced")
+        if self.packaged is not None and (
+            self.entry != "run" or self.instantiate_file is not None or self.postprocess_file is not None
+        ):
+            raise ValueError("directory-only fields are not allowed on a packaged resolved workflow")
 
     @property
     def store_name(self) -> str:
@@ -251,6 +287,8 @@ class ResolvedWorkflow:
         jobs still reference.
         """
 
+        if self.directory is not None:
+            return f"{self.directory.name}.{tree_digest(self.directory)[:12]}"
         digest = sha256_file(self.source)
         stem = self.source.name
         suffix = ""
@@ -436,6 +474,8 @@ def _packaged_runner_path(provider: WorkflowProvider) -> Path:
     that package's module.
     """
 
+    if provider.runner_package is None or provider.runner_file is None:
+        raise ValueError(f"workflow {provider.workflow_id!r} is not a packaged workflow")
     module = importlib.import_module(provider.runner_package)
     location = getattr(module, "__file__", None)
     if location is None:  # pragma: no cover - only a namespace package has none
@@ -447,6 +487,8 @@ def _packaged_runner_reference(provider: WorkflowProvider) -> dict[str, object]:
     """Return the installed ``runner`` member a provider's ``pkg:`` form pins."""
 
     path = _packaged_runner_path(provider)
+    if provider.runner_package is None or provider.runner_file is None:
+        raise ValueError(f"workflow {provider.workflow_id!r} is not a packaged workflow")
     return {
         "executor": "path",
         "source": "installed",
@@ -462,20 +504,29 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
     provider = workflow_provider(name)
     if provider is None:
         return None
+    source = provider.directory if provider.directory is not None else _packaged_runner_path(provider)
     return ResolvedWorkflow(
-        source=_packaged_runner_path(provider),
+        source=source,
         workflow_id=provider.workflow_id,
         alias=provider.alias,
         initial_step=provider.initial_step,
         steps=provider.steps,
         data_mode=provider.data_mode,
         workdir_mode=provider.workdir_mode,
-        packaged=provider.runner_file,
+        packaged=None if provider.directory is not None else provider.runner_file,
         summary=provider.summary,
         parameters=provider.parameters,
         instantiate=provider.instantiate,
         declarations=provider.declarations,
         postprocessor=provider.postprocessor,
+        directory=provider.directory,
+        entry=provider.entry,
+        instantiate_file=provider.instantiate_file,
+        postprocess_file=provider.postprocess_file,
+        inputs=provider.inputs,
+        outputs=provider.outputs,
+        declaration_uri=provider.declaration_uri,
+        _parameter_metadata=provider._parameter_metadata,
     )
 
 
@@ -498,24 +549,50 @@ def resolve_workflow(
     text = os.fspath(workflow)
     resolved = registered_workflow(text)
     if resolved is None:
-        # seam: package-directory workflow resolution is intentionally deferred.
         path = Path(text).expanduser()
-        if not path.is_file():
+        if path.is_dir() and (path / "workflow.toml").is_file():
+            from .packages import load_workflow_package
+
+            provider = load_workflow_package(path, register=False)
+            resolved = ResolvedWorkflow(
+                source=provider.directory or path.resolve(),
+                workflow_id=provider.workflow_id,
+                alias=provider.alias,
+                initial_step=provider.initial_step,
+                steps=provider.steps,
+                data_mode=provider.data_mode,
+                workdir_mode=provider.workdir_mode,
+                summary=provider.summary,
+                parameters=provider.parameters,
+                instantiate=provider.instantiate,
+                declarations=provider.declarations,
+                postprocessor=provider.postprocessor,
+                directory=provider.directory or path.resolve(),
+                entry=provider.entry,
+                instantiate_file=provider.instantiate_file,
+                postprocess_file=provider.postprocess_file,
+                inputs=provider.inputs,
+                outputs=provider.outputs,
+                declaration_uri=provider.declaration_uri,
+                _parameter_metadata=provider._parameter_metadata,
+            )
+        elif not path.is_file():
             known = ", ".join(registered_workflows()) or "none registered"
             raise ValueError(
                 f"unknown workflow {text!r}: it is neither a registered workflow ({known}) nor an existing runner file"
             )
-        described = describe_runner(path)
-        steps = tuple(cast(list[str], described["steps"]))
-        resolved = ResolvedWorkflow(
-            source=path.resolve(),
-            workflow_id=str(described["workflow"]),
-            initial_step=_initial_step(path, steps, step),
-            steps=steps,
-            summary=f"the runner {path}",
-            parameters=cast(dict[str, str | None], described.get("parameters", {})),
-            instantiate=bool(described.get("instantiate", False)),
-        )
+        else:
+            described = describe_runner(path)
+            steps = tuple(cast(list[str], described["steps"]))
+            resolved = ResolvedWorkflow(
+                source=path.resolve(),
+                workflow_id=str(described["workflow"]),
+                initial_step=_initial_step(path, steps, step),
+                steps=steps,
+                summary=f"the runner {path}",
+                parameters=cast(dict[str, str | None], described.get("parameters", {})),
+                instantiate=bool(described.get("instantiate", False)),
+            )
     if workflow_id is not None:
         resolved = replace(resolved, workflow_id=workflow_id)
     if step is not None:
@@ -724,6 +801,10 @@ def _prepare(
 
     resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode)
     if publish == "installed":
+        if resolved.directory is not None:
+            raise ValueError(
+                "publish='installed' is not supported for a directory workflow; publish it into the workspace"
+            )
         provider = workflow_provider(resolved.workflow_id)
         if resolved.packaged is None or provider is None:
             raise ValueError(
@@ -733,9 +814,33 @@ def _prepare(
             )
         reference = _packaged_runner_reference(provider)
     else:
-        reference = workspace.publish_runner(resolved.source, name=resolved.store_name)
+        try:
+            reference = workspace.publish_runner(resolved.source, name=resolved.store_name)
+        except FileExistsError as exc:
+            if resolved.directory is None:
+                raise
+            target = workspace.runner_store_path(resolved.store_name)
+            actual = tree_digest(target)
+            expected = tree_digest(resolved.source)
+            raise ValueError(
+                f"published workflow tree {target} has digest {actual}, but the package resolves to {expected}"
+            ) from exc
     runner_sha256 = str(reference["sha256"])
-    instantiate = _resolve_instantiate(resolved, runner_sha256) if resolved.instantiate else None
+    instantiate: Callable[[InstantiateContext], object] | None
+    if resolved.directory is not None and resolved.instantiate_file is not None:
+        from .packages import _tree_hook
+
+        instantiate = cast(
+            Callable[[InstantiateContext], object],
+            _tree_hook(
+                workspace.runner_store_path(str(reference["path"])),
+                runner_sha256,
+                resolved.instantiate_file,
+                "instantiate",
+            ),
+        )
+    else:
+        instantiate = _resolve_instantiate(resolved, runner_sha256) if resolved.instantiate else None
     return _Prepared(
         workflow=resolved,
         runner_source=cast(Literal["workspace", "installed"], str(reference["source"])),
