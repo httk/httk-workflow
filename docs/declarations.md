@@ -6,7 +6,7 @@ A *workflow declaration* is a property-like document that says what a workflow
 **is** — the inputs it consumes, the method it applies, the outputs it produces —
 without describing a graph. It is what a data layer stores next to a result so
 the result can later be explained: not the trace of what ran, which is the
-{doc}`collect <collect>` provenance, but the statement of what was meant to run.
+{doc}`collecting` provenance, but the statement of what was meant to run.
 
 OPTIMADE is standardizing exactly this document, graph-free and versioned like
 its other property definitions. That work is in progress, so *httk-workflow*
@@ -23,14 +23,14 @@ There is no *httk* envelope around it, and there will not be one. Versioning and
 self-description belong **inside** the document, in the `$id`-style members the
 OPTIMADE property-definition conventions already define: a document says which
 vocabulary and which version it follows, and a consumer that understands that
-vocabulary interprets it. An engine that wrapped or reinterpreted the document
+vocabulary gives it meaning. An engine that wrapped or changed the document
 could only ever come to disagree with the standard it is carrying.
 
 collection therefore belongs to *httk-data* and OPTIMADE tooling. Carriage,
 digest coverage, and honest reporting belong here.
 
-Packaged templates may carry declarations into every scaffolded `job.json`; the
-built-in VASP templates declare their `workflow` `$id` using the published
+Packaged workflows may carry declarations into every scaffolded `job.json`; the
+built-in VASP workflows declare their `workflow` `$id` using the published
 `schemas.httk.org` IRIs. See {doc}`provenance` for the rule that uses this `$id`
 as the workflow URI fallback.
 
@@ -159,7 +159,7 @@ runner wrote has `"declared": null`. An observed document that cannot be read is
 reported as `null` and sets `provenance.gaps` on the record, exactly like every
 other damaged evidence a collect still reports rather than hides.
 
-See {doc}`collect` for the record as a whole, {doc}`runtime_helpers` and
+See {doc}`collecting` for the record as a whole, {doc}`runtime_helpers` and
 {doc}`native_bash_api` for the two authoring APIs, and
 {doc}`workflow_filesystem_api` for the normative statement of the `declarations`
 member and the payload area it is stored in. See {doc}`provenance` for the

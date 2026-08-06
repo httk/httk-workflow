@@ -2,10 +2,12 @@
 
 *For data-layer authors and anyone reading finished jobs back out of a workspace.*
 
-A collect is the read-only counterpart of running work: it iterates the jobs of
-one workspace that stopped and yields, per job, everything a data layer needs to
-store the result — where the files are, what produced them, and what happened on
-the way.
+Collecting is the read-only counterpart of running work. The low-level
+`job_records()` iterator reads each stopped job into a `JobRecord`, preserving
+where the files are, what produced them, and what happened on the way. The
+framework-level `collect()` iterator dispatches each record through its
+registered workflow postprocessor and yields a `CollectedJob` with role-keyed
+outputs, provenance, products, and any unfulfilled roles.
 
 `JobRecord` is the layering boundary of *httk₂*. *httk-workflow* has no
 database dependency: it produces records, and something else — `httk-data` —
@@ -40,7 +42,7 @@ history did not survive. Only a job whose `job.json` cannot be read at all is
 skipped, loudly, through the module logger: the contract of a record is the
 *validated* job behind a result.
 
-**Collecting scales by iteration.** `collect` is a lazy iterator over one scan of
+**Collecting scales by iteration.** `job_records` is a lazy iterator over one scan of
 the requested state directories, and building one record reads only that job's
 own payload and journal chain. The measured local snapshot in
 {doc}`benchmarks` establishes a reference point; larger campaigns should be
@@ -92,7 +94,7 @@ understanding the vocabulary the document names itself — which is the consumer
 job, not this module's. An observed document that cannot be read is reported as
 `null` and sets `provenance.gaps`. The declared documents are not repeated inside
 `job`; `declarations` is where they are read. See {doc}`declarations`.
-The `provenance` declaration can be interpreted as a stored `httk.core.Run`; see
+The `provenance` declaration becomes a stored `httk.core.Run`; see
 {doc}`provenance`.
 
 ## Selecting records
@@ -115,7 +117,7 @@ placement, exactly as `httk workflow job list --placement` does.
 ```console
 httk workflow collect WORKSPACE
 httk workflow collect WORKSPACE --state succeeded --state failed
-httk workflow collect WORKSPACE --placement project/campaign --json
+httk workflow collect WORKSPACE --placement project/campaign --raw
 ```
 
 The workspace is attached read-only. The default `collect` command prints one
@@ -146,6 +148,17 @@ default workspace in the terminal state they stopped in, and the collect that
 follows cannot tell them from jobs that ran locally. See
 {doc}`workflow_cli`.
 
-Each line is exactly `JobRecord.as_mapping()`, and
-`JobRecord.from_mapping()` rebuilds the record from it, so a collect survives
-being written to a file, shipped, and read back by the process that stores it.
+With `--raw`, each line is exactly `JobRecord.as_mapping()`, and
+`JobRecord.from_mapping()` rebuilds the record from it, so the record stream
+survives being written to a file, shipped, and read back by the process that
+stores it.
+
+## Workflow postprocessing
+
+`collect()` is the workflow-owned postprocessing layer. It resolves the record's
+workflow id through `workflow_provider()`, calls that provider's callable or
+lazy `module:function` postprocessor, validates role names against declared
+`output_types`, and assembles the `Run` and `ProductLink` values. A workflow
+without a provider or postprocessor is represented as a degraded `CollectedJob`
+with `missing_postprocessor` set; `--allow-job-postprocessor` is reserved for a
+later tree fallback and is currently only passed through by the CLI.

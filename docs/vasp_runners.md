@@ -96,7 +96,7 @@ and {doc}`workflow_cli` for `workspace settings`.
 
 ## Job inputs
 
-The four templates declare one creation parameter: `structure` → `files/POSCAR`.
+The four workflows declare one creation parameter: `structure` → `files/POSCAR`.
 Paths are copied verbatim; other objects are serialized with `httk.core.save`,
 which requires the `httk-io` and `httk-atomistic` packages for POSCAR/CIF writers.
 
@@ -134,8 +134,8 @@ registers a policy and names it in the job inputs rather than editing a runner. 
 ladder position is recorded in the job state directory, so it survives every attempt
 of the job, and `maximum_remedies` bounds how many a single job may apply.
 
-`collect` publishes the files named by `collect` into the job's transactional data,
-under `data_prefix`. `vasp_relax_static.py` archives the relaxation inside the
+The `publish` step publishes the files named by the `collect` input into the
+job's transactional data, under `data_prefix`. `vasp_relax_static.py` archives the relaxation inside the
 workdir before the single point overwrites it, and publishes the two stages side by
 side as `relax/` and `static/`.
 

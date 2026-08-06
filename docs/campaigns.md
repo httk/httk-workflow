@@ -104,7 +104,7 @@ $ httk workflow campaign collect --state succeeded
 process for a local partition, and submitted through the remote's scheduler for a
 remote one — exactly as {doc}`manager run <workflow_cli>` does for a single
 workspace. Each partition's target workspace supplies its own scheduler profile
-through workspace settings. `campaign collect` chains {doc}`collect` across the
+through workspace settings. `campaign collect` chains `campaign_collect()` across the
 partitions
 lazily, one workspace after another in stable order, so a campaign spread over
 many workspaces streams as one collect without ever materializing more than the
@@ -138,6 +138,6 @@ own managers.
 
 - {doc}`workflow_cli` — `workspace init`, `transfer`, `manager run`, and the
   `campaign` group in full.
-- {doc}`collect` — the record `campaign collect` streams, and the data-layer
+- {doc}`collecting` — the `JobRecord` stream `campaign_collect()` provides, and the data-layer
   boundary it marks.
 - {doc}`taskmanager` — running managers for real.

@@ -1,6 +1,6 @@
 # Run provenance
 
-*For workflow authors and data-layer authors connecting one collect record to
+*For workflow authors and data-layer authors connecting one `JobRecord` to
 one stored `httk.core.Run`.*
 
 The `provenance` declaration describes the entries one workflow execution
@@ -50,10 +50,10 @@ from the `workflow` declaration when available.
 The end-to-end handoff is:
 
 ```python
-from httk.workflow import collect
+from httk.workflow import job_records
 from httk.workflow.provenance import run_record
 
-record = next(collect(workspace))
+record = next(job_records(workspace))
 run = run_record(record)
 store.save(run)  # the httk-data side
 ```
@@ -65,4 +65,4 @@ declaration. Runner identity, the attempt timeline, and failure remain on the
 
 VASP runners will adopt this declaration in future work.
 
-Built-in VASP result collection is documented in {doc}`collection`.
+Built-in VASP result collection and postprocessing are documented in {doc}`collecting`.

@@ -148,7 +148,7 @@ the job publishes.
 ### Creation-time instantiation
 
 `@run.instantiate` is a Python-only creation-time hook, replacing v1's
-`ht.instantiate.py`. `new_job(s)` imports the template on the creating machine,
+`ht.instantiate.py`. `new_job(s)` resolves the workflow on the creating machine,
 after declarative parameters are staged and before `job.json` is finalized. Its
 `InstantiateContext` provides the staging `payload`, read-only `parameters`,
 mutable merged `inputs`, and caller `tag`; `suggest_tag` supplies a tag only
@@ -162,7 +162,7 @@ def instantiate(ctx):
     ctx.suggest_tag("generated")
 ```
 
-The hook may write anywhere below `payload`. It is trusted template code: the
+The hook may write anywhere below `payload`. It is trusted workflow code: the
 file is code being published and executed anyway, and Bash runners cannot
 declare this hook.
 
