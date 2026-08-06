@@ -195,6 +195,7 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.shell_bridge",
         # Orchestration and management.
         "httk.workflow.harvesting",
+        "httk.workflow.provenance",
         "httk.workflow.supervision",
         "httk.workflow.transfers",
         "httk.workflow.manifests",
