@@ -1,4 +1,4 @@
-"""The provenance declaration is interpreted without changing the harvest record."""
+"""The provenance declaration is interpreted without changing the collect record."""
 
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
@@ -7,24 +7,24 @@ from typing import cast
 
 import pytest
 
-import httk.workflow.vasp  # noqa: F401 - imports and registers packaged templates
-from httk.workflow import HarvestRecord, Workspace, harvest
+import httk.workflow.vasp  # noqa: F401 - imports and registers packaged workflows
+from httk.workflow import JobRecord, Workspace, job_records
 from httk.workflow.provenance import run_record
-from httk.workflow.scaffold import packaged_template
-from test_harvest import campaign as _harvest_campaign
+from httk.workflow.scaffold import registered_workflow
+from test_collect import campaign as _collect_campaign
 
 
 @pytest.fixture(scope="module")
-def real_record(tmp_path_factory: pytest.TempPathFactory) -> HarvestRecord:
+def real_record(tmp_path_factory: pytest.TempPathFactory) -> JobRecord:
     campaign = cast(
-        Callable[[pytest.TempPathFactory], tuple[Workspace, dict[str, str]]], vars(_harvest_campaign)["__wrapped__"]
+        Callable[[pytest.TempPathFactory], tuple[Workspace, dict[str, str]]], vars(_collect_campaign)["__wrapped__"]
     )
     workspace, _ = campaign(tmp_path_factory)
-    return next(iter(harvest(workspace)))
+    return next(iter(job_records(workspace)))
 
 
-def _record(declarations: Mapping[str, object], *, timeline: object = ()) -> HarvestRecord:
-    return HarvestRecord(
+def _record(declarations: Mapping[str, object], *, timeline: object = ()) -> JobRecord:
+    return JobRecord(
         workspace_root=Path("."),
         workspace_id="ws",
         job_id="job",
@@ -99,10 +99,10 @@ def test_workflow_id_supplies_uri_without_provenance() -> None:
     assert run.workflow_declaration_uri == "https://example.test/workflows/v1"
 
 
-def test_template_workflow_id_supplies_uri_without_provenance() -> None:
-    template = packaged_template("vasp-relax")
-    assert template is not None
-    run = run_record(_record({"workflow": {"declared": template.declarations["workflow"], "observed": None}}))
+def test_packaged_workflow_id_supplies_uri_without_provenance() -> None:
+    workflow = registered_workflow("vasp-relax")
+    assert workflow is not None
+    run = run_record(_record({"workflow": {"declared": workflow.declarations["workflow"], "observed": None}}))
     assert run.workflow_declaration_uri == "https://schemas.httk.org/defs/v0.1/workflows/vasp-relax"
 
 
@@ -174,6 +174,6 @@ def test_last_modified_is_the_latest_aware_finished_timestamp() -> None:
     assert run.last_modified is not None and run.last_modified.tzinfo is not None
 
 
-def test_last_modified_is_aware_on_a_really_run_job(real_record: HarvestRecord) -> None:
+def test_last_modified_is_aware_on_a_really_run_job(real_record: JobRecord) -> None:
     run = run_record(real_record)
     assert run.last_modified is not None and run.last_modified.tzinfo is not None

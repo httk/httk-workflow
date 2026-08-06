@@ -2,10 +2,10 @@
 
 A campaign spreads a project's work across many ordinary workspaces without a new
 scheduler or graph. These tests pin the convention: a root job is assigned to a
-partition by policy, everything it spawns inherits its workspace, and harvest and
+partition by policy, everything it spawns inherits its workspace, and collect and
 management simply cross the partition list. Nothing here is engine sharding — a
 partition is just a name pointing at a registered workspace a manager serves and
-a harvest reads exactly as any other.
+a collect reads exactly as any other.
 """
 
 from pathlib import Path
@@ -17,7 +17,7 @@ from conftest import Remote, fake_remote
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.campaigns import (
     assign_partition,
-    campaign_harvest,
+    campaign_collect,
     campaign_managers,
     campaign_submit,
     read_campaign,
@@ -172,7 +172,7 @@ def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path,
             [
                 "campaign",
                 "submit",
-                "--template",
+                "--workflow",
                 "vasp-relax",
                 "--key",
                 "silicon",
@@ -209,8 +209,8 @@ def test_children_stay_in_their_parents_workspace(tmp_path: Path) -> None:
     assert list(workspaces["south"].scan_markers()) == []
 
 
-def test_harvest_crosses_the_partitions_lazily_in_stable_order(tmp_path: Path) -> None:
-    """A campaign spread over many workspaces harvests as one stream, visiting the
+def test_collect_crosses_the_partitions_lazily_in_stable_order(tmp_path: Path) -> None:
+    """A campaign spread over many workspaces collects as one stream, visiting the
     partitions in stable order."""
 
     root, workspaces = _campaign_project(tmp_path, "explicit")
@@ -220,17 +220,17 @@ def test_harvest_crosses_the_partitions_lazily_in_stable_order(tmp_path: Path) -
         with TaskManager(workspaces[partition], heartbeat_interval=0.01) as manager:
             manager.run_until_idle(timeout=120.0)
 
-    records = list(campaign_harvest(states=["succeeded"], project=root))
+    records = list(campaign_collect(states=["succeeded"], project=root))
     by_workspace = [record.workspace_id for record in records]
     assert by_workspace == [workspaces["north"].workspace_id, workspaces["south"].workspace_id]
 
-    # A subset selection harvests only the named partition.
-    south_only = list(campaign_harvest(states=["succeeded"], partitions=["south"], project=root))
+    # A subset selection collects only the named partition.
+    south_only = list(campaign_collect(states=["succeeded"], partitions=["south"], project=root))
     assert [record.workspace_id for record in south_only] == [workspaces["south"].workspace_id]
 
 
-def test_harvest_refuses_and_names_a_remote_partition(tmp_path: Path) -> None:
-    """A remote workspace is harvested where it runs; the campaign harvest names any
+def test_collect_refuses_and_names_a_remote_partition(tmp_path: Path) -> None:
+    """A remote workspace is collected where it runs; the campaign collect names any
     remote partition rather than silently skipping it."""
 
     root = tmp_path / "project"
@@ -241,7 +241,7 @@ def test_harvest_refuses_and_names_a_remote_partition(tmp_path: Path) -> None:
     write_campaign({"far": "cluster:far"}, assignment="explicit", project=root)
 
     with pytest.raises(ValueError, match="remote workspace"):
-        list(campaign_harvest(project=root))
+        list(campaign_collect(project=root))
 
 
 def test_start_managers_runs_a_manager_per_selected_local_partition(tmp_path: Path) -> None:

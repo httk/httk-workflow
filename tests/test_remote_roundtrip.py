@@ -3,7 +3,7 @@
 One job is created in a local workspace, sent to a *remote* workspace that lives
 in the stand-in cluster's filesystem root, run there by a real
 :class:`httk.workflow.TaskManager`, fetched back over the same adapter, and
-finally harvested at home. Only ``ssh`` and ``sbatch`` are stand-ins: the
+finally collected at home. Only ``ssh`` and ``sbatch`` are stand-ins: the
 transfers are real ``rsync`` runs, the offer, pull, import and retire steps are
 the shipped ones, and every command really crosses the transport.
 """
@@ -19,7 +19,7 @@ from httk.core.cli import CLIContext
 
 from conftest import Remote, fake_remote, register_ws
 from httk.workflow import (
-    HarvestRecord,
+    JobRecord,
     TaskManager,
     Workspace,
 )
@@ -191,11 +191,11 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     job = campaign.local.load_job(marker)
     assert campaign.local.runner_store_path(job.runner_path).is_file()
 
-    # (e) An ordinary harvest of the local workspace reports it.
-    assert command(["harvest", "home", "--state", "succeeded"], campaign.context) == 0
+    # (e) An ordinary collect of the local workspace reports it.
+    assert command(["collect", "home", "--state", "succeeded", "--raw"], campaign.context) == 0
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 1
-    record = HarvestRecord.from_mapping(json.loads(lines[0]))
+    record = JobRecord.from_mapping(json.loads(lines[0]))
     assert record.job_id == campaign.job_id
     assert record.workspace_id == campaign.local.workspace_id
     assert record.workdir is not None

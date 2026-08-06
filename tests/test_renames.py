@@ -21,6 +21,7 @@ so restoring a superseded name by accident becomes a failing test.
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -40,7 +41,7 @@ from httk.workflow.configuration import config_home, data_home, keys_home, remot
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.runners import RUNNERS, runner_package, runner_path, runner_reference
-from httk.workflow.scaffold import new_job, registered_templates
+from httk.workflow.scaffold import new_job, registered_workflows
 from httk.workflow.workflow_cli import command
 
 
@@ -315,12 +316,48 @@ def test_the_packaged_runners_moved_with_the_science_they_implement() -> None:
         runner_path("nothing.py")
 
 
-def test_the_scaffold_template_names_are_unchanged(tmp_path: Path) -> None:
-    assert registered_templates() == ("vasp-relax", "vasp-relax-bash", "vasp-static", "vasp-relax-static")
+def test_the_scaffold_workflow_ids_and_aliases_are_registered(tmp_path: Path) -> None:
+    assert registered_workflows() == (
+        "httk.vasp.relax",
+        "httk.vasp.relax-bash",
+        "httk.vasp.static",
+        "httk.vasp.relax-static",
+    )
     workspace = Workspace.initialize(tmp_path / "workspace")
     job = new_job(workspace, "vasp-relax", publish="installed", tag="silicon")
     assert job.runner["path"] == "pkg:httk.workflow.vasp.runners/vasp_relax.py"
     assert job.workflow == "httk.vasp.relax"
+
+
+def test_retired_lifecycle_spellings_are_gone() -> None:
+    from httk.workflow import scaffold
+
+    for name in (
+        "TemplateProvider",
+        "register_template",
+        "resolve_template",
+        "registered_templates",
+        "template_provider",
+        "packaged_template",
+        "JobTemplate",
+    ):
+        assert not hasattr(scaffold, name)
+    assert not hasattr(httk.workflow, "HarvestRecord")
+    assert not hasattr(httk.workflow, "harvest")
+    providers = [scaffold.workflow_provider(alias) for alias in ("vasp-relax", "vasp-relax-bash")]
+    assert {provider.workflow_id for provider in providers if provider is not None} == {
+        "httk.vasp.relax",
+        "httk.vasp.relax-bash",
+    }
+    root = Path(httk.workflow.__file__).parents[2]
+    retired = re.compile(
+        r"\b(?:TemplateProvider|register_template|resolve_template|registered_templates|template_provider|"
+        r"packaged_template|JobTemplate|HarvestRecord|campaign_harvest)\b|--template|\bharvest\b"
+    )
+    for path in root.rglob("*.py"):
+        if path.name == "_transfer.py":
+            continue
+        assert not retired.search(path.read_text(encoding="utf-8")), path
 
 
 def test_a_job_pinning_the_new_package_path_runs(tmp_path: Path) -> None:

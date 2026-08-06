@@ -46,7 +46,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "config": ("init", "show", "set", "unset", "import-v1"),
     "project": ("init", "import-v1", "show", "doctor", "manifest"),
     "remote": ("list", "add", "configure", "install", "import-v1", "show", "remove"),
-    "campaign": ("init", "show", "submit", "harvest", "start-managers"),
+    "campaign": ("init", "show", "submit", "collect", "start-managers"),
 }
 
 #: Superseded group spellings that were removed: ``tasks`` was the transfer

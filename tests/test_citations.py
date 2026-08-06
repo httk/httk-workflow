@@ -13,7 +13,7 @@ import httk.workflow
 
 headings = (
     "VASP workflow automation and results handling build on httk v1 contributions by Henrik Levämäki",
-    "VASP relaxation workflow templates and task scheduling build on httk v1 contributions by Christopher Tholander",
+    "VASP relaxation workflows and task scheduling build on httk v1 contributions by Christopher Tholander",
 )
 assert all(heading not in credits.entries() for heading in headings)
 import httk.workflow.vasp

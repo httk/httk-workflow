@@ -1,4 +1,4 @@
-"""Job scaffolding: one template, some files, and a submitted job.
+"""Job scaffolding: one workflow, some files, and a submitted job.
 
 Nothing here fabricates protocol state. Every job is built by
 :func:`httk.workflow.scaffold.new_job` or by ``httk workflow job new`` and then
@@ -26,14 +26,14 @@ from httk.workflow.runners import RUNNERS, runner_path
 from httk.workflow.scaffold import (
     JOB_SCAFFOLD_FORMAT,
     JobItem,
-    TemplateProvider,
+    WorkflowProvider,
     describe_runner,
     new_job,
     new_jobs,
-    packaged_template,
     payload_relative,
-    registered_templates,
-    resolve_template,
+    registered_workflow,
+    registered_workflows,
+    resolve_workflow,
     structure_files,
     structure_tag,
 )
@@ -141,68 +141,69 @@ def workspace(tmp_path: Path) -> Iterator[Workspace]:
     yield Workspace.initialize(tmp_path / "workspace")
 
 
-def test_every_packaged_runner_has_a_template_that_says_what_it_implements() -> None:
-    """The template table and the packaged runners cannot drift apart.
+def test_every_packaged_runner_has_a_workflow_that_says_what_it_implements() -> None:
+    """The workflow table and the packaged runners cannot drift apart.
 
-    The workflow and the steps of a packaged template are declared in the table
+    The workflow and the steps of a packaged workflow are declared in the table
     rather than asked of the runner on every call, so what holds the two together
     is this: every packaged runner is described here, by running it, and its own
     answer is what the table must contain.
     """
 
-    templates = [packaged_template(name) for name in registered_templates()]
-    assert {template.packaged for template in templates if template} == set(RUNNERS)
-    for template in templates:
-        assert template is not None
-        described = describe_runner(template.source)
-        assert described["workflow"] == template.workflow
-        assert described["steps"] == sorted(template.steps)
-        assert template.parameters == {"structure": "POSCAR"}
-        assert template.initial_step in template.steps
+    workflows = [registered_workflow(name) for name in registered_workflows()]
+    assert {workflow.packaged for workflow in workflows if workflow} == set(RUNNERS)
+    for workflow in workflows:
+        assert workflow is not None
+        described = describe_runner(workflow.source)
+        assert described["workflow"] == workflow.workflow_id
+        assert described["steps"] == sorted(workflow.steps)
+        assert workflow.parameters == {"structure": "POSCAR"}
+        assert workflow.initial_step in workflow.steps
 
     expected = {
-        "vasp-relax": "vasp-relax",
-        "vasp-relax-bash": "vasp-relax",
-        "vasp-static": "vasp-static",
-        "vasp-relax-static": "vasp-relax-static",
+        "httk.vasp.relax": "vasp-relax",
+        "httk.vasp.relax-bash": "vasp-relax",
+        "httk.vasp.static": "vasp-static",
+        "httk.vasp.relax-static": "vasp-relax-static",
     }
-    for name, workflow_name in expected.items():
-        template = packaged_template(name)
-        assert template is not None
-        assert template.declarations == {
-            "workflow": {"$id": f"https://schemas.httk.org/defs/v0.1/workflows/{workflow_name}"}
-        }
+    for workflow_id, workflow_name in expected.items():
+        workflow = registered_workflow(workflow_id)
+        assert workflow is not None
+        assert (
+            workflow.declarations["workflow"]["$id"] == f"https://schemas.httk.org/defs/v0.1/workflows/{workflow_name}"
+        )
 
-    # A packaged runner is nameable by its own file name as well as by its template
+    # A packaged runner is nameable by its own file name as well as by its workflow
     # name, and both resolve to exactly the installed bytes.
-    template = resolve_template("vasp_relax.py")
-    assert template.name == "vasp-relax" and template.source == runner_path("vasp_relax.py")
-    assert template.workflow == "httk.vasp.relax" and template.initial_step == "prepare"
-    assert template.data_mode == "transactional"
-    assert resolve_template("vasp-relax") == template
-    assert resolve_template("vasp-relax-static", step="static").initial_step == "static"
+    workflow = resolve_workflow("vasp-relax")
+    assert workflow.source == runner_path("vasp_relax.py")
+    assert workflow.workflow_id == "httk.vasp.relax" and workflow.initial_step == "prepare"
+    assert workflow.data_mode == "transactional"
+    with pytest.raises(ValueError, match="unknown workflow"):
+        resolve_workflow("vasp_relax.py")
+    assert resolve_workflow("vasp-relax-static", step="static").initial_step == "static"
     with pytest.raises(ValueError, match="does not implement the step 'prepear'"):
-        resolve_template("vasp-relax", step="prepear")
-    with pytest.raises(ValueError, match="unknown template"):
-        resolve_template("vasp-nonexistent")
+        resolve_workflow("vasp-relax", step="prepear")
+    with pytest.raises(ValueError, match="unknown workflow"):
+        resolve_workflow("vasp-nonexistent")
 
 
-def test_template_declarations_are_forwarded_and_digest_covered(
+def test_workflow_declarations_are_forwarded_and_digest_covered(
     workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     declarations = {"workflow": {"$id": "https://example.test/workflows/v1", "nested": {"value": 7}}}
-    provider = TemplateProvider(
-        name="test-declarations",
+    provider = WorkflowProvider(
+        workflow_id="tests.declarations",
+        alias="test-declarations",
         runner_package=PACKAGE,
         runner_file="vasp_relax.py",
-        workflow="tests.declarations",
         initial_step="prepare",
-        steps=("collect", "prepare", "run"),
+        steps=("publish", "prepare", "run"),
         declarations=declarations,
     )
-    monkeypatch.setitem(scaffold._TEMPLATE_PROVIDERS, provider.name, provider)
+    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
 
-    job = new_job(workspace, provider.name)
+    job = new_job(workspace, provider.alias or provider.workflow_id)
     definition = JobDefinition.from_path(job.payload / "job.json")
     assert definition.declarations == declarations
     assert definition.digest == sha256_file(job.payload / "job.json")
@@ -434,7 +435,7 @@ def test_hook_consumed_parameters_require_the_hook_and_old_description_defaults_
         new_job(workspace, runner, parameters={"x": "value"})
     plain = tmp_path / "plain.py"
     plain.write_text(_SINGLE_STEP_RUNNER, encoding="utf-8")
-    assert resolve_template(plain).instantiate is False
+    assert resolve_workflow(plain).instantiate is False
 
 
 def test_an_object_parameter_is_serialized_and_a_failing_save_leaves_no_scratch(
@@ -474,7 +475,7 @@ def test_an_object_parameter_requires_a_registered_writer(tmp_path: Path, worksp
 def test_a_runner_without_a_parameter_description_has_an_empty_declaration(tmp_path: Path) -> None:
     runner = tmp_path / "plain.py"
     runner.write_text(_SINGLE_STEP_RUNNER, encoding="utf-8")
-    assert resolve_template(runner).parameters == {}
+    assert resolve_workflow(runner).parameters == {}
 
 
 def test_the_installed_form_references_a_packaged_runner_without_copying(workspace: Workspace, structure: Path) -> None:
@@ -493,7 +494,7 @@ def test_a_runner_file_of_ones_own_is_described_and_published(tmp_path: Path, wo
     # The runner says what it implements, so nothing has to be declared twice.
     described = describe_runner(runner)
     assert described == {"workflow": "tests.scaffold.single", "steps": ["start"]}
-    assert resolve_template(runner).declarations == {}
+    assert resolve_workflow(runner).declarations == {}
     job = new_job(workspace, runner, tag="own")
     assert job.workflow == "tests.scaffold.single" and job.initial_step == "start"
     # A runner of one's own defaults to data.mode none: it declared no results.
@@ -522,7 +523,7 @@ def test_a_runner_with_several_steps_needs_the_starting_step_named(tmp_path: Pat
     assert new_job(workspace, runner, step="finish", tag="named").initial_step == "finish"
 
 
-def test_an_undescribable_template_is_refused_by_name(tmp_path: Path, workspace: Workspace) -> None:
+def test_an_undescribable_workflow_is_refused_by_name(tmp_path: Path, workspace: Workspace) -> None:
     broken = tmp_path / "broken.py"
     broken.write_text("raise SystemExit(3)\n", encoding="utf-8")
     with pytest.raises(ValueError, match="refused to describe itself"):
@@ -539,12 +540,12 @@ def test_an_undescribable_template_is_refused_by_name(tmp_path: Path, workspace:
         new_job(workspace, mystery)
 
 
-def test_a_transactional_template_works_in_a_core_workspace(tmp_path: Path, structure: Path) -> None:
+def test_a_transactional_workflow_works_in_a_core_workspace(tmp_path: Path, structure: Path) -> None:
     plain = Workspace.initialize(tmp_path / "plain")
     job = new_job(plain, "vasp-relax", files={"POSCAR": structure})
     assert JobDefinition.from_path(job.payload / "job.json").data_mode == "transactional"
 
-    # The same template can leave results in the workdir when requested.
+    # The same workflow can leave results in the workdir when requested.
     job = new_job(plain, "vasp-relax", files={"POSCAR": structure}, data_mode="none")
     assert JobDefinition.from_path(job.payload / "job.json").data_mode == "none"
 
@@ -654,7 +655,7 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
                 "job",
                 "new",
                 ws_name,
-                "--template",
+                "--workflow",
                 "vasp-relax",
                 "--parameter",
                 f"structure={structure}",
@@ -690,7 +691,7 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
                 "job",
                 "new",
                 ws_name,
-                "--template",
+                "--workflow",
                 "vasp-relax",
                 "--parameter-from",
                 "structure",
@@ -717,16 +718,16 @@ def test_the_command_reports_what_it_cannot_do(
     assert command(["workspace", "init", str(root)], _context(tmp_path)) == 0
     capsys.readouterr()
 
-    # A malformed assignment, an unknown template, and an empty structure directory.
-    assert command(["job", "new", name, "--template", "vasp-relax", "--input", "bare"], _context(tmp_path)) == 2
+    # A malformed assignment, an unknown workflow, and an empty structure directory.
+    assert command(["job", "new", name, "--workflow", "vasp-relax", "--input", "bare"], _context(tmp_path)) == 2
     assert "NAME=VALUE" in capsys.readouterr().err
-    assert command(["job", "new", name, "--template", "nope"], _context(tmp_path)) == 2
-    assert "unknown template" in capsys.readouterr().err
+    assert command(["job", "new", name, "--workflow", "nope"], _context(tmp_path)) == 2
+    assert "unknown workflow" in capsys.readouterr().err
     empty = tmp_path / "empty"
     empty.mkdir()
     assert (
         command(
-            ["job", "new", name, "--template", "vasp-relax", "--parameter-from", "structure", str(empty)],
+            ["job", "new", name, "--workflow", "vasp-relax", "--parameter-from", "structure", str(empty)],
             _context(tmp_path),
         )
         == 2
@@ -747,7 +748,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
                 "job",
                 "new",
                 name,
-                "--template",
+                "--workflow",
                 "vasp-relax",
                 "--parameter-from",
                 "structure",
@@ -783,7 +784,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
                 "job",
                 "new",
                 name,
-                "--template",
+                "--workflow",
                 str(runner),
                 "--parameter-from",
                 "data",
@@ -802,7 +803,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
         for line in reports
     )
 
-    # A packaged VASP template accepts the same source shape; two batch sources
+    # A packaged VASP workflow accepts the same source shape; two batch sources
     # are refused before either job is submitted.
     assert (
         command(
@@ -810,7 +811,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
                 "job",
                 "new",
                 name,
-                "--template",
+                "--workflow",
                 "vasp-relax",
                 "--parameter-from",
                 "structure",
@@ -824,7 +825,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
         == 2
     )
     assert "only one --parameter-from" in capsys.readouterr().err
-    assert command(["job", "new", name, "--template", "vasp-relax", "--from", str(structure)], _context(tmp_path)) == 2
+    assert command(["job", "new", name, "--workflow", "vasp-relax", "--from", str(structure)], _context(tmp_path)) == 2
     assert "unrecognized arguments: --from" in capsys.readouterr().err
 
 
@@ -855,7 +856,7 @@ def test_parameter_from_cif_is_written_as_a_poscar_when_domain_plugins_are_avail
                 "job",
                 "new",
                 "cif",
-                "--template",
+                "--workflow",
                 "vasp-relax",
                 "--parameter-from",
                 "structure",

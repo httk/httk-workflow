@@ -4,7 +4,7 @@ A declaration says what a workflow *is* — its inputs, its method, its outputs 
 without a graph. *httk-workflow* carries the document and never interprets it, so
 what is tested here is carriage and honesty: that a document survives `job.json`
 and a spawned child unchanged, that a runner may refine it at run time in either
-language without disturbing the payload digest, and that a harvest reports the
+language without disturbing the payload digest, and that a collect reports the
 declared and the observed document side by side, including when one of them is
 damaged.
 """
@@ -24,11 +24,11 @@ from httk.workflow import (
     Attempt,
     ChildSpec,
     FormatError,
-    HarvestRecord,
+    JobRecord,
     RunnerRef,
     TaskManager,
     Workspace,
-    harvest,
+    job_records,
 )
 from httk.workflow.models import MAXIMUM_DECLARATIONS_BYTES, validate_declarations
 from httk.workflow.protocol import JobDefinition, JobSpec, prepare_job_payload
@@ -353,7 +353,7 @@ def test_the_bridge_keeps_the_absent_and_refused_exit_codes(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# Harvesting and the payload digest
+# Collecting and the payload digest
 # ---------------------------------------------------------------------------
 
 
@@ -411,10 +411,10 @@ def _campaign(root: Path) -> tuple[Workspace, str]:
     return workspace, job.id
 
 
-def test_a_harvest_reports_declared_and_observed_side_by_side(tmp_path: Path) -> None:
+def test_a_collect_reports_declared_and_observed_side_by_side(tmp_path: Path) -> None:
     workspace, _ = _campaign(tmp_path / "run")
 
-    records = list(harvest(workspace))
+    records = list(job_records(workspace))
     assert len(records) == 1
     record = records[0]
     assert not record.gaps
@@ -436,8 +436,8 @@ def test_a_harvest_reports_declared_and_observed_side_by_side(tmp_path: Path) ->
 
     # A record survives being written, shipped, and read back unchanged.
     shipped = json.loads(json.dumps(record.as_mapping()))
-    assert HarvestRecord.from_mapping(shipped).declarations == record.declarations
-    assert HarvestRecord.from_mapping(shipped).as_mapping() == record.as_mapping()
+    assert JobRecord.from_mapping(shipped).declarations == record.declarations
+    assert JobRecord.from_mapping(shipped).as_mapping() == record.as_mapping()
 
 
 def test_an_unreadable_observed_declaration_is_a_gap_and_not_a_silence(tmp_path: Path) -> None:
@@ -447,8 +447,8 @@ def test_an_unreadable_observed_declaration_is_a_gap_and_not_a_silence(tmp_path:
     declarations = workspace.payload_path(marker.placement, marker.job_key) / ".httk-job" / "declarations"
     (declarations / "workflow.json").write_text("{ this is not JSON", encoding="utf-8")
 
-    record = next(iter(harvest(workspace)))
-    # The result still exists, so it is still harvested: the damaged side is
+    record = next(iter(job_records(workspace)))
+    # The result still exists, so it is still collected: the damaged side is
     # reported as absent, the intact side is untouched, and the record says its
     # history is not complete.
     assert record.gaps
@@ -457,7 +457,7 @@ def test_an_unreadable_observed_declaration_is_a_gap_and_not_a_silence(tmp_path:
         "$id": "https://example.org/hints/v1",
         "note": "runtime",
     }
-    assert HarvestRecord.from_mapping(record.as_mapping()).declarations == record.declarations
+    assert JobRecord.from_mapping(record.as_mapping()).declarations == record.declarations
 
 
 def test_declaring_does_not_move_the_payload_digest(tmp_path: Path) -> None:
@@ -485,8 +485,8 @@ def test_declaring_does_not_move_the_payload_digest(tmp_path: Path) -> None:
     # payload carries declarations the digest deliberately ignores.
     assert _payload_digest(imported_payload) == manifest["payload_sha256"]
 
-    # And the declarations travelled with the payload, so the job harvests the
+    # And the declarations travelled with the payload, so the job collects the
     # same way at home as it did where it ran.
-    record = next(iter(harvest(destination)))
+    record = next(iter(job_records(destination)))
     assert record.declarations["workflow"]["observed"] == {**_DECLARED, "outputs": {"structures": 3}}
     assert record.declarations["late"] == {"declared": None, "observed": {"late": True}}

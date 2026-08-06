@@ -127,7 +127,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     # The page really is six commands, including explicit workspace setup.
     assert sum(1 for line in commands if line.startswith("httk")) == 6
     assert "httk project init --name quickstart" in commands
-    assert any(line.startswith("httk workflow job new --template vasp-relax") for line in commands)
+    assert any(line.startswith("httk workflow job new --workflow vasp-relax") for line in commands)
 
     completed = _run(
         ["bash", "-e", "-c", "\n".join(commands)],
@@ -144,11 +144,12 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     assert (published / "INCAR").is_file() and (published / "KPOINTS").is_file()
     assert (payload / "files" / "POSCAR").read_text(encoding="utf-8").splitlines()[0] == "silicon"
 
-    # And the last documented command printed exactly one harvest record of it.
+    # And the last documented command printed exactly one collected summary.
     records = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{")]
     assert len(records) == 1
-    assert records[0]["state"] == "succeeded"
-    assert records[0]["job"]["workflow"] == "httk.vasp.relax"
+    assert records[0]["format"] == "httk-workflow-collected"
+    assert records[0]["workflow"] == "httk.vasp.relax"
+    assert records[0]["missing_postprocessor"] is None
     assert records[0]["job_key"].startswith("silicon--")
 
 
@@ -166,7 +167,7 @@ def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) ->
     kind, payload = _finished(work)
     assert kind == "succeeded"
     assert (payload / "data" / "vasp" / "OUTCAR").is_file()
-    assert "succeeded" in completed.stdout
+    assert '"workflow":"httk.vasp.relax"' in completed.stdout
 
 
 def test_the_python_api_tour_runs(work: Path, tmp_path: Path) -> None:

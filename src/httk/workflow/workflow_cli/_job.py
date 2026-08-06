@@ -137,11 +137,11 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
     if items:
         for item in items:
             item["tag"] = arguments.tag or item.get("tag")
-        results: Iterator[ScaffoldedJob] = new_jobs(workspace, arguments.template, items, **shared)
+        results: Iterator[ScaffoldedJob] = new_jobs(workspace, arguments.workflow, items, **shared)
     else:
-        results = iter([new_job(workspace, arguments.template, tag=arguments.tag or parameter_tag, **shared)])
+        results = iter([new_job(workspace, arguments.workflow, tag=arguments.tag or parameter_tag, **shared)])
     if arguments.json:
-        # One self-describing report per job, as an array, exactly as `harvest
+        # One self-describing report per job, as an array, exactly as `job_records
         # --json` prints one array of records.
         print(json.dumps([job.as_mapping() for job in results], indent=2))
         return 0
@@ -345,16 +345,20 @@ def build_job_parser(
     new = _leaf(
         group,
         "new",
-        summary="scaffold and submit jobs from a runner template",
-        description="Scaffold and submit jobs from a runner template",
+        summary="scaffold and submit jobs from a runner workflow",
+        description="Scaffold and submit jobs from a runner workflow",
         handler=handle_job_new,
     )
     add_workspace_argument(new, help_text="the workspace to submit into")
+    workflow_names: list[str] = []
+    for workflow_id in registered_workflows():
+        provider = workflow_provider(workflow_id)
+        workflow_names.append(f"{workflow_id} ({provider.alias})" if provider and provider.alias else workflow_id)
     new.add_argument(
-        "--template",
-        metavar="TEMPLATE",
+        "--workflow",
+        metavar="WORKFLOW",
         required=True,
-        help=f"a registered template ({', '.join(registered_templates())}) or the path of a runner file",
+        help="a registered workflow (" + ", ".join(workflow_names) + ") or the path of a runner file",
     )
     new.add_argument(
         "--input",
@@ -405,17 +409,17 @@ def build_job_parser(
         "--priority",
         type=int,
         metavar="PRIORITY",
-        help="scheduling priority (default: the template's)",
+        help="scheduling priority (default: the workflow's)",
     )
     new.add_argument(
         "--step",
         metavar="STEP",
-        help="the step the job starts at (default: the template's own)",
+        help="the step the job starts at (default: the workflow's own)",
     )
     new.add_argument(
         "--data-mode",
         choices=("none", "transactional"),
-        help="the job's data mode (default: what the template needs)",
+        help="the job's data mode (default: what the workflow needs)",
     )
     new.add_argument(
         "--workdir-mode",

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""One VASP relaxation: prepare inputs, run with remedies, collect the result.
+"""One VASP relaxation: prepare inputs, run with remedies, publish the result.
 
 The three steps are the whole workflow. ``prepare`` stages the structure and the
 INCAR of the job payload into the workdir and derives everything else;  ``run``
 executes VASP under supervision and, when the run fails in a way the reviewed
 remedy ladder recognizes, applies exactly one remedy and asks for another attempt;
-``collect`` publishes the files that describe the finished calculation.
+``publish`` publishes the files that describe the finished calculation.
 
 The job inputs are documented in :mod:`httk.workflow.vasp.runners`. Nothing here
 imports anything but an installed *httk-workflow*, so this one file is the whole
@@ -245,7 +245,7 @@ def execute(a: Attempt, *, next_step: str) -> None:
     a.retry(f"applied the {decision.policy} remedy for {decision.problem}")
 
 
-def publish(a: Attempt, *, prefix: str) -> None:
+def publish_files(a: Attempt, *, prefix: str) -> None:
     """Publish the collected files of a finished calculation."""
 
     names = names_input(a, "collect", DEFAULT_COLLECT)
@@ -278,14 +278,14 @@ def prepare(a: Attempt) -> None:
 def run_step(a: Attempt) -> None:
     """Run VASP, remedy a recognized failure, or fail with what was diagnosed."""
 
-    execute(a, next_step="collect")
+    execute(a, next_step="publish")
 
 
 @run.step
-def collect(a: Attempt) -> None:
+def publish(a: Attempt) -> None:
     """Publish the finished calculation and complete the job."""
 
-    publish(a, prefix=text_input(a, "data_prefix", "vasp"))
+    publish_files(a, prefix=text_input(a, "data_prefix", "vasp"))
     a.succeed()
 
 

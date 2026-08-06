@@ -17,12 +17,13 @@ from httk.core.cli import CLIContext
 
 from ._campaign import (
     build_campaign_parser,
-    handle_campaign_harvest,
+    handle_campaign_collect,
     handle_campaign_init,
     handle_campaign_show,
     handle_campaign_start_managers,
     handle_campaign_submit,
 )
+from ._collect import build_collect_parser, handle_collect
 
 # Private names were attributes of the old flat module too. Keep them
 # available for code that imported them deliberately, without making them part
@@ -65,7 +66,6 @@ from ._compat import (
     handle_v1_run,
     handle_v1_submit,
 )
-from ._harvest import build_harvest_parser, handle_harvest
 from ._job import (
     _add_job_selector,
     add_job_request_arguments,
@@ -173,7 +173,7 @@ def build_parser(program: str, context: CLIContext) -> argparse.ArgumentParser:
     build_runner_parser(groups)
     build_job_parser(groups)
     build_import_parser(groups)
-    build_harvest_parser(groups)
+    build_collect_parser(groups)
     build_run_parser(groups)
     build_manager_parser(groups)
     build_v1_parser(groups)

@@ -750,7 +750,7 @@ def _run_transfer_verb(
         "--state",
         action="append",
         metavar="STATE",
-        choices=HARVESTABLE_KINDS,
+        choices=COLLECTABLE_KINDS,
         help=f"state kind to move when fetching (repeatable, default: {', '.join(DEFAULT_OFFER_STATES)})",
     )
     parser.add_argument(
@@ -849,7 +849,7 @@ def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> i
     offer = protocol.add_parser("offer")
     offer.add_argument("workspace", metavar="WORKSPACE")
     offer.add_argument("--destination-workspace-id", metavar="UUID", required=True)
-    offer.add_argument("--state", action="append", metavar="STATE", choices=HARVESTABLE_KINDS)
+    offer.add_argument("--state", action="append", metavar="STATE", choices=COLLECTABLE_KINDS)
     offer.add_argument("--placement", metavar="PLACEMENT")
     offer.add_argument("--json", action="store_true")
     offer.set_defaults(handler=handle_transfer_offer)

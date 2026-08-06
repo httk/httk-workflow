@@ -28,7 +28,7 @@ runner even once.
 **The workflow runs on httk's own machinery.** No other engine is invoked, no
 other engine is bundled, and nothing shells out to `cwltool`. An imported job is
 claimed, leased, retried, checkpointed and journalled like every other job of a
-workspace, and shows up in `job list`, `job show`, `job why` and `harvest`.
+workspace, and shows up in `job list`, `job show`, `job why` and `collect`.
 
 ## Python Workflow Definition
 

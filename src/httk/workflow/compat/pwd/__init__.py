@@ -381,5 +381,4 @@ def import_pwd(
         priority=priority,
         data_mode=data_mode,
         maximum_attempts_per_activation=maximum_attempts,
-        template="pwd",
     )

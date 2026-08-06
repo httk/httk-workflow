@@ -11,15 +11,17 @@ The package presents three layers, each with its own import home:
   :mod:`httk.workflow.runtime_utils`, and job scaffolding in
   :mod:`httk.workflow.scaffold`.
 * **Orchestration and management** — :class:`Workspace`, :class:`TaskManager`,
-  and :func:`harvest` drive and inspect a running workspace. The management
+  and :func:`job_records` drive and inspect a running workspace. The management
   operations that surround them (transfers, manifests, hygiene, configuration,
   adapters, supervision, and the VASP and v1 compatibility surfaces) live in
   their own named submodules rather than in this root.
 
+The normal lifecycle is instantiate a job, run it, then collect its outputs.
 Only the deliberate top-level surface is re-exported here; everything else is
 reached through its submodule.
 """
 
+from .collecting import CollectedJob, JobRecord, collect, job_records
 from .errors import (
     FormatError,
     RunnerResolutionError,
@@ -30,7 +32,6 @@ from .errors import (
     WorkspaceCorruptionError,
     WorkspaceUnavailableError,
 )
-from .harvesting import HarvestRecord, harvest
 from .manager import TaskManager
 from .runtime_builders import JobState
 from .scaffold import ScaffoldedJob, new_job, new_jobs
@@ -50,9 +51,10 @@ __all__ = [
     "ChildResult",
     "ChildSpec",
     "ChildrenView",
+    "CollectedJob",
     "FormatError",
-    "HarvestRecord",
     "InstantiateHandler",
+    "JobRecord",
     "JobState",
     # Execution / authoring surface.
     "Runner",
@@ -69,7 +71,8 @@ __all__ = [
     "Workspace",
     "WorkspaceCorruptionError",
     "WorkspaceUnavailableError",
-    "harvest",
+    "collect",
+    "job_records",
     "new_job",
     "new_jobs",
 ]

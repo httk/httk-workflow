@@ -3,7 +3,7 @@
 Nothing here fabricates protocol state. One real campaign is run by a real
 :class:`httk.workflow.TaskManager` in a *remote* workspace — the one a remote
 adapter reaches — and every assertion reads what ``transfer offer``, ``transfer
-fetch``, ``transfer retire``, and finally ``harvest`` report about the local
+fetch``, ``transfer retire``, and finally ``collect`` report about the local
 workspace that asked for the results back.
 """
 
@@ -19,10 +19,10 @@ from httk.core.cli import CLIContext
 
 from conftest import register_ws
 from httk.workflow import (
-    HarvestRecord,
+    JobRecord,
     TaskManager,
     Workspace,
-    harvest,
+    job_records,
 )
 from httk.workflow.adapters import add_remote
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
@@ -404,12 +404,12 @@ def test_fetch_selects_states_and_placements(pair: Pair, capsys: pytest.CaptureF
 # ---------------------------------------------------------------------------
 
 
-def test_a_fetched_job_harvests_locally_as_an_ordinary_result(
+def test_a_fetched_job_collects_locally_as_an_ordinary_result(
     pair: Pair,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _fetch(pair, capsys)
-    records = {record.job_id: record for record in harvest(pair.local, states=("succeeded", "failed"))}
+    records = {record.job_id: record for record in job_records(pair.local, states=("succeeded", "failed"))}
     assert set(records) == {pair.ids["succeeded"], pair.ids["failed"]}
 
     succeeded = records[pair.ids["succeeded"]]
@@ -424,10 +424,10 @@ def test_a_fetched_job_harvests_locally_as_an_ordinary_result(
     assert failed.failure.details == {"cycles": 3}
 
     # The same thing through the command, which is the documented pipeline.
-    assert command(["harvest", "home", "--state", "succeeded", "--state", "failed"], pair.context) == 0
+    assert command(["collect", "home", "--state", "succeeded", "--state", "failed", "--raw"], pair.context) == 0
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == 2
-    assert {HarvestRecord.from_mapping(json.loads(line)).job_id for line in lines} == set(records)
+    assert {JobRecord.from_mapping(json.loads(line)).job_id for line in lines} == set(records)
 
 
 def test_the_runner_the_remote_pinned_travels_with_the_fetched_jobs(

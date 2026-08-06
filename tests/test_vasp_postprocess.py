@@ -1,0 +1,90 @@
+"""VASP postprocessors return role-keyed outputs only."""
+
+from pathlib import Path, PurePosixPath
+
+import pytest
+
+pytest.importorskip("httk.atomistic")
+pytest.importorskip("httk.io")
+
+import httk.core
+
+from httk.workflow.collecting import JobRecord
+from httk.workflow.vasp.postprocess import (
+    postprocess_vasp_relax,
+    postprocess_vasp_relax_static,
+    postprocess_vasp_static,
+)
+
+_POSCAR = """silicon
+1.0
+2.0 0.0 0.0
+0.0 2.0 0.0
+0.0 0.0 2.0
+Si
+2
+Direct
+0.0 0.0 0.0
+0.5 0.5 0.5
+"""
+_OUTCAR = """ vasp.5.2.12 synthetic
+   FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)
+   free  energy   TOTEN  =       -27.09328752 eV
+   energy  without entropy=      -27.09328752  energy(sigma->0) =      -27.09328752
+  General timing and accounting informations for this job:
+"""
+
+
+def _record(root: Path, workflow: str) -> JobRecord:
+    return JobRecord(
+        workspace_root=root,
+        workspace_id="ws",
+        job_id="12345678-1234-4234-8234-123456789abc",
+        job_key="job--12345678-1234-4234-8234-123456789abc",
+        job={"workflow": workflow},
+        runner_provenance=None,
+        state="succeeded",
+        failure=None,
+        placement=PurePosixPath("jobs"),
+        payload_path=PurePosixPath("jobs/job--12345678-1234-4234-8234-123456789abc"),
+        workdir_path=None,
+        data_path=PurePosixPath("data"),
+        data_generation=1,
+        provenance={},
+        runner_steps=None,
+        children={},
+        declarations={},
+    )
+
+
+def _write(root: Path, *parts: str) -> None:
+    directory = root.joinpath(*parts[:-1])
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / parts[-1]).write_text(_POSCAR if parts[-1] == "CONTCAR" else _OUTCAR, encoding="utf-8")
+
+
+def test_relax_returns_declared_roles(tmp_path: Path) -> None:
+    _write(tmp_path / "data", "vasp", "CONTCAR")
+    _write(tmp_path / "data", "vasp", "OUTCAR")
+    outputs = postprocess_vasp_relax(_record(tmp_path, "httk.vasp.relax"))
+    assert set(outputs) == {"relaxed_structure", "total_energy"}
+    assert isinstance(outputs["total_energy"], httk.core.DataRecord)
+
+
+def test_static_returns_only_energy(tmp_path: Path) -> None:
+    _write(tmp_path / "data", "vasp", "OUTCAR")
+    outputs = postprocess_vasp_static(_record(tmp_path, "httk.vasp.static"))
+    assert set(outputs) == {"total_energy"}
+
+
+def test_relax_static_uses_two_output_layouts(tmp_path: Path) -> None:
+    _write(tmp_path / "data", "relax", "CONTCAR")
+    _write(tmp_path / "data", "static", "OUTCAR")
+    outputs = postprocess_vasp_relax_static(_record(tmp_path, "httk.vasp.relax-static"))
+    assert set(outputs) == {"relaxed_structure", "total_energy"}
+
+
+def test_missing_file_names_job_identity(tmp_path: Path) -> None:
+    _write(tmp_path / "data", "vasp", "CONTCAR")
+    with pytest.raises(ValueError, match=r"ws:12345678-1234-4234-8234-123456789abc.*OUTCAR"):
+        postprocess_vasp_relax(_record(tmp_path, "httk.vasp.relax"))

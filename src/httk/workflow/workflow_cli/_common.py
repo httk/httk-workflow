@@ -32,8 +32,8 @@ from typing import Any
 import httk.core
 from httk.core.cli import CLIContext
 
-# The packaged domains register their templates as an import side effect, so the
-# CLI resolves `job new --template NAME` against a populated registry. The generic
+# The packaged domains register their workflows as an import side effect, so the
+# CLI resolves `job new --workflow NAME` against a populated registry. The generic
 # execution layer never imports a domain; the CLI does, exactly here.
 from .. import vasp as _vasp
 from .._logging import LOG_LEVELS, add_log_file, configure_logging
@@ -64,13 +64,14 @@ from ..adapters import (
 )
 from ..campaigns import (
     ASSIGNMENT_POLICIES,
-    campaign_harvest,
+    campaign_collect,
     campaign_managers,
     campaign_submit,
     campaign_submit_many,
     read_campaign,
     write_campaign,
 )
+from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, collect, job_records
 from ..compat.cwl import import_cwl
 from ..compat.pwd import import_pwd
 from ..compat.v1 import V1TaskManager, prepare_v1_payload, submit_v1_task
@@ -84,7 +85,6 @@ from ..configuration import (
 )
 from ..errors import WorkflowError
 from ..gc import iter_report_rows
-from ..harvesting import DEFAULT_HARVEST_STATES, HARVESTABLE_KINDS, harvest
 from ..hygiene import (
     describe_project,
     describe_remote,
@@ -128,8 +128,9 @@ from ..scaffold import (
     _sanitize_tag,
     new_job,
     new_jobs,
-    registered_templates,
+    registered_workflows,
     structure_tag,
+    workflow_provider,
 )
 from ..transfers import (
     DEFAULT_OFFER_STATES,
@@ -532,7 +533,7 @@ def _remote_workspace_read(
 
     *command* is a pinned far-side vector, e.g. ``REMOTE_STATUS_COMMAND``; the
     remote plain name is appended, then whichever of *flags* the parsed arguments set. This is the single path every remote-capable read command runs
-    through, so ``status``, ``gc``, ``fsck``, ``harvest``, and the ``job`` reads
+    through, so ``status``, ``gc``, ``fsck``, ``job_records``, and the ``job`` reads
     all reach a remote the same way.
     """
 

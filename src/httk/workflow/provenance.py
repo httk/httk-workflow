@@ -26,7 +26,7 @@ from typing import Final
 
 from httk.core import Run, RunEdge
 
-from .harvesting import HarvestRecord
+from .collecting import JobRecord
 
 __all__ = ["PROVENANCE_DECLARATION", "run_record"]
 
@@ -93,7 +93,7 @@ def _timestamp(value: object) -> datetime | None:
     return parsed
 
 
-def _last_modified(record: HarvestRecord) -> datetime | None:
+def _last_modified(record: JobRecord) -> datetime | None:
     latest: datetime | None = None
     activations = record.provenance.get("activations")
     if not isinstance(activations, Sequence) or isinstance(activations, (str, bytes)):
@@ -113,7 +113,7 @@ def _last_modified(record: HarvestRecord) -> datetime | None:
     return latest
 
 
-def run_record(record: HarvestRecord) -> Run:
+def run_record(record: JobRecord) -> Run:
     """Build the one :class:`httk.core.Run` represented by *record*.
 
     The observed ``provenance`` document is selected wholesale when present;
@@ -126,10 +126,10 @@ def run_record(record: HarvestRecord) -> Run:
     ``immutable_id`` is ``"<workspace_id>:<job_id>"``. ``last_modified`` is the
     latest parseable aware ``finished_at`` timestamp in the attempt timeline;
     absent or unparseable timestamps produce ``None``. Children are not folded
-    in: each child harvests to its own ``Run``, while a parent can name child
+    in: each child collects to its own ``Run``, while a parent can name child
     products explicitly in its observed declaration. Runner identity, timeline,
     and failure are deliberately not folded into ``Run``; the caller's
-    ``HarvestRecord`` remains the extra-information channel.
+    ``JobRecord`` remains the extra-information channel.
     """
 
     identity = f"{record.workspace_id}:{record.job_id}"

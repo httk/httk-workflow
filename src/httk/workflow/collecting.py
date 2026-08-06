@@ -1,18 +1,18 @@
-"""The results-harvest contract: everything a data layer needs about one job.
+"""The results-collect contract: everything a data layer needs about one job.
 
-Harvesting is the read-only counterpart of running work. A manager decides what
-happens next; a harvest reports what already happened, once, per job that
+Collecting is the read-only counterpart of running work. A manager decides what
+happens next; a job_records reports what already happened, once, per job that
 stopped, in a shape a data layer can store without knowing anything about
 markers, journals, or leases.
 
-That shape — :class:`~httk.workflow.harvesting.HarvestRecord` — is the layering boundary of *httk₂*.
+That shape — :class:`~httk.workflow.collecting.JobRecord` — is the layering boundary of *httk₂*.
 *httk-workflow* has no database dependency and never will: it produces records,
 and something else consumes them. A consumer therefore reads results like this,
 and nothing in this module knows what ``store`` or ``load_vasp`` are:
 
 .. code-block:: python
 
-    for record in harvest(workspace):
+    for record in job_records(workspace):
         store.save(load_vasp(record))
 
 Every member of a record is derived from exactly the authoritative state a
@@ -27,23 +27,26 @@ module exists at all:
   the reserved ``pkg:`` form the installed distribution and its version are
   reported as well, so a stored result names the software that produced it.
 * **Damage is reported, never guessed.** A job whose journal chain is broken is
-  still harvested, with whatever remains readable and ``gaps`` set, because a
+  still collected, with whatever remains readable and ``gaps`` set, because a
   result that exists must not become invisible just because part of its history
   did not survive.
 
-:func:`harvest` is lazily evaluated over one scan of the workspace. By design it
+:func:`job_records` is lazily evaluated over one scan of the workspace. By design it
 iterates jobs without materializing the workspace, and building one record reads
 only that job's own payload and journal chain.
 """
 
+from __future__ import annotations
+
+import importlib
 import json
 import logging
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache
 from importlib import metadata
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote
 
 from ._util import read_json, require_mapping, require_string
@@ -76,30 +79,54 @@ from .workspace import Workspace
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
-    "DEFAULT_HARVEST_STATES",
-    "HARVESTABLE_KINDS",
-    "HARVEST_FORMAT",
-    "HARVEST_FORMAT_VERSION",
-    "HarvestRecord",
+    "COLLECTABLE_KINDS",
+    "COLLECT_FORMAT",
+    "COLLECT_FORMAT_VERSION",
+    "DEFAULT_COLLECT_STATES",
+    "CollectedJob",
+    "JobRecord",
     "children_of",
+    "collect",
+    "collect_kinds",
     "declarations_of",
-    "harvest",
-    "harvest_kinds",
+    "job_records",
     "module_distribution",
     "record_of",
     "runner_provenance",
     "timeline",
 ]
 
-HARVEST_FORMAT = "httk-workflow-harvest"
-HARVEST_FORMAT_VERSION = 1
-#: The state kinds a harvest may read: a job that stopped. The terminal kinds are
+COLLECT_FORMAT = "httk-workflow-collect"
+COLLECT_FORMAT_VERSION = 1
+#: The state kinds a job_records may read: a job that stopped. The terminal kinds are
 #: final, and ``paused`` is included because a paused job published a real outcome
 #: and produced real results before an operator was asked to look at it.
-HARVESTABLE_KINDS = tuple(kind for kind in STATE_KINDS if kind in TERMINAL_KINDS or kind == "paused")
+COLLECTABLE_KINDS = tuple(kind for kind in STATE_KINDS if kind in TERMINAL_KINDS or kind == "paused")
 #: The default selection: the jobs that finished the way they were meant to.
-DEFAULT_HARVEST_STATES = ("succeeded",)
+DEFAULT_COLLECT_STATES = ("succeeded",)
 _FILE_URL_PREFIX = "file://"
+
+if TYPE_CHECKING:
+    import httk.core
+
+
+def _core():
+    """Load optional core provenance types only when the collect layer is used."""
+
+    return importlib.import_module("httk.core")
+
+
+@dataclass(frozen=True)
+class CollectedJob:
+    """One collected job and the framework-owned provenance it assembled."""
+
+    workflow_id: str
+    outputs: Mapping[str, object]
+    unfulfilled: tuple[str, ...]
+    run: httk.core.Run
+    products: tuple[httk.core.ProductLink, ...]
+    record: JobRecord
+    missing_postprocessor: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +178,7 @@ def module_distribution(module: str) -> tuple[str, str] | None:
     The answer is read from installation metadata alone and never by importing
     anything: a module name comes out of an untrusted ``job.json``, and importing
     it to ask which package it belongs to would execute code during a read-only
-    harvest. A wheel installation is recognized by the module path recorded in
+    job_records. A wheel installation is recognized by the module path recorded in
     its file list, and an editable installation by the source tree its
     ``direct_url.json`` names. Anything else — a module on ``PYTHONPATH`` that no
     installed distribution owns — is reported as unknown rather than guessed.
@@ -245,7 +272,7 @@ def timeline(frames: Sequence[Mapping[str, Any]]) -> dict[str, object]:
     opened by the ``claimed`` frame that consumed a budget and closed by the
     first frame that reported how it ended. A frame the journal could not return
     sets ``gaps`` and is skipped, which keeps a job with a damaged history
-    harvestable instead of silent.
+    collectable instead of silent.
     """
 
     activations: list[dict[str, object]] = []
@@ -334,8 +361,8 @@ def _frame_children(frame: Mapping[str, Any]) -> Iterator[tuple[str, str | None,
 def children_of(frames: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, object]]:
     """Return the labeled children one job registered, keyed by spawn label.
 
-    A campaign therefore harvests as a tree: every record names the children it
-    spawned, and each of those is a job a consumer harvests in its own right. A
+    A campaign therefore collects as a tree: every record names the children it
+    spawned, and each of those is a job a consumer collects in its own right. A
     label is mandatory in ``core-v2``, so an unlabeled child reference — only
     possible in a workspace written by an older profile — is left out rather than
     given an invented name. A label reused by a later activation names the child
@@ -419,18 +446,18 @@ def _failure_of(state: Mapping[str, Any]) -> tuple[Failure | None, bool]:
 
 
 @dataclass(frozen=True)
-class HarvestRecord:
+class JobRecord:
     """Everything a data layer needs about one job that stopped.
 
     Paths appear twice on purpose. The members ``payload_path``,
     ``workdir_path``, and ``data_path`` are workspace relative, which is what a
     stored record must hold so it survives moving the workspace; the properties
     :attr:`payload`, :attr:`workdir`, and :attr:`data` resolve them against the
-    workspace this record was harvested from, which is what code reading result
+    workspace this record was collected from, which is what code reading result
     files wants.
     """
 
-    #: The absolute root of the workspace this record was harvested from.
+    #: The absolute root of the workspace this record was collected from.
     workspace_root: Path
     workspace_id: str
     job_id: str
@@ -494,8 +521,8 @@ class HarvestRecord:
         """Return the JSON representation of this record."""
 
         return {
-            "format": HARVEST_FORMAT,
-            "format_version": HARVEST_FORMAT_VERSION,
+            "format": COLLECT_FORMAT,
+            "format_version": COLLECT_FORMAT_VERSION,
             "workspace": str(self.workspace_root),
             "workspace_id": self.workspace_id,
             "job_id": self.job_id,
@@ -523,11 +550,11 @@ class HarvestRecord:
         }
 
     @classmethod
-    def from_mapping(cls, value: Mapping[str, object]) -> "HarvestRecord":
+    def from_mapping(cls, value: Mapping[str, object]) -> JobRecord:
         """Rebuild one record from the mapping :meth:`as_mapping` produced."""
 
-        if value.get("format") != HARVEST_FORMAT or value.get("format_version") != HARVEST_FORMAT_VERSION:
-            raise FormatError(f"harvest record must use {HARVEST_FORMAT} version {HARVEST_FORMAT_VERSION}")
+        if value.get("format") != COLLECT_FORMAT or value.get("format_version") != COLLECT_FORMAT_VERSION:
+            raise FormatError(f"collect record must use {COLLECT_FORMAT} version {COLLECT_FORMAT_VERSION}")
         failure = value.get("failure")
         provenance = value.get("provenance")
         description = value.get("runner_description")
@@ -596,7 +623,7 @@ def declarations_of(
     and reported side by side, because merging them would require understanding
     a vocabulary this module deliberately does not implement. An observed
     document that cannot be read is reported as ``None`` with the damage flag
-    set, exactly like every other unreadable evidence a harvest still reports.
+    set, exactly like every other unreadable evidence a job_records still reports.
     """
 
     result: dict[str, dict[str, Mapping[str, object] | None]] = {
@@ -632,8 +659,8 @@ def _children(value: object) -> dict[str, Mapping[str, object]]:
     }
 
 
-def record_of(workspace: Workspace, marker: Marker) -> HarvestRecord | None:
-    """Return the harvest record of the one job *marker* names.
+def record_of(workspace: Workspace, marker: Marker) -> JobRecord | None:
+    """Return the job_records record of the one job *marker* names.
 
     ``None`` means this job has no readable ``job.json`` and therefore no
     definition to report: the whole contract of a record is the *validated* job
@@ -644,15 +671,15 @@ def record_of(workspace: Workspace, marker: Marker) -> HarvestRecord | None:
     job, job_error = _job_of(workspace, marker)
     if job is None:
         _LOGGER.error(
-            "not harvesting %s: %s (repair the payload with a workspace tool)",
+            "not collecting %s: %s (repair the payload with a workspace tool)",
             marker.job_key,
             job_error,
-            extra={"event": "harvest_unusable", "job_key": marker.job_key},
+            extra={"event": "collect_unusable", "job_key": marker.job_key},
         )
         return None
     state, state_error = _state_of(workspace, marker)
     if state_error is not None:
-        _LOGGER.warning("harvesting %s without its state frame: %s", marker.job_key, state_error)
+        _LOGGER.warning("collecting %s without its state frame: %s", marker.job_key, state_error)
     frames = job_frames(workspace, marker)
     provenance = timeline(frames)
     failure, failure_damaged = _failure_of(state)
@@ -663,7 +690,7 @@ def record_of(workspace: Workspace, marker: Marker) -> HarvestRecord | None:
     declarations, declarations_damaged = declarations_of(job, workspace.payload_path(marker.placement, marker.job_key))
     if declarations_damaged:
         provenance["gaps"] = True
-    return HarvestRecord(
+    return JobRecord(
         workspace_root=workspace.root,
         workspace_id=workspace.workspace_id,
         job_id=marker.job_id,
@@ -684,43 +711,43 @@ def record_of(workspace: Workspace, marker: Marker) -> HarvestRecord | None:
     )
 
 
-def harvest_kinds(states: Iterable[str]) -> tuple[str, ...]:
-    """Validate the requested state kinds against what a harvest may read."""
+def collect_kinds(states: Iterable[str]) -> tuple[str, ...]:
+    """Validate the requested state kinds against what collect may read."""
 
     kinds = tuple(dict.fromkeys(states))
     if not kinds:
-        raise ValueError("a harvest needs at least one state kind")
-    unknown = [kind for kind in kinds if kind not in HARVESTABLE_KINDS]
+        raise ValueError("collect needs at least one state kind")
+    unknown = [kind for kind in kinds if kind not in COLLECTABLE_KINDS]
     if unknown:
         raise ValueError(
-            f"a harvest only reads jobs that stopped, so {', '.join(unknown)} cannot be harvested; "
-            f"harvestable kinds: {', '.join(HARVESTABLE_KINDS)}"
+            f"collect only reads jobs that stopped, so {', '.join(unknown)} cannot be collected; "
+            f"collectable kinds: {', '.join(COLLECTABLE_KINDS)}"
         )
     return kinds
 
 
-def harvest(
+def job_records(
     workspace: Workspace,
     *,
-    states: Iterable[str] = DEFAULT_HARVEST_STATES,
+    states: Iterable[str] = DEFAULT_COLLECT_STATES,
     placement: str | PurePosixPath | None = None,
-) -> Iterator[HarvestRecord]:
-    """Yield one :class:`~httk.workflow.harvesting.HarvestRecord` per finished job of *workspace*.
+) -> Iterator[JobRecord]:
+    """Yield one :class:`~httk.workflow.collecting.JobRecord` per finished job of *workspace*.
 
     *states* selects which stopped jobs are reported and defaults to the
     successful ones; every requested kind is validated against
-    ``HARVESTABLE_KINDS`` before anything is read. *placement* restricts the
-    harvest to the jobs at or below one placement, exactly as
+    ``COLLECTABLE_KINDS`` before anything is read. *placement* restricts the
+    job_records to the jobs at or below one placement, exactly as
     ``httk workflow job list --placement`` does.
 
     The result is a lazy iterator over one scan of the requested state
     directories. Nothing is materialized, and building a record reads only that
-    job's own ``job.json`` and journal chain, so harvesting is a single pass over
+    job's own ``job.json`` and journal chain, so collecting is a single pass over
     a workspace of any size. Attach read-only — ``Workspace(root,
     mutable=False)`` — when nothing else in the process needs to write.
     """
 
-    kinds = harvest_kinds(states)
+    kinds = collect_kinds(states)
     prefix = None if placement is None else normalize_placement(placement).parts
     for marker in workspace.scan_markers(kinds):
         if prefix is not None and marker.placement.parts[: len(prefix)] != prefix:
@@ -728,3 +755,128 @@ def harvest(
         record = record_of(workspace, marker)
         if record is not None:
             yield record
+
+
+def _overlay_edges(
+    base: tuple[httk.core.RunEdge, ...], owned: tuple[httk.core.RunEdge, ...]
+) -> tuple[httk.core.RunEdge, ...]:
+    replacements = {edge.label: edge for edge in owned}
+    result: list[httk.core.RunEdge] = []
+    replaced: set[str] = set()
+    for edge in base:
+        replacement = replacements.get(edge.label)
+        result.append(edge if replacement is None else replacement)
+        if replacement is not None:
+            replaced.add(edge.label)
+    result.extend(edge for edge in owned if edge.label not in replaced)
+    return tuple(result)
+
+
+def _workflow_document(provider: object) -> Mapping[str, object]:
+    declarations = getattr(provider, "declarations", {})
+    document = declarations.get("workflow") if isinstance(declarations, Mapping) else None
+    return document if isinstance(document, Mapping) else {}
+
+
+def _output_roles(provider: object) -> dict[str, Mapping[str, object]]:
+    raw = _workflow_document(provider).get("output_types")
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        return {}
+    return {item["name"]: item for item in raw if isinstance(item, Mapping) and isinstance(item.get("name"), str)}
+
+
+def _entry_edge(identity: str, role: str, value: object, declared: Mapping[str, object]) -> httk.core.RunEdge:
+    entry_id = getattr(value, "id", None)
+    if not isinstance(entry_id, str):
+        raise ValueError(f"{identity}: output role {role!r} has no string entry id")
+    entry_type = getattr(value, "type", None)
+    if not isinstance(entry_type, str):
+        entry_type = declared.get("entry_type")
+    if not isinstance(entry_type, str):
+        raise ValueError(f"{identity}: output role {role!r} has no string entry type")
+    return _core().RunEdge(role, entry_type, entry_id)
+
+
+def _postprocessor(value: object) -> Callable[[JobRecord], Mapping[str, object]] | None:
+    if callable(value):
+        return cast(Callable[[JobRecord], Mapping[str, object]], value)
+    if not isinstance(value, str) or ":" not in value:
+        return None
+    module_name, function_name = value.rsplit(":", 1)
+    function = getattr(importlib.import_module(module_name), function_name, None)
+    return cast(Callable[[JobRecord], Mapping[str, object]], function) if callable(function) else None
+
+
+def collect(
+    workspace: Workspace,
+    *,
+    states: Iterable[str] = DEFAULT_COLLECT_STATES,
+    placement: str | PurePosixPath | None = None,
+    allow_job_postprocessor: bool = False,
+) -> Iterator[CollectedJob]:
+    """Collect records through their registered provider postprocessors."""
+
+    del allow_job_postprocessor  # The job-level fallback is a later phase.
+    from .provenance import run_record
+    from .scaffold import workflow_provider
+
+    core = _core()
+
+    for record in job_records(workspace, states=states, placement=placement):
+        identity = f"{record.workspace_id}:{record.job_id}"
+        workflow_id = record.job.get("workflow")
+        workflow_id = workflow_id if isinstance(workflow_id, str) else ""
+        provider = workflow_provider(workflow_id)
+        run = run_record(record)
+        if provider is None:
+            # seam: tree/job-level postprocessor fallback is a later phase.
+            yield CollectedJob(workflow_id, {}, (), run, (), record, f"no provider for workflow {workflow_id!r}")
+            continue
+        try:
+            adapter = _postprocessor(provider.postprocessor)
+        except Exception as exc:
+            raise ValueError(f"{identity}: postprocessor failed: {exc}") from exc
+        if adapter is None:
+            yield CollectedJob(workflow_id, {}, (), run, (), record, "no postprocessor registered")
+            continue
+        try:
+            raw_outputs = adapter(record)
+            if not isinstance(raw_outputs, Mapping):
+                raise ValueError("postprocessor must return a mapping of output roles")
+            roles = _output_roles(provider)
+            unknown = [role for role in raw_outputs if role not in roles]
+            if unknown:
+                raise ValueError(f"{identity}: unknown output role {unknown[0]!r}")
+            outputs = dict(raw_outputs)
+            unfulfilled = tuple(role for role in roles if role not in outputs)
+            owned = tuple(_entry_edge(identity, role, value, roles[role]) for role, value in outputs.items())
+            run = core.Run(
+                workflow_declaration_uri=run.workflow_declaration_uri,
+                inputs=run.inputs,
+                artifacts=_overlay_edges(run.artifacts, owned),
+                outputs=_overlay_edges(run.outputs, owned),
+                immutable_id=run.immutable_id,
+                last_modified=run.last_modified,
+            )
+            products: list[httk.core.ProductLink] = []
+            input_edges = {edge.label: edge for edge in run.inputs}
+            for role, declaration in roles.items():
+                source_role = declaration.get("product_of")
+                output_edge = next((edge for edge in owned if edge.label == role), None)
+                source_edge = input_edges.get(source_role) if isinstance(source_role, str) else None
+                if output_edge is not None and source_edge is not None:
+                    products.append(
+                        core.ProductLink(
+                            source_type=source_edge.entry_type,
+                            source_id=source_edge.entry_id,
+                            target_type=output_edge.entry_type,
+                            target_id=output_edge.entry_id,
+                            label=role,
+                            workflow_declaration_uri=run.workflow_declaration_uri,
+                        )
+                    )
+            yield CollectedJob(workflow_id, outputs, unfulfilled, run, tuple(products), record)
+        except ValueError as exc:
+            if str(exc).startswith(identity + ":"):
+                raise
+            raise ValueError(f"{identity}: postprocessor failed: {exc}") from exc

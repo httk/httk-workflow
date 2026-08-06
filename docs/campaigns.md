@@ -11,7 +11,7 @@ one workspace name in the machine registry; every command that drives a
 workspace drives a partition's workspace unchanged. Multi-workspace partitioning is the intended
 route to a campaign larger than one measured workspace: its partition sizes are
 chosen from the local measurements in {doc}`benchmarks`, with each partition an
-ordinary workspace a manager serves and a harvest reads.
+ordinary workspace a manager serves and a collect reads.
 
 The map lives in the project, in a `campaign` member of `project.json`, so it
 travels with the project and every helper reads it from there.
@@ -62,7 +62,7 @@ an index map to a partition reproducibly, run after run.
 ## Submitting into a campaign
 
 ```console
-$ httk workflow campaign submit --template vasp-relax --key silicon \
+$ httk workflow campaign submit --workflow vasp-relax --key silicon \
       --parameter structure=structures/Si.vasp --tag silicon
 silicon--0c4f…	/…/screening-a/jobs/silicon--0c4f…
 ```
@@ -92,26 +92,26 @@ partition that points at a remote workspace is submitted to locally and moved
 with {doc}`transfer <workflow_cli>`, because a job is created where the client
 runs.
 
-## Running and harvesting across partitions
+## Running and collecting across partitions
 
 ```console
 $ httk workflow campaign start-managers            # every partition
 $ httk workflow campaign start-managers --partition north
-$ httk workflow campaign harvest --state succeeded
+$ httk workflow campaign collect --state succeeded
 ```
 
 `campaign start-managers` starts one manager per selected partition: in this
 process for a local partition, and submitted through the remote's scheduler for a
 remote one — exactly as {doc}`manager run <workflow_cli>` does for a single
 workspace. Each partition's target workspace supplies its own scheduler profile
-through workspace settings. `campaign harvest` chains {doc}`harvest` across the
+through workspace settings. `campaign collect` chains {doc}`collect` across the
 partitions
 lazily, one workspace after another in stable order, so a campaign spread over
-many workspaces streams as one harvest without ever materializing more than the
+many workspaces streams as one collect without ever materializing more than the
 record in hand.
 
 Both take `--partition` to act on a subset, so a campaign can be managed and
-harvested a few partitions at a time.
+collected a few partitions at a time.
 
 ## Bounded fan-out: placement recipes
 
@@ -125,7 +125,7 @@ recipes, not policy — the engine imposes none of them:
   `project/<hash-prefix>/<batch>`. Multiple prefixes turn one wide directory
   into a shallow tree with a bounded fan-out at every level.
 - **Batch buckets** — place a submission run under its own `project/<date>/<run>`,
-  so each batch is a subtree a harvest or a placement-scoped manager can take on
+  so each batch is a subtree a collect or a placement-scoped manager can take on
   its own.
 - **Per-source subtrees** — place each structure family under
   `project/<family>/…`, so a partition's work is browsable by what it is.
@@ -138,6 +138,6 @@ own managers.
 
 - {doc}`workflow_cli` — `workspace init`, `transfer`, `manager run`, and the
   `campaign` group in full.
-- {doc}`harvest` — the record `campaign harvest` streams, and the data-layer
+- {doc}`collect` — the record `campaign collect` streams, and the data-layer
   boundary it marks.
 - {doc}`taskmanager` — running managers for real.

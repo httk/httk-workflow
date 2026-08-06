@@ -1,18 +1,18 @@
-"""Scaffolding submitted jobs from a template, some files, and some inputs.
+"""Scaffolding submitted jobs from a workflow, some files, and some inputs.
 
 A job is a payload directory plus a ``job.json`` that names the runner to execute,
 and building one by hand means knowing the runner's workflow name, its initial
 step, its digest, and where its inputs live in the payload. This module is the
-short way: :func:`new_job` takes a *template* — a packaged runner a domain
+short way: :func:`new_job` takes a *workflow* — a packaged runner a domain
 registered by name, or the path of a runner file of your own — stages the files
 the runner reads, writes the ``job.json``, and submits the result, all in one
 call.
 
-Packaged templates are not known to this module. A domain or compat engine
-registers each one it ships with :func:`~httk.workflow.scaffold.register_template`, supplying only the
+Packaged workflows are not known to this module. A domain or compat engine
+registers each one it ships with :func:`~httk.workflow.scaffold.register_workflow`, supplying only the
 generic description of a starting point — its name, the runner it starts from,
 the workflow and steps that runner declares, the modes a job of it defaults to,
-and what it does — so the scaffold resolves and pins a template without ever
+and what it does — so the scaffold resolves and pins a workflow without ever
 importing the science that owns it.
 
 .. code-block:: python
@@ -21,7 +21,7 @@ importing the science that owns it.
     from httk.workflow.scaffold import new_job
 
     workspace = Workspace.initialize("workflow-workspace")
-    job = new_job(workspace, "some-template", files={"input": "input"}, tag="example")
+    job = new_job(workspace, "some-workflow", files={"input": "input"}, tag="example")
     print(job.job_key, job.payload)
 
 By default the runner file is *published into the workspace runner store*, and the
@@ -29,21 +29,24 @@ job references it there by digest. That is what makes a scaffolded job durable:
 the bytes that will run are pinned in the workspace, so upgrading the installed
 *httk-workflow* underneath a queued campaign cannot change what its jobs execute.
 Publication is content addressed — the store name carries the digest of the
-bytes — so scaffolding the same template twice publishes nothing the second time,
+bytes — so scaffolding the same workflow twice publishes nothing the second time,
 and a later, different version of a packaged runner lands beside the old one
 instead of replacing it. ``publish="installed"`` instead references a packaged
-template through the reserved ``pkg:`` form, which copies nothing at all.
+workflow through the reserved ``pkg:`` form, which copies nothing at all.
 
-:func:`new_jobs` is the same operation for a campaign: one template resolution and
+:func:`new_jobs` is the same operation for a campaign: one workflow resolution and
 one publication amortized over every job, and a lazy iterator over the results. By
 design, generating a partitioned campaign costs one payload and one marker per
 job and never materializes a list of them.
 """
 
+from __future__ import annotations
+
 import hashlib
 import importlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -52,9 +55,10 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType, ModuleType
-from typing import Literal, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
-import httk.core
+if TYPE_CHECKING:
+    from .collecting import JobRecord
 
 from ._util import sha256_file, validate_parameters
 from .errors import FormatError
@@ -74,20 +78,20 @@ __all__ = [
     "STRUCTURE_PATTERNS",
     "InstantiateContext",
     "JobItem",
-    "JobTemplate",
+    "ResolvedWorkflow",
     "ScaffoldedJob",
-    "TemplateProvider",
+    "WorkflowProvider",
     "describe_runner",
     "new_job",
     "new_jobs",
-    "packaged_template",
     "payload_relative",
-    "register_template",
-    "registered_templates",
-    "resolve_template",
+    "register_workflow",
+    "registered_workflow",
+    "registered_workflows",
+    "resolve_workflow",
     "structure_files",
     "structure_tag",
-    "template_provider",
+    "workflow_provider",
 ]
 
 #: The format of the machine-readable report :meth:`ScaffoldedJob.as_mapping` returns.
@@ -110,8 +114,8 @@ type PublishMode = Literal["workspace", "installed"]
 
 
 @dataclass(frozen=True)
-class TemplateProvider:
-    """One packaged template a domain or compat engine offers by name.
+class WorkflowProvider:
+    """One packaged workflow a domain or compat engine offers by name.
 
     A provider is the generic description of a starting point. It names the
     packaged runner it starts from by the package the runner file is a module of
@@ -123,11 +127,11 @@ class TemplateProvider:
     runner really describes.
     """
 
-    name: str
+    workflow_id: str
     runner_package: str
     runner_file: str
-    workflow: str
     initial_step: str
+    alias: str | None = None
     steps: tuple[str, ...] = ()
     data_mode: DataMode = "none"
     workdir_mode: WorkdirMode = "persistent"
@@ -135,45 +139,63 @@ class TemplateProvider:
     parameters: Mapping[str, str | None] = field(default_factory=dict)
     instantiate: bool = False
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    postprocessor: Callable[[JobRecord], Mapping[str, object]] | str | None = None
 
     def __post_init__(self) -> None:
         parameters = validate_parameters(self.parameters)
         if any(destination is None for destination in parameters.values()) and not self.instantiate:
-            raise ValueError(f"template {self.name!r} has hook-consumed parameters and requires an instantiate hook")
+            raise ValueError(
+                f"workflow {self.workflow_id!r} has hook-consumed parameters and requires an instantiate hook"
+            )
+        if self.alias is not None and (
+            not isinstance(self.alias, str) or re.fullmatch(r"[a-z0-9._-]+", self.alias) is None
+        ):
+            raise ValueError(f"workflow alias must match [a-z0-9._-]+: {self.alias!r}")
         object.__setattr__(self, "parameters", MappingProxyType(parameters))
 
 
-#: Every registered template, keyed by name in registration order. The scaffold
+#: Every registered workflow, keyed by name in registration order. The scaffold
 #: ships this empty: a domain populates it as an import side effect, so the
-#: generic layer resolves a domain template without importing the domain.
-_TEMPLATE_PROVIDERS: dict[str, TemplateProvider] = {}
+#: generic layer resolves a domain workflow without importing the domain.
+_WORKFLOW_PROVIDERS: dict[str, WorkflowProvider] = {}
 
 
-def register_template(provider: TemplateProvider) -> None:
-    """Register one packaged template, replacing any registered under its name.
+def register_workflow(provider: WorkflowProvider) -> None:
+    """Register one packaged workflow, replacing any registered under its name.
 
-    A domain calls this once per template it ships when its package is imported,
-    which is how ``httk workflow job new --template NAME`` resolves a packaged
+    A domain calls this once per workflow it ships when its package is imported,
+    which is how ``httk workflow job new --workflow NAME`` resolves a packaged
     runner the generic scaffold never names.
     """
 
-    _TEMPLATE_PROVIDERS[provider.name] = provider
+    collisions = {
+        candidate
+        for key, existing in _WORKFLOW_PROVIDERS.items()
+        if key != provider.workflow_id
+        for candidate in (existing.workflow_id, existing.alias)
+        if candidate is not None
+    }
+    if provider.workflow_id in collisions or (provider.alias is not None and provider.alias in collisions):
+        raise ValueError(f"workflow id or alias collides with an existing registration: {provider.workflow_id!r}")
+    if provider.alias == provider.workflow_id:
+        raise ValueError(f"workflow alias must differ from workflow id: {provider.alias!r}")
+    _WORKFLOW_PROVIDERS[provider.workflow_id] = provider
 
 
-def registered_templates() -> tuple[str, ...]:
-    """Return the name of every registered template, in registration order."""
+def registered_workflows() -> tuple[str, ...]:
+    """Return the name of every registered workflow, in registration order."""
 
-    return tuple(_TEMPLATE_PROVIDERS)
+    return tuple(_WORKFLOW_PROVIDERS)
 
 
-def template_provider(name: str) -> TemplateProvider | None:
-    """Return the provider *name* names, by template name or runner file."""
+def workflow_provider(name: str) -> WorkflowProvider | None:
+    """Return the provider selected by canonical id or alias."""
 
-    provider = _TEMPLATE_PROVIDERS.get(name)
+    provider = _WORKFLOW_PROVIDERS.get(name)
     if provider is not None:
         return provider
-    for candidate in _TEMPLATE_PROVIDERS.values():
-        if candidate.runner_file == name:
+    for candidate in _WORKFLOW_PROVIDERS.values():
+        if candidate.alias == name:
             return candidate
     return None
 
@@ -196,19 +218,19 @@ class JobItem(TypedDict, total=False):
 
 
 @dataclass(frozen=True)
-class JobTemplate:
+class ResolvedWorkflow:
     """One resolved starting point for a job: a runner file and how to run it.
 
-    A template is either one of the runners a domain registered by name — see
-    :func:`~httk.workflow.scaffold.registered_templates` — or a runner file of your own, which is
+    A workflow is either one of the runners a domain registered by name — see
+    :func:`~httk.workflow.scaffold.registered_workflows` — or a runner file of your own, which is
     described by running it — every native runner answers ``--describe`` with its
     workflow and its steps — so a scaffolded job never guesses either.
     """
 
-    name: str
     source: Path
-    workflow: str
+    workflow_id: str
     initial_step: str
+    alias: str | None = None
     steps: tuple[str, ...] = ()
     data_mode: DataMode = "none"
     workdir_mode: WorkdirMode = "persistent"
@@ -217,10 +239,11 @@ class JobTemplate:
     parameters: Mapping[str, str | None] = field(default_factory=dict)
     instantiate: bool = False
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    postprocessor: Callable[[JobRecord], Mapping[str, object]] | str | None = None
 
     @property
     def store_name(self) -> str:
-        """The content-addressed name this template takes in a runner store.
+        """The content-addressed name this workflow takes in a runner store.
 
         The digest of the bytes is part of the name, so publishing is idempotent
         for identical bytes and never overwrites a name a submitted job pinned:
@@ -250,7 +273,6 @@ class ScaffoldedJob:
     marker: Path
     workflow: str
     initial_step: str
-    template: str
     runner: Mapping[str, object]
 
     def as_mapping(self) -> dict[str, object]:
@@ -267,21 +289,20 @@ class ScaffoldedJob:
             "marker_path": str(self.marker),
             "workflow": self.workflow,
             "initial_step": self.initial_step,
-            "template": self.template,
             "runner": dict(self.runner),
         }
 
 
 @dataclass(frozen=True)
 class _Prepared:
-    """A template whose runner is resolved once for every job that will use it."""
+    """A workflow whose runner is resolved once for every job that will use it."""
 
-    template: JobTemplate
+    workflow: ResolvedWorkflow
     runner_source: Literal["workspace", "installed"]
     runner_path: str
     runner_sha256: str
     data_mode: DataMode
-    instantiate: Callable[["InstantiateContext"], object] | None
+    instantiate: Callable[[InstantiateContext], object] | None
 
 
 @dataclass
@@ -312,13 +333,13 @@ def describe_runner(runner: str | os.PathLike[str]) -> dict[str, object]:
 
     Every native runner — Python or Bash — answers ``HTTK_WORKFLOW_DESCRIBE=1``
     with its workflow name and its registered steps and exits without touching
-    anything, which is how a runner nobody wrote a template for is still
+    anything, which is how a runner nobody wrote a workflow for is still
     scaffolded without being told what it implements.
     """
 
     path = Path(runner).expanduser()
     if not path.is_file():
-        raise ValueError(f"a runner template must be an existing file: {path}")
+        raise ValueError(f"a runner workflow must be an existing file: {path}")
     environment = dict(os.environ)
     environment[_DESCRIBE_VARIABLE] = "1"
     shell = Path(__file__).with_name("shell")
@@ -407,10 +428,10 @@ def _parse_description(text: str, path: Path) -> dict[str, object]:
     return result
 
 
-def _packaged_runner_path(provider: TemplateProvider) -> Path:
+def _packaged_runner_path(provider: WorkflowProvider) -> Path:
     """Return the installed runner file one provider names, without importing it.
 
-    The runner package is imported by name so resolving one template never drags
+    The runner package is imported by name so resolving one workflow never drags
     another domain's helpers into the process, and the file is taken from beside
     that package's module.
     """
@@ -422,7 +443,7 @@ def _packaged_runner_path(provider: TemplateProvider) -> Path:
     return Path(location).with_name(provider.runner_file)
 
 
-def _packaged_runner_reference(provider: TemplateProvider) -> dict[str, object]:
+def _packaged_runner_reference(provider: WorkflowProvider) -> dict[str, object]:
     """Return the installed ``runner`` member a provider's ``pkg:`` form pins."""
 
     path = _packaged_runner_path(provider)
@@ -435,16 +456,16 @@ def _packaged_runner_reference(provider: TemplateProvider) -> dict[str, object]:
     }
 
 
-def packaged_template(name: str) -> JobTemplate | None:
-    """Return the registered template *name* names, or ``None``."""
+def registered_workflow(name: str) -> ResolvedWorkflow | None:
+    """Return the registered workflow *name* names, or ``None``."""
 
-    provider = template_provider(name)
+    provider = workflow_provider(name)
     if provider is None:
         return None
-    return JobTemplate(
-        name=provider.name,
+    return ResolvedWorkflow(
         source=_packaged_runner_path(provider),
-        workflow=provider.workflow,
+        workflow_id=provider.workflow_id,
+        alias=provider.alias,
         initial_step=provider.initial_step,
         steps=provider.steps,
         data_mode=provider.data_mode,
@@ -454,48 +475,49 @@ def packaged_template(name: str) -> JobTemplate | None:
         parameters=provider.parameters,
         instantiate=provider.instantiate,
         declarations=provider.declarations,
+        postprocessor=provider.postprocessor,
     )
 
 
-def resolve_template(
-    template: str | os.PathLike[str],
+def resolve_workflow(
+    workflow: str | os.PathLike[str],
     *,
-    workflow: str | None = None,
+    workflow_id: str | None = None,
     step: str | None = None,
     data_mode: DataMode | None = None,
-) -> JobTemplate:
-    """Return the :class:`JobTemplate` *template* names.
+) -> ResolvedWorkflow:
+    """Return the :class:`ResolvedWorkflow` *workflow* names.
 
-    *template* is the name of a packaged template, the file name of a packaged
+    *workflow* is the name of a packaged workflow, the file name of a packaged
     runner, or the path of a runner file. A runner file is described by running
     it, so its workflow name and its steps come from the runner itself; *workflow*
     and *step* override what it said, and *step* is required when a runner
     registers several steps and none of them is ``start``.
     """
 
-    text = os.fspath(template)
-    resolved = packaged_template(text)
+    text = os.fspath(workflow)
+    resolved = registered_workflow(text)
     if resolved is None:
+        # seam: package-directory workflow resolution is intentionally deferred.
         path = Path(text).expanduser()
         if not path.is_file():
-            known = ", ".join(registered_templates()) or "none registered"
+            known = ", ".join(registered_workflows()) or "none registered"
             raise ValueError(
-                f"unknown template {text!r}: it is neither a registered template ({known}) nor an existing runner file"
+                f"unknown workflow {text!r}: it is neither a registered workflow ({known}) nor an existing runner file"
             )
         described = describe_runner(path)
         steps = tuple(cast(list[str], described["steps"]))
-        resolved = JobTemplate(
-            name=path.name,
+        resolved = ResolvedWorkflow(
             source=path.resolve(),
-            workflow=str(described["workflow"]),
+            workflow_id=str(described["workflow"]),
             initial_step=_initial_step(path, steps, step),
             steps=steps,
             summary=f"the runner {path}",
             parameters=cast(dict[str, str | None], described.get("parameters", {})),
             instantiate=bool(described.get("instantiate", False)),
         )
-    if workflow is not None:
-        resolved = replace(resolved, workflow=workflow)
+    if workflow_id is not None:
+        resolved = replace(resolved, workflow_id=workflow_id)
     if step is not None:
         if resolved.steps and step not in resolved.steps:
             raise ValueError(
@@ -584,7 +606,7 @@ def _sanitize_tag(name: str) -> str | None:
 
 def new_job(
     workspace: Workspace,
-    template: str | os.PathLike[str],
+    workflow: str | os.PathLike[str],
     *,
     inputs: Mapping[str, object] | None = None,
     files: Mapping[str, str | os.PathLike[str]] | None = None,
@@ -596,27 +618,27 @@ def new_job(
     data_mode: DataMode | None = None,
     publish: PublishMode = "workspace",
     step: str | None = None,
-    workflow: str | None = None,
+    workflow_id: str | None = None,
     name: str | None = None,
 ) -> ScaffoldedJob:
-    """Scaffold, submit, and describe one job of *template*.
+    """Scaffold, submit, and describe one job of *workflow*.
 
-    *template* is a registered template name — see :func:`~httk.workflow.scaffold.registered_templates` —
+    *workflow* is a registered workflow name — see :func:`~httk.workflow.scaffold.registered_workflows` —
     or the path of a runner file. *files* maps payload names to the files to stage
     there: a bare name lands in the payload's :data:`~httk.workflow.scaffold.FILES_DIRECTORY`, which is
     where a packaged runner reads its inputs, and a name with a directory in
     it is used verbatim. *inputs* becomes the job's ``inputs`` object, whose
     members are documented per runner.
 
-    *data_mode* defaults to what the template needs — ``transactional`` for a
-    template whose runner publishes collected results, and ``none`` for a runner
+    *data_mode* defaults to what the workflow needs — ``transactional`` for a
+    workflow whose runner publishes collected results, and ``none`` for a runner
     that said nothing. *publish* ``workspace`` publishes the runner
     file into the workspace runner store and pins its digest; ``installed``
     references a packaged runner through the reserved ``pkg:`` form instead and
     copies nothing.
     """
 
-    prepared = _prepare(workspace, template, publish=publish, step=step, workflow=workflow, data_mode=data_mode)
+    prepared = _prepare(workspace, workflow, publish=publish, step=step, workflow_id=workflow_id, data_mode=data_mode)
     return _submit(
         workspace,
         prepared,
@@ -633,7 +655,7 @@ def new_job(
 
 def new_jobs(
     workspace: Workspace,
-    template: str | os.PathLike[str],
+    workflow: str | os.PathLike[str],
     items: Iterable[JobItem],
     *,
     inputs: Mapping[str, object] | None = None,
@@ -646,7 +668,7 @@ def new_jobs(
     data_mode: DataMode | None = None,
     publish: PublishMode = "workspace",
     step: str | None = None,
-    workflow: str | None = None,
+    workflow_id: str | None = None,
     name: str | None = None,
 ) -> Iterator[ScaffoldedJob]:
     """Scaffold and submit one job per member of *items*, lazily.
@@ -656,7 +678,7 @@ def new_jobs(
     merged over the shared mappings, and ``tag``, ``name``, ``placement``, and
     ``priority`` replace the shared value.
 
-    This is the pattern for a campaign of any size. The template is resolved once
+    This is the pattern for a campaign of any size. The workflow is resolved once
     and its runner published once, however many jobs follow, so every job costs
     exactly one payload directory and one state marker; *items* is consumed as an
     iterator and the results are yielded as they are submitted, so a structure
@@ -669,11 +691,11 @@ def new_jobs(
             for path in sorted(Path("structures").glob("POSCAR.*")):
                 yield {"files": {"POSCAR": path}, "tag": structure_tag(path)}
 
-        for job in new_jobs(workspace, "some-template", structures(), inputs={"kpoint_density": 30.0}):
+        for job in new_jobs(workspace, "some-workflow", structures(), inputs={"kpoint_density": 30.0}):
             print(job.job_key)
     """
 
-    prepared = _prepare(workspace, template, publish=publish, step=step, workflow=workflow, data_mode=data_mode)
+    prepared = _prepare(workspace, workflow, publish=publish, step=step, workflow_id=workflow_id, data_mode=data_mode)
     for item in items:
         yield _submit(
             workspace,
@@ -691,21 +713,21 @@ def new_jobs(
 
 def _prepare(
     workspace: Workspace,
-    template: str | os.PathLike[str],
+    workflow: str | os.PathLike[str],
     *,
     publish: PublishMode,
     step: str | None,
-    workflow: str | None,
+    workflow_id: str | None,
     data_mode: DataMode | None,
 ) -> _Prepared:
-    """Resolve one template and make its runner referenceable, exactly once."""
+    """Resolve one workflow and make its runner referenceable, exactly once."""
 
-    resolved = resolve_template(template, workflow=workflow, step=step, data_mode=data_mode)
+    resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode)
     if publish == "installed":
-        provider = template_provider(resolved.name)
+        provider = workflow_provider(resolved.workflow_id)
         if resolved.packaged is None or provider is None:
             raise ValueError(
-                f"publish='installed' references a packaged template, but {resolved.source} is a runner "
+                f"publish='installed' references a packaged workflow, but {resolved.source} is a runner "
                 "file of your own; publish it into the workspace instead (the default), or install it on "
                 "a runner search path and write its job.json yourself"
             )
@@ -715,7 +737,7 @@ def _prepare(
     runner_sha256 = str(reference["sha256"])
     instantiate = _resolve_instantiate(resolved, runner_sha256) if resolved.instantiate else None
     return _Prepared(
-        template=resolved,
+        workflow=resolved,
         runner_source=cast(Literal["workspace", "installed"], str(reference["source"])),
         runner_path=str(reference["path"]),
         runner_sha256=runner_sha256,
@@ -724,12 +746,12 @@ def _prepare(
     )
 
 
-def _resolve_instantiate(template: JobTemplate, runner_sha256: str) -> Callable[[InstantiateContext], object]:
-    """Import and resolve a template's instantiate hook once."""
+def _resolve_instantiate(workflow: ResolvedWorkflow, runner_sha256: str) -> Callable[[InstantiateContext], object]:
+    """Import and resolve a workflow's instantiate hook once."""
 
-    if template.source.suffix != ".py":
-        raise ValueError(f"the instantiate hook is Python-SDK-only: {template.source}")
-    source = template.source
+    if workflow.source.suffix != ".py":
+        raise ValueError(f"the instantiate hook is Python-SDK-only: {workflow.source}")
+    source = workflow.source
     source_bytes = source.read_bytes()
     digest = hashlib.sha256(source_bytes).hexdigest()
     if digest != runner_sha256:
@@ -776,7 +798,7 @@ def _submit(
 ) -> ScaffoldedJob:
     """Build one payload below the workspace and publish it as a submitted job."""
 
-    template = prepared.template
+    workflow = prepared.workflow
     normalized = normalize_placement(placement)
     # The payload is built inside the workspace's own scratch directory, so
     # submitting it is a rename on one filesystem rather than a copy, whatever
@@ -787,7 +809,7 @@ def _submit(
         staging.mkdir(parents=True, exist_ok=False)
         _stage_files(staging, files or {})
         supplied_parameters = dict(parameters or {})
-        _stage_parameters(staging, template, supplied_parameters, instantiate=prepared.instantiate is not None)
+        _stage_parameters(staging, workflow, supplied_parameters, instantiate=prepared.instantiate is not None)
         job_inputs = dict(inputs or {})
         if prepared.instantiate is not None:
             context = InstantiateContext(
@@ -802,18 +824,18 @@ def _submit(
         job = prepare_job_payload(
             staging,
             JobSpec(
-                name=name or f"{template.name}: {tag or 'job'}",
-                workflow=template.workflow,
+                name=name or f"{workflow.workflow_id}: {tag or 'job'}",
+                workflow=workflow.workflow_id,
                 runner_path=prepared.runner_path,
                 runner_source=prepared.runner_source,
                 runner_sha256=prepared.runner_sha256,
-                initial_step=template.initial_step,
+                initial_step=workflow.initial_step,
                 tag=tag,
                 workdir_mode=workdir_mode,
                 data_mode=prepared.data_mode,
                 priority=500 if priority is None else priority,
                 inputs=validate_inputs(job_inputs),
-                declarations=template.declarations,
+                declarations=workflow.declarations,
             ),
         )
         marker = workspace.submit(staging, normalized, move=True)
@@ -828,7 +850,6 @@ def _submit(
         marker=marker.path,
         workflow=job.workflow,
         initial_step=job.initial_step,
-        template=template.name,
         runner={
             "source": prepared.runner_source,
             "path": prepared.runner_path,
@@ -853,27 +874,29 @@ def _stage_files(payload: Path, files: Mapping[str, str | os.PathLike[str]]) -> 
 
 def _stage_parameters(
     payload: Path,
-    template: JobTemplate,
+    workflow: ResolvedWorkflow,
     parameters: Mapping[str, object],
     *,
     instantiate: bool = False,
 ) -> None:
-    """Realize creation parameters into the payload declared by the template."""
+    """Realize creation parameters into the payload declared by the workflow."""
 
-    declared = template.parameters
+    declared = workflow.parameters
     for name, value in parameters.items():
         if name not in declared:
             names = ", ".join(declared) or "none"
-            raise ValueError(f"unknown template parameter {name!r}; declared parameters: {names}")
+            raise ValueError(f"unknown workflow parameter {name!r}; declared parameters: {names}")
         destination_name = declared[name]
         if destination_name is None:
             if not instantiate:
-                raise ValueError(f"template parameter {name!r} requires an instantiate hook")
+                raise ValueError(f"workflow parameter {name!r} requires an instantiate hook")
             continue
         destination = payload_relative(destination_name)
         if isinstance(value, (str, os.PathLike)):
             _stage_files(payload, {destination.as_posix(): value})
             continue
+        import httk.core
+
         if not httk.core.has_writer_for(destination.name):
             raise ValueError(
                 f"no writer is registered for {destination.name!r}; a writer must be registered "

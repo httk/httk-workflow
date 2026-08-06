@@ -120,7 +120,6 @@ def submit_integration_job(
     workdir_mode: Literal["persistent", "isolated"] = "persistent",
     required_capabilities: tuple[str, ...] = (),
     maximum_attempts_per_activation: int | None = None,
-    template: str = "import",
 ) -> ScaffoldedJob:
     """Build one payload for a packaged integration runner and submit it.
 
@@ -178,7 +177,6 @@ def submit_integration_job(
         marker=marker.path,
         workflow=job.workflow,
         initial_step=job.initial_step,
-        template=template,
         runner={
             "source": "installed",
             "path": str(reference["path"]),

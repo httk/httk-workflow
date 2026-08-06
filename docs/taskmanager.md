@@ -49,7 +49,7 @@ httk workflow remote install kappa
 httk workflow workspace init kappa:/scratch/rar/httk/runs
 httk workflow workspace settings set kappa:runs slurm.partition batch
 httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
-httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
+httk workflow job new --workflow vasp-relax --parameter structure=POSCAR --tag silicon
 httk workflow transfer default kappa:runs --job JOB-ID
 httk workflow run kappa:runs --workers 8
 httk workflow workspace status kappa:runs
@@ -59,7 +59,7 @@ The remote init command creates and registers `runs` on kappa; `kappa:runs` is
 resolved by kappa at use time. `transfer`
 detaches the selected job from the local default workspace, and `run` submits a
 manager through the remote adapter. Use `transfer kappa:runs default` after the
-remote job stops, then `httk workflow harvest` locally.
+remote job stops, then `httk workflow collect` locally.
 
 ## Workspace policy
 
@@ -325,7 +325,7 @@ transition that renames or removes a marker underneath the walk is tolerated
 silently, consistent with how a vanished marker becomes a miss rather than a
 fault.
 
-The exhaustive workspace operations — `fsck`, `gc`, `harvest`, `status`, and
+The exhaustive workspace operations — `fsck`, `gc`, `collect`, `status`, and
 `job list` — use the same scandir walker in an exhaustive mode with no cursor
 and no budget, so their semantics are unchanged; only the bounded scheduling
 passes carry the budgets.
@@ -514,9 +514,9 @@ whichever manager is running and is read from the manifest each manager
 publishes, so a manager that is not running is reported as absent rather than
 assumed.
 
-Reading *results* rather than status is a harvest: `httk workflow harvest
-WORKSPACE`, or `httk.workflow.harvest`, streams one record per finished job for a
-data layer to store; see {doc}`harvest`.
+Reading *results* rather than status is a collect: `httk workflow collect
+WORKSPACE`, or `httk.workflow.collect`, streams one record per finished job for a
+data layer to store; see {doc}`collect`.
 
 ## The foreground debug runner
 

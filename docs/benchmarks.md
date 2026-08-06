@@ -41,7 +41,7 @@ The nine rows mean:
   measurement, not an RSS or shared-filesystem result.
 - `join_evaluation` measures one manager join-evaluation pass for the waiting
   parent and its terminal children.
-- `harvest_throughput` measures a complete lazy harvest drain of terminal jobs.
+- `collect_throughput` measures a complete lazy collect drain of terminal jobs.
 - `fsck_and_gc` reports the combined wall time of a full fsck and gc pass. The
   JSON result also contains separate `fsck_seconds` and `gc_seconds`; gc uses
   `journal_days=0` so retention is configured and the journal walk occurs.
@@ -65,8 +65,8 @@ Measured on 2026-07-27 in `/home/rar/Documents/containers/devel/agents/httk2/htt
 | heartbeat under scan | 2,500 | 1.143089 | 17.49 heartbeats/s |
 | heartbeat under scan | 10,000 | 4.439381 | 15.98 heartbeats/s |
 | join evaluation (`C=500`) | 500 children | 0.669827 / 0.670408 | 746.46 / 745.81 children/s |
-| harvest throughput | 2,500 | 1.702431 | 1,468.49 records/s |
-| harvest throughput | 10,000 | 6.818689 | 1,466.56 records/s |
+| collect throughput | 2,500 | 1.702431 | 1,468.49 records/s |
+| collect throughput | 10,000 | 6.818689 | 1,466.56 records/s |
 | fsck + gc | 2,500 | 0.873996 (fsck 0.583754, gc 0.290242) | 2,860.42 jobs/s |
 | fsck + gc | 10,000 | 3.509589 (fsck 2.326079, gc 1.183510) | 2,849.34 jobs/s |
 
@@ -90,7 +90,7 @@ ratios crosses that flag; this is not a proof of asymptotic linearity.
 | time to first claim | 3.96× |
 | memory per active marker | 4.13× |
 | heartbeat under scan | 3.88× |
-| harvest throughput | 4.01× |
+| collect throughput | 4.01× |
 | fsck + gc | 4.02× |
 
 Join evaluation is not included in the ratio because its child count was held
