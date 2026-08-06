@@ -109,6 +109,8 @@ _FILE_URL_PREFIX = "file://"
 if TYPE_CHECKING:
     import httk.core
 
+    from .scaffold import WorkflowProvider
+
 
 def _core():
     """Load optional core provenance types only when the collect layer is used."""
@@ -807,6 +809,60 @@ def _postprocessor(value: object) -> Callable[[JobRecord], Mapping[str, object]]
     return cast(Callable[[JobRecord], Mapping[str, object]], function) if callable(function) else None
 
 
+def _job_postprocessor(
+    workspace: Workspace, record: JobRecord, workflow_id: str
+) -> tuple[Callable[[JobRecord], Mapping[str, object]] | None, WorkflowProvider | None, str | None]:
+    """Resolve a postprocessor from the job's pinned directory runner tree."""
+
+    runner = record.job.get("runner")
+    if not isinstance(runner, Mapping):
+        return None, None, "job-pinned postprocessor requires a runner mapping"
+    if runner.get("source") != "workspace":
+        return None, None, "job-pinned postprocessor requires runner.source='workspace'"
+    path_value = runner.get("path")
+    if not isinstance(path_value, str):
+        return None, None, "job-pinned postprocessor requires a workspace runner path"
+    try:
+        store_tree = workspace.runner_store_path(path_value)
+    except Exception as exc:
+        return None, None, f"job-pinned postprocessor runner path is invalid: {exc}"
+    store_root = workspace.runners.resolve()
+    try:
+        resolved_tree = store_tree.resolve()
+    except OSError as exc:
+        return None, None, f"job-pinned postprocessor runner tree cannot be resolved: {exc}"
+    if store_tree.is_symlink() or not resolved_tree.is_relative_to(store_root) or not store_tree.is_dir():
+        return None, None, f"job-pinned postprocessor requires a directory runner tree: {store_tree}"
+    manifest = store_tree / "workflow.toml"
+    if not manifest.is_file():
+        return None, None, f"job-pinned postprocessor manifest is missing: {manifest}"
+    try:
+        from .packages import _tree_hook, parse_workflow_manifest
+
+        provider = parse_workflow_manifest(store_tree)
+    except Exception as exc:
+        return None, None, f"job-pinned postprocessor manifest is invalid: {exc}"
+    if provider.workflow_id != workflow_id:
+        return (
+            None,
+            None,
+            f"job-pinned postprocessor manifest id {provider.workflow_id!r} does not match job workflow {workflow_id!r}",
+        )
+    if provider.postprocess_file is None:
+        return None, None, "job-pinned workflow tree has no postprocess hook"
+    pinned = runner.get("sha256")
+    if not isinstance(pinned, str):
+        return None, None, "job-pinned postprocessor requires runner.sha256"
+    return (
+        cast(
+            Callable[[JobRecord], Mapping[str, object]],
+            _tree_hook(store_tree, pinned, provider.postprocess_file, "postprocess"),
+        ),
+        provider,
+        None,
+    )
+
+
 def collect(
     workspace: Workspace,
     *,
@@ -814,9 +870,13 @@ def collect(
     placement: str | PurePosixPath | None = None,
     allow_job_postprocessor: bool = False,
 ) -> Iterator[CollectedJob]:
-    """Collect records through their registered provider postprocessors."""
+    """Collect records through registered or explicitly allowed job postprocessors.
 
-    del allow_job_postprocessor  # The job-level fallback is a later phase.
+    A fallback reads and verifies the package manifest from the pinned runner
+    tree itself. A refusal, including a changed tree, degrades that job and does
+    not stop the rest of the sweep; the changed-tree reason is deliberately loud.
+    """
+
     from .provenance import run_record
     from .scaffold import workflow_provider
 
@@ -828,17 +888,30 @@ def collect(
         workflow_id = workflow_id if isinstance(workflow_id, str) else ""
         provider = workflow_provider(workflow_id)
         run = run_record(record)
-        if provider is None:
-            # seam: tree/job-level postprocessor fallback is a later phase.
-            yield CollectedJob(workflow_id, {}, (), run, (), record, f"no provider for workflow {workflow_id!r}")
-            continue
+        fallback = False
         try:
-            adapter = _postprocessor(provider.postprocessor)
-        except Exception as exc:
-            raise ValueError(f"{identity}: postprocessor failed: {exc}") from exc
+            adapter = _postprocessor(provider.postprocessor if provider is not None else None)
+        except Exception:
+            adapter = None
         if adapter is None:
-            yield CollectedJob(workflow_id, {}, (), run, (), record, "no postprocessor registered")
-            continue
+            if not allow_job_postprocessor:
+                reason = (
+                    f"no provider for workflow {workflow_id!r}; pass allow_job_postprocessor=True to use a pinned "
+                    "workspace workflow tree"
+                    if provider is None
+                    else f"no postprocessor registered for workflow {workflow_id!r}; pass "
+                    "allow_job_postprocessor=True to use a pinned workspace workflow tree"
+                )
+                yield CollectedJob(workflow_id, {}, (), run, (), record, reason)
+                continue
+            adapter, fallback_provider, fallback_reason = _job_postprocessor(workspace, record, workflow_id)
+            if adapter is None or fallback_provider is None:
+                yield CollectedJob(
+                    workflow_id, {}, (), run, (), record, fallback_reason or "job postprocessor unavailable"
+                )
+                continue
+            provider = fallback_provider
+            fallback = True
         try:
             raw_outputs = adapter(record)
             if not isinstance(raw_outputs, Mapping):
@@ -876,7 +949,23 @@ def collect(
                         )
                     )
             yield CollectedJob(workflow_id, outputs, unfulfilled, run, tuple(products), record)
-        except ValueError as exc:
+        except Exception as exc:
+            if fallback:
+                message = str(exc)
+                if "published workflow tree" in message:
+                    message = f"pinned runner tree was modified: {message}"
+                yield CollectedJob(
+                    workflow_id,
+                    {},
+                    (),
+                    run,
+                    (),
+                    record,
+                    f"job-pinned postprocessor failed: {message}",
+                )
+                continue
+            if not isinstance(exc, ValueError):
+                raise
             if str(exc).startswith(identity + ":"):
                 raise
             raise ValueError(f"{identity}: postprocessor failed: {exc}") from exc
