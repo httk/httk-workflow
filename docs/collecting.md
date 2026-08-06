@@ -160,5 +160,7 @@ workflow id through `workflow_provider()`, calls that provider's callable or
 lazy `module:function` postprocessor, validates role names against declared
 `output_types`, and assembles the `Run` and `ProductLink` values. A workflow
 without a provider or postprocessor is represented as a degraded `CollectedJob`
-with `missing_postprocessor` set; `--allow-job-postprocessor` is reserved for a
-later tree fallback and is currently only passed through by the CLI.
+with `missing_postprocessor` set. With `--allow-job-postprocessor`, collecting
+can inspect the job-pinned package tree, validate its own manifest and digest,
+and load that tree's postprocess hook; refusals degrade only that job. See
+{doc}`workflow_packages` for the trust tiers and package hook contract.

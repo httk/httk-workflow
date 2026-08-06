@@ -149,6 +149,8 @@ marker.
   packaged one; the file is published into the workspace and pinned by digest.
   Two complete campaign runners are in `examples/defect_campaign.py` and
   `examples/defect_campaign.sh`.
+- {doc}`workflow_packages` — authoring a directory workflow with hooks and a
+  manifest.
 - {doc}`native_bash_api` — the same runner protocol from Bash.
 - {doc}`importing_workflows` — a Python Workflow Definition or CWL workflow you
   already have becomes one job with `httk workflow import pwd` or
