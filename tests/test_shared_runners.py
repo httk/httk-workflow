@@ -1,6 +1,7 @@
 """Shared runners: one published runner file referenced by many jobs."""
 
 import json
+import os
 import stat
 import uuid
 from pathlib import Path
@@ -259,6 +260,47 @@ def test_workspace_runner_tree_is_content_addressed_read_only_and_replaceable(tm
     assert not any(path.name.startswith("runner-old.") for path in workspace.control.joinpath("tmp").iterdir())
 
 
+def test_failed_tree_install_cleans_nested_read_only_staging(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = _runner_tree(tmp_path / "source" / "toolbox")
+    (source / "support" / "nested").mkdir(parents=True)
+    (source / "support" / "nested" / "member.txt").write_text("support", encoding="utf-8")
+    target = workspace.runner_store_path("toolbox")
+    real_replace = os.replace
+
+    def fail_new_tree(source_path: str | os.PathLike[str], target_path: str | os.PathLike[str]) -> None:
+        if Path(source_path).name.startswith("runner.") and Path(target_path) == target:
+            raise OSError("injected install failure")
+        real_replace(source_path, target_path)
+
+    monkeypatch.setattr(os, "replace", fail_new_tree)
+    with pytest.raises(OSError, match="injected install failure"):
+        workspace.publish_runner(source, name="toolbox")
+    assert not target.exists()
+    assert not any(path.name.startswith("runner.") for path in workspace.control.joinpath("tmp").iterdir())
+
+
+def test_failed_tree_replacement_restores_a_read_only_old_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    old_source = _runner_tree(tmp_path / "old" / "toolbox")
+    workspace.publish_runner(old_source, name="toolbox")
+    new_source = _runner_tree(tmp_path / "new" / "toolbox")
+    (new_source / "outcome.py").write_text(_OTHER_RUNNER, encoding="utf-8")
+    target = workspace.runner_store_path("toolbox")
+    real_replace = os.replace
+
+    def fail_new_tree(source_path: str | os.PathLike[str], target_path: str | os.PathLike[str]) -> None:
+        if Path(source_path).name.startswith("runner.") and Path(target_path) == target:
+            raise OSError("injected replacement failure")
+        real_replace(source_path, target_path)
+
+    monkeypatch.setattr(os, "replace", fail_new_tree)
+    with pytest.raises(OSError, match="injected replacement failure"):
+        workspace.publish_runner(new_source, name="toolbox", replace=True)
+    assert (target / "outcome.py").read_text(encoding="utf-8") == _SUCCEED_RUNNER
+    assert stat.S_IMODE(target.stat().st_mode) == 0o555
+
+
 def test_publish_runner_tree_rejects_symlinks_and_type_mismatches(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     source = _runner_tree(tmp_path / "source" / "toolbox")
@@ -301,6 +343,31 @@ def test_workspace_runner_tree_is_staged_and_verified_by_manager(tmp_path: Path)
     staged = sorted(job_root.glob(".httk-attempt.*/runner"))
     assert len(staged) == 1 and staged[0].is_dir()
     assert (staged[0] / "run").is_file()
+
+
+def test_tampering_with_a_pinned_tree_support_member_fails_at_execution(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    reference = workspace.publish_runner(_runner_tree(tmp_path / "source" / "toolbox"), name="toolbox")
+    payload = tmp_path / "payload"
+    job = prepare_job_payload(
+        payload,
+        JobSpec(
+            name="tampered workspace tree",
+            workflow="tests.shared",
+            runner_path=str(reference["path"]),
+            runner_source="workspace",
+            runner_sha256=str(reference["sha256"]),
+            initial_step="only",
+        ),
+    )
+    stored = workspace.runners / "toolbox"
+    stored.chmod(0o755)
+    (stored / "outcome.py").chmod(0o644)
+    (stored / "outcome.py").write_text(_OTHER_RUNNER, encoding="utf-8")
+    workspace.submit(payload, "project/tampered-tree")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+    assert _failure(workspace, job.id)["code"] == "runner_mismatch"
 
 
 def test_published_runner_tree_tampering_changes_its_pinned_digest(tmp_path: Path) -> None:
@@ -405,17 +472,26 @@ def test_runner_describe_reports_every_published_reference(tmp_path: Path, capsy
 
     assert workflow_command(["runner", "describe", "--workspace", ws, "--json"], context) == 0
     described = json.loads(capsys.readouterr().out)
-    assert described == sorted([first, second, tree], key=lambda reference: str(reference["path"]))
+    expected = [
+        {**first, "kind": "file", "inferred": False},
+        {**second, "kind": "file", "inferred": False},
+        {**tree, "kind": "tree", "inferred": True},
+    ]
+    assert described == sorted(expected, key=lambda reference: str(reference["path"]))
 
     assert workflow_command(["runner", "describe", "--workspace", ws], context) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert lines == [f"{reference['path']}\t{reference['sha256']}" for reference in described]
+    assert lines == [
+        f"{reference['path']}\t{reference['sha256']}"
+        + ("\ttree (inferred)" if workspace.runner_store_path(str(reference["path"])).is_dir() else "")
+        for reference in described
+    ]
 
     # One name at a time, and a name that was never published is an error.
     argv = ["runner", "describe", "campaign/step.py", "--workspace", ws, "--json"]
     assert workflow_command(argv, context) == 0
-    assert json.loads(capsys.readouterr().out) == [second]
+    assert json.loads(capsys.readouterr().out) == [{**second, "kind": "file", "inferred": False}]
     assert workflow_command(["runner", "describe", "campaign/toolbox", "--workspace", ws, "--json"], context) == 0
-    assert json.loads(capsys.readouterr().out) == [tree]
+    assert json.loads(capsys.readouterr().out) == [{**tree, "kind": "tree", "inferred": True}]
     assert workflow_command(["runner", "describe", "absent.py", "--workspace", ws], context) == 2
     assert "no such workspace runner" in capsys.readouterr().err

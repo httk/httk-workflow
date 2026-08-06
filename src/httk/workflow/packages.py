@@ -27,6 +27,10 @@ __all__ = [
 ]
 
 
+class _PinnedTreeError(ValueError):
+    """The pinned tree changed before a hook member could be executed."""
+
+
 def _error(directory: Path, message: str) -> ValueError:
     return ValueError(f"{directory}: {message}")
 
@@ -158,6 +162,7 @@ def _validate_outputs(
     raw: Mapping[str, object], parameters: Mapping[str, Mapping[str, object]], directory: Path
 ) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
+    roles: set[str] = set()
     for name, value in raw.items():
         output = _validate_name(name, "[workflow.outputs] name", directory)
         table = _table(value, f"[workflow.outputs.{output}]", directory)
@@ -165,9 +170,14 @@ def _validate_outputs(
         _unknown(table, {"entry_type", "ref", "description", "product_of", "role"}, path, directory)
         entry_type = _string(table, "entry_type", path, directory, required=True)
         role = _optional_string(table, "role", path, directory) or output
+        if role in roles:
+            raise _error(directory, f"{path}.role is duplicated")
+        roles.add(role)
         product_of = _optional_string(table, "product_of", path, directory)
         if product_of is not None and product_of not in parameters:
             raise _error(directory, f"{path}.product_of names missing parameter {product_of!r}")
+        if product_of is not None and "entry_type" not in parameters[product_of]:
+            raise _error(directory, f"{path}.product_of parameter {product_of!r} is not entry-typed")
         entry: dict[str, object] = {"entry_type": entry_type, "role": role}
         for key in ("ref", "description"):
             optional = _optional_string(table, key, path, directory)
@@ -183,18 +193,33 @@ def _matches_parameter_roles(document: Mapping[str, object], provider: WorkflowP
     parameters = document.get("parameters", [])
     if not isinstance(parameters, list):
         raise _error(directory, "external declaration parameters must be an array")
-    roles = {str(entry.get("role", name)) for name, entry in provider.inputs.items()}
-    roles.update(str(entry.get("role", name)) for name, entry in provider._parameter_metadata.items())
-    parameter_entries = {str(entry.get("role", name)): entry for name, entry in provider._parameter_metadata.items()}
+    expected = {
+        str(entry.get("role", name)): entry
+        for name, entry in provider._parameter_metadata.items()
+        if "entry_type" in entry
+    }
+    actual: dict[str, Mapping[str, object]] = {}
     for index, entry in enumerate(parameters):
         if not isinstance(entry, Mapping) or not isinstance(entry.get("name"), str):
             raise _error(directory, f"external declaration parameters[{index}] must name a role")
         name = str(entry["name"])
-        if name not in roles:
-            raise _error(directory, f"external declaration parameter {name!r} is not a manifest parameter/input role")
-        expected = parameter_entries.get(name)
-        if expected is not None and "entry_type" in entry and entry["entry_type"] != expected.get("entry_type"):
+        if name in actual:
+            raise _error(directory, f"external declaration parameter {name!r} is duplicated")
+        actual[name] = entry
+        if name not in expected:
+            raise _error(
+                directory,
+                f"external declaration parameter {name!r} is not a manifest parameter/input role "
+                "(or is not entry-typed)",
+            )
+        if entry.get("entry_type") != expected[name].get("entry_type"):
             raise _error(directory, f"external declaration parameter {name!r} has an incompatible entry_type")
+    missing = sorted(set(expected) - set(actual))
+    extra = sorted(set(actual) - set(expected))
+    if missing:
+        raise _error(directory, f"external declaration is missing manifest parameter role {missing[0]!r}")
+    if extra:
+        raise _error(directory, f"external declaration has extra parameter role {extra[0]!r}")
 
 
 def _validate_external_declaration(
@@ -209,21 +234,33 @@ def _validate_external_declaration(
     if not isinstance(outputs, list):
         raise _error(directory, "external declaration output_types must be an array")
     output_roles = {str(entry.get("role", name)): entry for name, entry in provider.outputs.items()}
+    actual_outputs: dict[str, Mapping[str, object]] = {}
     for index, entry in enumerate(outputs):
         if not isinstance(entry, Mapping) or not isinstance(entry.get("name"), str):
             raise _error(directory, f"external declaration output_types[{index}] must name a role")
         name = str(entry["name"])
+        if name in actual_outputs:
+            raise _error(directory, f"external declaration output {name!r} is duplicated")
+        actual_outputs[name] = entry
         expected = output_roles.get(name)
         if expected is None:
             raise _error(directory, f"external declaration output {name!r} is not a manifest output role")
         if entry.get("entry_type") != expected.get("entry_type"):
             raise _error(directory, f"external declaration output {name!r} has an incompatible entry_type")
-        if "product_of" in entry:
-            product = expected.get("product_of")
-            parameter = provider._parameter_metadata.get(str(product)) if product is not None else None
-            expected_product = parameter.get("role", product) if parameter is not None else product
-            if entry["product_of"] != expected_product:
-                raise _error(directory, f"external declaration output {name!r} has an incompatible product_of")
+        expected_product = None
+        if "product_of" in expected:
+            parameter = provider._parameter_metadata.get(str(expected["product_of"]))
+            expected_product = parameter.get("role", expected["product_of"]) if parameter is not None else None
+            if expected_product is None:
+                raise _error(directory, f"manifest output {name!r} has a dangling product_of")
+        if entry.get("product_of") != expected_product:
+            raise _error(directory, f"external declaration output {name!r} has an incompatible product_of")
+    missing = sorted(set(output_roles) - set(actual_outputs))
+    extra = sorted(set(actual_outputs) - set(output_roles))
+    if missing:
+        raise _error(directory, f"external declaration is missing manifest output role {missing[0]!r}")
+    if extra:
+        raise _error(directory, f"external declaration has extra output role {extra[0]!r}")
     return document
 
 
@@ -315,6 +352,8 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     runner = _table(workflow.get("runner"), "[workflow.runner]", root)
     _unknown(runner, {"entry", "initial_step", "steps", "data_mode", "workdir_mode"}, "[workflow.runner]", root)
     entry = _member(root, runner.get("entry", "run"), "[workflow.runner].entry")
+    if entry != "run":
+        raise _error(root, "custom entries are not yet supported; the tree entry point must be named run")
     steps_raw = runner.get("steps")
     if (
         not isinstance(steps_raw, list)
@@ -433,8 +472,9 @@ def _source_hook(directory: Path, member: str, function_name: str) -> Callable[.
     :func:`_tree_hook` after publication, where the store tree is verified first.
     """
 
+    member_key = hashlib.sha256(PurePosixPath(member).as_posix().encode()).hexdigest()
     module_name = (
-        f"httk_workflow_pkg_source_{hashlib.sha256(str(directory.resolve()).encode()).hexdigest()}_{Path(member).stem}"
+        f"httk_workflow_pkg_source_{hashlib.sha256(str(directory.resolve()).encode()).hexdigest()}_{member_key}"
     )
 
     def hook(*args: object, **kwargs: object) -> object:
@@ -466,12 +506,16 @@ def _tree_hook(store_tree: Path, pinned_sha256: str, member: str, function_name:
     """Return a hook that verifies and executes one member of a pinned tree."""
 
     relative = PurePosixPath(member)
-    module_name = f"httk_workflow_pkg_{pinned_sha256}_{relative.stem}"
+    member_key = hashlib.sha256(relative.as_posix().encode()).hexdigest()
+    module_name = f"httk_workflow_pkg_{pinned_sha256}_{member_key}"
 
     def hook(*args: object, **kwargs: object) -> object:
-        actual = tree_digest(store_tree)
+        try:
+            actual = tree_digest(store_tree)
+        except Exception as exc:
+            raise _PinnedTreeError(f"published workflow tree {store_tree} could not be verified: {exc}") from exc
         if actual != pinned_sha256:
-            raise ValueError(
+            raise _PinnedTreeError(
                 f"published workflow tree {store_tree} changed: digest {actual} does not match pinned {pinned_sha256}"
             )
         module = sys.modules.get(module_name)

@@ -124,6 +124,11 @@ name, and re-register it with `workspace init <newpath> --name NAME` instead.
 | `runner publish FILE_OR_DIRECTORY` | publish one runner file or directory, pinned by digest | `--workspace` (required), `--name`, `--replace` |
 | `runner describe [NAME]` | report the published runners and their digests | `--workspace` (required), `--json` |
 
+Directory rows are reported as `tree (inferred)` because the store format
+identifies a tree by its `run` entry. New nested file publishes named `run` are
+refused; a pre-existing store may still contain an ambiguous legacy layout, so
+the marker is an honest inference rather than provenance metadata.
+
 ### `job` — making jobs, and finding out about them
 
 | Command | What it does | Notable options |

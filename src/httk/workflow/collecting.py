@@ -49,7 +49,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote
 
-from ._util import read_json, require_mapping, require_string
+from ._util import read_json, require_mapping, require_string, tree_digest
 from .errors import FormatError
 from .introspection import (
     _job_of,
@@ -780,8 +780,27 @@ def _workflow_document(provider: object) -> Mapping[str, object]:
     return document if isinstance(document, Mapping) else {}
 
 
-def _output_roles(provider: object) -> dict[str, Mapping[str, object]]:
-    raw = _workflow_document(provider).get("output_types")
+def _job_workflow_document(record: JobRecord, provider: object | None) -> Mapping[str, object]:
+    """Select the job's observed-then-declared workflow declaration.
+
+    The provider is only a compatibility fallback for old jobs that carried no
+    workflow declaration; new jobs are interpreted from their immutable record.
+    """
+
+    entry = record.declarations.get("workflow")
+    if isinstance(entry, Mapping):
+        if "parameters" in entry or "output_types" in entry:
+            return entry
+        observed = entry.get("observed")
+        declared = entry.get("declared")
+        chosen = observed if observed is not None else declared
+        if isinstance(chosen, Mapping):
+            return chosen
+    return _workflow_document(provider) if provider is not None else {}
+
+
+def _output_roles(document: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
+    raw = document.get("output_types")
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
         return {}
     return {item["name"]: item for item in raw if isinstance(item, Mapping) and isinstance(item.get("name"), str)}
@@ -833,6 +852,19 @@ def _job_postprocessor(
         return None, None, f"job-pinned postprocessor runner tree cannot be resolved: {exc}"
     if store_tree.is_symlink() or not resolved_tree.is_relative_to(store_root) or not store_tree.is_dir():
         return None, None, f"job-pinned postprocessor requires a directory runner tree: {store_tree}"
+    pinned = runner.get("sha256")
+    if not isinstance(pinned, str):
+        return None, None, "job-pinned postprocessor requires runner.sha256"
+    try:
+        actual = tree_digest(store_tree)
+    except Exception as exc:
+        return None, None, f"pinned runner tree was modified: {store_tree} could not be verified: {exc}"
+    if actual != pinned:
+        return (
+            None,
+            None,
+            f"pinned runner tree was modified: {store_tree} digest {actual} does not match pinned {pinned}",
+        )
     manifest = store_tree / "workflow.toml"
     if not manifest.is_file():
         return None, None, f"job-pinned postprocessor manifest is missing: {manifest}"
@@ -850,9 +882,6 @@ def _job_postprocessor(
         )
     if provider.postprocess_file is None:
         return None, None, "job-pinned workflow tree has no postprocess hook"
-    pinned = runner.get("sha256")
-    if not isinstance(pinned, str):
-        return None, None, "job-pinned postprocessor requires runner.sha256"
     return (
         cast(
             Callable[[JobRecord], Mapping[str, object]],
@@ -891,8 +920,8 @@ def collect(
         fallback = False
         try:
             adapter = _postprocessor(provider.postprocessor if provider is not None else None)
-        except Exception:
-            adapter = None
+        except Exception as exc:
+            raise ValueError(f"{identity}: postprocessor resolution failed: {exc}") from exc
         if adapter is None:
             if not allow_job_postprocessor:
                 reason = (
@@ -916,7 +945,7 @@ def collect(
             raw_outputs = adapter(record)
             if not isinstance(raw_outputs, Mapping):
                 raise ValueError("postprocessor must return a mapping of output roles")
-            roles = _output_roles(provider)
+            roles = _output_roles(_job_workflow_document(record, provider))
             unknown = [role for role in raw_outputs if role not in roles]
             if unknown:
                 raise ValueError(f"{identity}: unknown output role {unknown[0]!r}")
@@ -950,10 +979,9 @@ def collect(
                     )
             yield CollectedJob(workflow_id, outputs, unfulfilled, run, tuple(products), record)
         except Exception as exc:
-            if fallback:
-                message = str(exc)
-                if "published workflow tree" in message:
-                    message = f"pinned runner tree was modified: {message}"
+            from .packages import _PinnedTreeError
+
+            if fallback and isinstance(exc, _PinnedTreeError):
                 yield CollectedJob(
                     workflow_id,
                     {},
@@ -961,11 +989,9 @@ def collect(
                     run,
                     (),
                     record,
-                    f"job-pinned postprocessor failed: {message}",
+                    f"pinned runner tree was modified: {exc}",
                 )
                 continue
-            if not isinstance(exc, ValueError):
-                raise
             if str(exc).startswith(identity + ":"):
                 raise
             raise ValueError(f"{identity}: postprocessor failed: {exc}") from exc

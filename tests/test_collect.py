@@ -571,6 +571,21 @@ def test_collect_assembles_overlay_edges_and_products(
         ),
     )
 
+    changed_provider = WorkflowProvider(
+        workflow_id="tests.framework.collect",
+        alias="tests-framework-collect",
+        runner_package=PACKAGE,
+        runner_file="runner.py",
+        initial_step="run",
+        declarations={"workflow": {"output_types": [{"name": "different", "entry_type": "records"}]}},
+        postprocessor=lambda _record: {"relaxed_structure": Structure()},
+    )
+    monkeypatch.setitem(scaffold_module._WORKFLOW_PROVIDERS, changed_provider.workflow_id, changed_provider)
+    recollected = next(collecting_module.collect(workspace))
+    assert recollected.outputs.keys() == collected.outputs.keys()
+    assert recollected.run == collected.run
+    assert recollected.products == collected.products
+
 
 def test_a_record_refuses_a_mapping_of_another_format() -> None:
     with pytest.raises(FormatError, match="httk-workflow-collect"):

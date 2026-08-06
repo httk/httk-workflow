@@ -261,6 +261,7 @@ class ResolvedWorkflow:
     data_mode: DataMode = "none"
     workdir_mode: WorkdirMode = "persistent"
     packaged: str | None = None
+    registration_id: str | None = None
     summary: str = ""
     parameters: Mapping[str, str | None] = field(default_factory=dict)
     instantiate: bool = False
@@ -524,6 +525,7 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
         data_mode=provider.data_mode,
         workdir_mode=provider.workdir_mode,
         packaged=None if provider.directory is not None else provider.runner_file,
+        registration_id=provider.workflow_id,
         summary=provider.summary,
         parameters=provider.parameters,
         instantiate=provider.instantiate,
@@ -817,7 +819,7 @@ def _prepare(
             raise ValueError(
                 "publish='installed' is not supported for a directory workflow; publish it into the workspace"
             )
-        provider = workflow_provider(resolved.workflow_id)
+        provider = workflow_provider(resolved.registration_id or resolved.workflow_id)
         if resolved.packaged is None or provider is None:
             raise ValueError(
                 f"publish='installed' references a packaged workflow, but {resolved.source} is a runner "

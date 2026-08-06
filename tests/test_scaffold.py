@@ -479,10 +479,17 @@ def test_a_runner_without_a_parameter_description_has_an_empty_declaration(tmp_p
 
 
 def test_the_installed_form_references_a_packaged_runner_without_copying(workspace: Workspace, structure: Path) -> None:
-    job = new_job(workspace, "vasp-static", files={"POSCAR": structure}, publish="installed")
+    job = new_job(
+        workspace,
+        "vasp-static",
+        files={"POSCAR": structure},
+        publish="installed",
+        workflow_id="tests.override.static",
+    )
 
     assert job.runner["source"] == "installed"
     assert job.runner["path"] == f"pkg:{PACKAGE}/vasp_static.py"
+    assert job.workflow == "tests.override.static"
     assert not list(workspace.runners.iterdir())
     assert job.tag is None and job.job_key == job.job_id
 

@@ -109,6 +109,12 @@ def test_manifest_parses_and_generates_the_declared_roles(tmp_path: Path) -> Non
     assert provider.declarations["workflow"] == workflow_declaration_from_manifest(provider)
 
 
+def test_manifest_rejects_duplicate_output_roles(tmp_path: Path) -> None:
+    manifest = _MANIFEST + '\n[workflow.outputs.other]\nentry_type = "records"\nrole = "relaxed_structure"\n'
+    with pytest.raises(ValueError, match=r"\[workflow.outputs.other\]\.role is duplicated"):
+        parse_workflow_manifest(_package(tmp_path / "package", manifest))
+
+
 def test_external_declaration_is_embedded_verbatim(tmp_path: Path) -> None:
     package = _package(
         tmp_path / "package",

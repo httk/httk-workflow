@@ -14,13 +14,19 @@ WORKFLOW_DESCRIPTION_FORMAT = "httk-workflow-workflow-description"
 
 
 def _source_kind(target: str, workflow: ResolvedWorkflow) -> str:
-    if workflow_provider(target) is not None:
-        return "registered/packaged"
+    provider = workflow_provider(target)
+    if provider is not None:
+        return "registered-directory" if provider.directory is not None else "installed-package"
     return "directory" if workflow.directory is not None else "file"
 
 
 def _parameter_document(workflow: ResolvedWorkflow) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
+    declaration = workflow.declarations.get("workflow", {})
+    declared = declaration.get("parameters", []) if isinstance(declaration, Mapping) else []
+    declared_parameters = (
+        [entry for entry in declared if isinstance(entry, Mapping)] if isinstance(declared, list) else []
+    )
     for name, destination in workflow.parameters.items():
         metadata = workflow._parameter_metadata.get(name, {})
         entry: dict[str, object] = {
@@ -29,13 +35,33 @@ def _parameter_document(workflow: ResolvedWorkflow) -> dict[str, dict[str, objec
         for key in ("entry_type", "role", "description"):
             if key in metadata:
                 entry[key] = metadata[key]
+        if not any(key in metadata for key in ("entry_type", "role", "description")) and len(
+            declared_parameters
+        ) == len(workflow.parameters):
+            declared_entry = declared_parameters[list(workflow.parameters).index(name)]
+            if isinstance(declared_entry.get("entry_type"), str):
+                entry["entry_type"] = declared_entry["entry_type"]
+            if isinstance(declared_entry.get("name"), str):
+                entry["role"] = declared_entry["name"]
+            if isinstance(declared_entry.get("description"), str):
+                entry["description"] = declared_entry["description"]
         result[name] = entry
     return result
 
 
 def _output_document(workflow: ResolvedWorkflow) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
-    for name, metadata in workflow.outputs.items():
+    metadata_items: list[tuple[str, Mapping[str, object]]] = list(workflow.outputs.items())
+    if not workflow.outputs:
+        declaration = workflow.declarations.get("workflow", {})
+        raw = declaration.get("output_types", []) if isinstance(declaration, Mapping) else []
+        if isinstance(raw, list):
+            for entry in raw:
+                if isinstance(entry, Mapping) and isinstance(entry.get("name"), str):
+                    metadata_items.append(
+                        (str(entry["name"]), {key: value for key, value in entry.items() if key != "name"})
+                    )
+    for name, metadata in metadata_items:
         role = str(metadata.get("role", name))
         entry = {key: value for key, value in metadata.items() if key != "role"}
         entry["role"] = role
