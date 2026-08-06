@@ -134,6 +134,7 @@ class TemplateProvider:
     summary: str = ""
     parameters: Mapping[str, str | None] = field(default_factory=dict)
     instantiate: bool = False
+    declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         parameters = validate_parameters(self.parameters)
@@ -215,6 +216,7 @@ class JobTemplate:
     summary: str = ""
     parameters: Mapping[str, str | None] = field(default_factory=dict)
     instantiate: bool = False
+    declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
     @property
     def store_name(self) -> str:
@@ -451,6 +453,7 @@ def packaged_template(name: str) -> JobTemplate | None:
         summary=provider.summary,
         parameters=provider.parameters,
         instantiate=provider.instantiate,
+        declarations=provider.declarations,
     )
 
 
@@ -810,6 +813,7 @@ def _submit(
                 data_mode=prepared.data_mode,
                 priority=500 if priority is None else priority,
                 inputs=validate_inputs(job_inputs),
+                declarations=template.declarations,
             ),
         )
         marker = workspace.submit(staging, normalized, move=True)

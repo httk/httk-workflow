@@ -1,22 +1,29 @@
 """The provenance declaration is interpreted without changing the harvest record."""
 
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from typing import cast
 
 import pytest
 
-from httk.workflow import HarvestRecord, harvest
+import httk.workflow.vasp  # noqa: F401 - imports and registers packaged templates
+from httk.workflow import HarvestRecord, Workspace, harvest
 from httk.workflow.provenance import run_record
+from httk.workflow.scaffold import packaged_template
 from test_harvest import campaign as _harvest_campaign
 
 
 @pytest.fixture(scope="module")
 def real_record(tmp_path_factory: pytest.TempPathFactory) -> HarvestRecord:
-    workspace, _ = _harvest_campaign.__wrapped__(tmp_path_factory)
+    campaign = cast(
+        Callable[[pytest.TempPathFactory], tuple[Workspace, dict[str, str]]], vars(_harvest_campaign)["__wrapped__"]
+    )
+    workspace, _ = campaign(tmp_path_factory)
     return next(iter(harvest(workspace)))
 
 
-def _record(declarations: dict[str, object], *, timeline: object = ()) -> HarvestRecord:
+def _record(declarations: Mapping[str, object], *, timeline: object = ()) -> HarvestRecord:
     return HarvestRecord(
         workspace_root=Path("."),
         workspace_id="ws",
@@ -34,7 +41,7 @@ def _record(declarations: dict[str, object], *, timeline: object = ()) -> Harves
         provenance={"activations": timeline},
         runner_steps=None,
         children={},
-        declarations=declarations,
+        declarations=cast(Mapping[str, Mapping[str, Mapping[str, object] | None]], declarations),
     )
 
 
@@ -90,6 +97,13 @@ def test_workflow_id_supplies_uri_without_provenance() -> None:
     )
     assert run.inputs == () and run.artifacts == () and run.outputs == ()
     assert run.workflow_declaration_uri == "https://example.test/workflows/v1"
+
+
+def test_template_workflow_id_supplies_uri_without_provenance() -> None:
+    template = packaged_template("vasp-relax")
+    assert template is not None
+    run = run_record(_record({"workflow": {"declared": template.declarations["workflow"], "observed": None}}))
+    assert run.workflow_declaration_uri == "https://schemas.httk.org/defs/v0.1/workflows/vasp-relax"
 
 
 def test_explicit_null_provenance_uri_does_not_fall_back() -> None:

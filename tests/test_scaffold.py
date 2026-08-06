@@ -18,13 +18,15 @@ import pytest
 from httk.core.cli import CLIContext
 from httk.core.register import register_format_serializer, register_reader, register_writer
 
-from httk.workflow import FormatError, TaskManager, Workspace
+import httk.workflow.vasp
+from httk.workflow import FormatError, TaskManager, Workspace, scaffold
 from httk.workflow._util import sha256_file
 from httk.workflow.models import JobDefinition, validate_label
 from httk.workflow.runners import RUNNERS, runner_path
 from httk.workflow.scaffold import (
     JOB_SCAFFOLD_FORMAT,
     JobItem,
+    TemplateProvider,
     describe_runner,
     new_job,
     new_jobs,
@@ -158,6 +160,19 @@ def test_every_packaged_runner_has_a_template_that_says_what_it_implements() -> 
         assert template.parameters == {"structure": "POSCAR"}
         assert template.initial_step in template.steps
 
+    expected = {
+        "vasp-relax": "vasp-relax",
+        "vasp-relax-bash": "vasp-relax",
+        "vasp-static": "vasp-static",
+        "vasp-relax-static": "vasp-relax-static",
+    }
+    for name, workflow_name in expected.items():
+        template = packaged_template(name)
+        assert template is not None
+        assert template.declarations == {
+            "workflow": {"$id": f"https://schemas.httk.org/defs/v0.1/workflows/{workflow_name}"}
+        }
+
     # A packaged runner is nameable by its own file name as well as by its template
     # name, and both resolve to exactly the installed bytes.
     template = resolve_template("vasp_relax.py")
@@ -170,6 +185,27 @@ def test_every_packaged_runner_has_a_template_that_says_what_it_implements() -> 
         resolve_template("vasp-relax", step="prepear")
     with pytest.raises(ValueError, match="unknown template"):
         resolve_template("vasp-nonexistent")
+
+
+def test_template_declarations_are_forwarded_and_digest_covered(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    declarations = {"workflow": {"$id": "https://example.test/workflows/v1", "nested": {"value": 7}}}
+    provider = TemplateProvider(
+        name="test-declarations",
+        runner_package=PACKAGE,
+        runner_file="vasp_relax.py",
+        workflow="tests.declarations",
+        initial_step="prepare",
+        steps=("collect", "prepare", "run"),
+        declarations=declarations,
+    )
+    monkeypatch.setitem(scaffold._TEMPLATE_PROVIDERS, provider.name, provider)
+
+    job = new_job(workspace, provider.name)
+    definition = JobDefinition.from_path(job.payload / "job.json")
+    assert definition.declarations == declarations
+    assert definition.digest == sha256_file(job.payload / "job.json")
 
 
 def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, structure: Path) -> None:
@@ -457,10 +493,12 @@ def test_a_runner_file_of_ones_own_is_described_and_published(tmp_path: Path, wo
     # The runner says what it implements, so nothing has to be declared twice.
     described = describe_runner(runner)
     assert described == {"workflow": "tests.scaffold.single", "steps": ["start"]}
+    assert resolve_template(runner).declarations == {}
     job = new_job(workspace, runner, tag="own")
     assert job.workflow == "tests.scaffold.single" and job.initial_step == "start"
     # A runner of one's own defaults to data.mode none: it declared no results.
     assert JobDefinition.from_path(job.payload / "job.json").data_mode == "none"
+    assert "declarations" not in json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
     assert job.runner["source"] == "workspace"
     assert str(job.runner["path"]).startswith("single.")
 

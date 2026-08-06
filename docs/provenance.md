@@ -64,3 +64,5 @@ declaration. Runner identity, the attempt timeline, and failure remain on the
 `HarvestRecord` for callers that need them.
 
 VASP runners will adopt this declaration in future work.
+
+Built-in VASP result interpretation is documented in {doc}`interpretation`.

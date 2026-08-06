@@ -29,6 +29,11 @@ could only ever come to disagree with the standard it is carrying.
 Interpretation therefore belongs to *httk-data* and OPTIMADE tooling. Carriage,
 digest coverage, and honest reporting belong here.
 
+Packaged templates may carry declarations into every scaffolded `job.json`; the
+built-in VASP templates declare their `workflow` `$id` using the published
+`schemas.httk.org` IRIs. See {doc}`provenance` for the rule that uses this `$id`
+as the workflow URI fallback.
+
 ## Declared and observed
 
 A declaration attaches in two places, and the two are never merged.
