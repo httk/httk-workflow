@@ -37,7 +37,8 @@ from httk.core.cli import CLIContext
 # execution layer never imports a domain; the CLI does, exactly here.
 from .. import vasp as _vasp
 from .._logging import LOG_LEVELS, add_log_file, configure_logging
-from .._util import read_json, sha256_file, utc_now, write_json_atomic
+from .._manager_runners import RUNNER_TREE_ENTRY
+from .._util import read_json, sha256_file, tree_digest, utc_now, write_json_atomic
 from ..adapters import (
     REMOTE_MANAGER_COMMAND,
     REMOTE_OFFER_COMMAND,
