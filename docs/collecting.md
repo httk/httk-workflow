@@ -158,7 +158,10 @@ stores it.
 `collect()` is the workflow-owned postprocessing layer. It resolves the record's
 workflow id through `workflow_provider()`, calls that provider's callable or
 lazy `module:function` postprocessor, validates role names against declared
-`output_types`, and assembles the `Run` and `ProductLink` values. A workflow
+`output_types` in the job's embedded workflow declaration, and assembles the
+`Run` and `ProductLink` values. Old jobs without that declaration fall back to
+the currently registered provider declaration, so their role interpretation is
+necessarily live rather than historical. A workflow
 without a provider or postprocessor is represented as a degraded `CollectedJob`
 with `missing_postprocessor` set. With `--allow-job-postprocessor`, collecting
 can inspect the job-pinned package tree, validate its own manifest and digest,

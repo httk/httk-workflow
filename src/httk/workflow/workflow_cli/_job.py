@@ -58,6 +58,8 @@ def handle_runner_describe(arguments: argparse.Namespace, context: CLIContext) -
             "source": "workspace",
             "path": path.relative_to(store).as_posix(),
             "sha256": tree_digest(path) if path.is_dir() else sha256_file(path),
+            "kind": "tree" if path.is_dir() else "file",
+            "inferred": path.is_dir(),
         }
         for path in found
     ]
@@ -65,7 +67,9 @@ def handle_runner_describe(arguments: argparse.Namespace, context: CLIContext) -
         print(json.dumps(references, indent=2, sort_keys=True))
         return 0
     for reference in references:
-        print(f"{reference['path']}\t{reference['sha256']}")
+        path = workspace.runner_store_path(str(reference["path"]))
+        inferred = "\ttree (inferred)" if path.is_dir() else ""
+        print(f"{reference['path']}\t{reference['sha256']}{inferred}")
     return 0
 
 

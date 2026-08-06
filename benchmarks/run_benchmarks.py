@@ -19,7 +19,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from httk.workflow import TaskManager, Workspace, harvest
+from httk.workflow import TaskManager, Workspace, job_records
 from httk.workflow.models import Marker
 from httk.workflow.protocol import ChildReference, JobSpec, join_mapping, prepare_job_payload
 
@@ -33,7 +33,7 @@ BENCHMARK_NAMES = (
     "memory_per_active_marker",
     "heartbeat_under_scan",
     "join_evaluation",
-    "harvest_throughput",
+    "collect_throughput",
     "fsck_and_gc",
 )
 
@@ -335,9 +335,9 @@ def _join_benchmark(root: Path, children: int) -> Result:
 def _terminal_benchmarks(root: Path, count: int) -> list[Result]:
     workspace, heartbeat_result = _heartbeat_benchmark(root, count)
     _move_ready_to_terminal(workspace)
-    harvest_start = time.perf_counter()
-    harvested = sum(1 for _ in harvest(workspace, states=("succeeded",)))
-    harvest_duration = time.perf_counter() - harvest_start
+    collect_start = time.perf_counter()
+    collected = sum(1 for _ in job_records(workspace, states=("succeeded",)))
+    collect_duration = time.perf_counter() - collect_start
     fsck_start = time.perf_counter()
     fsck_report = workspace.check()
     fsck_duration = time.perf_counter() - fsck_start
@@ -349,10 +349,10 @@ def _terminal_benchmarks(root: Path, count: int) -> list[Result]:
     return [
         heartbeat_result,
         _result(
-            "harvest_throughput",
+            "collect_throughput",
             {"N": count, "states": "succeeded"},
-            harvest_duration,
-            harvested / harvest_duration,
+            collect_duration,
+            collected / collect_duration,
             "records/s",
         ),
         _result(

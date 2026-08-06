@@ -164,7 +164,7 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
         by_id = json.loads(capsys.readouterr().out)
         assert by_id["format"] == "httk-workflow-workflow-description"
         assert by_id["format_version"] == 1
-        assert by_id["source"]["kind"] == "registered/packaged"
+        assert by_id["source"]["kind"] == "registered-directory"
         assert by_id["workflow"] == provider.workflow_id
 
         assert command(["describe", "cli-package", "--json"], context) == 0

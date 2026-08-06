@@ -78,7 +78,7 @@ step; otherwise `initial_step` is required and must name a listed step.
 
 | Key | Required/default | Meaning |
 | --- | --- | --- |
-| `entry` | `"run"` | Relative regular-file package member executed by the manager. |
+| `entry` | `"run"` | Reserved relative entry member. It must be named `run`; custom entry names are not yet supported. |
 | `initial_step` | `"start"` when present; otherwise the sole step | First step for a scaffolded job. |
 | `steps` | required | Nonempty runner step list. |
 | `data_mode` | `"none"` | `"none"` or `"transactional"`. |
@@ -86,6 +86,7 @@ step; otherwise `initial_step` is required and must name a listed step.
 
 ```toml
 [workflow.runner]
+# Reserved: the manager's tree entry point must be named "run".
 entry = "run"
 initial_step = "start"
 steps = ["start", "finish"]
@@ -149,7 +150,7 @@ description = "Sampling density."
 
 `entry_type` is required. The other accepted keys are `ref`, `description`,
 `product_of`, and `role`. `role` defaults to the output key. `product_of`, when
-present, must name a `[workflow.parameters]` key; generated declarations resolve
+present, must name an entry-typed `[workflow.parameters]` key; generated declarations resolve
 that parameter key to its declaration `role`.
 
 ```toml
@@ -170,11 +171,11 @@ It becomes `provider.declarations["workflow"]` and is embedded in `job.json`.
 
 With `declaration_file`, the JSON document is loaded and embedded verbatim after
 validation. Its `$id` must equal `declaration_uri` when both are supplied. Every
-external parameter must be a manifest parameter/input role, every external
-output must be a manifest output role, and output `entry_type` and
-`product_of` values must agree with the manifest. The declaration remains the
-authoritative OPTIMADE document; the manifest remains the authoritative
-httk-owned package glue.
+external parameter and output role maps must exactly cover the manifest's
+entry-typed parameters and outputs, and output `entry_type` and `product_of`
+values must agree with the manifest. Every product source must be emitted by an
+entry-typed parameter. The declaration remains the authoritative OPTIMADE
+document; the manifest remains the authoritative strictly httk-owned package glue.
 
 ## Hooks and trust
 
@@ -194,8 +195,10 @@ def postprocess(record):
 An instantiate hook runs during scaffolding and may write the payload or update
 inputs. A postprocess hook runs during `collect`; it returns role-keyed outputs.
 The framework validates those roles, derives unfulfilled roles, overlays output
-edges onto the `Run`, and emits `ProductLink` values from `product_of`. Package
-hooks are executed from the published, digest-pinned tree.
+edges onto the `Run`, and emits `ProductLink` values from `product_of`. A direct
+package path's instantiate hook and the job-pinned postprocess fallback execute
+from the published, digest-pinned tree; registered-directory postprocessors
+instead execute current source bytes by explicit registration consent.
 
 There are THREE TRUST TIERS:
 
@@ -204,8 +207,10 @@ There are THREE TRUST TIERS:
    trusted by the registration and distribution boundary.
 2. **explicit-path consent** — a package or runner supplied by an explicit
    filesystem path is parsed and used because the caller selected that path.
-   Its source hooks are loaded only for that explicit operation, then package
-   execution is pinned by publication.
+   Registered directory providers execute the current source-directory hook
+   bytes at collection time: this is tier two and is not digest-gated. A direct
+   package path is published and its scaffold instantiate hook executes from
+   the resulting pinned tree.
 3. **allow-job-postprocessor off-by-default digest-verified** — `collect` only
    loads a postprocess hook from a job-pinned workspace package tree when
    `allow_job_postprocessor=True` (or the CLI flag is supplied). The tree's own
@@ -244,7 +249,12 @@ entries, runs, and products, and reports stored ids. Entry families and record
 classes are resolved lazily from the core registry; output types may require
 `httk-data` and `httk-atomistic` to be installed.
 
+With `--into`, each job's entries, run, and products are stored as one job-level
+operation. A storage failure is reported on that job's summary as
+`storage_error`; other jobs may still be stored, so a sweep can partially
+succeed. Inspect each JSONL line's `storage_error` before retrying or
+reconciling the destination store.
+
 See {doc}`declarations` for declaration carriage, {doc}`provenance` for the
 tree-pinned provenance handoff, {doc}`collecting` for postprocessing and
 fallback behavior, and {doc}`workflow_cli` for the complete command reference.
-

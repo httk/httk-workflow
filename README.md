@@ -6,7 +6,7 @@
 It provides the `httk.workflow` Python API in three layers — the language-neutral
 filesystem protocol (`httk.workflow.protocol`), the execution and authoring
 surface (`httk.workflow` — `Runner`, `Attempt`), and orchestration and management
-(`Workspace`, `TaskManager`, `harvest`, and named submodules) — and registers
+(`Workspace`, `TaskManager`, `collect`, and named submodules) — and registers
 `httk workflow`, the canonical command tree for everything below. The
 `httk-taskmanager` and
 `httk-v1-taskmanager` executables remain installed as aliases of that tree; the
@@ -19,10 +19,10 @@ From nothing to a finished VASP relaxation, without writing a runner:
 
 ```console
 httk project init --name quickstart
-httk workflow job new --template vasp-relax --parameter structure=POSCAR --tag silicon
+httk workflow job new --workflow vasp-relax --parameter structure=POSCAR --tag silicon
 httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
 httk workflow run
-httk workflow harvest
+httk workflow collect
 ```
 
 [`docs/quickstart.md`](docs/quickstart.md) explains each command, and
@@ -79,8 +79,8 @@ stay serial within their group while the rest of the suite runs in parallel.
 - **Manages projects and identity**: XDG configuration, signed project
   manifests, and workspace policy — see
   [`docs/workflow_cli.md`](docs/workflow_cli.md).
-- **Hands results to a data layer.** [`harvest`](docs/harvest.md) yields one
-  record per stopped job; *httk-workflow* itself has no database dependency.
+- **Hands results to a data layer.** [`collect`](docs/collecting.md) yields one
+  collected result per stopped job; *httk-workflow* itself has no database dependency.
 - **Keeps *httk* v1 workflows running.** `ht_steps`/`ht_run` task directories
   execute unchanged on this engine — see
   [`docs/v1_compatibility.md`](docs/v1_compatibility.md) and the

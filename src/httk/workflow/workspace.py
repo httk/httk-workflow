@@ -53,6 +53,7 @@ if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .gc import GcReport
 
 _LOGGER = logging.getLogger(__name__)
+RUNNER_TREE_ENTRY = "run"
 
 
 def _validate_setting_key(key: str) -> str:
@@ -503,6 +504,11 @@ class Workspace:
             raise FormatError(f"a published runner must be a regular file or directory: {source_path}")
         digest = tree_digest(source_path) if is_directory else sha256_file(source_path)
         target = self.runner_store_path(name if name is not None else source_path.name)
+        if not is_directory and target.name == RUNNER_TREE_ENTRY and target.parent != self.runners:
+            raise FormatError(
+                "a file runner named 'run' cannot be published below a store subdirectory; "
+                "that name is reserved for directory runner entry points"
+            )
         if target.exists() or target.is_symlink():
             if target.is_symlink() or is_directory != target.is_dir():
                 raise FormatError(f"workspace runner store entry type does not match the published runner: {target}")
@@ -557,33 +563,38 @@ class Workspace:
         self.ensure_directory(target.parent)
         staging = self.control / "tmp" / f"runner.{uuid.uuid4()}"
         staging.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(source, staging, symlinks=False)
-        for entry in sorted(staging.rglob("*")):
-            entry.chmod(0o555)
-        # Linux requires write permission on a directory itself to rename it;
-        # the installed root is made read-only immediately after the rename.
-        staging.chmod(0o755)
         old: Path | None = None
         try:
-            if target.exists():
-                target.chmod(0o755)
-                old = staging.parent / f"runner-old.{uuid.uuid4()}"
-                os.replace(target, old)
-                # Explicit replacement has a small non-atomic window while the old tree is aside.
-            os.replace(staging, target)
-            target.chmod(0o555)
-            if old is not None:
-                for entry in sorted(old.rglob("*")):
-                    entry.chmod(0o755 if entry.is_dir() else 0o644)
-                old.chmod(0o755)
-                shutil.rmtree(old)
-                old = None
-        finally:
-            if staging.exists():
+            try:
+                shutil.copytree(source, staging, symlinks=False)
+                for entry in sorted(staging.rglob("*")):
+                    entry.chmod(0o555)
+                # Linux requires write permission on a directory itself to rename it;
+                # the installed root is made read-only immediately after the rename.
                 staging.chmod(0o755)
-                shutil.rmtree(staging)
+                if target.exists():
+                    target.chmod(0o755)
+                    old = staging.parent / f"runner-old.{uuid.uuid4()}"
+                    os.replace(target, old)
+                    # Explicit replacement has a small non-atomic window while the old tree is aside.
+                os.replace(staging, target)
+                target.chmod(0o555)
+                if old is not None:
+                    for entry in sorted(old.rglob("*")):
+                        entry.chmod(0o755 if entry.is_dir() else 0o644)
+                    old.chmod(0o755)
+                    shutil.rmtree(old)
+                    old = None
+            finally:
+                if staging.exists():
+                    entries = [staging, *staging.rglob("*")]
+                    for entry in sorted(entries, key=lambda path: len(path.parts)):
+                        entry.chmod(0o755 if entry.is_dir() else 0o644)
+                    shutil.rmtree(staging)
+        finally:
             if old is not None and not target.exists():
                 os.replace(old, target)
+                target.chmod(0o555)
 
     def detach(
         self,

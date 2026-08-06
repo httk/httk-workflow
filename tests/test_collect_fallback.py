@@ -106,7 +106,9 @@ def test_collect_degrades_a_pinned_tree_with_the_wrong_manifest_id(tmp_path: Pat
     item = next(collect(workspace, allow_job_postprocessor=True))
     assert item.outputs == {}
     assert item.missing_postprocessor is not None
-    assert "does not match job workflow" in item.missing_postprocessor
+    # Digest verification deliberately precedes manifest parsing: a modified
+    # manifest is tampering, not a trusted wrong-id diagnostic.
+    assert "pinned runner tree was modified" in item.missing_postprocessor
 
 
 def test_collect_refuses_a_file_runner_for_the_job_fallback(tmp_path: Path) -> None:
