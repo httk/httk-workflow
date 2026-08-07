@@ -32,7 +32,7 @@ Available runners
     The chain: relax, promote CONTCAR, then a static calculation of the relaxed
     structure, in one job.
 
-Job inputs
+Job parameters
 ----------
 
 Every packaged VASP runner reads the same ``inputs`` object, and every member is

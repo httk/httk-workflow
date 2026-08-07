@@ -852,12 +852,13 @@ A minimal `job.json` is:
 immutable after submission. Small workflow-specific parameters SHOULD be stored
 directly in it instead of one file per parameter.
 
-The optional top-level `inputs` member is the place for them: a JSON object with
+The optional top-level `parameters` member is the place for them: a JSON object with
 string keys and application-defined values, opaque to the protocol and covered by
-the immutable job digest like every other member. An implementation MUST reject an
-`inputs` object whose serialization exceeds 262144 bytes; bulk content belongs in
+the immutable job digest like every other member. An implementation MUST reject a
+`parameters` object whose serialization exceeds 262144 bytes; bulk content belongs in
 the payload or in transactional `data/`. A parent that synthesizes a child job
-varies normally only the child's `initial_step` and its `inputs`.
+varies normally only the child's `initial_step` and its `parameters`.
+The limit is exposed as `MAXIMUM_PARAMETERS_BYTES` by the protocol model.
 
 The optional top-level `declarations` member carries workflow declarations: a
 JSON object mapping a declaration name to one declaration document. A
@@ -871,7 +872,7 @@ self-description live inside the document itself, as the `$id`-style members of
 the property-definition conventions it follows. A declaration name MUST match
 `[A-Za-z0-9_][A-Za-z0-9._-]{0,63}`, because it is also one file basename in the
 payload area below. An implementation MUST reject a `declarations` object whose
-serialization exceeds 262144 bytes, which is the `inputs` allowance again and
+serialization exceeds 262144 bytes, which is the `parameters` allowance again and
 separate from it. Being members of `job.json`, declarations are immutable after
 submission and covered by the immutable job digest like every other member.
 Nothing is inherited: a synthesized child job carries the declarations its parent

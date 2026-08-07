@@ -424,7 +424,7 @@ def _job_mapping(job: JobDefinition) -> dict[str, object]:
             "retry_on": sorted(policy.retry_on),
         },
         "resources": dict(job.resources),
-        "inputs": dict(job.inputs),
+        "parameters": dict(job.parameters),
         "parent": None if job.parent is None else dict(job.parent),
     }
 
@@ -789,7 +789,7 @@ def _job_workflow_document(record: JobRecord, provider: object | None) -> Mappin
 
     entry = record.declarations.get("workflow")
     if isinstance(entry, Mapping):
-        if "parameters" in entry or "output_types" in entry:
+        if "inputs" in entry or "outputs" in entry:
             return entry
         observed = entry.get("observed")
         declared = entry.get("declared")
@@ -800,7 +800,7 @@ def _job_workflow_document(record: JobRecord, provider: object | None) -> Mappin
 
 
 def _output_roles(document: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
-    raw = document.get("output_types")
+    raw = document.get("outputs")
     if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
         return {}
     return {item["name"]: item for item in raw if isinstance(item, Mapping) and isinstance(item.get("name"), str)}

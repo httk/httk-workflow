@@ -196,7 +196,7 @@ def test_the_campaign_examples_run_in_either_language(runner: str, tmp_path: Pat
         workspace,
         _EXAMPLES / runner,
         step="characterize",
-        inputs={"sites": sites, "diverging": "1"},
+        parameters={"sites": sites, "diverging": "1"},
         tag="campaign",
     )
     assert parent.workflow == "examples.defects"

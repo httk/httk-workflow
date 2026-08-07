@@ -20,25 +20,23 @@ def _source_kind(target: str, workflow: ResolvedWorkflow) -> str:
     return "directory" if workflow.directory is not None else "file"
 
 
-def _parameter_document(workflow: ResolvedWorkflow) -> dict[str, dict[str, object]]:
+def _input_document(workflow: ResolvedWorkflow) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
     declaration = workflow.declarations.get("workflow", {})
-    declared = declaration.get("parameters", []) if isinstance(declaration, Mapping) else []
-    declared_parameters = (
-        [entry for entry in declared if isinstance(entry, Mapping)] if isinstance(declared, list) else []
-    )
-    for name, destination in workflow.parameters.items():
-        metadata = workflow._parameter_metadata.get(name, {})
+    declared = declaration.get("inputs", []) if isinstance(declaration, Mapping) else []
+    declared_inputs = [entry for entry in declared if isinstance(entry, Mapping)] if isinstance(declared, list) else []
+    for name, destination in workflow.inputs.items():
+        metadata = workflow._input_metadata.get(name, {})
         entry: dict[str, object] = {
             "destination": destination if destination is not None else "consumed by the instantiate hook"
         }
         for key in ("entry_type", "role", "description"):
             if key in metadata:
                 entry[key] = metadata[key]
-        if not any(key in metadata for key in ("entry_type", "role", "description")) and len(
-            declared_parameters
-        ) == len(workflow.parameters):
-            declared_entry = declared_parameters[list(workflow.parameters).index(name)]
+        if not any(key in metadata for key in ("entry_type", "role", "description")) and len(declared_inputs) == len(
+            workflow.inputs
+        ):
+            declared_entry = declared_inputs[list(workflow.inputs).index(name)]
             if isinstance(declared_entry.get("entry_type"), str):
                 entry["entry_type"] = declared_entry["entry_type"]
             if isinstance(declared_entry.get("name"), str):
@@ -54,7 +52,7 @@ def _output_document(workflow: ResolvedWorkflow) -> dict[str, dict[str, object]]
     metadata_items: list[tuple[str, Mapping[str, object]]] = list(workflow.outputs.items())
     if not workflow.outputs:
         declaration = workflow.declarations.get("workflow", {})
-        raw = declaration.get("output_types", []) if isinstance(declaration, Mapping) else []
+        raw = declaration.get("outputs", []) if isinstance(declaration, Mapping) else []
         if isinstance(raw, list):
             for entry in raw:
                 if isinstance(entry, Mapping) and isinstance(entry.get("name"), str):
@@ -95,8 +93,8 @@ def _workflow_description(target: str) -> dict[str, object]:
         "initial_step": workflow.initial_step,
         "data_mode": workflow.data_mode,
         "workdir_mode": workflow.workdir_mode,
-        "parameters": _parameter_document(workflow),
-        "inputs": {name: dict(metadata) for name, metadata in workflow.inputs.items()},
+        "inputs": _input_document(workflow),
+        "parameters": {name: dict(metadata) for name, metadata in workflow.parameters.items()},
         "outputs": _output_document(workflow),
         "declaration": _declaration_document(workflow),
         "hooks": {
@@ -141,7 +139,7 @@ def _render_text(description: Mapping[str, object]) -> str:
     for step in steps:
         assert isinstance(step, Mapping)
         lines.append(f"  {'*' if step['initial'] else '-'} {step['name']}")
-    for title, key in (("parameters", "parameters"), ("inputs", "inputs"), ("outputs", "outputs")):
+    for title, key in (("inputs", "inputs"), ("parameters", "parameters"), ("outputs", "outputs")):
         lines.append(f"{title}:")
         values = description[key]
         assert isinstance(values, Mapping)

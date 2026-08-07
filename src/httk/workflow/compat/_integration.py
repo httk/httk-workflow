@@ -53,7 +53,7 @@ from httk.workflow.protocol import (
     JobSpec,
     normalize_placement,
     prepare_job_payload,
-    validate_inputs,
+    validate_parameters,
 )
 from httk.workflow.scaffold import (
     DEFAULT_PLACEMENT,
@@ -110,7 +110,7 @@ def submit_integration_job(
     workflow: str,
     initial_step: str,
     name: str,
-    inputs: Mapping[str, object],
+    parameters: Mapping[str, object],
     documents: Mapping[str, str] | None = None,
     files: Mapping[str, str | os.PathLike[str]] | None = None,
     tag: str | None = None,
@@ -162,7 +162,7 @@ def submit_integration_job(
                 priority=500 if priority is None else priority,
                 required_capabilities=required_capabilities,
                 maximum_attempts_per_activation=maximum_attempts_per_activation,
-                inputs=validate_inputs(dict(inputs)),
+                parameters=validate_parameters(dict(parameters)),
             ),
         )
         marker = workspace.submit(staging, normalized, move=True)

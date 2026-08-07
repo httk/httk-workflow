@@ -6,7 +6,7 @@ from ._common import (
     _group,
     _json_value,
     _leaf,
-    _load_parameters,
+    _load_inputs,
     _pairs,
 )
 
@@ -47,14 +47,17 @@ def handle_campaign_show(arguments: argparse.Namespace, context: CLIContext) -> 
 def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Assign one root job to a partition and submit it into that workspace."""
 
-    inputs = {name: _json_value(text, f"job input {name!r}") for name, text in _pairs(arguments.inputs, "a job input")}
+    parameters = {
+        name: _json_value(text, f"job parameter {name!r}")
+        for name, text in _pairs(arguments.parameters, "a job parameter")
+    }
     files: dict[str, str | Path] = {name: Path(text) for name, text in _pairs(arguments.files, "a staged file")}
-    parameters, items, parameter_tag = _load_parameters(arguments.parameters, arguments.parameter_from)
+    inputs, items, input_tag = _load_inputs(arguments.inputs, arguments.input_from)
     shared = {
         "inputs": inputs,
         "files": files,
         "parameters": parameters,
-        "tag": arguments.tag or parameter_tag,
+        "tag": arguments.tag or input_tag,
         "placement": arguments.placement or DEFAULT_PLACEMENT,
         "priority": arguments.priority,
         "name": arguments.name,
@@ -193,12 +196,12 @@ def build_campaign_parser(
         help="the batch position, for round-robin (default: 0)",
     )
     submit.add_argument(
-        "--input",
+        "--parameter",
         action="append",
         default=[],
-        dest="inputs",
+        dest="parameters",
         metavar="NAME=VALUE",
-        help="one job input (repeatable)",
+        help="one implementation parameter (repeatable)",
     )
     submit.add_argument(
         "--file",
@@ -209,20 +212,20 @@ def build_campaign_parser(
         help="one staged file (repeatable)",
     )
     submit.add_argument(
-        "--parameter",
+        "--input",
         action="append",
         default=[],
-        dest="parameters",
+        dest="inputs",
         metavar="NAME=VALUE",
-        help="one creation parameter; VALUE is passed verbatim (repeatable)",
+        help="one declared input value to stage (repeatable)",
     )
     submit.add_argument(
-        "--parameter-from",
+        "--input-from",
         action="append",
         nargs="+",
         default=[],
         metavar=("NAME", "SOURCE"),
-        help="load a creation parameter from one or more files, or readable files in a directory (repeatable)",
+        help="load a declared input from one or more files, or readable files in a directory (repeatable)",
     )
     submit.add_argument("--tag", metavar="TAG", help="the job tag")
     submit.add_argument("--placement", metavar="PLACEMENT", help="where the job lands in its workspace")

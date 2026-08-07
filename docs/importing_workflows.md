@@ -98,7 +98,7 @@ published under `data/pwd/` when the job was imported with
 
 ### Documents too large to embed
 
-A job's `inputs` object is bounded, so a document larger than half that budget is
+A job's `parameters` object is bounded, so a document larger than half that budget is
 staged in the payload as `files/pwd.json` and the job carries a
 `pwd_document_path` pointer to it instead of the document itself. Both spellings
 run identically; `import_pwd(..., maximum_embedded_bytes=N)` moves the boundary.

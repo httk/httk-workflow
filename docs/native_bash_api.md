@@ -43,15 +43,15 @@ step_characterize() {
     while read -r site; do
         httk_workflow_spawn "site-$site" \
             --step relax \
-            --input site="$site" \
-            --input structure=@"defect-$site.json" \
+            --parameter site="$site" \
+            --parameter structure=@"defect-$site.json" \
             --data-mode transactional >/dev/null
     done <sites.txt
     httk_workflow_gather aggregate --when all_terminal --on-impossible triage
 }
 
 step_relax() {
-    if ! httk_workflow_run --timeout 3600 -- relax --site "$(httk_workflow_input site)"; then
+    if ! httk_workflow_run --timeout 3600 -- relax --site "$(httk_workflow_parameter site)"; then
         httk_workflow_retry "the relaxation did not finish"
         return
     fi
@@ -107,7 +107,7 @@ prepare_job_payload(
         runner_path=str(reference["path"]),
         runner_sha256=str(reference["sha256"]),
         initial_step="characterize",
-        inputs={"encut": 520},
+        parameters={"encut": 520},
     ),
 )
 workspace.submit("prepared-job", "project/si-vacancies")
@@ -116,7 +116,7 @@ workspace.submit("prepared-job", "project/si-vacancies")
 A Bash step can also prepare a payload itself, with
 `httk_workflow_job_prepare DESTINATION SPEC.json`, where the spec object holds
 the members of `JobSpec` — including `runner_executor`, `runner_source`,
-`runner_sha256`, and `inputs` — and the created job's identity is printed back as
+`runner_sha256`, and `parameters` — and the created job's identity is printed back as
 JSON.
 
 The libraries require Bash 4.2 or newer and work with `set -euo pipefail`. They
@@ -177,7 +177,7 @@ step composed lives in shell state, so the subshell costs a step nothing.
 
 | Call | What it returns |
 | --- | --- |
-| `httk_workflow_input NAME [DEFAULT]` | one member of the job's `inputs` object |
+| `httk_workflow_parameter NAME [DEFAULT]` | one member of the job's opaque `parameters` object |
 | `httk_workflow_context [FIELD]` | the attempt context, or one field of it |
 | `httk_workflow_state_get NAME` | one key of the job's JSON state |
 | `httk_workflow_declaration NAME` | one workflow declaration: the observed document, else the declared one; 1 when neither exists |
@@ -283,14 +283,14 @@ within one attempt: it is how `gather` and `httk_workflow_children` name that
 child later, and it becomes the child's job tag by default, so its payload
 directory is readable at a glance.
 
-A spawned child needs no prepared payload at all. `--step` and `--input`
+A spawned child needs no prepared payload at all. `--step` and `--parameter`
 synthesize a complete `job.json`, and everything not given follows the spawning
 job: its workflow, its claim pool, its priority, its resources, and its runner.
 
 | Option | Meaning |
 | --- | --- |
 | `--step STEP` | the step the child starts at; required unless `--payload` is given |
-| `--input NAME=VALUE`, `--input NAME=@FILE.json` | one member of the child's `inputs` object |
+| `--parameter NAME=VALUE`, `--parameter NAME=@FILE.json` | one member of the child's `parameters` object |
 | `--payload DIRECTORY` | spawn a prepared payload directory instead of synthesizing a job |
 | `--runner inherit\|ws:PATH@SHA256\|installed:PATH@SHA256` | which runner the child executes; `inherit` is the default |
 | `--placement PATH` | where the child is created; the placement of this job by default |
@@ -371,7 +371,7 @@ like a broken call:
 | Status | Meaning |
 | --- | --- |
 | `0` | the call succeeded |
-| `1` | the answer is legitimately absent: an unset state key, a missing input without a default, a null child field, a child that was not observed |
+| `1` | the answer is legitimately absent: an unset state key, a missing parameter without a default, a null child field, a child that was not observed |
 | `2` | the call is refused: bad usage, a protocol violation such as a second terminal call, or a corrupt attempt context |
 
 Reading something that may not be there is therefore an ordinary conditional:

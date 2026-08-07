@@ -28,7 +28,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 import httk.workflow
-from httk.workflow import TaskManager, Workspace
+from httk.workflow import Attempt, TaskManager, Workspace
 from httk.workflow import workflow_cli as cli
 from httk.workflow.adapters import (
     METADATA_FILE,
@@ -349,6 +349,18 @@ def test_retired_lifecycle_spellings_are_gone() -> None:
         "httk.vasp.relax",
         "httk.vasp.relax-bash",
     }
+    from httk.workflow.protocol import JobSpec
+
+    assert not hasattr(JobSpec, "inputs")
+    assert not hasattr(Attempt, "inputs")
+    for provider in providers:
+        assert provider is not None
+        declaration = provider.declarations["workflow"]
+        assert "parameters" not in declaration
+        assert "output_types" not in declaration
+    parser = cli.build_parser("httk workflow", CLIContext("httk", Path.cwd()))
+    with pytest.raises(SystemExit):
+        parser.parse_args(["job", "new", "WS", "--workflow", "vasp-relax", "--parameter-from", "structure", "x"])
     root = Path(httk.workflow.__file__).parents[2]
     retired = re.compile(
         r"\b(?:TemplateProvider|register_template|resolve_template|registered_templates|template_provider|"

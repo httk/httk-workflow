@@ -18,7 +18,7 @@ Exit codes are uniform across every subcommand:
 ``0``
     the call succeeded.
 ``1``
-    the answer is legitimately absent — an unset state key, a missing input
+    the answer is legitimately absent — an unset state key, a missing parameter
     without a default, a null child field.
 ``2``
     the call is refused — bad usage, a protocol violation, or a corrupt attempt
@@ -128,7 +128,7 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("batch")
     context = commands.add_parser("context")
     context.add_argument("field", nargs="?")
-    job_input = commands.add_parser("input")
+    job_input = commands.add_parser("parameter")
     job_input.add_argument("name")
     job_input.add_argument("--default")
     setting = commands.add_parser("setting")
@@ -164,7 +164,7 @@ def _parser() -> argparse.ArgumentParser:
     spawn.add_argument("label")
     spawn.add_argument("--step")
     spawn.add_argument("--payload")
-    spawn.add_argument("--input", action="append", default=[], dest="inputs")
+    spawn.add_argument("--parameter", action="append", default=[], dest="parameters")
     spawn.add_argument("--runner", default="inherit")
     spawn.add_argument("--placement")
     spawn.add_argument("--priority", type=int)
@@ -503,7 +503,7 @@ def _child_spec(arguments: argparse.Namespace) -> ChildSpec:
     resources = None if not arguments.resources else read_json(Path(str(arguments.resources).removeprefix("@")))
     return ChildSpec(
         step=arguments.step,
-        inputs=_assignments(arguments.inputs, "a child input"),
+        parameters=_assignments(arguments.parameters, "a child parameter"),
         runner=_runner_reference(arguments.runner),
         name=arguments.name,
         workflow=arguments.workflow,
@@ -525,10 +525,10 @@ def _child_spec(arguments: argparse.Namespace) -> ChildSpec:
 def _spawn(arguments: argparse.Namespace) -> None:
     attempt = _publishing()
     if arguments.payload:
-        if arguments.step or arguments.inputs or arguments.runner != "inherit":
+        if arguments.step or arguments.parameters or arguments.runner != "inherit":
             raise _Refused(
                 "a prepared payload directory carries its own job definition, "
-                "so --step, --input, and --runner apply only to a synthesized child"
+                "so --step, --parameter, and --runner apply only to a synthesized child"
             )
         reference = attempt.spawn(arguments.payload, label=arguments.label, placement=arguments.placement)
     else:
@@ -615,7 +615,7 @@ def _job_prepare(arguments: argparse.Namespace) -> None:
     """Create ``job.json`` in a prepared payload from a specification file.
 
     The specification is exactly the member set of :class:`JobSpec`, including
-    ``runner_executor``, ``runner_source``, ``runner_sha256``, and ``inputs``, so
+    ``runner_executor``, ``runner_source``, ``runner_sha256``, and ``parameters``, so
     a Bash runner can prepare a payload for a shared runner without a Python
     program in between.
     """
@@ -637,7 +637,7 @@ def _job_prepare(arguments: argparse.Namespace) -> None:
             "runner_executor": job.runner_executor,
             "runner_source": job.runner_source,
             "runner_sha256": job.runner_sha256,
-            "inputs": dict(job.inputs),
+            "parameters": dict(job.parameters),
         }
     )
 
@@ -748,13 +748,13 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
             raise _Absent()
         elif raw[arguments.field] is not None:
             _print(raw[arguments.field])
-    elif command == "input":
+    elif command == "parameter":
         attempt = _attempt()
         try:
             if arguments.default is None:
-                _print(attempt.input(arguments.name))
+                _print(attempt.parameter(arguments.name))
             else:
-                _print(attempt.input(arguments.name, _value(arguments.default)))
+                _print(attempt.parameter(arguments.name, _value(arguments.default)))
         except KeyError as exc:
             raise _Absent(str(exc.args[0])) from exc
     elif command == "setting":

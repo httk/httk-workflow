@@ -9,13 +9,13 @@ runner at all: it submits jobs that name one of the installed files in
 
 | Runner | Workflow | Steps |
 | --- | --- | --- |
-| `vasp_relax.py` | `httk.vasp.relax` | prepare, run, collect |
-| `vasp_relax.sh` | `httk.vasp.relax` | prepare, run, collect |
-| `vasp_static.py` | `httk.vasp.static` | prepare, run, collect |
-| `vasp_relax_static.py` | `httk.vasp.relax-static` | prepare, run, promote, static, collect |
+| `vasp_relax.py` | `httk.vasp.relax` | publish, prepare, run |
+| `vasp_relax.sh` | `httk.vasp.relax` | publish, prepare, run |
+| `vasp_static.py` | `httk.vasp.static` | publish, prepare, run |
+| `vasp_relax_static.py` | `httk.vasp.relax-static` | publish, prepare, promote, run, static |
 
 `vasp_relax.sh` is the Bash authoring of exactly the same workflow as
-`vasp_relax.py`: the same steps, the same job inputs, the same job state, the same
+`vasp_relax.py`: the same steps, the same job parameters, the same job state, the same
 failure codes, and the same files in the workdir and in the published data. It is
 both a working runner and the proof that the two authoring SDKs are one protocol.
 
@@ -40,7 +40,7 @@ job = prepare_job_payload(
         runner_sha256=str(reference["sha256"]),
         initial_step="prepare",
         data_mode="transactional",
-        inputs={"kpoint_density": 30.0, "incar_tags": {"ENCUT": 520}},
+        parameters={"kpoint_density": 30.0, "incar_tags": {"ENCUT": 520}},
     ),
 )
 ```
@@ -71,9 +71,9 @@ published = workspace.publish_runner("/path/to/vasp_relax.py", name="vasp/relax.
 
 The VASP command is the `vasp.command` application setting, which the runners
 resolve through `a.setting("vasp.command")` — most
-specific first: a job's own `vasp.command` input, then `HTTK_VASP_COMMAND` in the
+specific first: a job's own `vasp.command` parameter, then `HTTK_VASP_COMMAND` in the
 environment, then the workspace's `vasp.command` setting, and finally the job's
-legacy `vasp_command` input. The chosen string is split the way a shell would.
+legacy `vasp_command` parameter. The chosen string is split the way a shell would.
 
 Two spellings therefore both work, and mean different things. A machine that
 invokes VASP its own way still exports the environment variable, and it wins over
@@ -91,21 +91,21 @@ httk workflow manager run --pool vasp
 
 The pseudopotential library resolves the same way, as `vasp.pseudo_library`
 (environment `HTTK_VASP_PSEUDO_LIBRARY`), falling back to the job's
-`pseudopotential_library` input. See {doc}`sdk_parity` for the resolution table
+`pseudopotential_library` parameter. See {doc}`sdk_parity` for the resolution table
 and {doc}`workflow_cli` for `workspace settings`.
 
-## Job inputs
+## Declared inputs and parameters
 
-The four workflows declare one creation parameter: `structure` → `files/POSCAR`.
+The four workflows declare one creation input: `structure` → `files/POSCAR`.
 Paths are copied verbatim; other objects are serialized with `httk.core.save`,
 which requires the `httk-io` and `httk-atomistic` packages for POSCAR/CIF writers.
 
-Every input is optional and every one is documented, with its default, in the API
+Every implementation parameter is optional and every one is documented, with its default, in the API
 reference of {py:mod}`httk.workflow.vasp.runners`. The ones a campaign normally sets are
 `poscar`, `incar_tags`, `kpoint_density`, `pseudopotential_library`, `timeout`, and
 `collect`.
 
-Two job members are not inputs but requirements: `workdir.mode` must be
+Two job members are not parameters but requirements: `workdir.mode` must be
 `persistent`, because the inputs a remedy rewrites have to be the inputs the next
 attempt reads, and `data.mode` must be `transactional` for the collected files to
 be published. With `data.mode` `none` the results simply stay in the workdir.
@@ -130,11 +130,11 @@ the classification:
 Remedies are the bounded ladder of the policy named by `remedy_policy`, which
 defaults to `reviewed-v1`; they are planned and applied explicitly and never
 invented: see {doc}`runtime_helpers`. A group with its own reviewed practice
-registers a policy and names it in the job inputs rather than editing a runner. The
+registers a policy and names it in the job parameters rather than editing a runner. The
 ladder position is recorded in the job state directory, so it survives every attempt
 of the job, and `maximum_remedies` bounds how many a single job may apply.
 
-The `publish` step publishes the files named by the `collect` input into the
+The `publish` step publishes the files named by the `collect` parameter into the
 job's transactional data, under `data_prefix`. `vasp_relax_static.py` archives the relaxation inside the
 workdir before the single point overwrites it, and publishes the two stages side by
 side as `relax/` and `static/`.
@@ -143,7 +143,7 @@ side as `relax/` and `static/`.
 
 | Code | Meaning |
 | --- | --- |
-| `vasp.command_missing` | no `vasp.command` resolved — set it with `httk workflow workspace settings set vasp.command '...'`, or use `HTTK_VASP_COMMAND` as a deployment override; no `vasp_command` input was provided |
+| `vasp.command_missing` | no `vasp.command` resolved — set it with `httk workflow workspace settings set vasp.command '...'`, or use `HTTK_VASP_COMMAND` as a deployment override; no `vasp_command` parameter was provided |
 | `vasp.input_missing` | the structure named by `poscar` is not in the payload |
 | `vasp.no_relaxed_structure` | the chained runner's relaxation left no CONTCAR |
 | `vasp.failed` | VASP did not complete and no remedy remained |

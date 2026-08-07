@@ -14,8 +14,8 @@ manager asked for to the handler that implements it, giving it one
 
     @run.step
     def characterize(a):
-        for site in range(a.input("sites")):
-            a.spawn(ChildSpec(step="relax", inputs={"site": site}), label=f"site-{site}")
+        for site in range(a.parameter("sites")):
+            a.spawn(ChildSpec(step="relax", parameters={"site": site}), label=f"site-{site}")
         a.gather("aggregate", on_impossible="triage")
 
 
@@ -41,7 +41,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Literal, Self, cast, overload
 
-from ._util import read_json, require_string, validate_parameters, write_json_atomic
+from ._util import read_json, require_string, validate_inputs, write_json_atomic
 from .errors import FormatError
 from .models import (
     JOB_STATE_DIRECTORY,
@@ -94,7 +94,7 @@ type RunnerSource = Literal["payload", "workspace", "installed"]
 
 
 class _Missing:
-    """The sentinel telling a missing input from an input that is null."""
+    """The sentinel telling a missing parameter from a parameter that is null."""
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
         return "<missing>"
@@ -162,16 +162,16 @@ class RunnerRef:
 
 @dataclass(frozen=True)
 class ChildSpec:
-    """A complete child job described by the step and inputs it starts with.
+    """A complete child job described by the step and parameters it starts with.
 
     Everything not given follows the spawning job: its workflow, its claim pool,
     its priority, its resources, and its runner. The child therefore differs from
     its parent in exactly what the campaign varies, which is normally only *step*
-    and *inputs*.
+    and *parameters*.
     """
 
     step: str
-    inputs: Mapping[str, object] = field(default_factory=dict)
+    parameters: Mapping[str, object] = field(default_factory=dict)
     #: The child's own workflow declarations. A declaration describes the job it
     #: belongs to, so nothing is inherited: a child that declares carries what it
     #: was given here, and a child that declares nothing carries nothing.
@@ -217,7 +217,7 @@ class ChildSpec:
             maximum_activations=self.maximum_activations,
             retry_on=self.retry_on,
             resources=dict(parent.resources) if self.resources is None else dict(self.resources),
-            inputs=dict(self.inputs),
+            parameters=dict(self.parameters),
             declarations=validate_declarations(self.declarations, "child declarations"),
         )
 
@@ -411,10 +411,10 @@ class Attempt:
         return self._job
 
     @property
-    def inputs(self) -> Mapping[str, object]:
-        """The application-defined ``inputs`` object of this job."""
+    def parameters(self) -> Mapping[str, object]:
+        """The application-defined ``parameters`` object of this job."""
 
-        return self.job.inputs
+        return self.job.parameters
 
     @property
     def children(self) -> ChildrenView:
@@ -435,27 +435,27 @@ class Attempt:
 
         return self._published is not None
 
-    def input(self, name: str, default: object = _MISSING) -> object:
-        """Return one member of the job's ``inputs`` object.
+    def parameter(self, name: str, default: object = _MISSING) -> object:
+        """Return one member of the job's ``parameters`` object.
 
-        Without a *default*, a missing input is a :exc:`KeyError`: a step that
-        needs an input cannot run without it, and saying so immediately is better
+        Without a *default*, a missing parameter is a :exc:`KeyError`: a step that
+        needs a parameter cannot run without it, and saying so immediately is better
         than failing later on a value that was never there.
         """
 
-        inputs = self.job.inputs
-        if name in inputs:
-            return inputs[name]
+        parameters = self.job.parameters
+        if name in parameters:
+            return parameters[name]
         if isinstance(default, _Missing):
-            available = ", ".join(sorted(inputs)) or "none"
-            raise KeyError(f"job input {name!r} is not defined; defined inputs: {available}")
+            available = ", ".join(sorted(parameters)) or "none"
+            raise KeyError(f"job parameter {name!r} is not defined; defined parameters: {available}")
         return default
 
     def setting(self, name: str, default: object = None) -> object:
         """Resolve one application setting through its layers.
 
         The layers are consulted most-specific first, and the first that has the
-        name wins: this job's ``inputs`` object, then the environment variable
+        name wins: this job's ``parameters`` object, then the environment variable
         ``HTTK_`` + the name upper-cased with dots as underscores (so
         ``vasp.command`` reads ``HTTK_VASP_COMMAND``), then the workspace's
         application settings, then *default*. This is how a step reads the VASP
@@ -463,9 +463,9 @@ class Attempt:
         for every job, while still letting one job or one shell override it.
         """
 
-        inputs = self.job.inputs
-        if name in inputs:
-            return inputs[name]
+        parameters = self.job.parameters
+        if name in parameters:
+            return parameters[name]
         variable = "HTTK_" + name.upper().replace(".", "_")
         if variable in os.environ:
             return os.environ[variable]
@@ -812,17 +812,17 @@ class Runner:
     steps that really exist.
     """
 
-    def __init__(self, workflow: str, *, parameters: Mapping[str, str | None] | None = None) -> None:
+    def __init__(self, workflow: str, *, inputs: Mapping[str, str | None] | None = None) -> None:
         self.workflow = require_string(workflow, "workflow")
-        self._parameters = MappingProxyType(validate_parameters(parameters or {}))
+        self._inputs = MappingProxyType(validate_inputs(inputs or {}))
         self._steps: dict[str, StepHandler] = {}
         self._instantiate: InstantiateHandler | None = None
 
     @property
-    def parameters(self) -> Mapping[str, str | None]:
-        """The immutable creation-parameter declaration."""
+    def inputs(self) -> Mapping[str, str | None]:
+        """The immutable declared-input staging map."""
 
-        return self._parameters
+        return self._inputs
 
     @property
     def steps(self) -> frozenset[str]:
@@ -876,8 +876,8 @@ class Runner:
             "workflow": self.workflow,
             "steps": sorted(self._steps),
         }
-        if self.parameters:
-            description["parameters"] = dict(self.parameters)
+        if self.inputs:
+            description["inputs"] = dict(self.inputs)
         if self.has_instantiate:
             description["instantiate"] = True
         return description

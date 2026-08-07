@@ -40,7 +40,7 @@ The command line can use the directory without registering it:
 
 ```console
 httk workflow describe ./my-workflow
-httk workflow job new WS --workflow-dir ./my-workflow --parameter structure=POSCAR
+httk workflow job new WS --workflow-dir ./my-workflow --input structure=POSCAR
 ```
 
 ## `workflow.toml` reference
@@ -108,39 +108,39 @@ file = "instantiate.py"
 file = "postprocess.py"
 ```
 
-### `[workflow.parameters.<NAME>]`
+### `[workflow.inputs.<NAME>]`
 
-Every parameter table accepts these keys:
+Every input table accepts these keys:
 
 | Key | Meaning |
 | --- | --- |
-| `destination` | Optional payload-relative destination. Omit it when the instantiate hook consumes the value; omission requires `[workflow.instantiate]`. Existing parameter and payload-relative-name validation applies. |
-| `description` | Optional parameter description. |
+| `destination` | Optional payload-relative destination. Omit it when the instantiate hook consumes the value; omission requires `[workflow.instantiate]`. Existing input and payload-relative-name validation applies. |
+| `description` | Optional input description. |
 | `entry_type` | Optional declaration entry type. |
 | `ref` | Optional declaration reference. |
-| `role` | Optional declaration role; defaults to the parameter key. |
+| `role` | Optional declaration role; defaults to the input key. |
 
 ```toml
-[workflow.parameters.structure]
+[workflow.inputs.structure]
 destination = "POSCAR"
 entry_type = "structures"
 ref = "https://example.org/types/structure"
 description = "The starting structure."
 role = "initial_structure"
 
-[workflow.parameters.settings]
+[workflow.inputs.settings]
 description = "Values consumed by instantiate.py."
 role = "settings"
 ```
 
-### `[workflow.inputs.<NAME>]`
+### `[workflow.parameters.<NAME>]`
 
-Each input accepts `type`, `description`, and `default`. `type`, when present,
+Each parameter accepts `type`, `description`, and `default`. `type`, when present,
 must be one of `"string"`, `"number"`, `"integer"`, `"boolean"`, `"array"`,
 or `"object"`; a supplied default must have that matching JSON/TOML type.
 
 ```toml
-[workflow.inputs.kpoint_density]
+[workflow.parameters.kpoint_density]
 type = "number"
 default = 30.0
 description = "Sampling density."
@@ -150,7 +150,7 @@ description = "Sampling density."
 
 `entry_type` is required. The other accepted keys are `ref`, `description`,
 `product_of`, and `role`. `role` defaults to the output key. `product_of` is a
-scalar role reference: it may name a parameter role or another output role. It
+scalar role reference: it may name an input role or another output role. It
 means “the single entity this output is an attribute-like property of”; joint
 derivations stay unmarked—the `Run` carries them. Self-references, output
 cycles, ambiguous parameter/output names, and unknown roles are rejected.
@@ -164,18 +164,55 @@ product_of = "initial_structure"
 role = "relaxed_structure"
 ```
 
+### Inputs, parameters, and files
+
+A job is created from three kinds of things, and the distinction carries
+meaning beyond convenience.
+
+**Inputs** are the objects the workflow *operates on* — the things named in the
+workflow's declaration, described by OPTIMADE property and entry-type
+definitions. They define what the workflow *is*: two runs of `httk.vasp.relax`
+on different structures are the same workflow applied to different inputs, and
+it is the inputs (and the declared outputs) that give the workflow's `$id` its
+meaning across databases. Inputs are staged into the job payload at creation
+time (`new_job(..., inputs={"structure": ...})`), become the input roles of the
+recorded provenance, and are what a served entry's `has_input` edges point back
+to.
+
+**Parameters** are the knobs a particular workflow *implementation* exposes —
+cutoffs, densities, tolerances, switches. They are deliberately **not** part of
+the declaration, and this is a design decision rather than an omission.
+Practically everything in a VASP calculation could be regarded as an input:
+hundreds of settings, each either hard-coded in an INCAR template or lifted out
+as something the caller may adjust. If adjusting any of them changed *which*
+workflow was being run, nearly every calculation would be a semantically
+distinct workflow, the declaration registry would fragment into uselessness,
+and every knob would demand a curated property definition. Parameters are the
+escape from that: an implementation may lift as many knobs as it likes without
+touching the workflow's declared identity. They require no property
+definitions, travel in `job.json` as opaque JSON — so they remain
+digest-pinned, recorded facts of the execution, fully reproducible — but they
+never appear among the declared inputs and outputs.
+
+**Files** stage additional payload content by name, without either role.
+
+The boundary is a judgment the workflow implementer owns: if turning a knob
+genuinely changes *what* is being computed — not just how carefully or by what
+route — it does not belong among the parameters. It belongs as a declared
+input, or in a differently declared workflow.
+
 ### Declarations
 
 Without `declaration_file`, `workflow_declaration_from_manifest(provider)`
 generates an OPTIMADE-format document with optional `$id` and `description`,
-entry-typed parameter entries, and output entries. `product_of` is curation
+entry-typed input entries, and output entries. `product_of` is curation
 metadata and is never emitted in this declaration. It becomes
 `provider.declarations["workflow"]` and is embedded in `job.json`.
 
 With `declaration_file`, the JSON document is loaded and embedded verbatim after
 validation. Its `$id` must equal `declaration_uri` when both are supplied. Every
-external parameter and output role maps must exactly cover the manifest's
-entry-typed parameters and outputs. An external declaration must not contain
+external input and output role maps must exactly cover the manifest's
+entry-typed inputs and outputs. An external declaration must not contain
 `product_of`; the declaration remains the authoritative OPTIMADE document, and
 the manifest remains the authoritative strictly httk-owned package glue.
 
@@ -185,7 +222,7 @@ The hook contracts are deliberately small:
 
 ```python
 def instantiate(context):
-    # context.payload, context.parameters, context.inputs, context.tag
+    # context.payload, context.inputs, context.parameters, context.tag
     ...
 
 
@@ -195,7 +232,7 @@ def postprocess(record):
 ```
 
 An instantiate hook runs during scaffolding and may write the payload or update
-inputs. A postprocess hook runs during `collect`; it returns role-keyed outputs.
+parameters. A postprocess hook runs during `collect`; it returns role-keyed outputs.
 The framework validates those roles, derives unfulfilled roles, overlays output
 edges onto the `Run`, and emits `ProductLink` values from manifest/provider
 `product_of`. A direct
@@ -240,8 +277,8 @@ The usual lifecycle is instantiate, run, then collect:
 
 ```console
 httk workflow job new WS --workflow-dir ./my-workflow \\
-    --parameter-from structure structures/ \\
-    --input kpoint_density=30.0 \\
+    --input-from structure structures/ \\
+    --parameter kpoint_density=30.0 \\
     --placement project/screening
 httk workflow run WS
 httk workflow collect WS

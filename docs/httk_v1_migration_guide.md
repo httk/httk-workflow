@@ -577,10 +577,10 @@ def branch(a):
 
 A child whose steps live in the same runner needs no payload at all: publish the
 runner once in the workspace and spawn a `ChildSpec`, which synthesizes the whole
-child job from its step and inputs and inherits the parent's runner reference.
+child job from its step and parameters and inherits the parent's runner reference.
 
 ```python
-a.spawn(ChildSpec(step="run", inputs={"scale": parameter}), label=f"volume-{index}")
+a.spawn(ChildSpec(step="run", parameters={"scale": parameter}), label=f"volume-{index}")
 ```
 
 Use `all_succeeded` when any failed child should make the join impossible.
@@ -588,14 +588,14 @@ Use `all_succeeded` when any failed child should make the join impossible.
 broken descendant no longer counts as active. Other native conditions are
 `any_succeeded` and `at_least`.
 
-A Bash step spawns the same children by step and inputs, and gathers exactly the
+A Bash step spawns the same children by step and parameters, and gathers exactly the
 ones it spawned:
 
 ```bash
 for index in 000 001; do
     httk_workflow_spawn "volume-$index" \
         --step run \
-        --input scale="0.$index" \
+        --parameter scale="0.$index" \
         --placement "volume-scan/$index" >/dev/null
 done
 httk_workflow_gather collect --when all_terminal
@@ -694,33 +694,34 @@ name the task.
 
 This is the overwhelmingly common case: every template shipped with v1 did
 exactly this. You need no code. Use a packaged template, or declare the
-parameter on your own Python runner:
+input on your own Python runner:
 
 ```python
-run = Runner("example.structure", parameters={"structure": "POSCAR"})
+run = Runner("example.structure", inputs={"structure": "POSCAR"})
 ```
 
 Callers pass the structure object. The scaffold writes it to `files/POSCAR`
 using the registered writer (the *httk-io* and *httk-atomistic* distributions
-provide the POSCAR writer). A path parameter is copied instead; for example,
-the Python API uses `new_job(ws, template, parameters={"structure": obj})`,
+provide the POSCAR writer). A path input is copied instead; for example,
+the Python API uses `new_job(ws, workflow, inputs={"structure": obj})`,
 and a batch uses `new_jobs(...)` items such as
-`{"parameters": {"structure": obj}}`. The command-line spellings are
+`{"inputs": {"structure": obj}}`. The command-line spellings are
 documented in {doc}`workflow_cli`.
 
 ### The script produced derived creation-time files
 
 If everything the script produced was derivable from its arguments, declare a
-parameter for every argument. Use a destination for values that can be staged
-directly and `None` for values consumed by a creation hook. Move the remaining
-logic to `@run.instantiate`:
+input for every declared object that defines workflow equivalence. Use a
+destination for values that can be staged directly and `None` for values
+consumed by a creation hook. Keep implementation knobs outside the declaration
+as job parameters. Move the remaining logic to `@run.instantiate`:
 
 ```python
 from httk.workflow import Runner
 
 run = Runner(
     "example.supercell",
-    parameters={"structure": "POSCAR", "supercell": None},
+    inputs={"structure": "POSCAR"},
 )
 
 
@@ -729,9 +730,8 @@ def instantiate(ctx):
     from httk.atomistic import build_supercell
     from httk.core import save
 
-    result = build_supercell(ctx.parameters["structure"], ctx.parameters["supercell"])
+    result = build_supercell(ctx.inputs["structure"], ctx.parameters["supercell"])
     save(result.structure, ctx.payload / "files" / "POSCAR")
-    ctx.inputs.setdefault("supercell", ctx.parameters["supercell"])
     ctx.suggest_tag("supercell")
 ```
 
@@ -740,17 +740,17 @@ mapping is:
 
 | v1 | v2 |
 | --- | --- |
-| `args` dictionary | `parameters=` declaration and each job item's `{"parameters": ...}` |
+| `args` dictionary | declared `inputs=` and opaque job `parameters=` |
 | script current directory | `ctx.payload` |
 | writing a file | a declared destination, or a write below `ctx.payload` |
 | `finalname` | `ctx.suggest_tag(...)` |
 | a value the runner needs later | `ctx.inputs` |
 
-Declarative staging happens before the hook. `ctx.parameters` is read-only;
-`ctx.inputs` is mutable and becomes the job's run-time inputs. The hook runs
+Declarative staging happens before the hook. `ctx.inputs` is read-only;
+`ctx.parameters` is mutable and becomes the job's opaque parameter mapping. The hook runs
 in-process on the creating machine. See {doc}`runtime_helpers` for the hook
 reference and {doc}`workflow_cli` for `--parameter NAME=VALUE` and
-`--parameter-from NAME SOURCE...`.
+`--input-from NAME SOURCE...`.
 
 ### The work belongs at run time
 

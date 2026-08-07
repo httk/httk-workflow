@@ -366,19 +366,19 @@ def _pairs(values: Sequence[str], label: str) -> list[tuple[str, str]]:
     return result
 
 
-def _load_parameters(
+def _load_inputs(
     values: Sequence[str], occurrences: Sequence[Sequence[str]]
 ) -> tuple[dict[str, object], list[JobItem], str | None]:
-    """Load parameter sources and split shared values from a batch source."""
+    """Load staged input sources and split shared values from a batch source."""
 
-    shared: dict[str, object] = {name: text for name, text in _pairs(values, "a job parameter")}
+    shared: dict[str, object] = {name: text for name, text in _pairs(values, "a staged workflow input")}
     batch: list[JobItem] = []
     batch_occurrence: Sequence[str] | None = None
     single_files: list[Path] = []
     single_tags: list[str | None] = []
     for occurrence in occurrences:
         if len(occurrence) < 2 or not occurrence[0]:
-            raise ValueError("--parameter-from requires NAME followed by at least one SOURCE")
+            raise ValueError("--input-from requires NAME followed by at least one SOURCE")
         name = occurrence[0]
         found: list[Path] = []
         for source in occurrence[1:]:
@@ -393,19 +393,19 @@ def _load_parameters(
                     key=lambda child: child.name,
                 )
                 if not children:
-                    raise ValueError(f"no readable parameter files in {path}")
+                    raise ValueError(f"no readable input files in {path}")
                 found.extend(children)
             else:
                 if not path.is_file():
-                    raise ValueError(f"parameter source does not exist: {path}")
+                    raise ValueError(f"input source does not exist: {path}")
                 found.append(path)
         loaded = [(path, httk.core.load(str(path))) for path in found]
         if len(loaded) > 1:
             if batch_occurrence is not None:
-                raise ValueError("only one --parameter-from occurrence may contain multiple files")
+                raise ValueError("only one --input-from occurrence may contain multiple files")
             batch_occurrence = occurrence
             batch = [
-                {"parameters": {name: value}, "tag": structure_tag(path) or _sanitize_tag(path.stem)}
+                {"inputs": {name: value}, "tag": structure_tag(path) or _sanitize_tag(path.stem)}
                 for path, value in loaded
             ]
         else:

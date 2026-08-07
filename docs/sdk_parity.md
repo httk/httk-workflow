@@ -43,7 +43,7 @@ language, and compares everything both left behind.
 | `Runner` | `httk_workflow_runner` | Declare the workflow, and in Bash its complete step set, before any step runs. | none; registration is in-process |
 | `InstantiateHandler` | — | The callable type accepted by `Runner.instantiate`. | none |
 | `Runner.workflow` | — | The name of the workflow this runner implements. | the `workflow` member of the description |
-| `Runner.parameters` | — | Immutable creation-time payload declarations. | the optional `parameters` member of the description |
+| `Runner.inputs` | — | Immutable creation-time staged-input declarations. | the optional `inputs` member of the description |
 | `Runner.has_instantiate` | — | Whether a creation-time instantiate hook is registered. | none |
 | `Runner.step` | **step_&lt;name&gt;** function | Register one handler for one step; the name is the function's unless overridden. | none |
 | `Runner.instantiate` | — | Register the Python-only creation-time hook receiving `scaffold.InstantiateContext`. | none |
@@ -63,9 +63,9 @@ language, and compares everything both left behind.
 | `Attempt.data` | — | The job's published transactional data, or `None` when the job has `data.mode` `none`. | **$HTTK_WORKFLOW_DATA_DIR** |
 | `runtime.AttemptContext.durable` | `httk_workflow_context durable` | The workspace durability mode, threaded into every artifact the attempt publishes so an outcome, transaction, or child is synchronized before it is renamed authoritative. Neither SDK needs a call to act on it. | `context.json` → `durable`; **$HTTK_WORKFLOW_DURABLE** |
 | `Attempt.job` | — | The immutable job definition as a typed value. | `job.json` (read-only) |
-| `Attempt.inputs` | `httk_workflow_input` | The application-defined `inputs` object of the job. | `job.json` → `inputs` |
-| `Attempt.input` | `httk_workflow_input` | One input, with an optional default; without one, a missing input raises `KeyError` in Python and exits 1 in Bash. | `job.json` → `inputs` |
-| `Attempt.setting` | `httk_workflow_setting` | One application setting, resolved most-specific first: the job's `inputs[name]`, then the environment variable `HTTK_` + the dotted name upper-cased with dots as underscores (`vasp.command` → `HTTK_VASP_COMMAND`), then the workspace settings, then the default; without one, an absent setting returns `None` in Python and exits 1 in Bash. | `job.json` → `inputs`, manager-built attempt environment, `context.json` → `settings` |
+| `Attempt.parameters` | `httk_workflow_parameter` | The opaque implementation `parameters` object of the job. | `job.json` → `parameters` |
+| `Attempt.parameter` | `httk_workflow_parameter` | One parameter, with an optional default; without one, a missing parameter raises `KeyError` in Python and exits 1 in Bash. | `job.json` → `parameters` |
+| `Attempt.setting` | `httk_workflow_setting` | One application setting, resolved most-specific first: the job's `parameters[name]`, then the environment variable `HTTK_` + the dotted name upper-cased with dots as underscores (`vasp.command` → `HTTK_VASP_COMMAND`), then the workspace settings, then the default; without one, an absent setting returns `None` in Python and exits 1 in Bash. | `job.json` → `parameters`, manager-built attempt environment, `context.json` → `settings` |
 | `Attempt.state` | — | The job's private JSON state mapping, surviving every advance, every retry, and every isolated workdir. | `.httk-job/state.json` |
 | `JobState.read` | `httk_workflow_state_get` | Read the whole state document, or in Bash one key; an unset key exits 1. | `.httk-job/state.json` |
 | `JobState.set` | `httk_workflow_state_set` | Store one JSON value in one atomic replace. | `.httk-job/state.json` |
@@ -83,7 +83,7 @@ language, and compares everything both left behind.
 | `Attempt.put` | `httk_workflow_put` | Stage one file or tree into the job's transactional data; the manager applies it exactly once when the outcome commits. | an operation of `outcome.tmp.<uuid>/transaction/` |
 | `Attempt.remove` | `httk_workflow_remove` | Stage one removal from the job's transactional data. | an operation of `outcome.tmp.<uuid>/transaction/` |
 | `Attempt.workdir_batch` | `httk_workflow_workdir_apply` | Group workdir changes so that an interrupted apply is replayed on the next attempt instead of being left half-done. | `.httk-runner/workdir-ready/<uuid>/`, then `workdir-applied/` |
-| `ChildSpec` | `httk_workflow_spawn --step` | Describe a synthesized child job by its step and inputs; everything else follows the spawning job. | one entry of `outcome.tmp.<uuid>/children/spawn.json` and the child's `job.json` |
+| `ChildSpec` | `httk_workflow_spawn --step` | Describe a synthesized child job by its step and parameters; everything else follows the spawning job. | one entry of `outcome.tmp.<uuid>/children/spawn.json` and the child's `job.json` |
 | `RunnerRef` | `httk_workflow_spawn --runner` | Which runner a synthesized child runs: `inherit` (Bash `inherit`), `workspace` (`ws:PATH@SHA256`), or `installed` (`installed:PATH@SHA256`). | `runner` of the child's `job.json` |
 | `Attempt.spawn` | `httk_workflow_spawn` | Register one child under a mandatory unique label — a `ChildSpec`, or the path of a prepared payload directory — created when the outcome is published. | `outcome.tmp.<uuid>/children/spawn.json` |
 | `Attempt.children` | `httk_workflow_children` | The children observed by the join that started this activation; empty when no join did, so it can be read unconditionally. | `context.json` → `children` |
@@ -95,7 +95,7 @@ language, and compares everything both left behind.
 | `Attempt.retry` | `httk_workflow_retry` | Ask for another attempt of this same activation. | outcome action `retry` |
 | `Attempt.pause` | `httk_workflow_pause` | Pause this job until an operator resumes it. | outcome action `pause` |
 | `Attempt.published` | — | Whether this attempt already published; a second outcome is refused before anything of the first is disturbed. | the existence of `outcome.ready/` |
-| `protocol.JobSpec` | `httk_workflow_job_prepare` | The complete member set of a job definition, including the runner reference and the inputs. | `job.json` |
+| `protocol.JobSpec` | `httk_workflow_job_prepare` | The complete member set of a job definition, including the runner reference and the parameters. | `job.json` |
 | `protocol.prepare_job_payload` | `httk_workflow_job_prepare` | Write `job.json` into a prepared payload directory from that specification. | `job.json` of a new payload |
 | — | `httk_workflow_batch` | Run several bridge commands, one per line, in one interpreter start; a batch stops at its first failing line. | none |
 | `runtime_utils.evaluate_expression` | `httk_calc` | Evaluate one arithmetic expression without a shell. | none |
@@ -120,7 +120,7 @@ call:
 | Status | Meaning | Python equivalent |
 | --- | --- | --- |
 | `0` | the call succeeded | the return value |
-| `1` | the answer is legitimately absent: an unset state key, a missing input without a default, a null child field, a child that was not observed | `KeyError`, or `None` |
+| `1` | the answer is legitimately absent: an unset state key, a missing parameter without a default, a null child field, a child that was not observed | `KeyError`, or `None` |
 | `2` | the call is refused: bad usage, a protocol violation such as a second terminal call, or a corrupt attempt context | `ValueError` or `RuntimeError` |
 
 The functions that run a program report the classified outcome of *that program*

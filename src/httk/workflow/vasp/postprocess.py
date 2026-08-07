@@ -22,9 +22,11 @@ def _identity(record: JobRecord) -> str:
     return f"{record.workspace_id}:{record.job_id}"
 
 
-def _input(record: JobRecord, name: str, default: str) -> str:
-    inputs = record.job.get("inputs")
-    return str(inputs[name]) if isinstance(inputs, Mapping) and isinstance(inputs.get(name), str) else default
+def _parameter(record: JobRecord, name: str, default: str) -> str:
+    parameters = record.job.get("parameters")
+    return (
+        str(parameters[name]) if isinstance(parameters, Mapping) and isinstance(parameters.get(name), str) else default
+    )
 
 
 def _data_file(record: JobRecord, relative: str) -> Path:
@@ -81,7 +83,7 @@ def _energy(record: JobRecord, path: Path) -> httk.core.DataRecord:
 def postprocess_vasp_relax(record: JobRecord) -> Mapping[str, object]:
     """Extract the relaxed structure and final energy from one VASP job."""
 
-    prefix = _input(record, "data_prefix", "vasp")
+    prefix = _parameter(record, "data_prefix", "vasp")
     return {
         "relaxed_structure": _structure(record, _data_file(record, f"{prefix}/CONTCAR" if prefix else "CONTCAR")),
         "total_energy": _energy(record, _data_file(record, f"{prefix}/OUTCAR" if prefix else "OUTCAR")),
@@ -91,14 +93,14 @@ def postprocess_vasp_relax(record: JobRecord) -> Mapping[str, object]:
 def postprocess_vasp_static(record: JobRecord) -> Mapping[str, object]:
     """Extract the final energy from one static VASP job."""
 
-    prefix = _input(record, "data_prefix", "vasp")
+    prefix = _parameter(record, "data_prefix", "vasp")
     return {"total_energy": _energy(record, _data_file(record, f"{prefix}/OUTCAR" if prefix else "OUTCAR"))}
 
 
 def postprocess_vasp_relax_static(record: JobRecord) -> Mapping[str, object]:
     """Extract the relaxed structure and final static energy."""
 
-    prefix = _input(record, "data_prefix", "")
+    prefix = _parameter(record, "data_prefix", "")
     root = f"{prefix}/" if prefix else ""
     return {
         "relaxed_structure": _structure(record, _data_file(record, f"{root}relax/CONTCAR")),

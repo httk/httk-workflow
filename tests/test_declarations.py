@@ -93,11 +93,11 @@ def test_declarations_have_their_own_size_budget() -> None:
         name="Both",
         workflow="tests.declarations",
         runner_path="files/runner",
-        inputs={"blob": filling},
+        parameters={"blob": filling},
         declarations={"workflow": {"blob": filling}},
     )
     definition = JobDefinition.from_mapping(spec.as_mapping())
-    assert definition.inputs["blob"] == filling
+    assert definition.parameters["blob"] == filling
     assert definition.declarations["workflow"]["blob"] == filling
 
 
@@ -147,7 +147,7 @@ def test_a_spawned_child_declares_for_itself_and_inherits_nothing(tmp_path: Path
     attempt.spawn(
         ChildSpec(
             step="relax",
-            inputs={"site": 0},
+            parameters={"site": 0},
             declarations={"workflow": child},
             runner=RunnerRef.workspace("campaign/run.py", "a" * 64),
         ),

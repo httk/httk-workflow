@@ -257,8 +257,8 @@ def test_a_subworkflow_runs_as_one_child_carrying_its_position_in_the_plan(flows
     definition = JobDefinition.from_path(
         workspace.payload_path(PurePosixPath(str(child["placement"])), str(child["job_key"])) / "job.json"
     )
-    assert definition.inputs["cwl_target"] == ["inner"]
-    assert definition.inputs["cwl_document"] == "files/workflow.cwl.json"
+    assert definition.parameters["cwl_target"] == ["inner"]
+    assert definition.parameters["cwl_document"] == "files/workflow.cwl.json"
 
 
 def test_a_single_command_line_tool_is_a_workflow_of_one(flows: Path, workspace: Workspace) -> None:
@@ -347,7 +347,7 @@ def test_an_imported_job_references_the_packaged_runner_and_stages_the_plan(flow
     definition = JobDefinition.from_path(imported.job.payload / "job.json")
     assert definition.runner_source == "installed"
     assert definition.runner_path.as_posix() == f"pkg:{PACKAGE}/cwl_runner.py"
-    assert definition.inputs == {"cwl_document": "files/workflow.cwl.json", "cwl_inputs": "files/inputs.json"}
+    assert definition.parameters == {"cwl_document": "files/workflow.cwl.json", "cwl_inputs": "files/inputs.json"}
     staged = sorted(
         path.relative_to(imported.job.payload).as_posix() for path in imported.job.payload.rglob("*") if path.is_file()
     )

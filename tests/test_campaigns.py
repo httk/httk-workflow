@@ -53,7 +53,7 @@ run = Runner("tests.spawn")
 @run.step
 def parent(a):
     a.spawn(
-        ChildSpec(step="child", inputs={}, maximum_attempts_per_activation=1),
+        ChildSpec(step="child", parameters={}, maximum_attempts_per_activation=1),
         label="kid",
         placement="project/children",
     )
@@ -152,7 +152,7 @@ def test_campaign_submit_passes_creation_parameters_to_the_scaffold(tmp_path: Pa
     root, workspaces = _campaign_project(tmp_path, "explicit")
     structure = tmp_path / "POSCAR"
     structure.write_text("structure\n", encoding="utf-8")
-    job = campaign_submit("vasp-relax", key="north", project=root, parameters={"structure": structure})
+    job = campaign_submit("vasp-relax", key="north", project=root, inputs={"structure": structure})
     assert (job.payload / "files" / "POSCAR").read_text(encoding="utf-8") == "structure\n"
     assert workspaces["north"].find_marker_by_id(job.job_id) is not None
 
@@ -178,7 +178,7 @@ def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path,
                 "silicon",
                 "--index",
                 "1",
-                "--parameter-from",
+                "--input-from",
                 "structure",
                 str(structures),
             ],

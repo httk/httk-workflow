@@ -89,8 +89,10 @@ def _manager_environment(
     return json.loads(result.read_text(encoding="utf-8"))
 
 
-def _attempt_environment(tmp_path: Path, *, inputs: dict[str, object], settings: dict[str, object]) -> dict[str, str]:
-    """Fabricate one attempt whose job carries *inputs* and whose context carries
+def _attempt_environment(
+    tmp_path: Path, *, parameters: dict[str, object], settings: dict[str, object]
+) -> dict[str, str]:
+    """Fabricate one attempt whose job carries *parameters* and whose context carries
     *settings*, returning the environment both SDKs bind to.
 
     The ``settings`` member of ``context.json`` is exactly the workspace layer a
@@ -109,7 +111,7 @@ def _attempt_environment(tmp_path: Path, *, inputs: dict[str, object], settings:
             runner_path="files/runner",
             initial_step="only",
             data_mode="none",
-            inputs=inputs,
+            parameters=parameters,
         ),
     )
     control = payload / f".httk-attempt.{uuid.uuid4()}"
@@ -189,26 +191,26 @@ _ENV = {"HTTK_VASP_COMMAND": "srun -n 32 vasp_std"}
 
 
 @pytest.mark.parametrize(
-    ("inputs", "settings", "overlay", "expected"),
+    ("parameters", "settings", "overlay", "expected"),
     [
         ({}, {}, {}, "the-default"),
         ({}, {"vasp.command": "workspace vasp"}, {}, "workspace vasp"),
         ({}, {"vasp.command": "workspace vasp"}, _ENV, "srun -n 32 vasp_std"),
         ({"vasp.command": "job vasp"}, {"vasp.command": "workspace vasp"}, _ENV, "job vasp"),
     ],
-    ids=["only-default", "workspace-only", "env-beats-workspace", "input-beats-env"],
+    ids=["only-default", "workspace-only", "env-beats-workspace", "parameter-beats-env"],
 )
 def test_the_two_sdks_resolve_the_same_layers_in_the_same_order(
     tmp_path: Path,
-    inputs: dict[str, object],
+    parameters: dict[str, object],
     settings: dict[str, object],
     overlay: dict[str, str],
     expected: str,
 ) -> None:
-    """inputs beat environment beat workspace settings beat the default, and Bash
+    """parameters beat environment beat workspace settings beat the default, and Bash
     resolves the very same scenario to the very same bytes."""
 
-    environment = _attempt_environment(tmp_path, inputs=inputs, settings=settings)
+    environment = _attempt_environment(tmp_path, parameters=parameters, settings=settings)
 
     assert _python_setting(environment, overlay, "vasp.command", "the-default") == expected
 
@@ -221,7 +223,7 @@ def test_an_absent_setting_is_none_in_python_and_exit_one_in_bash(tmp_path: Path
     """With no layer supplying it and no default, the answer is legitimately
     absent: ``None`` in Python and a bare exit 1 in Bash."""
 
-    environment = _attempt_environment(tmp_path, inputs={}, settings={})
+    environment = _attempt_environment(tmp_path, parameters={}, settings={})
 
     assert _python_setting(environment, {}, "vasp.command", None) is None
 
@@ -334,7 +336,7 @@ def test_the_vasp_runner_reads_the_workspace_setting_without_the_environment(tmp
     monkeypatch.delenv("HTTK_VASP_COMMAND", raising=False)
     environment = _attempt_environment(
         tmp_path,
-        inputs={},
+        parameters={},
         settings={"vasp.command": "srun -n 8 vasp_std"},
     )
     attempt = Attempt.initialize(environment)

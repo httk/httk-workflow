@@ -18,7 +18,7 @@ _RELAX_DECLARATION = {
         "name": "vasp-relax",
         "label": "vasp_relax_workflow_httk",
     },
-    "parameters": [
+    "inputs": [
         {
             "name": "initial_structure",
             "entry_type": "structures",
@@ -26,7 +26,7 @@ _RELAX_DECLARATION = {
             "description": "The structure to relax.",
         }
     ],
-    "output_types": [
+    "outputs": [
         {
             "name": "relaxed_structure",
             "entry_type": "structures",
@@ -52,7 +52,7 @@ _STATIC_DECLARATION = {
         "name": "vasp-static",
         "label": "vasp_static_workflow_httk",
     },
-    "parameters": [
+    "inputs": [
         {
             "name": "initial_structure",
             "entry_type": "structures",
@@ -60,7 +60,7 @@ _STATIC_DECLARATION = {
             "description": "The structure to evaluate.",
         }
     ],
-    "output_types": [
+    "outputs": [
         {
             "name": "total_energy",
             "entry_type": "records",
@@ -80,7 +80,7 @@ _RELAX_STATIC_DECLARATION = {
         "name": "vasp-relax-static",
         "label": "vasp_relax_static_workflow_httk",
     },
-    "parameters": [
+    "inputs": [
         {
             "name": "initial_structure",
             "entry_type": "structures",
@@ -88,7 +88,7 @@ _RELAX_STATIC_DECLARATION = {
             "description": "The structure to relax.",
         }
     ],
-    "output_types": [
+    "outputs": [
         {
             "name": "relaxed_structure",
             "entry_type": "structures",
@@ -155,7 +155,7 @@ PROVIDERS = (
         initial_step="prepare",
         steps=("publish", "prepare", "run"),
         data_mode="transactional",
-        parameters={"structure": "POSCAR"},
+        inputs={"structure": "POSCAR"},
         outputs=_RELAX_OUTPUTS,
         summary="relax one structure with the reviewed remedy ladder",
         declarations={"workflow": _RELAX_DECLARATION},
@@ -169,7 +169,7 @@ PROVIDERS = (
         initial_step="prepare",
         steps=("publish", "prepare", "run"),
         data_mode="transactional",
-        parameters={"structure": "POSCAR"},
+        inputs={"structure": "POSCAR"},
         outputs=_RELAX_OUTPUTS,
         summary="the same relaxation, authored in Bash",
         declarations={"workflow": _RELAX_DECLARATION},
@@ -183,7 +183,7 @@ PROVIDERS = (
         initial_step="prepare",
         steps=("publish", "prepare", "run"),
         data_mode="transactional",
-        parameters={"structure": "POSCAR"},
+        inputs={"structure": "POSCAR"},
         outputs=_STATIC_OUTPUTS,
         summary="one single-point calculation of one structure",
         declarations={"workflow": _STATIC_DECLARATION},
@@ -197,7 +197,7 @@ PROVIDERS = (
         initial_step="prepare",
         steps=("publish", "prepare", "promote", "run", "static"),
         data_mode="transactional",
-        parameters={"structure": "POSCAR"},
+        inputs={"structure": "POSCAR"},
         outputs=_RELAX_STATIC_OUTPUTS,
         summary="relax, promote the relaxed structure, then run it statically",
         declarations={"workflow": _RELAX_STATIC_DECLARATION},

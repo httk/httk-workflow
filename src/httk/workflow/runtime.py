@@ -53,7 +53,7 @@ class AttemptContext:
     #: was written under.
     durable: bool
     #: The workspace's application settings at claim time, a flat dotted map. It
-    #: is the workspace layer of the job-inputs → environment → workspace →
+    #: is the workspace layer of the job-parameters → environment → workspace →
     #: default resolution a runner reads through
     #: :meth:`~httk.workflow.sdk.Attempt.setting`. An old context that predates
     #: the member reads as empty, which is what a context written before layered

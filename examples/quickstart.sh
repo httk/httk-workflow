@@ -52,7 +52,7 @@ httk_workflow workspace init . --name default
 #    command prints one tab-separated line with its key and payload.
 httk_workflow job new \
     --workflow vasp-relax \
-    --parameter structure=POSCAR \
+    --input structure=POSCAR \
     --tag silicon
 
 # 3. Workspace state follows the job. Without VASP, the mock beside this file

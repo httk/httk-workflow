@@ -133,7 +133,7 @@ the marker is an honest inference rather than provenance metadata.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `job new WORKSPACE` | scaffold and submit jobs from a workflow | `--workflow` (required), `--parameter`, `--parameter-from`, `--file`, `--input`, `--tag`, `--placement`, `--json` |
+| `job new WORKSPACE` | scaffold and submit jobs from a workflow | `--workflow` or `--workflow-dir` (one required), `--parameter`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
 | `job submit WORKSPACE SOURCE` | submit one prepared payload directory | `--placement` (required), `--move` |
 | `job request WORKSPACE JOB_ID ACTION` | publish an operator request | `--operator`, `--reason` (both required), `--priority`, `--step`, `--force` |
 | `job list WORKSPACE` | list the jobs as a cheap table | `--kind`, `--placement`, `--json` |
@@ -336,7 +336,7 @@ job again, or edit the one `runner.path` member.
 | --- | --- | --- |
 | `campaign init` | define the project's partition map and assignment policy | `--partition NAME=WORKSPACE`, `--assignment` |
 | `campaign show` | show the partition map | `--json` |
-| `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--key` (required), `--index`, `--input`, `--parameter`, `--parameter-from`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
+| `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
 | `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--json` |
 | `campaign start-managers` | start a manager per selected partition | `--partition`, `--workers`, `--count`, `--adapter-timeout` |
 
@@ -352,17 +352,16 @@ children always inherit their parent's workspace. See {doc}`campaigns`.
 alias, or the path of a runner file — and needs no prepared payload:
 
 ```console
-httk workflow job new WORKSPACE --workflow vasp-relax --parameter structure=POSCAR --tag silicon
-httk workflow job new WORKSPACE --workflow vasp-relax --parameter-from structure structures/ --placement project/screening
-httk workflow job new WORKSPACE --workflow ./my_runner.py --step characterize --input sites=8
+httk workflow job new WORKSPACE --workflow vasp-relax --input structure=POSCAR --tag silicon
+httk workflow job new WORKSPACE --workflow vasp-relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening
+httk workflow job new WORKSPACE --workflow ./my_runner.py --step characterize --parameter sites=8
 ```
 
-`--parameter NAME=VALUE` supplies a creation-time value verbatim; `--parameter-from
+`--parameter NAME=VALUE` supplies an opaque implementation knob; `--input-from
 NAME SOURCE...` loads a file or the readable files in a directory, realizes the
 declared payload destination, and creates one job per file for a batch. `--file
-NAME=PATH` stages anything else, `--input
-NAME=VALUE` writes the job's inputs — JSON when the value parses as JSON, a string
-otherwise, and `NAME=@FILE` reads a JSON file — and the command prints one
+NAME=PATH` stages anything else, `--input NAME=PATH` stages one declared input,
+and the command prints one
 tab-separated `job_key<TAB>payload` line per job, or `--json` reports. The runner
 file is published into the workspace runner store and pinned by digest unless
 `--publish installed` names a packaged runner where it is installed. See
@@ -610,7 +609,7 @@ seeded from that remote definition's whitelisted remote settings, so a cluster's
 it.
 
 A runner reads a setting through `a.setting("vasp.command")`, and the value is
-resolved in layers, most specific first: the job's own inputs, a real
+resolved in layers, most specific first: the job's own parameters, a real
 `HTTK_VASP_COMMAND` deployment override, the workspace setting, then the runner's
 default. The manager exports scalar workspace settings into each attempt
 environment (`vasp.command` becomes `HTTK_VASP_COMMAND`) and snapshots them into
@@ -825,7 +824,7 @@ httk workflow remote install kappa
 httk workflow workspace init kappa:/scratch/rar/httk/runs
 httk workflow workspace settings set kappa:runs slurm.partition batch
 httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
-httk workflow job new --workflow vasp-relax --parameter structure=POSCAR --tag silicon
+httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
 httk workflow transfer default kappa:runs --job JOB-ID
 httk workflow run kappa:runs --workers 8
 httk workflow workspace status kappa:runs

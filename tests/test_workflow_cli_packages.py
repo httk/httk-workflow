@@ -78,10 +78,10 @@ def test_job_new_accepts_workflow_dir_and_batches_parameter_sources(tmp_path: Pa
                 workspace,
                 "--workflow-dir",
                 str(package),
-                "--parameter-from",
+                "--input-from",
                 "structure",
                 str(structures),
-                "--input",
+                "--parameter",
                 "kpoint_density=30.0",
                 "--placement",
                 "project/screening",
@@ -99,7 +99,7 @@ def test_job_new_accepts_workflow_dir_and_batches_parameter_sources(tmp_path: Pa
         assert report["runner"]["sha256"] == tree_digest(package)
         assert report["placement"] == "project/screening"
         job = json.loads((Path(report["payload_path"]) / "job.json").read_text(encoding="utf-8"))
-        assert job["inputs"] == {"kpoint_density": 30.0}
+        assert job["parameters"] == {"kpoint_density": 30.0}
 
 
 def test_job_new_accepts_a_package_path_and_rejects_workflow_selection_errors(tmp_path: Path, capsys) -> None:
@@ -117,7 +117,7 @@ def test_job_new_accepts_a_package_path_and_rejects_workflow_selection_errors(tm
                 workspace,
                 "--workflow",
                 str(package),
-                "--parameter",
+                "--input",
                 f"structure={structure}",
             ],
             context,
@@ -144,8 +144,8 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
     assert "workflow: tests.cli.package" in text
     assert "source: directory" in text
     assert "* start" in text
-    assert "parameters:" in text and "initial_structure" in text
-    assert "inputs:" in text and "label" in text
+    assert "inputs:" in text and "initial_structure" in text
+    assert "parameters:" in text and "label" in text
     assert "outputs:" in text and "relaxed_structure" in text
     assert "generated from manifest" in text
     assert "instantiate hook: yes" in text and "postprocess hook: yes" in text
@@ -180,6 +180,8 @@ def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path:
     packaged = json.loads(capsys.readouterr().out)
     assert packaged["hooks"]["postprocess"] == {"present": True, "file": None, "packaged": True}
     assert packaged["hooks"]["instantiate"] == {"present": False, "file": None, "packaged": True}
+    assert packaged["inputs"]["structure"]["role"] == "initial_structure"
+    assert packaged["inputs"]["structure"]["entry_type"] == "structures"
 
     no_hooks = _package(
         tmp_path / "no-hooks",
@@ -202,7 +204,7 @@ def test_directory_package_runs_and_job_records_retain_the_tree_pin(tmp_path: Pa
     structure = tmp_path / "POSCAR"
     structure.write_text(_POSCAR, encoding="utf-8")
     workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, package, parameters={"structure": structure})
+    job = new_job(workspace, package, inputs={"structure": structure})
 
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=120.0)

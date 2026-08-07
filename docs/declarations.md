@@ -88,7 +88,7 @@ prepare_job_payload(
         name="Silicon relaxation",
         workflow="example.vasp-relax",
         runner_path="files/runner",
-        inputs={"kpoint_density": 30.0},
+        parameters={"kpoint_density": 30.0},
         declarations={"workflow": RELAXATION},
     ),
 )
@@ -100,7 +100,7 @@ different thing from its parent.
 
 ```python
 a.spawn(
-    ChildSpec(step="relax", inputs={"site": site}, declarations={"workflow": SITE_RELAXATION}),
+    ChildSpec(step="relax", parameters={"site": site}, declarations={"workflow": SITE_RELAXATION}),
     label=f"site-{site}",
 )
 ```

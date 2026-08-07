@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any, cast
 
-from ._util import tree_digest, validate_parameters
+from ._util import tree_digest, validate_inputs
 from .errors import FormatError
 from .models import validate_declarations
 from .scaffold import WorkflowProvider, payload_relative, register_workflow
@@ -97,15 +97,15 @@ def _validate_name(name: object, path: str, directory: Path) -> str:
     return name
 
 
-def _validate_parameter_table(
+def _validate_input_table(
     raw: Mapping[str, object], name: str, directory: Path
 ) -> tuple[dict[str, object], str | None]:
-    path = f"[workflow.parameters.{name}]"
+    path = f"[workflow.inputs.{name}]"
     _unknown(raw, {"destination", "description", "entry_type", "ref", "role"}, path, directory)
     destination = raw.get("destination")
     if destination is not None:
         try:
-            validate_parameters({name: destination})
+            validate_inputs({name: destination})
             payload_relative(str(destination))
         except (FormatError, ValueError) as exc:
             raise _error(directory, f"{path}.destination is invalid: {exc}") from exc
@@ -120,22 +120,33 @@ def _validate_parameter_table(
     return result, None if destination is None else str(destination)
 
 
-def _validate_inputs(raw: Mapping[str, object], directory: Path) -> dict[str, dict[str, object]]:
+def _validate_parameters(raw: Mapping[str, object], directory: Path) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
     for name, value in raw.items():
-        parameter = _validate_name(name, "[workflow.inputs] name", directory)
-        table = _table(value, f"[workflow.inputs.{parameter}]", directory)
-        path = f"[workflow.inputs.{parameter}]"
+        parameter = _validate_name(name, "[workflow.parameters] name", directory)
+        table = _table(value, f"[workflow.parameters.{parameter}]", directory)
+        path = f"[workflow.parameters.{parameter}]"
         _unknown(table, {"type", "description", "default"}, path, directory)
-        input_type = _optional_string(table, "type", path, directory)
-        if input_type is not None and input_type not in {"string", "number", "integer", "boolean", "array", "object"}:
+        parameter_type = _optional_string(table, "type", path, directory)
+        if parameter_type is not None and parameter_type not in {
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "array",
+            "object",
+        }:
             raise _error(directory, f"{path}.type is not one of string, number, integer, boolean, array, object")
         description = _optional_string(table, "description", path, directory)
-        if "default" in table and input_type is not None and not _matches_input_type(table["default"], input_type):
-            raise _error(directory, f"{path}.default does not match type {input_type!r}")
+        if (
+            "default" in table
+            and parameter_type is not None
+            and not _matches_input_type(table["default"], parameter_type)
+        ):
+            raise _error(directory, f"{path}.default does not match type {parameter_type!r}")
         entry: dict[str, object] = {}
-        if input_type is not None:
-            entry["type"] = input_type
+        if parameter_type is not None:
+            entry["type"] = parameter_type
         if description is not None:
             entry["description"] = description
         if "default" in table:
@@ -159,11 +170,11 @@ def _matches_input_type(value: object, input_type: str) -> bool:
 
 
 def _validate_outputs(
-    raw: Mapping[str, object], parameters: Mapping[str, Mapping[str, object]], directory: Path
+    raw: Mapping[str, object], inputs: Mapping[str, Mapping[str, object]], directory: Path
 ) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
     roles: set[str] = set()
-    parameter_roles = {str(entry.get("role", name)): name for name, entry in parameters.items()}
+    input_roles = {str(entry.get("role", name)): name for name, entry in inputs.items()}
     for name, value in raw.items():
         output = _validate_name(name, "[workflow.outputs] name", directory)
         table = _table(value, f"[workflow.outputs.{output}]", directory)
@@ -191,15 +202,15 @@ def _validate_outputs(
         role = str(entry["role"])
         if source_role == role:
             raise _error(directory, f"{path}.product_of cannot reference its own output role {role!r}")
-        parameter_match = source_role in parameter_roles
+        input_match = source_role in input_roles
         output_match = source_role in roles
-        if parameter_match and output_match:
+        if input_match and output_match:
             raise _error(
                 directory,
-                f"{path}.product_of role {source_role!r} is both a parameter and output role; rename one",
+                f"{path}.product_of role {source_role!r} is both an input and output role; rename one",
             )
-        if not parameter_match and not output_match:
-            raise _error(directory, f"{path}.product_of names unknown parameter or output role {source_role!r}")
+        if not input_match and not output_match:
+            raise _error(directory, f"{path}.product_of names unknown input or output role {source_role!r}")
     output_paths = {str(entry["role"]): f"[workflow.outputs.{name}]" for name, entry in result.items()}
     graph = {
         str(entry["role"]): str(entry["product_of"])
@@ -227,37 +238,34 @@ def _validate_outputs(
     return result
 
 
-def _matches_parameter_roles(document: Mapping[str, object], provider: WorkflowProvider, directory: Path) -> None:
-    parameters = document.get("parameters", [])
-    if not isinstance(parameters, list):
-        raise _error(directory, "external declaration parameters must be an array")
+def _matches_input_roles(document: Mapping[str, object], provider: WorkflowProvider, directory: Path) -> None:
+    inputs = document.get("inputs", [])
+    if not isinstance(inputs, list):
+        raise _error(directory, "external declaration inputs must be an array")
     expected = {
-        str(entry.get("role", name)): entry
-        for name, entry in provider._parameter_metadata.items()
-        if "entry_type" in entry
+        str(entry.get("role", name)): entry for name, entry in provider._input_metadata.items() if "entry_type" in entry
     }
     actual: dict[str, Mapping[str, object]] = {}
-    for index, entry in enumerate(parameters):
+    for index, entry in enumerate(inputs):
         if not isinstance(entry, Mapping) or not isinstance(entry.get("name"), str):
-            raise _error(directory, f"external declaration parameters[{index}] must name a role")
+            raise _error(directory, f"external declaration inputs[{index}] must name a role")
         name = str(entry["name"])
         if name in actual:
-            raise _error(directory, f"external declaration parameter {name!r} is duplicated")
+            raise _error(directory, f"external declaration input {name!r} is duplicated")
         actual[name] = entry
         if name not in expected:
             raise _error(
                 directory,
-                f"external declaration parameter {name!r} is not a manifest parameter/input role "
-                "(or is not entry-typed)",
+                f"external declaration input {name!r} is not a manifest input role (or is not entry-typed)",
             )
         if entry.get("entry_type") != expected[name].get("entry_type"):
-            raise _error(directory, f"external declaration parameter {name!r} has an incompatible entry_type")
+            raise _error(directory, f"external declaration input {name!r} has an incompatible entry_type")
     missing = sorted(set(expected) - set(actual))
     extra = sorted(set(actual) - set(expected))
     if missing:
-        raise _error(directory, f"external declaration is missing manifest parameter role {missing[0]!r}")
+        raise _error(directory, f"external declaration is missing manifest input role {missing[0]!r}")
     if extra:
-        raise _error(directory, f"external declaration has extra parameter role {extra[0]!r}")
+        raise _error(directory, f"external declaration has extra input role {extra[0]!r}")
 
 
 def _validate_external_declaration(
@@ -267,15 +275,15 @@ def _validate_external_declaration(
         raise _error(directory, "external workflow declaration must be a JSON object")
     if declaration_uri is not None and document.get("$id") != declaration_uri:
         raise _error(directory, "external declaration $id does not match workflow.declaration_uri")
-    _matches_parameter_roles(document, provider, directory)
-    outputs = document.get("output_types", [])
+    _matches_input_roles(document, provider, directory)
+    outputs = document.get("outputs", [])
     if not isinstance(outputs, list):
-        raise _error(directory, "external declaration output_types must be an array")
+        raise _error(directory, "external declaration outputs must be an array")
     output_roles = {str(entry.get("role", name)): entry for name, entry in provider.outputs.items()}
     actual_outputs: dict[str, Mapping[str, object]] = {}
     for index, entry in enumerate(outputs):
         if not isinstance(entry, Mapping) or not isinstance(entry.get("name"), str):
-            raise _error(directory, f"external declaration output_types[{index}] must name a role")
+            raise _error(directory, f"external declaration outputs[{index}] must name a role")
         name = str(entry["name"])
         if name in actual_outputs:
             raise _error(directory, f"external declaration output {name!r} is duplicated")
@@ -307,15 +315,15 @@ def workflow_declaration_from_manifest(provider: WorkflowProvider) -> dict[str, 
         document["$id"] = provider.declaration_uri
     if provider.summary:
         document["description"] = provider.summary
-    parameters: list[dict[str, object]] = []
-    for name, entry in provider._parameter_metadata.items():
+    inputs: list[dict[str, object]] = []
+    for name, entry in provider._input_metadata.items():
         if "entry_type" not in entry:
             continue
-        parameter = {"name": entry.get("role", name), "entry_type": entry["entry_type"]}
+        input_entry = {"name": entry.get("role", name), "entry_type": entry["entry_type"]}
         for key in ("ref", "description"):
             if key in entry:
-                parameter[key] = entry[key]
-        parameters.append(parameter)
+                input_entry[key] = entry[key]
+        inputs.append(input_entry)
     outputs: list[dict[str, object]] = []
     for name, entry in provider.outputs.items():
         output: dict[str, object] = {"name": entry.get("role", name), "entry_type": entry["entry_type"]}
@@ -323,8 +331,8 @@ def workflow_declaration_from_manifest(provider: WorkflowProvider) -> dict[str, 
             if key in entry:
                 output[key] = entry[key]
         outputs.append(output)
-    document["parameters"] = parameters
-    document["output_types"] = outputs
+    document["inputs"] = inputs
+    document["outputs"] = outputs
     return document
 
 
@@ -361,8 +369,8 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
             "runner",
             "instantiate",
             "postprocess",
-            "parameters",
             "inputs",
+            "parameters",
             "outputs",
         },
         "[workflow]",
@@ -411,27 +419,27 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     if workdir_mode not in {"persistent", "isolated"}:
         raise _error(root, "[workflow.runner].workdir_mode must be 'persistent' or 'isolated'")
 
-    raw_parameters = _table(workflow.get("parameters", {}), "[workflow.parameters]", root)
-    parameter_metadata: dict[str, dict[str, object]] = {}
-    parameters: dict[str, str | None] = {}
+    raw_inputs = _table(workflow.get("inputs", {}), "[workflow.inputs]", root)
+    input_metadata: dict[str, dict[str, object]] = {}
+    inputs: dict[str, str | None] = {}
     roles: set[str] = set()
-    for name, value in raw_parameters.items():
-        parameter = _validate_name(name, "[workflow.parameters] name", root)
-        table = _table(value, f"[workflow.parameters.{parameter}]", root)
-        metadata, destination = _validate_parameter_table(table, parameter, root)
+    for name, value in raw_inputs.items():
+        input_name = _validate_name(name, "[workflow.inputs] name", root)
+        table = _table(value, f"[workflow.inputs.{input_name}]", root)
+        metadata, destination = _validate_input_table(table, input_name, root)
         if str(metadata["role"]) in roles:
-            raise _error(root, f"[workflow.parameters.{parameter}].role is duplicated")
+            raise _error(root, f"[workflow.inputs.{input_name}].role is duplicated")
         roles.add(str(metadata["role"]))
-        parameter_metadata[parameter] = metadata
-        parameters[parameter] = destination
+        input_metadata[input_name] = metadata
+        inputs[input_name] = destination
 
     instantiate_file: str | None = None
     if "instantiate" in workflow:
         instantiate = _table(workflow["instantiate"], "[workflow.instantiate]", root)
         _unknown(instantiate, {"file"}, "[workflow.instantiate]", root)
         instantiate_file = _member(root, instantiate.get("file"), "[workflow.instantiate].file", python=True)
-    if any(destination is None for destination in parameters.values()) and instantiate_file is None:
-        raise _error(root, "hook-consumed workflow parameters require [workflow.instantiate]")
+    if any(destination is None for destination in inputs.values()) and instantiate_file is None:
+        raise _error(root, "hook-consumed workflow inputs require [workflow.instantiate]")
 
     postprocess_file: str | None = None
     if "postprocess" in workflow:
@@ -439,10 +447,8 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         _unknown(postprocess, {"file"}, "[workflow.postprocess]", root)
         postprocess_file = _member(root, postprocess.get("file"), "[workflow.postprocess].file", python=True)
 
-    inputs = _validate_inputs(_table(workflow.get("inputs", {}), "[workflow.inputs]", root), root)
-    outputs = _validate_outputs(
-        _table(workflow.get("outputs", {}), "[workflow.outputs]", root), parameter_metadata, root
-    )
+    parameters = _validate_parameters(_table(workflow.get("parameters", {}), "[workflow.parameters]", root), root)
+    outputs = _validate_outputs(_table(workflow.get("outputs", {}), "[workflow.outputs]", root), input_metadata, root)
     provider = WorkflowProvider(
         workflow_id=workflow_id,
         runner_package=None,
@@ -453,18 +459,18 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         data_mode=data_mode,  # type: ignore[arg-type]
         workdir_mode=workdir_mode,  # type: ignore[arg-type]
         summary=description,
-        parameters=parameters,
+        inputs=inputs,
         instantiate=instantiate_file is not None,
         declarations={},
         directory=root.resolve(),
         entry=entry,
         instantiate_file=instantiate_file,
         postprocess_file=postprocess_file,
-        inputs=inputs,
+        parameters=parameters,
         outputs=outputs,
         declaration_uri=declaration_uri,
         declaration_file=None,
-        _parameter_metadata=parameter_metadata,
+        _input_metadata=input_metadata,
     )
     declaration_member: str | None = None
     if "declaration_file" in workflow:

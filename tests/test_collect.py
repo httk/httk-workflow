@@ -61,7 +61,7 @@ def branch(a):
         a.spawn(
             ChildSpec(
                 step="calculate",
-                inputs={{"failing": failing}},
+                parameters={{"failing": failing}},
                 maximum_attempts_per_activation=1,
             ),
             label=label,
@@ -73,7 +73,7 @@ def branch(a):
 @run.step
 def calculate(a):
     (a.workdir / "energy.txt").write_text("-10.5", encoding="utf-8")
-    if a.input("failing"):
+    if a.parameter("failing"):
         a.fail("calculate.diverged", "the calculation did not converge", details={{"cycles": 3}})
     else:
         a.succeed()
@@ -141,7 +141,7 @@ def campaign(tmp_path_factory: pytest.TempPathFactory) -> tuple[Workspace, dict[
             tag="campaign",
             initial_step="branch",
             maximum_attempts_per_activation=1,
-            inputs={"structure": "Si"},
+            parameters={"structure": "Si"},
         ),
     )
     workspace.submit(root / "parent", "project/campaign")
@@ -246,7 +246,7 @@ def test_a_record_pins_the_job_digest_and_the_runner_that_executed_it(
     assert parent.job["id"] == identifiers["parent"]
     assert parent.job["workflow"] == "tests.collect"
     assert parent.job["initial_step"] == "branch"
-    assert parent.job["inputs"] == {"structure": "Si"}
+    assert parent.job["parameters"] == {"structure": "Si"}
     assert parent.job["runner"] == {
         "executor": "path",
         "source": "workspace",
@@ -517,8 +517,8 @@ def test_collect_assembles_overlay_edges_and_products(
     record = next(job_records(workspace))
     document = {
         "$id": "https://schemas.example.test/workflows/collect",
-        "parameters": [{"name": "initial_structure", "entry_type": "structures"}],
-        "output_types": [
+        "inputs": [{"name": "initial_structure", "entry_type": "structures"}],
+        "outputs": [
             {"name": "relaxed_structure", "entry_type": "structures"},
             {"name": "total_energy", "entry_type": "records"},
         ],
@@ -605,7 +605,7 @@ def test_collect_assembles_overlay_edges_and_products(
         runner_package=PACKAGE,
         runner_file="runner.py",
         initial_step="run",
-        declarations={"workflow": {"output_types": [{"name": "different", "entry_type": "records"}]}},
+        declarations={"workflow": {"outputs": [{"name": "different", "entry_type": "records"}]}},
         postprocessor=lambda _record: {"relaxed_structure": Structure(), "total_energy": Energy()},
     )
     monkeypatch.setitem(scaffold_module._WORKFLOW_PROVIDERS, changed_provider.workflow_id, changed_provider)
