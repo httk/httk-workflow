@@ -120,7 +120,18 @@ def _core():
 
 @dataclass(frozen=True)
 class CollectedJob:
-    """One collected job and the framework-owned provenance it assembled."""
+    """Represent one job after workflow postprocessing and provenance assembly.
+
+    :param workflow_id: Identify the workflow that produced the job.
+    :param outputs: Map declared output roles to postprocessor results.
+    :param unfulfilled: Name declared output roles omitted after a postprocessor
+        ran; leave empty for degraded jobs.
+    :param run: Carry the framework-assembled run provenance.
+    :param products: Carry the framework-assembled product links.
+    :param record: Preserve the mechanical job readout behind the collection.
+    :param missing_postprocessor: Explain why postprocessing was unavailable,
+        or leave it unset when collection completed.
+    """
 
     workflow_id: str
     outputs: Mapping[str, object]
@@ -184,6 +195,10 @@ def module_distribution(module: str) -> tuple[str, str] | None:
     its file list, and an editable installation by the source tree its
     ``direct_url.json`` names. Anything else — a module on ``PYTHONPATH`` that no
     installed distribution owns — is reported as unknown rather than guessed.
+
+    :param module: Name the module whose installed distribution to locate.
+    :return: The distribution name and version, or ``None`` when ownership is
+        unknown.
     """
 
     relative = PurePosixPath(*module.split("."))
@@ -211,6 +226,9 @@ def runner_provenance(job: JobDefinition) -> dict[str, object] | None:
     payload runner is pinned by the job digest, and a workspace or plain
     installed runner is pinned by ``runner.sha256`` and nothing else is known
     about where it came from.
+
+    :param job: Supply the validated job definition and runner identity.
+    :return: Installation metadata for a reserved package runner, or ``None``.
     """
 
     if job.runner_source != "installed":
@@ -275,6 +293,10 @@ def timeline(frames: Sequence[Mapping[str, Any]]) -> dict[str, object]:
     first frame that reported how it ended. A frame the journal could not return
     sets ``gaps`` and is skipped, which keeps a job with a damaged history
     collectable instead of silent.
+
+    :param frames: Supply the journal frames read for one job.
+    :return: The oldest-first activation and attempt timeline with its damage
+        flag.
     """
 
     activations: list[dict[str, object]] = []
@@ -369,6 +391,9 @@ def children_of(frames: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, obje
     possible in a workspace written by an older profile — is left out rather than
     given an invented name. A label reused by a later activation names the child
     of the most recent spawn under it.
+
+    :param frames: Supply the state and journal frames for one job.
+    :return: Child records keyed by their spawn labels.
     """
 
     children: dict[str, dict[str, object]] = {}
@@ -457,6 +482,26 @@ class JobRecord:
     :attr:`payload`, :attr:`workdir`, and :attr:`data` resolve them against the
     workspace this record was collected from, which is what code reading result
     files wants.
+
+    :param workspace_root: Identify the absolute workspace root.
+    :param workspace_id: Identify the workspace.
+    :param job_id: Identify the job.
+    :param job_key: Preserve the complete job key.
+    :param job: Preserve the validated immutable job definition.
+    :param runner_provenance: Preserve installed package provenance, when known.
+    :param state: Record the terminal state in which the job stopped.
+    :param failure: Record the terminal failure, when one exists.
+    :param placement: Locate the job within the workspace hierarchy.
+    :param payload_path: Locate the workspace-relative job payload.
+    :param workdir_path: Locate the last workspace-relative workdir, when known.
+    :param data_path: Locate transactional data, when the job has it.
+    :param data_generation: Record the committed data generation, when present.
+    :param provenance: Preserve the journal-derived timeline and damage flag.
+    :param runner_steps: Preserve the runner steps, when recorded.
+    :param children: Preserve labeled child references.
+    :param declarations: Preserve declared and observed workflow documents.
+    :param runner_description: Preserve the reserved runner description, when
+        available.
     """
 
     #: The absolute root of the workspace this record was collected from.
@@ -553,7 +598,13 @@ class JobRecord:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> JobRecord:
-        """Rebuild one record from the mapping :meth:`as_mapping` produced."""
+        """Rebuild one record from a serialized record mapping.
+
+        :param value: Supply the mapping produced by :meth:`as_mapping`.
+        :return: The reconstructed job record.
+        :raises httk.workflow.errors.FormatError: If the mapping has the wrong format or invalid
+            record members.
+        """
 
         if value.get("format") != COLLECT_FORMAT or value.get("format_version") != COLLECT_FORMAT_VERSION:
             raise FormatError(f"collect record must use {COLLECT_FORMAT} version {COLLECT_FORMAT_VERSION}")
@@ -626,6 +677,11 @@ def declarations_of(
     a vocabulary this module deliberately does not implement. An observed
     document that cannot be read is reported as ``None`` with the damage flag
     set, exactly like every other unreadable evidence a job_records still reports.
+
+    :param job: Supply the validated job whose declared documents are available.
+    :param payload: Locate the payload containing observed documents.
+    :return: The side-by-side declarations and whether reading observed data
+        found damage.
     """
 
     result: dict[str, dict[str, Mapping[str, object] | None]] = {
@@ -668,6 +724,10 @@ def record_of(workspace: Workspace, marker: Marker) -> JobRecord | None:
     definition to report: the whole contract of a record is the *validated* job
     behind a result, so an unusable payload is reported through the module logger
     and left to a workspace tool instead of being described by guesswork.
+
+    :param workspace: Read the workspace containing the marked job.
+    :param marker: Identify the stopped job to read.
+    :return: The validated job record, or ``None`` when its payload is unreadable.
     """
 
     job, job_error = _job_of(workspace, marker)
@@ -714,7 +774,12 @@ def record_of(workspace: Workspace, marker: Marker) -> JobRecord | None:
 
 
 def collect_kinds(states: Iterable[str]) -> tuple[str, ...]:
-    """Validate the requested state kinds against what collect may read."""
+    """Validate the requested state kinds against what collect may read.
+
+    :param states: Select the stopped state kinds to collect.
+    :return: The distinct validated state kinds in request order.
+    :raises ValueError: If no state or an uncollectable state is requested.
+    """
 
     kinds = tuple(dict.fromkeys(states))
     if not kinds:
@@ -747,6 +812,12 @@ def job_records(
     job's own ``job.json`` and journal chain, so collecting is a single pass over
     a workspace of any size. Attach read-only — ``Workspace(root,
     mutable=False)`` — when nothing else in the process needs to write.
+
+    :param workspace: Read jobs from this workspace.
+    :param states: Select the stopped state kinds to report.
+    :param placement: Restrict results to this placement and its descendants.
+    :yields: Mechanical job records, one for each readable selected job.
+    :raises ValueError: If ``states`` contains no collectable state.
     """
 
     kinds = collect_kinds(states)
@@ -909,8 +980,18 @@ def collect(
     """Collect records through registered or explicitly allowed job postprocessors.
 
     A fallback reads and verifies the package manifest from the pinned runner
-    tree itself. A refusal, including a changed tree, degrades that job and does
-    not stop the rest of the sweep; the changed-tree reason is deliberately loud.
+    tree itself. A changed pinned tree raises ``_PinnedTreeError``, which degrades
+    that job and does not stop the rest of the sweep; other hook-loading errors
+    propagate and stop iteration.
+
+    :param workspace: Read jobs from this workspace.
+    :param states: Select the stopped state kinds to report.
+    :param placement: Restrict results to this placement and its descendants.
+    :param allow_job_postprocessor: Permit digest-verified postprocessors from
+        job-pinned workspace package trees.
+    :yields: Framework-assembled collected jobs, including degraded jobs.
+    :raises ValueError: If a registered postprocessor fails to resolve or
+        returns invalid output roles.
     """
 
     from .provenance import run_record

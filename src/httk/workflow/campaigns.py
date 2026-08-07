@@ -62,13 +62,20 @@ ASSIGNMENT_POLICIES = ("round-robin", "hash", "explicit")
 
 @dataclass(frozen=True)
 class CampaignConfig:
-    """One project's campaign map: its partitions and how roots are assigned."""
+    """Store one project's partitions and root-assignment policy.
+
+    :param partitions: Map partition names to registered workspace names.
+    :param assignment: Select the root-job assignment policy.
+    """
 
     partitions: Mapping[str, str]
     assignment: str
 
     def ordered_partitions(self) -> tuple[str, ...]:
-        """Return the partition names in the stable order helpers iterate."""
+        """Return partition names in the stable helper iteration order.
+
+        :return: The sorted partition names.
+        """
 
         return tuple(sorted(self.partitions))
 
@@ -91,7 +98,12 @@ def _validate(partitions: object, assignment: object) -> CampaignConfig:
 
 
 def read_campaign(project: str | os.PathLike[str] | None = None) -> CampaignConfig:
-    """Read and validate one project's campaign configuration."""
+    """Read and validate one project's campaign configuration.
+
+    :param project: Locate the project whose campaign to read.
+    :return: The validated campaign configuration.
+    :raises ValueError: If the stored campaign is malformed.
+    """
 
     section = read_project_section(_require_root(project), CAMPAIGN_SECTION)
     if not section:
@@ -105,7 +117,14 @@ def write_campaign(
     assignment: str = "hash",
     project: str | os.PathLike[str] | None = None,
 ) -> CampaignConfig:
-    """Store one project's campaign configuration and return it."""
+    """Store one project's campaign configuration and return it.
+
+    :param partitions: Map partition names to registered workspace names.
+    :param assignment: Select the root-job assignment policy.
+    :param project: Locate the project whose campaign to write.
+    :return: The validated configuration that was stored.
+    :raises ValueError: If the configuration is malformed.
+    """
 
     config = _validate(partitions, assignment)
     write_project_section(
@@ -117,7 +136,11 @@ def write_campaign(
 
 
 def campaign_partitions(project: str | os.PathLike[str] | None = None) -> dict[str, str]:
-    """Return the partition-name to workspace-name map of one project."""
+    """Return one project's partition-to-workspace map.
+
+    :param project: Locate the project whose campaign to read.
+    :return: A copy of the partition map.
+    """
 
     return dict(read_campaign(project).partitions)
 
@@ -130,6 +153,13 @@ def assign_partition(key: str, *, index: int = 0, project: str | os.PathLike[str
     lands in the same partition. ``round-robin`` spreads by *index*, the position
     of the job in a submission batch, so a batch fans out evenly. The partition
     order is stable (sorted), so both content and position map reproducibly.
+
+    :param key: Supply the tag, job key, or explicit partition name.
+    :param index: Supply the batch position for round-robin assignment.
+    :param project: Locate the project whose campaign to read.
+    :return: The selected partition name.
+    :raises ValueError: If no partitions exist or an explicit partition is
+        unknown.
     """
 
     config = read_campaign(project)
@@ -147,7 +177,13 @@ def assign_partition(key: str, *, index: int = 0, project: str | os.PathLike[str
 
 
 def partition_workspace(partition: str, *, project: str | os.PathLike[str] | None = None) -> str:
-    """Return the registered workspace name one partition points at."""
+    """Return the registered workspace name one partition points at.
+
+    :param partition: Identify the campaign partition.
+    :param project: Locate the project whose campaign to read.
+    :return: The registered workspace name.
+    :raises ValueError: If the partition is unknown.
+    """
 
     partitions = read_campaign(project).partitions
     if partition not in partitions:
@@ -177,10 +213,18 @@ def campaign_submit(
     project: str | os.PathLike[str] | None = None,
     **job: object,
 ) -> ScaffoldedJob:
-    """Assign *key* to a partition and submit one root job into its workspace.
+    r"""Assign *key* to a partition and submit one root job into its workspace.
 
     The child jobs this root later spawns inherit its workspace automatically, so
     the whole subtree stays in the partition its root was assigned to.
+
+    :param workflow: Identify the workflow to submit.
+    :param key: Supply the assignment key.
+    :param index: Supply the batch position for round-robin assignment.
+    :param project: Locate the project whose campaign to use.
+    :param \*\*job: Supply the root job fields.
+    :return: The scaffolded root job.
+    :raises ValueError: If the campaign partition is remote or submission fails.
     """
 
     partition = assign_partition(key, index=index, project=project)
@@ -197,10 +241,19 @@ def campaign_submit_many(
     project: str | os.PathLike[str] | None = None,
     **shared: object,
 ) -> list[ScaffoldedJob]:
-    """Submit a batch of root jobs into the partition *key* is assigned.
+    r"""Submit a batch of root jobs into the partition *key* is assigned.
 
     The batch shares one partition; use one call per key to spread a campaign
     across partitions, or ``round-robin`` assignment with distinct indices.
+
+    :param workflow: Identify the workflow to submit.
+    :param items: Supply the job items to submit.
+    :param key: Supply the assignment key.
+    :param index: Supply the batch position for round-robin assignment.
+    :param project: Locate the project whose campaign to use.
+    :param \*\*shared: Supply fields shared by every submitted job.
+    :return: The scaffolded jobs in input order.
+    :raises ValueError: If the campaign partition is remote or submission fails.
     """
 
     partition = assign_partition(key, index=index, project=project)
@@ -230,9 +283,16 @@ def campaign_collect(
 
     The partitions are visited in stable order and each is collected lazily, so a
     campaign spread over many workspaces streams as one job_records without ever
-    materializing more than the record in hand. Remote partitions are fetched
-    home first — a remote workspace is collected where it runs — so this crosses
-    only the local partitions and names any remote one it skips.
+    materializing more than the record in hand. Remote partitions are refused
+    and must be fetched home beforehand; collection crosses only local
+    partitions.
+
+    :param states: Select the stopped state kinds to collect.
+    :param placement: Restrict collection to this placement and descendants.
+    :param partitions: Select partitions, or use all partitions.
+    :param project: Locate the project whose campaign to collect.
+    :yields: Job records from the selected local partitions.
+    :raises ValueError: If a selected partition is remote or unknown.
     """
 
     config = read_campaign(project)
@@ -264,6 +324,16 @@ def campaign_managers(
     work; a remote partition's managers are submitted through its scheduler over
     the adapter, exactly as ``httk workflow manager run`` does for one workspace.
     The report has one row per partition, so a caller sees where work ran.
+
+    :param partitions: Select partitions, or use all partitions.
+    :param workers: Limit concurrent workers for local managers.
+    :param count: Number of remote managers to submit per remote partition.
+    :param poll_interval: Set the local manager polling interval.
+    :param idle_timeout: Set the local manager idle timeout.
+    :param adapter_timeout: Set the remote adapter timeout.
+    :param project: Locate the project whose campaign to manage.
+    :return: One management report row per selected partition.
+    :raises ValueError: If a selected partition cannot be managed.
     """
 
     from .adapters import probe_remote_workspace, resolve_remote, submit_remote_managers

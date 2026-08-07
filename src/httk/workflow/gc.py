@@ -1,4 +1,4 @@
-"""Bounded collection of the disk a running workspace accumulates.
+"""Collect bounded, explicitly configured workspace garbage.
 
 Nothing in the engine frees disk on its own, and that is deliberate: neither a
 runner nor a manager is ever required to run cleanup code, so every artefact a
@@ -78,7 +78,14 @@ _SECONDS_PER_DAY = 86400.0
 
 @dataclass(frozen=True)
 class GcCategory:
-    """What one category of collectable garbage held and what became of it."""
+    """Describe what one garbage category held and what became of it.
+
+    :param name: Category name.
+    :param candidates: Number of entries eligible for collection.
+    :param removed: Number of entries removed.
+    :param bytes_reclaimed: Estimated bytes held by the entries.
+    :param entries: Paths of candidate entries.
+    """
 
     name: str
     candidates: int = 0
@@ -87,7 +94,10 @@ class GcCategory:
     entries: tuple[str, ...] = ()
 
     def as_mapping(self) -> dict[str, object]:
-        """Return the JSON representation of this category."""
+        """Return the JSON representation of this category.
+
+        :return: JSON-compatible category members.
+        """
 
         return {
             "name": self.name,
@@ -105,6 +115,15 @@ class GcReport:
     ``bytes_reclaimed`` is an estimate taken from the entries themselves before
     they were removed, so under a dry run it reports what a real run would free
     rather than what this one did.
+
+    :param workspace_id: Identifier of the collected workspace.
+    :param dry_run: Whether the collection made no filesystem changes.
+    :param collected_at: Timestamp at which the report was produced.
+    :param retention: Retention settings used for the collection.
+    :param categories: Results for each collection category.
+    :param record_ref: Journal reference for the collection record, if written.
+    :param skipped: Categories or reasons skipped during collection.
+    :param skipped_foreign: Foreign entries skipped by category.
     """
 
     workspace_id: str
@@ -118,24 +137,37 @@ class GcReport:
 
     @property
     def candidates(self) -> int:
-        """Return how many entries the run found collectable."""
+        """Return how many entries the run found collectable.
+
+        :return: Number of candidate entries.
+        """
 
         return sum(category.candidates for category in self.categories)
 
     @property
     def removed(self) -> int:
-        """Return how many entries the run actually removed."""
+        """Return how many entries the run actually removed.
+
+        :return: Number of removed entries.
+        """
 
         return sum(category.removed for category in self.categories)
 
     @property
     def bytes_reclaimed(self) -> int:
-        """Return the estimated bytes the collected entries held."""
+        """Return the estimated bytes the collected entries held.
+
+        :return: Estimated reclaimed bytes.
+        """
 
         return sum(category.bytes_reclaimed for category in self.categories)
 
     def category(self, name: str) -> GcCategory:
-        """Return one named category, empty when the run collected nothing."""
+        """Return one named category, empty when the run collected nothing.
+
+        :param name: Category name to find.
+        :return: Matching category or an empty category with that name.
+        """
 
         for category in self.categories:
             if category.name == name:
@@ -143,7 +175,10 @@ class GcReport:
         return GcCategory(name)
 
     def as_mapping(self) -> dict[str, object]:
-        """Return the JSON representation of this report."""
+        """Return the JSON representation of this report.
+
+        :return: JSON-compatible report members.
+        """
 
         return {
             "format": GC_FRAME_FORMAT,
@@ -842,13 +877,22 @@ def collect_garbage(
     With *dry_run* the workspace is not touched at all and the report describes
     what a real run would have removed. *now* overrides the moment every age is
     measured against, which is how a test ages a workspace deterministically.
+
+    :param workspace: Workspace whose retention policy is applied.
+    :param dry_run: Whether to report candidates without removing them.
+    :param now: Timestamp used to evaluate age limits.
+    :return: Collection report.
     """
 
     return _Collection(workspace, dry_run=dry_run, now=time.time() if now is None else now).execute()
 
 
 def iter_report_rows(report: GcReport) -> Iterator[tuple[str, int, int, int]]:
-    """Yield the category rows a command-line collection prints."""
+    """Yield the category rows a command-line collection prints.
+
+    :param report: Collection report to render.
+    :yield: Category row for each report category and the final total.
+    """
 
     for category in report.categories:
         yield category.name, category.candidates, category.removed, category.bytes_reclaimed

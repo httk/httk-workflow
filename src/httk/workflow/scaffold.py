@@ -125,6 +125,28 @@ class WorkflowProvider:
     Declaring the steps here rather than running the runner to ask keeps
     scaffolding cheap; the owning domain's tests hold the declaration to what the
     runner really describes.
+
+    :param workflow_id: Name the workflow in registrations and job definitions.
+    :param runner_package: Name the package containing a packaged runner.
+    :param runner_file: Name the runner file beside the package module.
+    :param initial_step: Select the default starting step.
+    :param alias: Provide an alternate registered name.
+    :param steps: Declare the steps the runner provides.
+    :param data_mode: Declare the workflow's default data mode.
+    :param workdir_mode: Declare the workflow's default workdir mode.
+    :param summary: Describe the workflow for callers.
+    :param inputs: Map input names to payload destinations or hook handling.
+    :param instantiate: Indicate that the workflow has an instantiate hook.
+    :param declarations: Declare workflow declaration documents.
+    :param postprocessor: Identify the optional result postprocessor.
+    :param directory: Locate a directory-sourced workflow package.
+    :param entry: Name the directory package's runner entry.
+    :param instantiate_file: Name the directory package's instantiate hook.
+    :param postprocess_file: Name the directory package's postprocessor.
+    :param parameters: Declare the workflow's parameter metadata.
+    :param outputs: Declare the workflow's output metadata.
+    :param declaration_uri: Identify the source declaration URI.
+    :param declaration_file: Name the source declaration file.
     """
 
     workflow_id: str
@@ -190,6 +212,9 @@ def register_workflow(provider: WorkflowProvider) -> None:
     A domain calls this once per workflow it ships when its package is imported,
     which is how ``httk workflow job new --workflow NAME`` resolves a packaged
     runner the generic scaffold never names.
+
+    :param provider: Supply the workflow provider to register.
+    :raises ValueError: If the provider's id or alias collides with another registration.
     """
 
     collisions = {
@@ -207,13 +232,20 @@ def register_workflow(provider: WorkflowProvider) -> None:
 
 
 def registered_workflows() -> tuple[str, ...]:
-    """Return the name of every registered workflow, in registration order."""
+    """Return the name of every registered workflow, in registration order.
+
+    :return: The registered workflow ids.
+    """
 
     return tuple(_WORKFLOW_PROVIDERS)
 
 
 def workflow_provider(name: str) -> WorkflowProvider | None:
-    """Return the provider selected by canonical id or alias."""
+    """Return the provider selected by canonical id or alias.
+
+    :param name: Select a workflow by id or alias.
+    :return: The selected provider, or ``None`` when no provider matches.
+    """
 
     provider = _WORKFLOW_PROVIDERS.get(name)
     if provider is not None:
@@ -249,6 +281,29 @@ class ResolvedWorkflow:
     :func:`~httk.workflow.scaffold.registered_workflows` — or a runner file of your own, which is
     described by running it — every native runner answers ``--describe`` with its
     workflow and its steps — so a scaffolded job never guesses either.
+
+    :param source: Locate the runner file or workflow package directory.
+    :param workflow_id: Name the resolved workflow.
+    :param initial_step: Select the step a job starts at.
+    :param alias: Preserve the registered workflow alias.
+    :param steps: Preserve the steps the runner provides.
+    :param data_mode: Preserve the workflow data mode.
+    :param workdir_mode: Preserve the workflow workdir mode.
+    :param packaged: Preserve the packaged runner file name when applicable.
+    :param registration_id: Preserve the registration id when applicable.
+    :param summary: Describe the resolved workflow.
+    :param inputs: Map input names to payload destinations or hook handling.
+    :param instantiate: Indicate that the workflow has an instantiate hook.
+    :param declarations: Preserve workflow declaration documents.
+    :param postprocessor: Preserve the optional result postprocessor.
+    :param directory: Locate a directory-sourced workflow package.
+    :param entry: Name the directory package's runner entry.
+    :param instantiate_file: Name the directory package's instantiate hook.
+    :param postprocess_file: Name the directory package's postprocessor.
+    :param parameters: Preserve the workflow's parameter metadata.
+    :param outputs: Preserve the workflow's output metadata.
+    :param declaration_uri: Identify the source declaration URI.
+    :param declaration_file: Name the source declaration file.
     """
 
     source: Path
@@ -288,12 +343,14 @@ class ResolvedWorkflow:
 
     @property
     def store_name(self) -> str:
-        """The content-addressed name this workflow takes in a runner store.
+        """Return the content-addressed name this workflow takes in a runner store.
 
         The digest of the bytes is part of the name, so publishing is idempotent
         for identical bytes and never overwrites a name a submitted job pinned:
         an upgraded packaged runner is published beside the version its queued
         jobs still reference.
+
+        :return: The digest-pinned runner-store name.
         """
 
         if self.directory is not None:
@@ -310,7 +367,18 @@ class ResolvedWorkflow:
 
 @dataclass(frozen=True)
 class ScaffoldedJob:
-    """One job this module submitted, and everything needed to look at it again."""
+    """Describe one job this module submitted.
+
+    :param job_id: Identify the submitted job.
+    :param job_key: Identify the job payload and state markers.
+    :param tag: Preserve the optional job tag.
+    :param placement: Locate the job within the workspace.
+    :param payload: Locate the submitted payload.
+    :param marker: Locate the submitted state marker.
+    :param workflow: Name the workflow the job runs.
+    :param initial_step: Name the step the job starts at.
+    :param runner: Describe the pinned runner.
+    """
 
     job_id: str
     job_key: str
@@ -323,7 +391,10 @@ class ScaffoldedJob:
     runner: Mapping[str, object]
 
     def as_mapping(self) -> dict[str, object]:
-        """Return the machine-readable report of this job."""
+        """Return the machine-readable report of this job.
+
+        :return: The serialized job report.
+        """
 
         return {
             "format": JOB_SCAFFOLD_FORMAT,
@@ -361,6 +432,11 @@ class InstantiateContext:
     caller's tag. The hook may write below ``payload`` and update
     ``parameters``; use :meth:`suggest_tag` to provide a tag without overriding one
     the caller supplied.
+
+    :param payload: Locate the payload being staged.
+    :param inputs: Provide the supplied workflow inputs.
+    :param parameters: Provide the merged job parameters.
+    :param tag: Preserve or suggest the job tag.
     """
 
     payload: Path
@@ -382,6 +458,10 @@ def describe_runner(runner: str | os.PathLike[str]) -> dict[str, object]:
     with its workflow name and its registered steps and exits without touching
     anything, which is how a runner nobody wrote a workflow for is still
     scaffolded without being told what it implements.
+
+    :param runner: Locate the runner file to describe.
+    :return: The validated runner description.
+    :raises ValueError: If the runner is missing, cannot run, or emits an invalid description.
     """
 
     path = Path(runner).expanduser()
@@ -513,7 +593,11 @@ def _packaged_runner_reference(provider: WorkflowProvider) -> dict[str, object]:
 
 
 def registered_workflow(name: str) -> ResolvedWorkflow | None:
-    """Return the registered workflow *name* names, or ``None``."""
+    """Return the registered workflow selected by *name*, or ``None``.
+
+    :param name: Select a workflow by id or alias.
+    :return: The resolved workflow, or ``None`` when no provider matches.
+    """
 
     provider = workflow_provider(name)
     if provider is None:
@@ -560,6 +644,13 @@ def resolve_workflow(
     it, so its workflow name and its steps come from the runner itself; *workflow*
     and *step* override what it said, and *step* is required when a runner
     registers several steps and none of them is ``start``.
+
+    :param workflow: Select a registered workflow, package directory, or runner file.
+    :param workflow_id: Override the resolved workflow id.
+    :param step: Override the resolved initial step.
+    :param data_mode: Override the resolved data mode.
+    :return: The resolved workflow description.
+    :raises ValueError: If the workflow cannot be found or its description is invalid.
     """
 
     text = os.fspath(workflow)
@@ -645,6 +736,10 @@ def structure_files(directory: str | os.PathLike[str]) -> list[Path]:
     A structure is a file matching one of :data:`STRUCTURE_PATTERNS` — the VASP
     conventions ``POSCAR``, ``POSCAR.something``, and ``something.vasp`` — which is
     what makes a directory of structures one campaign.
+
+    :param directory: Locate the directory to scan.
+    :return: Matching regular structure files in stable order.
+    :raises ValueError: If *directory* is not a directory.
     """
 
     root = Path(directory).expanduser()
@@ -664,6 +759,9 @@ def structure_tag(path: str | os.PathLike[str]) -> str | None:
     The tag is the part of the name that identifies the structure — ``Si2O`` of
     ``POSCAR.Si2O``, ``fcc-al`` of ``fcc-al.vasp`` — reduced to the tag syntax the
     protocol allows. A name that says nothing beyond ``POSCAR`` suggests no tag.
+
+    :param path: Name the structure file whose tag to derive.
+    :return: The sanitized suggested tag, or ``None`` when no tag is present.
     """
 
     name = Path(path).name
@@ -730,6 +828,23 @@ def new_job(
     file into the workspace runner store and pins its digest; ``installed``
     references a packaged runner through the reserved ``pkg:`` form instead and
     copies nothing.
+
+    :param workspace: Provide the workspace receiving the job.
+    :param workflow: Select the workflow or runner file.
+    :param inputs: Supply declared workflow inputs.
+    :param files: Map payload names to files to stage.
+    :param parameters: Supply opaque job parameters.
+    :param tag: Set the job tag.
+    :param placement: Place the job within the workspace.
+    :param priority: Set the scheduling priority.
+    :param workdir_mode: Select the job workdir mode.
+    :param data_mode: Override the workflow data mode.
+    :param publish: Select workspace publication or installed reference.
+    :param step: Override the workflow's initial step.
+    :param workflow_id: Override the workflow id in the job definition.
+    :param name: Set the job's display name.
+    :return: The submitted job description.
+    :raises ValueError: If workflow, inputs, placement, or job settings are invalid.
     """
 
     prepared = _prepare(workspace, workflow, publish=publish, step=step, workflow_id=workflow_id, data_mode=data_mode)
@@ -778,6 +893,25 @@ def new_jobs(
     iterator and the results are yielded as they are submitted, so a structure
     generator can be turned into jobs without either side of the loop ever being
     materialized.
+
+    :param workspace: Provide the workspace receiving the jobs.
+    :param workflow: Select the workflow or runner file.
+    :param items: Yield per-job overrides.
+    :param inputs: Supply shared declared workflow inputs.
+    :param files: Supply shared payload files.
+    :param parameters: Supply shared opaque job parameters.
+    :param tag: Set the shared job tag.
+    :param placement: Set the shared workspace placement.
+    :param priority: Set the shared scheduling priority.
+    :param workdir_mode: Select the shared workdir mode.
+    :param data_mode: Override the workflow data mode.
+    :param publish: Select workspace publication or installed reference.
+    :param step: Override the workflow's initial step.
+    :param workflow_id: Override the workflow id in each job definition.
+    :param name: Set the shared display name.
+    :return: An iterator yielding each submitted job description.
+    :yield: Each submitted job description.
+    :raises ValueError: If workflow, inputs, placement, or job settings are invalid.
 
     .. code-block:: python
 
@@ -1035,6 +1169,11 @@ def payload_relative(name: str) -> PurePosixPath:
     A bare name lands in :data:`~httk.workflow.scaffold.FILES_DIRECTORY`, so ``POSCAR`` becomes
     ``files/POSCAR`` — where the packaged runners read it — and a name that
     carries a directory of its own is used exactly as it is written.
+
+    :param name: Name the staged file within the payload.
+    :return: The validated payload-relative destination.
+    :raises httk.workflow.errors.FormatError: If the name uses a reserved payload member.
+    :raises ValueError: If the name is empty or absolute.
     """
 
     text = str(name).strip()

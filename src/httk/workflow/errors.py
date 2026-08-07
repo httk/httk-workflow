@@ -1,4 +1,4 @@
-"""Exceptions raised by :mod:`httk.workflow`."""
+"""Define exceptions raised by :mod:`httk.workflow`."""
 
 __all__ = [
     "FormatError",
@@ -52,6 +52,9 @@ class RunnerResolutionError(WorkflowError):
     so an unresolvable runner (``runner_unavailable``) and a runner whose staged
     bytes disagree with the digest the job pinned (``runner_mismatch``) stay
     distinguishable to an operator.
+
+    :param code: Protocol failure code recorded by the manager.
+    :param message: Human-readable failure description.
     """
 
     def __init__(self, code: str, message: str) -> None:

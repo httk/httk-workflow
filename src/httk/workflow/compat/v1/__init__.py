@@ -53,13 +53,21 @@ type V1Materializer = Callable[[pathlib.Path], None]
 
 
 def bundled_v1_root() -> Path:
-    """Return the packaged compatibility ``HTTK_DIR`` root."""
+    """Return the packaged compatibility ``HTTK_DIR`` root.
+
+    :return: The packaged v1 runtime root.
+    """
 
     return Path(str(files("httk.workflow.compat.v1").joinpath("v1_runtime")))
 
 
 def legacy_priority(value: int) -> int:
-    """Map a legacy priority from 1 through 5 onto the v2 range."""
+    """Map a legacy priority from 1 through 5 onto the v2 range.
+
+    :param value: Map this legacy priority.
+    :return: The corresponding v2 priority.
+    :raises ValueError: If the priority is outside the legacy range.
+    """
 
     try:
         return V1_PRIORITY_MAP[value]
@@ -202,6 +210,23 @@ def prepare_v1_payload(
     ``materializer`` and ``instantiate_globals`` are mutually exclusive. The
     latter executes trusted template code in the current interpreter and does
     not restore removed v1 Python imports.
+
+    :param source: Copy the instantiated v1 template from this directory.
+    :param destination: Create the v2 payload at this directory.
+    :param materializer: Materialize the template with this callback.
+    :param instantiate_globals: Execute the template with these globals.
+    :param job_id: Set the job identifier, or generate one when unset.
+    :param tag: Set the job tag.
+    :param name: Set the job display name.
+    :param initial_step: Set the first runner step.
+    :param pool: Set the claim pool.
+    :param priority: Set the legacy priority.
+    :param attempts: Set the retry attempt count.
+    :param parent: Preserve the parent job reference.
+    :param root_placement: Preserve the legacy root placement.
+    :param legacy_link: Preserve the legacy directory link metadata.
+    :return: The immutable v2 job definition written to the payload.
+    :raises ValueError: If mutually exclusive options or retry values are invalid.
     """
 
     if materializer is not None and instantiate_globals is not None:
@@ -258,7 +283,22 @@ def submit_v1_task(
     priority: int = 3,
     attempts: int = 10,
 ) -> Marker:
-    """Prepare and atomically submit one legacy task through a v2 workspace."""
+    """Prepare and atomically submit one legacy task through a v2 workspace.
+
+    :param workspace: Submit the task to this workspace.
+    :param source: Copy the instantiated v1 template from this directory.
+    :param placement: Submit the task at this placement.
+    :param materializer: Materialize the template with this callback.
+    :param instantiate_globals: Execute the template with these globals.
+    :param job_id: Set the job identifier, or generate one when unset.
+    :param tag: Set the job tag.
+    :param name: Set the job display name.
+    :param initial_step: Set the first runner step.
+    :param pool: Set the claim pool.
+    :param priority: Set the legacy priority.
+    :param attempts: Set the retry attempt count.
+    :return: The submitted job marker.
+    """
 
     normalized = normalize_placement(placement)
     temporary = workspace.control / "tmp" / f"v1-submit.{uuid.uuid4()}"
@@ -280,7 +320,11 @@ def submit_v1_task(
 
 
 def parse_v1_task_name(value: str) -> dict[str, str] | None:
-    """Parse a legacy task basename, returning ``None`` when it is unrelated."""
+    """Parse a legacy task basename, returning ``None`` when it is unrelated.
+
+    :param value: Parse this legacy task basename.
+    :return: Parsed task fields, or ``None`` for an unrelated name.
+    """
 
     match = _TASK_PATTERN.fullmatch(value)
     return None if match is None else match.groupdict()
@@ -294,7 +338,14 @@ def _compatibility(job: JobDefinition) -> Mapping[str, object]:
 
 
 class V1RunnerExecutor:
-    """Runner executor which adapts v1 filesystem decisions to v2 outcomes."""
+    """Runner executor which adapts v1 filesystem decisions to v2 outcomes.
+
+    :param runtime_root: Use this packaged v1 runtime root.
+    :param timeout: Limit one legacy process to this duration.
+    :param wrapper: Run legacy programs through this wrapper when set.
+    :param log_compression: Select the archived log compression.
+    :param attempts: Limit retries passed to the legacy runner.
+    """
 
     name = V1_EXECUTOR
 
@@ -320,6 +371,11 @@ class V1RunnerExecutor:
         self.attempts = attempts
 
     def validate(self, job: JobDefinition, payload: Path) -> None:
+        """Validate a v1 job payload for execution.
+
+        :param job: Validate this job definition.
+        :param payload: Validate the runner and runtime files in this payload.
+        """
         compatibility = _compatibility(job)
         if job.workflow != V1_WORKFLOW:
             raise FormatError(f"httk-v1 executor cannot execute workflow {job.workflow!r}")
@@ -341,6 +397,11 @@ class V1RunnerExecutor:
             raise FormatError(f"legacy shell runtime is incomplete: {api}")
 
     def command(self, launch: AttemptLaunch) -> Sequence[str]:
+        """Build the command for one v1 attempt.
+
+        :param launch: Read the job and launch context.
+        :return: The runner command argument vector.
+        """
         compatibility = _compatibility(launch.job)
         job_attempts = require_int(compatibility.get("attempts"), "compatibility.attempts")
         effective_attempts = min(self.attempts, job_attempts)
@@ -365,6 +426,10 @@ class V1RunnerExecutor:
         return command
 
     def commit_outcome(self, commit: OutcomeCommit) -> None:
+        """Reconcile legacy child links after publishing an outcome.
+
+        :param commit: Read the committed outcome and payload.
+        """
         spawn_path = commit.outcome_path / "children" / "spawn.json"
         if not spawn_path.is_file():
             return
@@ -389,6 +454,10 @@ class V1RunnerExecutor:
             _replace_with_relative_symlink(commit.payload / legacy_path, target)
 
     def reconcile(self, workspace: Workspace) -> None:
+        """Reconcile legacy links for every marked job.
+
+        :param workspace: Scan this workspace for v1 jobs.
+        """
         for marker in workspace.scan_markers():
             try:
                 job = workspace.load_job(marker)
@@ -400,6 +469,11 @@ class V1RunnerExecutor:
                 continue
 
     def marker_changed(self, workspace: Workspace, marker: Marker) -> None:
+        """Reconcile the legacy link for one changed marker.
+
+        :param workspace: Read the changed job from this workspace.
+        :param marker: Identify the changed job.
+        """
         job = workspace.load_job(marker)
         compatibility = _compatibility(job)
         link = compatibility.get("legacy_link")
@@ -408,7 +482,20 @@ class V1RunnerExecutor:
 
 
 class V1TaskManager(TaskManager):
-    """A task manager restricted to jobs using the httk v1 runner executor."""
+    """A task manager restricted to jobs using the httk v1 runner executor.
+
+    :param workspace: Manage v1 jobs in this workspace.
+    :param taskset: Restrict jobs to this taskset, or accept every taskset when ``any``.
+    :param maximum_workers: Run at most this many workers.
+    :param lease_seconds: Use this lease duration when set.
+    :param heartbeat_interval: Send worker heartbeats at this interval.
+    :param unsafe_persistent_takeover: Permit takeover of persistent workdirs.
+    :param runtime_root: Use this packaged v1 runtime root.
+    :param timeout: Limit one legacy process to this duration.
+    :param wrapper: Run legacy programs through this wrapper when set.
+    :param log_compression: Select the archived log compression.
+    :param attempts: Limit retries passed to the legacy runner.
+    """
 
     def __init__(
         self,

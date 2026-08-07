@@ -21,7 +21,11 @@ VASP_RESTART_ARTIFACTS: tuple[str, ...] = ("CONTCAR", "vasp-run-report.json")
 
 
 def last_oszicar_energy(path: str | os.PathLike[str] = "OSZICAR") -> float | None:
-    """Return the final ``E0`` value, or ``None`` when it is absent."""
+    """Return the final ``E0`` value, or ``None`` when it is absent.
+
+    :param path: Read the OSZICAR file at this path.
+    :return: The final parsed ``E0`` value, or ``None`` when no value is found.
+    """
 
     found: float | None = None
     pattern = re.compile(r"\bE0=\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][-+]?\d+)?)")
@@ -33,7 +37,11 @@ def last_oszicar_energy(path: str | os.PathLike[str] = "OSZICAR") -> float | Non
 
 
 def last_vasprun_volume(path: str | os.PathLike[str] = "vasprun.xml") -> float | None:
-    """Return the final volume reported by ``vasprun.xml``."""
+    """Return the final volume reported by ``vasprun.xml``.
+
+    :param path: Read the vasprun XML file at this path.
+    :return: The final parsed volume, or ``None`` when no volume is found.
+    """
 
     found: float | None = None
     pattern = re.compile(r'<i\s+name=["\']volume["\']>\s*([-+0-9.Ee]+)\s*</i>')
@@ -43,7 +51,11 @@ def last_vasprun_volume(path: str | os.PathLike[str] = "vasprun.xml") -> float |
 
 
 def outcar_potim(path: str | os.PathLike[str] = "OUTCAR") -> float | None:
-    """Return the last optimizer step size from OUTCAR."""
+    """Return the last optimizer step size from OUTCAR.
+
+    :param path: Read the OUTCAR file at this path.
+    :return: The last parsed optimizer step size, or ``None`` when absent.
+    """
 
     found: float | None = None
     pattern = re.compile(r"^\s*opt step\s*=\s*([-+0-9.Ee]+)", re.MULTILINE)
@@ -53,7 +65,11 @@ def outcar_potim(path: str | os.PathLike[str] = "OUTCAR") -> float | None:
 
 
 def outcar_plane_wave_count(path: str | os.PathLike[str] = "OUTCAR") -> int | None:
-    """Return OUTCAR's maximum plane-wave count."""
+    """Return OUTCAR's maximum plane-wave count.
+
+    :param path: Read the OUTCAR file at this path.
+    :return: The parsed maximum plane-wave count, or ``None`` when absent.
+    """
 
     match = re.search(
         r"^\s*maximum number of plane-waves\s*:\s*([0-9]+)",
@@ -67,7 +83,12 @@ def clean_outcar(
     path: str | os.PathLike[str] = "OUTCAR",
     output: str | os.PathLike[str] = "OUTCAR.cleaned",
 ) -> Path:
-    """Remove the largest reproducible k-point detail blocks from OUTCAR."""
+    """Remove the largest reproducible k-point detail blocks from OUTCAR.
+
+    :param path: Read the OUTCAR file at this path.
+    :param output: Write the cleaned OUTCAR to this path.
+    :return: The cleaned output path.
+    """
 
     lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
     result: list[str] = []
@@ -99,7 +120,13 @@ def validate_vasp_workdir(
     *,
     maximum_length: int = 240,
 ) -> Path:
-    """Validate VASP's conservative absolute-path length constraint."""
+    """Validate VASP's conservative absolute-path length constraint.
+
+    :param path: Resolve and validate this workdir path.
+    :param maximum_length: Reject resolved paths longer than this byte length.
+    :return: The resolved workdir path.
+    :raises ValueError: If the limit is invalid or the resolved path is too long.
+    """
 
     resolved = Path(path).resolve()
     if maximum_length < 1:
@@ -122,6 +149,12 @@ def clean_vasp_outputs(
     the remedy machinery and restart promotion read: a pre-run cleanup that
     deletes them destroys the evidence of the run it is cleaning up after. Name
     them in *also_remove* to delete them anyway.
+
+    :param directory: Remove outputs from this directory.
+    :param keep: Preserve these output names.
+    :param also_remove: Allow restart artifacts to be removed by naming them here.
+    :return: The paths removed from the directory.
+    :raises ValueError: If an output to remove is not a regular file.
     """
 
     root = Path(directory)
@@ -197,7 +230,11 @@ _VASP_PATTERNS: tuple[tuple[re.Pattern[str], str, str, bool], ...] = (
 
 
 def diagnose_vasp_files(directory: str | os.PathLike[str] = ".") -> tuple[Diagnostic, ...]:
-    """Diagnose completion and final convergence from VASP output files."""
+    """Diagnose completion and final convergence from VASP output files.
+
+    :param directory: Read VASP output files from this directory.
+    :return: Diagnostics inferred from the available output files.
+    """
 
     root = Path(directory)
     diagnostics: list[Diagnostic] = []

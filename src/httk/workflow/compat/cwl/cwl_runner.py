@@ -106,7 +106,12 @@ run = Runner(WORKFLOW)
 
 
 class ToolError(Exception):
-    """One tool, step or binding could not be prepared or could not be run."""
+    """One tool, step or binding could not be prepared or could not be run.
+
+    :param code: Identify the structured failure code.
+    :param message: Describe the failure.
+    :param details: Preserve structured failure details.
+    """
 
     def __init__(self, code: str, message: str, *, details: Mapping[str, object] | None = None) -> None:
         super().__init__(message)
@@ -120,7 +125,11 @@ class ToolError(Exception):
 
 
 def plan_root(a: Attempt) -> Path:
-    """Return the payload holding the plan: this job's, or the root job's."""
+    """Return the payload holding the plan: this job's, or the root job's.
+
+    :param a: Read plan location and workspace paths from this attempt.
+    :return: The payload containing the normalized plan.
+    """
 
     pointer = a.parameter("cwl_payload", None)
     if isinstance(pointer, str) and pointer:
@@ -129,7 +138,12 @@ def plan_root(a: Attempt) -> Path:
 
 
 def plan_of(a: Attempt) -> dict[str, object]:
-    """Return the normalized plan this job runs."""
+    """Return the normalized plan this job runs.
+
+    :param a: Read the plan from this attempt's payload.
+    :return: The normalized CWL plan.
+    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If the plan is missing or is not an object.
+    """
 
     root = plan_root(a)
     pointer = a.parameter("cwl_document")
@@ -143,7 +157,13 @@ def plan_of(a: Attempt) -> dict[str, object]:
 
 
 def process_at(plan: Mapping[str, object], target: Sequence[str]) -> Mapping[str, object]:
-    """Return the process one path of step names names inside the plan."""
+    """Return the process one path of step names names inside the plan.
+
+    :param plan: Search this normalized CWL plan.
+    :param target: Follow this nested sequence of step names.
+    :return: The process at the target path.
+    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If the target path does not identify a process.
+    """
 
     process: Mapping[str, object] = plan
     for name in target:
@@ -158,7 +178,11 @@ def process_at(plan: Mapping[str, object], target: Sequence[str]) -> Mapping[str
 
 
 def payload_relative(a: Attempt) -> str:
-    """Return the workspace-relative payload holding the plan, for a child."""
+    """Return the workspace-relative payload holding the plan, for a child.
+
+    :param a: Resolve the plan payload for this attempt.
+    :return: The workspace-relative payload path.
+    """
 
     root = plan_root(a)
     try:
@@ -173,7 +197,14 @@ def payload_relative(a: Attempt) -> str:
 
 
 def reference_value(namespace: str, path: str, bindings: Mapping[str, object], runtime: Mapping[str, object]) -> object:
-    """Return the value one plain parameter reference names."""
+    """Return the value one plain parameter reference names.
+
+    :param namespace: Select the ``inputs`` or ``runtime`` namespace.
+    :param path: Follow this dotted value path.
+    :param bindings: Supply workflow input bindings.
+    :param runtime: Supply runtime values.
+    :return: The referenced value, or ``None`` for a missing component.
+    """
 
     source: object = bindings if namespace == "inputs" else runtime
     for part in path.split("."):
@@ -190,6 +221,11 @@ def interpolate(text: object, bindings: Mapping[str, object], runtime: Mapping[s
     A string that is exactly one reference becomes the referenced *value*, of
     whatever type it has; a string that merely contains references becomes a
     string with each one substituted, which is what CWL means by interpolation.
+
+    :param text: Resolve references in this value.
+    :param bindings: Supply workflow input bindings.
+    :param runtime: Supply runtime values.
+    :return: The resolved value.
     """
 
     if not isinstance(text, str):
@@ -203,7 +239,11 @@ def interpolate(text: object, bindings: Mapping[str, object], runtime: Mapping[s
 
 
 def as_text(value: object) -> str:
-    """Return the command-line spelling of one CWL value."""
+    """Return the command-line spelling of one CWL value.
+
+    :param value: Convert this CWL value.
+    :return: The command-line spelling.
+    """
 
     if isinstance(value, Mapping) and value.get("class") in {"File", "Directory"}:
         return str(value.get("path") or value.get("basename") or "")
@@ -215,7 +255,11 @@ def as_text(value: object) -> str:
 
 
 def as_list(value: object) -> list[object]:
-    """Return one plan member that may be a scalar or an array as a list."""
+    """Return one plan member that may be a scalar or an array as a list.
+
+    :param value: Normalize this scalar, array, or null value.
+    :return: A list containing the normalized members.
+    """
 
     if value is None:
         return []
@@ -225,13 +269,22 @@ def as_list(value: object) -> list[object]:
 
 
 def is_file(value: object) -> bool:
-    """Report whether one value is a File or Directory object."""
+    """Report whether one value is a File or Directory object.
+
+    :param value: Inspect this CWL value.
+    :return: Whether the value names a File or Directory.
+    """
 
     return isinstance(value, Mapping) and value.get("class") in {"File", "Directory"}
 
 
 def file_object(path: Path, *, contents: bool = False) -> dict[str, object]:
-    """Describe one produced file or directory the way CWL does."""
+    """Describe one produced file or directory the way CWL does.
+
+    :param path: Describe the file or directory at this path.
+    :param contents: Include up to the supported content limit for files.
+    :return: The CWL-compatible file or directory object.
+    """
 
     if path.is_dir():
         return {"class": "Directory", "path": str(path), "basename": path.name}
@@ -249,7 +302,12 @@ def file_object(path: Path, *, contents: bool = False) -> dict[str, object]:
 
 
 def resolve_staged(value: object, root: Path) -> object:
-    """Turn every payload-relative staged file of the input object into a path."""
+    """Turn every payload-relative staged file of the input object into a path.
+
+    :param value: Resolve staged members recursively in this value.
+    :param root: Resolve payload-relative paths below this root.
+    :return: The value with staged paths resolved.
+    """
 
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and not isinstance(value, Mapping):
         return [resolve_staged(item, root) for item in value]
@@ -272,6 +330,12 @@ def stage_value(value: object, directory: Path, counter: list[int]) -> object:
     normal case, not the odd one — and a shared destination would silently make
     them one file. The numbering follows the declaration order of the inputs, so
     a repeated attempt stages exactly the same paths.
+
+    :param value: Stage File and Directory values recursively.
+    :param directory: Place staged values below this directory.
+    :param counter: Use and update this deterministic staging counter.
+    :return: The value rewritten with execution-local paths.
+    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If a staged source is missing or invalid.
     """
 
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and not isinstance(value, Mapping):
@@ -302,7 +366,13 @@ def stage_value(value: object, directory: Path, counter: list[int]) -> object:
 
 
 def tool_bindings(tool: Mapping[str, object], bindings: Mapping[str, object], staging: Path) -> dict[str, object]:
-    """Return every input of one tool, defaulted, checked and staged."""
+    """Return every input of one tool, defaulted, checked and staged.
+
+    :param tool: Read input declarations from this tool.
+    :param bindings: Supply workflow bindings by input name.
+    :param staging: Stage file values below this directory.
+    :return: Resolved tool bindings.
+    """
 
     resolved: dict[str, object] = {}
     counter = [0]
@@ -324,7 +394,13 @@ def tool_bindings(tool: Mapping[str, object], bindings: Mapping[str, object], st
 
 
 def binding_arguments(binding: Mapping[str, object], value: object, kind: Mapping[str, object] | None) -> list[str]:
-    """Return the argv fragment one input binding contributes."""
+    """Return the argv fragment one input binding contributes.
+
+    :param binding: Read command-line binding settings.
+    :param value: Convert this bound value to arguments.
+    :param kind: Use this normalized input type when present.
+    :return: The argument fragment for the binding.
+    """
 
     prefix = binding.get("prefix")
     separate = bool(binding.get("separate", True))
@@ -357,7 +433,13 @@ def build_argv(
     resolved: Mapping[str, object],
     runtime: Mapping[str, object],
 ) -> list[str]:
-    """Build the argument vector one tool execution runs."""
+    """Build the argument vector one tool execution runs.
+
+    :param tool: Read the tool command and input declarations.
+    :param resolved: Supply resolved tool bindings.
+    :param runtime: Supply runtime values for interpolation.
+    :return: The command argument vector.
+    """
 
     ordered: list[tuple[int, int, list[str]]] = []
     index = 0
@@ -400,7 +482,15 @@ def collect_outputs(
     directory: Path,
     captured: Mapping[str, Path],
 ) -> dict[str, object]:
-    """Collect the declared outputs of one finished tool execution."""
+    """Collect the declared outputs of one finished tool execution.
+
+    :param tool: Read output declarations from this tool.
+    :param resolved: Supply resolved input bindings.
+    :param runtime: Supply runtime values for output expressions.
+    :param directory: Search this execution directory for outputs.
+    :param captured: Supply captured stdout and stderr paths.
+    :return: Declared outputs represented as CWL values.
+    """
 
     outputs: dict[str, object] = {}
     declared = tool.get("outputs")
@@ -443,7 +533,15 @@ def _has_magic(text: str) -> bool:
 
 
 def run_tool(a: Attempt, tool: Mapping[str, object], bindings: Mapping[str, object], name: str) -> dict[str, object]:
-    """Run one CommandLineTool in its own execution directory and collect it."""
+    """Run one CommandLineTool in its own execution directory and collect it.
+
+    :param a: Execute and report through this attempt.
+    :param tool: Run this normalized CommandLineTool.
+    :param bindings: Supply bindings for the tool inputs.
+    :param name: Name the execution directory.
+    :return: The collected tool outputs.
+    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If the tool fails or its outputs cannot be collected.
+    """
 
     base = a.workdir / "cwl"
     directory = base / name
@@ -513,7 +611,12 @@ def _timeout(a: Attempt, tool: Mapping[str, object]) -> float:
 
 
 def step_bindings(step: Mapping[str, object], values: Mapping[str, object]) -> dict[str, object]:
-    """Resolve the inputs of one workflow step from the values it can see."""
+    """Resolve the inputs of one workflow step from the values it can see.
+
+    :param step: Read input connections from this workflow step.
+    :param values: Supply values visible to the step.
+    :return: Bindings keyed by the step's input names.
+    """
 
     connections = step.get("in")
     entries = connections if isinstance(connections, Mapping) else {}
@@ -549,7 +652,12 @@ def step_bindings(step: Mapping[str, object], values: Mapping[str, object]) -> d
 
 
 def ready_steps(process: Mapping[str, object], done: Sequence[str]) -> list[str]:
-    """Return every step whose sources are all produced, in a stable order."""
+    """Return every step whose sources are all produced, in a stable order.
+
+    :param process: Read workflow steps from this process.
+    :param done: Identify steps already completed.
+    :return: Ready step names in declaration order.
+    """
 
     steps = process.get("steps")
     entries = steps if isinstance(steps, Mapping) else {}
@@ -571,7 +679,13 @@ def ready_steps(process: Mapping[str, object], done: Sequence[str]) -> list[str]
 
 
 def shard_bindings(step: Mapping[str, object], bindings: Mapping[str, object]) -> list[dict[str, object]]:
-    """Split one scattered step's inputs into one binding set per shard."""
+    """Split one scattered step's inputs into one binding set per shard.
+
+    :param step: Read scatter declarations from this step.
+    :param bindings: Supply resolved step bindings.
+    :return: One binding mapping per scatter shard.
+    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If scattered inputs are not arrays of equal length.
+    """
 
     ports = [str(port) for port in as_list(step.get("scatter"))]
     lengths: list[int] = []
@@ -597,7 +711,13 @@ def shard_bindings(step: Mapping[str, object], bindings: Mapping[str, object]) -
 
 
 def child_inputs(a: Attempt, target: Sequence[str], bindings: Mapping[str, object]) -> dict[str, object]:
-    """Return the job inputs one child needs to find and run its part."""
+    """Return the job inputs one child needs to find and run its part.
+
+    :param a: Resolve the plan payload for this parent attempt.
+    :param target: Identify the child process by its step path.
+    :param bindings: Supply the child's resolved bindings.
+    :return: Parameters for the child job.
+    """
 
     return {
         "cwl_payload": payload_relative(a),
@@ -608,7 +728,11 @@ def child_inputs(a: Attempt, target: Sequence[str], bindings: Mapping[str, objec
 
 
 def finish(a: Attempt, outputs: Mapping[str, object]) -> None:
-    """Write the outputs of this job, publish them when asked to, and succeed."""
+    """Write the outputs of this job, publish them when asked to, and succeed.
+
+    :param a: Write and publish through this attempt.
+    :param outputs: Write these workflow outputs.
+    """
 
     path = a.workdir / OUTPUTS_FILE
     path.write_text(json.dumps(outputs, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -628,7 +752,12 @@ def finish(a: Attempt, outputs: Mapping[str, object]) -> None:
 
 
 def workflow_outputs(process: Mapping[str, object], values: Mapping[str, object]) -> dict[str, object]:
-    """Return the declared outputs of one finished workflow."""
+    """Return the declared outputs of one finished workflow.
+
+    :param process: Read workflow output declarations from this process.
+    :param values: Supply values produced by the process.
+    :return: The declared workflow outputs.
+    """
 
     outputs: dict[str, object] = {}
     declared = process.get("outputs")
@@ -680,7 +809,10 @@ def _failed(a: Attempt, exception: ToolError) -> None:
 
 @run.step
 def start(a: Attempt) -> None:
-    """Read the plan and the staged input object, and start the root process."""
+    """Read the plan and the staged input object, and start the root process.
+
+    :param a: Initialize the root process through this attempt.
+    """
 
     try:
         plan = plan_of(a)
@@ -719,7 +851,10 @@ def _defaulted(process: Mapping[str, object], values: Mapping[str, object]) -> d
 
 @run.step
 def enter(a: Attempt) -> None:
-    """Start a child at the position of the plan its inputs name."""
+    """Start a child at the position of the plan its inputs name.
+
+    :param a: Initialize the child process through this attempt.
+    """
 
     target = [str(item) for item in as_list(a.parameter("cwl_target", []))]
     bindings = a.parameter("cwl_bindings", {})
@@ -745,7 +880,10 @@ def enter(a: Attempt) -> None:
 
 @run.step
 def advance(a: Attempt) -> None:
-    """Run exactly one tool or one workflow step, and say what happens next."""
+    """Run exactly one tool or one workflow step, and say what happens next.
+
+    :param a: Advance the current CWL process through this attempt.
+    """
 
     try:
         _advance(a)
@@ -840,7 +978,10 @@ def _record(
 
 @run.step
 def collect(a: Attempt) -> None:
-    """Read the outputs of the children of one step, and go on."""
+    """Read the outputs of the children of one step, and go on.
+
+    :param a: Gather child outputs through this attempt.
+    """
 
     pending = _state_mapping(a, STATE_PENDING)
     name = str(pending.get("step") or "")

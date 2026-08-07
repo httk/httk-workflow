@@ -692,6 +692,11 @@ def _start_manager(kind: str, request: Mapping[str, object]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Dispatch one adapter request file.
+
+    :param argv: The dispatcher arguments, or the process arguments when omitted.
+    :return: Zero after writing an adapter result, or a nonzero refusal status.
+    """
     arguments = sys.argv[1:] if argv is None else argv
     if len(arguments) != 1:
         print("adapter dispatcher expects one REQUEST.json path", file=sys.stderr)

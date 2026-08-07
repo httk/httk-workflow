@@ -303,7 +303,17 @@ def detach_job(
     destination_placement: str | PurePosixPath | None = None,
     transfer_id: str | None = None,
 ) -> Path:
-    """Fence and seal one job, leaving no schedulable source marker."""
+    """Fence and seal one job, leaving no schedulable source marker.
+
+    :param workspace: Provide the source workspace.
+    :param job_id: Identify the job to detach.
+    :param destination_workspace_id: Identify the destination workspace.
+    :param destination_remote: Preserve the destination's remote identifier.
+    :param destination_placement: Override the destination placement.
+    :param transfer_id: Reuse a transfer id when resuming sealing.
+    :return: The sealed source bundle path.
+    :raises ValueError: If the job is missing, active, joined, or already transferring incompatibly.
+    """
 
     destination_id = canonical_uuid(destination_workspace_id, "destination_workspace_id")
     identifier = str(uuid.uuid4()) if transfer_id is None else canonical_uuid(transfer_id, "transfer_id")
@@ -348,7 +358,12 @@ def detach_job(
 
 
 def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
-    """Validate a sealed bundle and return its manifest."""
+    """Validate a sealed bundle and return its manifest.
+
+    :param bundle: Locate the sealed transfer bundle.
+    :return: The validated transfer manifest.
+    :raises httk.workflow.errors.FormatError: If the bundle format, digest, marker, or runner is invalid.
+    """
 
     payload = Path(bundle).expanduser().resolve()
     manifest = read_json(payload / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
@@ -389,7 +404,17 @@ def _ack_path(workspace: Workspace, transfer_id: str) -> Path:
 
 
 def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
-    """Idempotently import a sealed bundle and publish its prior state."""
+    """Idempotently import a sealed bundle and publish its prior state.
+
+    Runners are installed and verified before the imported job becomes schedulable;
+    the returned acknowledgement identifies the imported payload and transfer.
+
+    :param workspace: Provide the destination workspace.
+    :param bundle: Locate the sealed source bundle.
+    :return: The destination acknowledgement.
+    :raises httk.workflow.errors.FormatError: If the bundle or copied payload fails validation.
+    :raises ValueError: If the bundle names another destination workspace.
+    """
 
     source = Path(bundle).expanduser().resolve()
     manifest = validate_bundle(source)
@@ -583,6 +608,11 @@ def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, obj
     attribution is refused rather than recorded. An acknowledgement with no
     signature is accepted exactly as before, so a destination without an
     identity key keeps working.
+
+    :param workspace: Provide the source workspace.
+    :param acknowledgement: Supply the destination acknowledgement.
+    :return: The retired source bundle path.
+    :raises httk.workflow.errors.FormatError: If the acknowledgement format, signature, or identity is invalid.
     """
 
     if acknowledgement.get("format") != "httk-workflow-transfer-acknowledgement":
@@ -606,7 +636,11 @@ def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, obj
 
 
 def recover_transfers(workspace: Workspace) -> list[dict[str, object]]:
-    """Finish source sealing and inventory every retained bundle."""
+    """Finish source sealing and inventory every retained bundle.
+
+    :param workspace: Provide the workspace whose transfers to recover.
+    :return: The recovered and retained transfer records.
+    """
 
     results: list[dict[str, object]] = []
     for marker in list(workspace.scan_markers(("transferring",))):
@@ -676,6 +710,13 @@ def offer_transfers(
     A job that cannot leave right now is skipped rather than fatal: one still
     referenced by an unresolved join keeps the campaign it belongs to
     consistent, and reporting the rest lets the fetch make progress.
+
+    :param workspace: Provide the source workspace.
+    :param destination_workspace_id: Identify the destination workspace.
+    :param states: Select quiescent states eligible for offering.
+    :param placement: Restrict offers to this placement prefix.
+    :return: Offered transfer records in placement order.
+    :raises ValueError: If the destination id or requested states are invalid.
     """
 
     destination_id = canonical_uuid(destination_workspace_id, "destination_workspace_id")
@@ -737,6 +778,12 @@ def retire_transfers(
     somebody else. Retirement moves the bundle rather than deleting it, and a
     bundle already retired is reported as such, so calling this twice is the
     same as calling it once.
+
+    :param workspace: Provide the source workspace.
+    :param job_ids: Identify the jobs whose bundles to retire.
+    :param destination_workspace_id: Restrict retirement to one destination.
+    :return: Retirement records for the named jobs.
+    :raises ValueError: If a job id has no matching detached transfer.
     """
 
     destination_id = (
@@ -778,6 +825,9 @@ def discard_staged_bundle(workspace: Workspace, staging: Path) -> None:
     The staging tree is renamed out of the incoming directory before it is
     removed, so an interrupted removal can never leave a partial bundle where a
     resumed fetch would find one and mistake it for the real thing.
+
+    :param workspace: Provide the workspace owning the staging directory.
+    :param staging: Locate the staged bundle to discard.
     """
 
     if not staging.exists():

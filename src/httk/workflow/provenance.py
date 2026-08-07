@@ -130,6 +130,11 @@ def run_record(record: JobRecord) -> Run:
     products explicitly in its observed declaration. Runner identity, timeline,
     and failure are deliberately not folded into ``Run``; the caller's
     ``JobRecord`` remains the extra-information channel.
+
+    :param record: Supply the mechanical readout of one collected job.
+    :return: The framework-owned run assembled from the selected declaration.
+    :raises ValueError: If a selected URI or edge violates the provenance
+        contract.
     """
 
     identity = f"{record.workspace_id}:{record.job_id}"

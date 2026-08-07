@@ -125,7 +125,14 @@ def _seed(project: Path) -> bytes:
 
 @dataclass(frozen=True)
 class MaintenanceLock:
-    """Recorded holder of one workspace maintenance lock."""
+    """Record the holder of one workspace maintenance lock.
+
+    :param path: Locate the lock file.
+    :param pid: Record the holder process identifier, when readable.
+    :param hostname: Record the holder host, when readable.
+    :param created: Record the holder creation timestamp, when readable.
+    :param readable: Mark whether the lock contents could be read.
+    """
 
     path: Path
     pid: int | None
@@ -219,7 +226,11 @@ def _read_maintenance_lock(path: Path) -> MaintenanceLock | None:
 
 
 def read_maintenance_lock(workspace: Workspace) -> MaintenanceLock | None:
-    """Describe the workspace maintenance lock, or ``None`` when it is absent."""
+    """Describe the workspace maintenance lock, or ``None`` when it is absent.
+
+    :param workspace: Locate the workspace whose lock to inspect.
+    :return: The recorded lock, or ``None`` when no lock exists.
+    """
 
     return _read_maintenance_lock(workspace.control / MAINTENANCE_LOCK_FILE)
 
@@ -252,7 +263,13 @@ def _acquire_maintenance_lock(path: Path) -> None:
 
 
 def release_maintenance_lock(workspace: Workspace, *, force: bool = False) -> str:
-    """Remove a stale, or with *force* any, maintenance lock and report it."""
+    """Remove a stale, or with *force* any, maintenance lock and report it.
+
+    :param workspace: Locate the workspace whose lock to remove.
+    :param force: Permit removal of a lock that does not appear stale.
+    :return: A human-readable removal result.
+    :raises ValueError: If a live lock is protected by the default policy.
+    """
 
     path = workspace.control / MAINTENANCE_LOCK_FILE
     holder = read_maintenance_lock(workspace)
@@ -267,7 +284,12 @@ def release_maintenance_lock(workspace: Workspace, *, force: bool = False) -> st
 
 @contextmanager
 def workspace_maintenance_guard(workspace: Workspace) -> Iterator[None]:
-    """Fence manager launches while a project snapshot is inspected."""
+    """Fence manager launches while a project snapshot is inspected.
+
+    :param workspace: Lock and inspect this workspace around the guarded work.
+    :return: A context manager that holds the maintenance lock.
+    :raises ValueError: If the workspace is already maintained or not quiescent.
+    """
 
     path = workspace.control / MAINTENANCE_LOCK_FILE
     _acquire_maintenance_lock(path)
@@ -287,7 +309,13 @@ def create_manifest(
     *,
     output: str | os.PathLike[str] | None = None,
 ) -> Path:
-    """Create and atomically publish the signed v2 project manifest."""
+    """Create and atomically publish the signed v2 project manifest.
+
+    :param project: Locate the project to snapshot, or use discovery when unset.
+    :param output: Publish the manifest at this path, or use the project default.
+    :return: The published manifest path.
+    :raises ValueError: If the project is invalid or cannot be snapshotted.
+    """
 
     root = require_project(project)
     metadata = read_project(root)
@@ -367,6 +395,13 @@ class ManifestVerification:
     unaltered?* is answered by the digests and the signature. *Was it made by
     somebody this project trusts?* is answered only by comparing the signing key
     with a trust anchor that did not come from the manifest itself.
+
+    :param verdict: Classify the verification result.
+    :param reason: Explain the classification.
+    :param manifest: Identify the verified manifest.
+    :param manifest_format: Identify the manifest format used.
+    :param public_key: Record the signing key, when readable.
+    :param trusted_keys: Record the trust anchors consulted.
     """
 
     verdict: str
@@ -423,6 +458,11 @@ def resolve_trusted_keys(
 
     An entry of *trusted_keys* is either a recorded key — ``ed25519:BASE64`` or
     the bare base64 — or the path of a ``*.pub`` file holding one.
+
+    :param project: Locate the project whose pinned keys to include.
+    :param trusted_keys: Add explicit recorded keys or public-key files.
+    :return: Unique canonical trust-anchor values in stable order.
+    :raises ValueError: If an explicit key cannot be canonicalized.
     """
 
     keys: list[str] = []
@@ -527,6 +567,10 @@ def verify_v2_manifest(root: Path, path: Path) -> bool:
     This deliberately says nothing about *whose* key signed it: the key comes
     out of the manifest header. Use :func:`verify_manifest` for the trust
     decision.
+
+    :param root: Locate the tree the manifest should describe.
+    :param path: Locate the v2 manifest to verify.
+    :return: Whether the tree and signature verify, without a trust decision.
     """
 
     return _verify_v2(root, path, ()).valid
@@ -547,7 +591,12 @@ def _legacy_public_key(path: Path) -> str | None:
 
 
 def verify_legacy_manifest(root: Path, path: Path) -> bool:
-    """Verify a legacy manifest without modifying its project tree."""
+    """Verify a legacy manifest without modifying its project tree.
+
+    :param root: Locate the tree the manifest should describe.
+    :param path: Locate the legacy manifest to verify.
+    :return: Whether the legacy tree records and signature verify.
+    """
 
     try:
         raw = bz2.decompress(path.read_bytes())
@@ -620,6 +669,12 @@ def verify_manifest(
     The trust anchor is the key pinned in ``project.json`` — never the key the
     manifest being verified names in its own header — plus any key passed in
     *trusted_keys*, as a recorded value or as the path of a ``*.pub`` file.
+
+    :param project: Locate the project to discover and verify.
+    :param manifest: Select a manifest path instead of the project default.
+    :param trusted_keys: Add explicit trust anchors to the project keys.
+    :return: The detailed verification verdict.
+    :raises ValueError: If no project or usable manifest exists.
     """
 
     supplied = Path(project).expanduser().resolve() if project is not None else Path.cwd().resolve()

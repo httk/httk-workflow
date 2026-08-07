@@ -68,7 +68,13 @@ def _copy_tree(source: Path, destination: Path) -> None:
 
 @dataclass(frozen=True)
 class ChildReference:
-    """The stable identity used in a native join."""
+    """Identify one child in a native join.
+
+    :param workspace_id: Identify the child's workspace.
+    :param job_id: Identify the child job.
+    :param job_key: Identify the child payload and markers.
+    :param placement_hint: Locate the child within its workspace.
+    """
 
     workspace_id: str
     job_id: str
@@ -76,6 +82,10 @@ class ChildReference:
     placement_hint: str
 
     def as_mapping(self) -> dict[str, str]:
+        """Return the protocol mapping for this child.
+
+        :return: The serialized child reference.
+        """
         return {
             "workspace_id": self.workspace_id,
             "job_id": self.job_id,
@@ -90,7 +100,15 @@ def join_mapping(
     count: int | None = None,
     on_impossible_step: str | None = None,
 ) -> dict[str, object]:
-    """Return the validated ``join`` member of one waiting outcome."""
+    """Return the validated ``join`` member of one waiting outcome.
+
+    :param children: Identify the child jobs to join.
+    :param condition: Select the condition that decides the join.
+    :param count: Set the success threshold for ``at_least``.
+    :param on_impossible_step: Name the step to advance to when the join is impossible.
+    :return: The validated join mapping.
+    :raises ValueError: If the child set or condition arguments are invalid.
+    """
 
     if not children:
         raise ValueError("a join requires at least one child")
@@ -118,6 +136,30 @@ class JobSpec:
     ``installed`` runner lives outside the payload and must therefore pin its own
     ``runner_sha256``, which is how one published runner serves a whole campaign
     of jobs without being copied per job.
+
+    :param name: Set the job display name.
+    :param workflow: Name the workflow.
+    :param runner_path: Locate the runner.
+    :param initial_step: Name the starting step.
+    :param tag: Set the optional job tag.
+    :param job_id: Preserve a job id when resuming or spawning.
+    :param runner_executor: Select the runner executor.
+    :param runner_source: Select where the runner lives.
+    :param runner_sha256: Pin a runner outside the payload by digest.
+    :param runner_arguments: Supply runner arguments.
+    :param workdir_mode: Select the workdir mode.
+    :param workdir_path: Name the workdir below the job payload.
+    :param data_mode: Select the job data mode.
+    :param priority: Set the scheduling priority.
+    :param claim_pool: Select the claim pool.
+    :param required_capabilities: Require these manager capabilities.
+    :param maximum_attempts_per_activation: Bound attempts in one activation.
+    :param maximum_total_attempts: Bound attempts across the job.
+    :param maximum_activations: Bound job activations.
+    :param retry_on: Name manager-detected failure codes eligible for retry.
+    :param resources: Supply resource requirements.
+    :param parameters: Supply opaque job parameters.
+    :param declarations: Supply workflow declarations.
     """
 
     name: str
@@ -146,6 +188,12 @@ class JobSpec:
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
     def as_mapping(self, *, parent: Mapping[str, object] | None = None) -> dict[str, object]:
+        """Return the validated job-definition mapping.
+
+        :param parent: Identify the parent job when this is a spawned child.
+        :return: The mapping written to ``job.json``.
+        :raises ValueError: If runner placement or digest settings are invalid.
+        """
         limits = {
             "maximum_attempts_per_activation": self.maximum_attempts_per_activation,
             "maximum_total_attempts": self.maximum_total_attempts,
@@ -206,6 +254,14 @@ def prepare_job_payload(
     payload directly on durable storage; it defaults to ``False`` because a
     payload prepared here is not yet a workspace artifact, and its submission
     is what makes it authoritative and durable.
+
+    :param destination: Locate the prepared payload directory.
+    :param spec: Supply the immutable job definition values.
+    :param parent: Identify the parent job when preparing a child.
+    :param durable: Synchronize ``job.json`` before returning.
+    :return: The validated job definition.
+    :raises FileExistsError: If ``job.json`` already exists.
+    :raises ValueError: If the job definition or payload runner is invalid.
     """
 
     root = Path(destination)
@@ -224,7 +280,12 @@ def prepare_job_payload(
 
 
 class TransactionBuilder:
-    """Build a validated replayable transaction manifest."""
+    """Build a validated replayable transaction manifest.
+
+    :param root: Locate the transaction staging directory.
+    :param expected_generation: Pin the data generation the transaction applies to.
+    :param durable: Synchronize the sealed manifest before returning it.
+    """
 
     def __init__(self, root: Path, *, expected_generation: int, durable: bool = False) -> None:
         self.root = root
@@ -248,6 +309,12 @@ class TransactionBuilder:
         the operations of a draft from one call to the next. Resuming reads it
         back, so appending an operation continues the same sequence and the same
         overlap checks as the process that staged the first one.
+
+        :param root: Locate the sealed transaction directory.
+        :param expected_generation: Require this data generation in the manifest.
+        :param durable: Preserve the durability setting for later sealing.
+        :return: The resumed transaction builder.
+        :raises ValueError: If the manifest format or generation is invalid.
         """
 
         target = Path(root)
@@ -272,7 +339,10 @@ class TransactionBuilder:
         return result
 
     def __len__(self) -> int:
-        """The number of operations staged on this transaction so far."""
+        """Return the number of operations staged on this transaction.
+
+        :return: The staged operation count.
+        """
 
         return len(self._operations)
 
@@ -296,6 +366,11 @@ class TransactionBuilder:
         return {"id": identifier, "op": operation, "path": target.as_posix()}
 
     def make_dir(self, operation_id: str, path: str | os.PathLike[str]) -> None:
+        """Stage creation of one directory.
+
+        :param operation_id: Identify the transaction operation.
+        :param path: Name the relative destination directory.
+        """
         self._operations.append(self._operation(operation_id, "make-dir", path, track_target=False))
 
     def put_file(
@@ -304,6 +379,13 @@ class TransactionBuilder:
         source: str | os.PathLike[str],
         path: str | os.PathLike[str],
     ) -> None:
+        """Stage one regular file for installation.
+
+        :param operation_id: Identify the transaction operation.
+        :param source: Locate the regular source file.
+        :param path: Name the relative destination path.
+        :raises ValueError: If the source is not a regular file.
+        """
         item = self._operation(operation_id, "put-file", path)
         source_path = Path(source)
         if not source_path.is_file() or source_path.is_symlink():
@@ -321,6 +403,14 @@ class TransactionBuilder:
         *,
         replace: bool = False,
     ) -> None:
+        """Stage one directory tree for installation.
+
+        :param operation_id: Identify the transaction operation.
+        :param source: Locate the regular source directory.
+        :param path: Name the relative destination path.
+        :param replace: Replace the destination tree instead of merging it.
+        :raises ValueError: If the source tree contains an unsupported entry.
+        """
         item = self._operation(operation_id, "replace-tree" if replace else "put-tree", path)
         staged = self.root / "payload" / operation_id
         _copy_tree(Path(source), staged)
@@ -328,11 +418,21 @@ class TransactionBuilder:
         self._operations.append(item)
 
     def remove(self, operation_id: str, path: str | os.PathLike[str], *, missing_ok: bool = False) -> None:
+        """Stage removal of one path.
+
+        :param operation_id: Identify the transaction operation.
+        :param path: Name the relative path to remove.
+        :param missing_ok: Allow the destination to be absent during replay.
+        """
         item = self._operation(operation_id, "remove", path)
         item["missing_ok"] = missing_ok
         self._operations.append(item)
 
     def seal(self) -> Path:
+        """Seal the staged operations into a manifest.
+
+        :return: The sealed manifest path.
+        """
         write_json_atomic(
             self.root / "manifest.json",
             {
@@ -355,6 +455,11 @@ class OutcomeDraft:
     is bound to nothing but the attempt identity and the control directory, so
     the authoring SDK and the Bash bridge publish through exactly one
     implementation.
+
+    :param context: Provide the attempt identity and generation.
+    :param control: Locate the attempt control directory.
+    :param root: Locate an existing unpublished draft, when resuming one.
+    :param durable: Synchronize the draft before publishing it.
     """
 
     def __init__(
@@ -415,6 +520,12 @@ class OutcomeDraft:
         return result
 
     def transaction(self) -> TransactionBuilder:
+        """Create the transaction builder for this outcome.
+
+        :return: The outcome's transaction builder.
+        :raises ValueError: If the attempt has no transactional data.
+        :raises RuntimeError: If the outcome already has a transaction.
+        """
         if self.context.data_generation is None:
             raise ValueError("this job does not use transactional data")
         if self._transaction is not None or (self.root / "transaction").exists():
@@ -453,7 +564,13 @@ class OutcomeDraft:
         *,
         label: str | None = None,
     ) -> ChildReference:
-        """Register one prepared payload directory as a child of this outcome."""
+        """Register one prepared payload directory as a child of this outcome.
+
+        :param payload: Locate the prepared child payload.
+        :param placement: Place the child within the workspace.
+        :param label: Set the child's unique spawn label.
+        :return: The registered child reference.
+        """
 
         source = Path(payload)
         return self._register_child(read_json(source / "job.json"), placement, label=label, source=source)
@@ -470,6 +587,11 @@ class OutcomeDraft:
         A child whose runner lives outside the payload — a workspace or installed
         runner — is completely described by its ``job.json``, so a partitioned
         campaign can spawn children without copying a payload tree per child.
+
+        :param job: Supply the synthesized child job definition.
+        :param placement: Place the child within the workspace.
+        :param label: Set the child's unique spawn label.
+        :return: The registered child reference.
         """
 
         return self._register_child(dict(job), placement, label=label, source=None)
@@ -526,6 +648,10 @@ class OutcomeDraft:
 
     @property
     def children(self) -> tuple[ChildReference, ...]:
+        """Return the children registered in this outcome.
+
+        :return: The child references in registration order.
+        """
         return tuple(item[0] for item in self._children)
 
     def _write_spawn(self) -> None:
@@ -556,6 +682,22 @@ class OutcomeDraft:
         expected_data_generation: int | None = None,
         runner_steps: Sequence[str] | None = None,
     ) -> Path:
+        """Publish this outcome atomically.
+
+        :param action: Select the next job action.
+        :param next_step: Name the next step for ``advance`` or ``wait``.
+        :param priority: Override the next marker priority.
+        :param failure: Supply canonical failure details for ``fail``.
+        :param retry: Supply retry details for ``retry``.
+        :param join: Supply join details for ``wait``.
+        :param pause: Supply pause details for ``pause``.
+        :param message: Attach an optional human-readable message.
+        :param expected_data_generation: Confirm the transaction generation.
+        :param runner_steps: Record the runner steps available to the manager.
+        :return: The authoritative published outcome path.
+        :raises FileExistsError: If an outcome is already published.
+        :raises ValueError: If the action's required details are invalid.
+        """
         ready = self.control / "outcome.ready"
         if ready.exists():
             raise FileExistsError(f"an outcome is already published: {ready}")
@@ -635,7 +777,12 @@ class OutcomeDraft:
 
 
 class ReplayableWorkdirBatch:
-    """A sealed, idempotently replayable set of workdir changes."""
+    """Build a sealed, idempotently replayable set of workdir changes.
+
+    :param workdir: Locate the workdir receiving the changes.
+    :param root: Locate the batch staging directory.
+    :param durable: Synchronize staged and applied batch directories.
+    """
 
     def __init__(self, workdir: Path, root: Path, *, durable: bool = False) -> None:
         self.workdir = workdir
@@ -648,12 +795,22 @@ class ReplayableWorkdirBatch:
 
     @classmethod
     def create(cls, workdir: str | os.PathLike[str], *, durable: bool = False) -> "ReplayableWorkdirBatch":
+        """Create a new workdir batch.
+
+        :param workdir: Locate the workdir receiving the changes.
+        :param durable: Synchronize the batch publications.
+        :return: The new replayable batch.
+        """
         target = Path(workdir).resolve()
         draft = target / ".httk-runner" / "workdir-drafts" / str(uuid.uuid4())
         draft.mkdir(parents=True)
         return cls(target, draft, durable=durable)
 
     def seal(self) -> Path:
+        """Seal the batch for recovery.
+
+        :return: The sealed ready-directory path.
+        """
         self.transaction.seal()
         ready_root = self.workdir / ".httk-runner" / "workdir-ready"
         ready_root.mkdir(parents=True, exist_ok=True)
@@ -670,6 +827,10 @@ class ReplayableWorkdirBatch:
         return ready
 
     def commit(self) -> Path:
+        """Replay and retire the sealed batch.
+
+        :return: The applied batch path.
+        """
         if self.root.parent.name != "workdir-ready":
             self.seal()
         replay_transaction(self.root, self.workdir, expected_generation=0, durable=self.durable)
@@ -684,6 +845,12 @@ class ReplayableWorkdirBatch:
 
     @staticmethod
     def recover(workdir: str | os.PathLike[str], *, durable: bool = False) -> tuple[Path, ...]:
+        """Replay every ready batch found in a workdir.
+
+        :param workdir: Locate the workdir containing ready batches.
+        :param durable: Synchronize replayed publications.
+        :return: The applied batch paths.
+        """
         target = Path(workdir).resolve()
         ready_root = target / ".httk-runner" / "workdir-ready"
         if not ready_root.is_dir():
@@ -715,6 +882,9 @@ class JobState(MutableMapping[str, object]):
     Keys are nonempty strings and values must be JSON. Each mutation rewrites the
     whole document through an atomic replace, so a crash leaves either the
     previous state or the new one.
+
+    :param payload: Locate the job payload containing the state directory.
+    :param durable: Synchronize each atomic state replacement.
     """
 
     def __init__(self, payload: str | os.PathLike[str], *, durable: bool = False) -> None:
@@ -725,12 +895,19 @@ class JobState(MutableMapping[str, object]):
         self.durable = durable
 
     def read(self) -> dict[str, object]:
-        """Return the whole state document."""
+        """Return the whole state document.
+
+        :return: The current JSON state mapping.
+        """
 
         return {} if not self.path.exists() else read_json(self.path)
 
     def merge(self, values: Mapping[str, object]) -> None:
-        """Write several keys in one atomic replace."""
+        """Write several keys in one atomic replace.
+
+        :param values: Supply the keys and values to merge.
+        :raises ValueError: If a key or value is not valid JSON state.
+        """
 
         state = self.read()
         for name, value in values.items():
@@ -739,12 +916,21 @@ class JobState(MutableMapping[str, object]):
         write_json_atomic(self.path, state, durable=self.durable)
 
     def set(self, name: str, value: object) -> None:
-        """Store one value, an alias of ``state[name] = value``."""
+        """Store one value, an alias of ``state[name] = value``.
+
+        :param name: Name the state key.
+        :param value: Supply the JSON-compatible value.
+        :raises ValueError: If the key or value is invalid JSON state.
+        """
 
         self[name] = value
 
     def delete(self, name: str) -> bool:
-        """Remove one key, reporting whether it was present."""
+        """Remove one key, reporting whether it was present.
+
+        :param name: Name the state key.
+        :return: Whether the key was present.
+        """
 
         state = self.read()
         if name not in state:
@@ -788,12 +974,22 @@ def _check_state_item(name: str, value: object) -> None:
 
 
 class RunLog:
-    """Append-only structured application evidence in a workdir."""
+    """Append structured application evidence in a workdir.
+
+    :param workdir: Locate the workdir receiving the run log.
+    """
 
     def __init__(self, workdir: str | os.PathLike[str]) -> None:
         self.path = Path(workdir).resolve() / ".httk-runner" / "runlog.jsonl"
 
     def append(self, kind: str, message: str, *, files: Sequence[str | os.PathLike[str]] = ()) -> None:
+        """Append one structured run-log event.
+
+        :param kind: Name the event kind.
+        :param message: Record the event message.
+        :param files: Attach existing regular files as evidence.
+        :raises ValueError: If *kind* is empty or contains NUL.
+        """
         if not kind or "\x00" in kind:
             raise ValueError("run-log kind must be a nonempty string without NUL")
         attachments: list[dict[str, object]] = []

@@ -1,4 +1,4 @@
-"""Compatibility shim over the project anchor, now owned by :mod:`httk.core.project`.
+"""Expose workflow project policy over the project anchor owned by :mod:`httk.core.project`.
 
 The project anchor — the ``httk_project`` directory, ``project.json`` and its
 validation, upward discovery, the identity key, and key pinning and trust —
@@ -121,7 +121,14 @@ def initialize_project(
     description: str = "",
     manifest_exclusions: Iterable[str] = (),
 ) -> dict[str, object]:
-    """Initialize the project anchor without creating a workspace."""
+    """Initialize the project anchor without creating a workspace.
+
+    :param root: Directory in which to create the project anchor.
+    :param name: Project name.
+    :param description: Optional project description.
+    :param manifest_exclusions: Relative paths excluded from the manifest.
+    :return: Created project metadata.
+    """
 
     return _initialize_anchor(
         root,
@@ -137,12 +144,24 @@ def import_v1_project(
     source: str | os.PathLike[str] | None = None,
     name: str | None = None,
 ) -> dict[str, object]:
-    """Create v2 project metadata from a legacy ``ht.project`` directory."""
+    """Create v2 project metadata from a legacy ``ht.project`` directory.
+
+    :param root: Directory in which to create the project anchor.
+    :param source: Legacy project directory, or the default legacy location.
+    :param name: Replacement project name, or the legacy name.
+    :return: Created project metadata.
+    """
 
     return _import_v1_anchor(root, source=source, name=name)
 
 
 def project_exclusions(metadata: dict[str, object]) -> tuple[str, ...]:
+    """Return default and configured manifest exclusions.
+
+    :param metadata: Project metadata containing optional exclusions.
+    :return: Exclusion patterns applied to the signed manifest.
+    :raises ValueError: If configured exclusions are not strings in an array.
+    """
     configured = metadata.get("manifest_exclusions", [])
     if not isinstance(configured, list) or not all(isinstance(item, str) for item in configured):
         raise ValueError("manifest_exclusions must be an array of strings")

@@ -24,7 +24,33 @@ __all__ = [
 
 @dataclass(frozen=True)
 class AttemptContext:
-    """The immutable identity and restart evidence for one running attempt."""
+    """Describe the immutable identity and restart evidence for one running attempt.
+
+    :param workspace_id: Identify the workspace.
+    :param job_id: Identify the job.
+    :param job_key: Identify the job payload.
+    :param placement: Locate the job placement.
+    :param step: Identify the runner step.
+    :param activation_id: Identify the activation.
+    :param attempt_id: Identify the attempt.
+    :param activation_ordinal: Record the activation sequence position.
+    :param attempt_ordinal: Record the attempt sequence position.
+    :param total_attempts: Record the planned attempt count.
+    :param is_restart: Mark whether this attempt is a restart.
+    :param is_unclean_restart: Mark whether the restart followed an unclean exit.
+    :param attempt_reason: Explain why this attempt was selected.
+    :param previous_attempt_id: Identify the preceding attempt when present.
+    :param activation_reason: Explain why the activation was selected.
+    :param workdir_mode: Describe how the work directory was selected.
+    :param workdir_reused: Mark whether the work directory was reused.
+    :param unsafe_persistent_takeover: Record whether persistent takeover was enabled.
+    :param data_generation: Record the data generation at claim time.
+    :param durable: Record whether storage-crash durability was enabled.
+    :param settings: Record workspace application settings at claim time.
+    :param resources: Record the resources assigned to the attempt.
+    :param join: Record the job's join description.
+    :param raw: Preserve the complete decoded context.
+    """
 
     workspace_id: str
     job_id: str
@@ -65,7 +91,12 @@ class AttemptContext:
 
     @classmethod
     def read(cls, path: str | os.PathLike[str]) -> Self:
-        """Read and validate a manager-written attempt context."""
+        """Read and validate a manager-written attempt context.
+
+        :param path: Locate the attempt context file.
+        :return: The validated attempt context.
+        :raises ValueError: If the context format or required values are invalid.
+        """
 
         value = read_json(Path(path))
         if value.get("format") != "httk-workflow-attempt-context" or value.get("format_version") != 1:
@@ -176,7 +207,14 @@ def _read_environment(environment: Mapping[str, str] | None = None) -> _AttemptE
 
 @dataclass(frozen=True)
 class CommandResult:
-    """Result of an argv-only supervised child process."""
+    """Report the result of an argv-only supervised child process.
+
+    :param argv: Preserve the command arguments that were run.
+    :param returncode: Record the child process return code.
+    :param stdout: Capture standard output.
+    :param stderr: Capture standard error.
+    :param timed_out: Mark whether the command exceeded its timeout.
+    """
 
     argv: tuple[str, ...]
     returncode: int
@@ -193,7 +231,16 @@ def run_command(
     environment: Mapping[str, str] | None = None,
     termination_grace: float = 10.0,
 ) -> CommandResult:
-    """Run an argv array and terminate its process group on timeout."""
+    """Run an argv array and terminate its process group on timeout.
+
+    :param argv: Supply the nonempty command argument sequence.
+    :param timeout: Stop the command after this many seconds when supplied.
+    :param cwd: Set the child working directory.
+    :param environment: Set the child environment.
+    :param termination_grace: Wait this long after termination before killing.
+    :return: The supervised command result.
+    :raises ValueError: If the command or timeout settings are invalid.
+    """
 
     command = tuple(argv)
     if not command or not all(isinstance(item, str) and item for item in command):

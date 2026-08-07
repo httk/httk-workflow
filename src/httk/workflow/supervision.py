@@ -65,7 +65,13 @@ _MAXIMUM_REAP_WAIT = 10.0
 
 @dataclass(frozen=True)
 class SourceEvent:
-    """One event delivered to an in-process or executable checker."""
+    """Describe one event delivered to a checker.
+
+    :param event: Identify the event kind.
+    :param source: Identify the stream or process that produced it.
+    :param line: Preserve the event line when one exists.
+    :param timestamp: Preserve the event timestamp, or generate one when absent.
+    """
 
     event: Literal["start", "line", "tick", "source-eof", "process-exit"]
     source: str
@@ -73,6 +79,10 @@ class SourceEvent:
     timestamp: str = ""
 
     def as_mapping(self) -> dict[str, object]:
+        """Return the checker protocol mapping for this event.
+
+        :return: The serialized event mapping.
+        """
         result: dict[str, object] = {
             "format": "httk-workflow-checker-event",
             "format_version": 1,
@@ -87,7 +97,15 @@ class SourceEvent:
 
 @dataclass(frozen=True)
 class Diagnostic:
-    """A structured observation made while supervising a program."""
+    """Describe a structured observation made while supervising a program.
+
+    :param code: Name the stable diagnostic code.
+    :param severity: Classify the diagnostic severity.
+    :param summary: Summarize the observation.
+    :param source: Identify the source that produced it.
+    :param evidence: Preserve supporting evidence when present.
+    :param stop: Request termination of the supervised command.
+    """
 
     code: str
     severity: DiagnosticSeverity
@@ -97,6 +115,10 @@ class Diagnostic:
     stop: bool = False
 
     def as_mapping(self) -> dict[str, object]:
+        """Return the serialized diagnostic mapping.
+
+        :return: The diagnostic mapping.
+        """
         result: dict[str, object] = {
             "code": self.code,
             "severity": self.severity,
@@ -111,7 +133,12 @@ class Diagnostic:
 
 @dataclass(frozen=True)
 class FollowSource:
-    """A file to follow while the child process is running."""
+    """Describe a file to follow while the child process is running.
+
+    :param path: Locate the file to follow.
+    :param name: Identify the source in emitted events.
+    :param inactivity_timeout: Stop when no data arrives for this interval.
+    """
 
     path: Path
     name: str | None = None
@@ -120,7 +147,12 @@ class FollowSource:
 
 @dataclass(frozen=True)
 class CheckerSpec:
-    """A versioned executable checker."""
+    """Describe a versioned executable checker.
+
+    :param argv: Supply the checker command and arguments.
+    :param required: Require the checker to remain available for the run.
+    :param sources: Select files the checker follows.
+    """
 
     argv: tuple[str, ...]
     required: bool = True
@@ -128,6 +160,12 @@ class CheckerSpec:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> "CheckerSpec":
+        """Validate and build a checker specification from a mapping.
+
+        :param value: Supply the serialized checker specification.
+        :return: The validated checker specification.
+        :raises ValueError: If the mapping has an invalid checker format or source.
+        """
         if value.get("format") != "httk-workflow-checker-spec" or value.get("format_version") != 1:
             raise ValueError("checker spec must use httk-workflow-checker-spec version 1")
         raw = value.get("argv")
@@ -164,6 +202,22 @@ class ProcessReport:
     capture limit. ``stdout_bytes`` and ``stderr_bytes`` always count every byte
     the program produced, and ``stdout_truncated`` and ``stderr_truncated`` say
     whether anything was dropped from the retained tail.
+
+    :param argv: Preserve the executed command.
+    :param started_at: Record when execution began.
+    :param finished_at: Record when execution ended.
+    :param returncode: Record the process return code.
+    :param termination: Record why execution ended.
+    :param stdout: Preserve the captured stdout tail.
+    :param stderr: Preserve the captured stderr tail.
+    :param diagnostics: Preserve emitted diagnostics.
+    :param stdout_path: Locate the authoritative stdout file when configured.
+    :param stderr_path: Locate the authoritative stderr file when configured.
+    :param stdout_bytes: Count all stdout bytes produced.
+    :param stderr_bytes: Count all stderr bytes produced.
+    :param stdout_truncated: Indicate that stdout was truncated.
+    :param stderr_truncated: Indicate that stderr was truncated.
+    :param dropped_diagnostics: Count diagnostics dropped from the middle.
     """
 
     argv: tuple[str, ...]
@@ -184,9 +238,17 @@ class ProcessReport:
 
     @property
     def timed_out(self) -> bool:
+        """Report whether the process ended because of a timeout.
+
+        :return: Whether the termination reason starts with ``timeout``.
+        """
         return self.termination.startswith("timeout")
 
     def as_mapping(self) -> dict[str, object]:
+        """Return the serialized process report.
+
+        :return: The report mapping.
+        """
         return {
             "format": "httk-workflow-process-report",
             "format_version": 1,
@@ -206,6 +268,11 @@ class ProcessReport:
         }
 
     def write(self, path: str | os.PathLike[str]) -> Path:
+        """Write the serialized report atomically.
+
+        :param path: Locate the report file to write.
+        :return: The report path.
+        """
         destination = Path(path)
         write_json_atomic(destination, self.as_mapping())
         return destination
@@ -432,6 +499,10 @@ class ProcessSupervisor:
     handlers are restored, the child's process group is terminated and reaped,
     the reader threads are joined, and the output handles are closed before
     :meth:`run` returns or propagates.
+
+    :param monitors: Supply in-process event monitors.
+    :param checkers: Supply executable checker specifications.
+    :param follow: Supply files to follow during the run.
     """
 
     def __init__(
@@ -461,7 +532,23 @@ class ProcessSupervisor:
         tail_limit: int = DEFAULT_TAIL_LIMIT,
         diagnostic_limit: int = DEFAULT_DIAGNOSTIC_LIMIT,
     ) -> ProcessReport:
-        """Run one command to completion and return its structured report."""
+        """Run one command to completion and return its structured report.
+
+        :param argv: Supply the command and arguments.
+        :param timeout: Stop the command after this interval.
+        :param cwd: Select the command working directory.
+        :param environment: Supply the command environment.
+        :param termination_grace: Wait this long after requesting termination.
+        :param stdout_path: Write stdout to this authoritative file.
+        :param stderr_path: Write stderr to this authoritative file.
+        :param tick_interval: Set the interval between tick events.
+        :param follow_interval: Set the interval between followed-file polls.
+        :param capture_limit: Bound retained output without an output file.
+        :param tail_limit: Bound retained output with an output file.
+        :param diagnostic_limit: Bound retained diagnostics.
+        :return: The structured process report.
+        :raises ValueError: If command or supervision limits are invalid.
+        """
 
         command = tuple(argv)
         if not command or not all(isinstance(item, str) and item for item in command):

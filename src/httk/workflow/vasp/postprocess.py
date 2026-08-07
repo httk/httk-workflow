@@ -81,7 +81,11 @@ def _energy(record: JobRecord, path: Path) -> httk.core.DataRecord:
 
 
 def postprocess_vasp_relax(record: JobRecord) -> Mapping[str, object]:
-    """Extract the relaxed structure and final energy from one VASP job."""
+    """Extract the relaxed structure and final energy from one VASP job.
+
+    :param record: Read the collected VASP job record.
+    :return: Extracted output roles for the relaxation workflow.
+    """
 
     prefix = _parameter(record, "data_prefix", "vasp")
     return {
@@ -91,14 +95,22 @@ def postprocess_vasp_relax(record: JobRecord) -> Mapping[str, object]:
 
 
 def postprocess_vasp_static(record: JobRecord) -> Mapping[str, object]:
-    """Extract the final energy from one static VASP job."""
+    """Extract the final energy from one static VASP job.
+
+    :param record: Read the collected VASP job record.
+    :return: Extracted output roles for the static workflow.
+    """
 
     prefix = _parameter(record, "data_prefix", "vasp")
     return {"total_energy": _energy(record, _data_file(record, f"{prefix}/OUTCAR" if prefix else "OUTCAR"))}
 
 
 def postprocess_vasp_relax_static(record: JobRecord) -> Mapping[str, object]:
-    """Extract the relaxed structure and final static energy."""
+    """Extract the relaxed structure and final static energy.
+
+    :param record: Read the collected VASP job record.
+    :return: Extracted output roles from the relaxation and static stages.
+    """
 
     prefix = _parameter(record, "data_prefix", "")
     root = f"{prefix}/" if prefix else ""

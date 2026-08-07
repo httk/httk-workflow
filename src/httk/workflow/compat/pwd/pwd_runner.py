@@ -99,7 +99,12 @@ run = Runner(WORKFLOW)
 
 
 class NodeError(Exception):
-    """One node of the graph could not be prepared or could not be run."""
+    """One node of the graph could not be prepared or could not be run.
+
+    :param node: Identify the failing node.
+    :param message: Describe the failure.
+    :param details: Preserve structured failure details.
+    """
 
     def __init__(self, node: int, message: str, *, details: Mapping[str, object] | None = None) -> None:
         super().__init__(message)
@@ -108,7 +113,12 @@ class NodeError(Exception):
 
 
 def document_of(a: Attempt) -> PwdDocument:
-    """Return the PWD document this job carries, embedded or staged."""
+    """Return the PWD document this job carries, embedded or staged.
+
+    :param a: Read the document from this attempt's parameters or payload.
+    :return: The validated PWD document.
+    :raises ValueError: If the job has no readable or valid PWD document.
+    """
 
     embedded = a.parameter("pwd_document", None)
     if embedded is None:
@@ -131,7 +141,12 @@ def document_of(a: Attempt) -> PwdDocument:
 
 
 def import_roots(a: Attempt) -> list[str]:
-    """Return the import roots this job adds, payload first."""
+    """Return the import roots this job adds, payload first.
+
+    :param a: Read module paths from this attempt.
+    :return: Import roots with the payload files directory first.
+    :raises ValueError: If the module path parameter is not a sequence.
+    """
 
     roots = [str(a.payload / "files")]
     extra = a.parameter("pwd_module_path", [])
@@ -142,7 +157,12 @@ def import_roots(a: Attempt) -> list[str]:
 
 
 def allowed_modules(a: Attempt) -> tuple[str, ...]:
-    """Return the module prefix allowlist of this job, empty meaning none."""
+    """Return the module prefix allowlist of this job, empty meaning none.
+
+    :param a: Read the allowlist from this attempt.
+    :return: Allowed module prefixes.
+    :raises ValueError: If the allowlist parameter is not a sequence.
+    """
 
     value = a.parameter("pwd_allowed_modules", [])
     if isinstance(value, str) or not isinstance(value, Sequence):
@@ -151,7 +171,14 @@ def allowed_modules(a: Attempt) -> tuple[str, ...]:
 
 
 def resolve_callable(reference: str, allowlist: Sequence[str], node: int) -> object:
-    """Import ``module.function`` and return the callable it names."""
+    """Import ``module.function`` and return the callable it names.
+
+    :param reference: Name the callable as a dotted module and attribute.
+    :param allowlist: Restrict the module to these prefixes when nonempty.
+    :param node: Identify the graph node requesting the callable.
+    :return: The imported callable.
+    :raises httk.workflow.compat.pwd.pwd_runner.NodeError: If the reference is malformed, disallowed, unavailable, or not callable.
+    """
 
     module_name, _, attribute = reference.rpartition(".")
     if not module_name or not attribute:
@@ -178,7 +205,15 @@ def resolve_callable(reference: str, allowlist: Sequence[str], node: int) -> obj
 
 
 def port_value(value: object, port: str | None, node: int, source: int) -> object:
-    """Return the value one edge carries out of a node's result."""
+    """Return the value one edge carries out of a node's result.
+
+    :param value: Read the source node result.
+    :param port: Select this mapping key or attribute, or the whole result when unset.
+    :param node: Identify the receiving node in errors.
+    :param source: Identify the producing node in errors.
+    :return: The value carried by the edge.
+    :raises httk.workflow.compat.pwd.pwd_runner.NodeError: If the requested output port does not exist.
+    """
 
     if port is None:
         return value
@@ -203,7 +238,13 @@ def node_arguments(
     node: int,
     results: Mapping[int, object],
 ) -> dict[str, object]:
-    """Return the keyword arguments the edges into *node* carry."""
+    """Return the keyword arguments the edges into *node* carry.
+
+    :param document: Read edges from this validated document.
+    :param node: Collect edges targeting this node.
+    :param results: Read source node results from this mapping.
+    :return: Keyword arguments assembled from incoming edges.
+    """
 
     arguments: dict[str, object] = {}
     for edge in document.edges:
@@ -221,7 +262,11 @@ def node_arguments(
 
 
 def jsonable(value: object) -> bool:
-    """Report whether one result can go into the checkpoint."""
+    """Report whether one result can go into the checkpoint.
+
+    :param value: Test this result for JSON serializability.
+    :return: Whether the value can be encoded as JSON.
+    """
 
     try:
         json.dumps(value)
@@ -239,7 +284,17 @@ def execute_node(
     overrides: Mapping[str, object],
     allowlist: Sequence[str],
 ) -> object:
-    """Compute one node of the graph and return its result."""
+    """Compute one node of the graph and return its result.
+
+    :param a: Log and execute through this attempt.
+    :param document: Read the node definition from this document.
+    :param node: Execute this node identifier.
+    :param results: Read completed upstream results.
+    :param overrides: Override input node values by name.
+    :param allowlist: Restrict imported function modules to these prefixes.
+    :return: The node result.
+    :raises httk.workflow.compat.pwd.pwd_runner.NodeError: If the node callable fails or cannot be resolved.
+    """
 
     definition = document.nodes[node]
     kind = str(definition.get("type"))
@@ -262,7 +317,12 @@ def execute_node(
 
 
 def publish_outputs(a: Attempt, document: PwdDocument, results: Mapping[int, object]) -> None:
-    """Write the named outputs of the graph, and publish them when asked to."""
+    """Write the named outputs of the graph, and publish them when asked to.
+
+    :param a: Write and publish outputs through this attempt.
+    :param document: Read output node definitions from this document.
+    :param results: Read completed node results.
+    """
 
     outputs: dict[str, object] = {}
     for node in document.order:
@@ -281,7 +341,10 @@ def publish_outputs(a: Attempt, document: PwdDocument, results: Mapping[int, obj
 
 @run.step
 def execute(a: Attempt) -> None:
-    """Run every node of the document once, resuming from the checkpoint."""
+    """Run every node of the document once, resuming from the checkpoint.
+
+    :param a: Execute and checkpoint this PWD job attempt.
+    """
 
     document = document_of(a)
     for root in reversed(import_roots(a)):

@@ -1,4 +1,4 @@
-"""Describing and repairing a project, its remotes, and its workspace.
+"""Describe and repair a project, its remotes, and its workspace.
 
 Everything here answers an operator question about state that already exists:
 *what is this project*, *what is this remote configured to do*, *what is wrong
@@ -172,6 +172,10 @@ def describe_project(
     description say whether the project is *currently* described by what it
     signed; by design, pass ``False`` for a cheap answer when verification is
     not required, because that skips the tree walk.
+
+    :param project_root: Project directory, or the discovered project.
+    :param verify: Whether to verify the project manifest contents.
+    :return: JSON-compatible project description.
     """
 
     project = require_project(project_root)
@@ -248,6 +252,11 @@ def describe_remote(
     file each one came from, and for a setting stored in the manifest-excluded
     ``credentials.json`` only its *name* is reported: a description an operator
     can paste into a bug report must never carry a password.
+
+    :param name: Remote bundle name.
+    :param project: Project directory used for project-local lookup.
+    :return: JSON-compatible remote description.
+    :raises ValueError: If the remote name is invalid or unknown.
     """
 
     bundle, scope = _remote_bundle(name, project=project)
@@ -315,6 +324,11 @@ def remove_remote(
     owes an answer about, and the adapter is how that answer is fetched.
     Removing the remote would leave the transfer with no way home, so it is
     refused by name — retire or fetch the transfer first.
+
+    :param name: Remote bundle name.
+    :param project: Project directory used for project-local lookup.
+    :return: JSON-compatible removal result.
+    :raises ValueError: If the remote is invalid, unknown, or still has transfers.
     """
 
     bundle, scope = _remote_bundle(name, project=project)
@@ -337,7 +351,16 @@ def remove_remote(
 
 @dataclass
 class Finding:
-    """One thing the doctor looked at, and what it found."""
+    """Describe one thing the doctor looked at and what it found.
+
+    :param check: Check name.
+    :param status: Check result status.
+    :param message: Human-readable result.
+    :param repairable: Whether the finding can be repaired automatically.
+    :param repaired: Whether this run repaired the finding.
+    :param action: Repair action, when one was taken.
+    :param details: Structured result details.
+    """
 
     check: str
     status: str
@@ -348,7 +371,10 @@ class Finding:
     details: dict[str, object] = field(default_factory=dict)
 
     def as_mapping(self) -> dict[str, object]:
-        """Return the JSON representation of this finding."""
+        """Return the JSON representation of this finding.
+
+        :return: JSON-compatible finding members.
+        """
 
         return {
             "check": self.check,
@@ -524,6 +550,10 @@ def project_doctor(
     when *repair* is asked for, and a run that repaired anything says exactly
     what it did — in the log and, when the project has a workspace, in that
     workspace's journal, so the repair is part of its durable history.
+
+    :param project_root: Project directory, or the discovered project.
+    :param repair: Whether to apply automatic repairs.
+    :return: JSON-compatible doctor report.
     """
 
     project = require_project(project_root)

@@ -1,4 +1,4 @@
-"""The public name of the command bridge behind the native Bash API.
+"""Expose the command bridge behind the native Bash API.
 
 Every function of the packaged ``shell/httk-workflow.sh`` library is one
 invocation of one subcommand of this bridge, and every subcommand publishes

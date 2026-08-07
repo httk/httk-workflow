@@ -1,4 +1,4 @@
-"""Filesystem-native workflow execution for httk₂.
+"""Expose filesystem-native workflow execution for httk₂.
 
 The package presents three layers, each with its own import home:
 

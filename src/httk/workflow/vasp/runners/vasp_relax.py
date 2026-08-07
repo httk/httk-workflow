@@ -57,7 +57,14 @@ run = Runner(WORKFLOW)
 
 
 def text_parameter(a: Attempt, name: str, default: str) -> str:
-    """Return one string input, refusing a value of another type."""
+    """Return one string parameter, refusing a value of another type.
+
+    :param a: Read the job parameters from this attempt.
+    :param name: Read this parameter name.
+    :param default: Use this value when the parameter is absent.
+    :return: The validated string value.
+    :raises ValueError: If the parameter is present with another type.
+    """
 
     value = a.parameter(name, default)
     if value is None:
@@ -68,7 +75,14 @@ def text_parameter(a: Attempt, name: str, default: str) -> str:
 
 
 def number_parameter(a: Attempt, name: str, default: float | None) -> float | None:
-    """Return one numeric input, refusing a value of another type."""
+    """Return one numeric input, refusing a value of another type.
+
+    :param a: Read the job parameters from this attempt.
+    :param name: Read this parameter name.
+    :param default: Use this value when the parameter is absent.
+    :return: The validated numeric value, or the default.
+    :raises ValueError: If the parameter is present with another type.
+    """
 
     value = a.parameter(name, default)
     if value is None:
@@ -79,7 +93,13 @@ def number_parameter(a: Attempt, name: str, default: float | None) -> float | No
 
 
 def tags_parameter(a: Attempt, name: str) -> dict[str, object]:
-    """Return one INCAR tag object input."""
+    """Return one INCAR tag object input.
+
+    :param a: Read the job parameters from this attempt.
+    :param name: Read this parameter name.
+    :return: The validated INCAR tag mapping.
+    :raises ValueError: If the parameter is not a mapping.
+    """
 
     value = a.parameter(name, {})
     if not isinstance(value, Mapping):
@@ -88,20 +108,36 @@ def tags_parameter(a: Attempt, name: str) -> dict[str, object]:
 
 
 def names_parameter(a: Attempt, name: str, default: str) -> tuple[str, ...]:
-    """Return one space-separated list input as a tuple of file names."""
+    """Return one space-separated list input as a tuple of file names.
+
+    :param a: Read the job parameters from this attempt.
+    :param name: Read this parameter name.
+    :param default: Use this space-separated list when absent.
+    :return: The selected file names.
+    """
 
     return tuple(text_parameter(a, name, default).split())
 
 
 def state_int(a: Attempt, name: str) -> int:
-    """Return one nonnegative integer job-state counter, absent meaning zero."""
+    """Return one nonnegative integer job-state counter, with invalid or absent values producing zero.
+
+    :param a: Read the job state from this attempt.
+    :param name: Read this state name.
+    :return: The nonnegative counter, or zero for an invalid or absent value.
+    """
 
     value = a.state.get(name, 0)
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 def preparation_options(a: Attempt, *, library: str | None) -> VaspPreparationOptions:
-    """Build the preparation options this job's inputs describe."""
+    """Build the preparation options this job's parameters describe.
+
+    :param a: Read preparation parameters from this attempt.
+    :param library: Use this pseudopotential library when set.
+    :return: The preparation options for the job.
+    """
 
     parallel_tag = text_parameter(a, "parallel_tag", "") or None
     parallel_value = number_parameter(a, "parallel_value", None)
@@ -121,6 +157,10 @@ def stage_inputs(a: Attempt, *, extra_tags: Mapping[str, object] | None = None) 
 
     Returns the preparation record, or ``None`` after publishing the failure of a
     job whose starting structure is not where its inputs say it is.
+
+    :param a: Stage files and publish failures through this attempt.
+    :param extra_tags: Add these INCAR tags to the preparation defaults.
+    :return: The preparation record, or ``None`` after an input failure.
     """
 
     validate_vasp_workdir(a.workdir)
@@ -166,6 +206,9 @@ def vasp_argv(a: Attempt) -> tuple[str, ...]:
     submitted elsewhere cannot know — winning over the workspace default, while
     letting an operator configure the command once per workspace instead of
     exporting it for every job.
+
+    :param a: Read command settings and parameters from this attempt.
+    :return: The VASP command argument vector.
     """
 
     text = a.setting("vasp.command", text_parameter(a, "vasp_command", ""))
@@ -178,6 +221,9 @@ def execute(a: Attempt, *, next_step: str) -> None:
     Exactly one outcome is published: the next step when the calculation
     completed, another attempt when a remedy was applied, and ``vasp.failed`` when
     the ladder has nothing left to try.
+
+    :param a: Run and update this VASP attempt.
+    :param next_step: Advance here after a completed calculation.
     """
 
     argv = vasp_argv(a)
@@ -248,7 +294,11 @@ def execute(a: Attempt, *, next_step: str) -> None:
 
 
 def publish_files(a: Attempt, *, prefix: str) -> None:
-    """Publish the collected files of a finished calculation."""
+    """Publish the collected files of a finished calculation.
+
+    :param a: Read files and publish them through this attempt.
+    :param prefix: Publish files below this data prefix.
+    """
 
     names = names_parameter(a, "collect", DEFAULT_COLLECT)
     published: list[str] = []
@@ -269,7 +319,10 @@ def publish_files(a: Attempt, *, prefix: str) -> None:
 
 @run.step
 def prepare(a: Attempt) -> None:
-    """Stage the payload inputs, derive the rest, and go on to run VASP."""
+    """Stage the payload inputs, derive the rest, and go on to run VASP.
+
+    :param a: Prepare and advance this VASP attempt.
+    """
 
     record = stage_inputs(a)
     if record is not None:
@@ -278,14 +331,20 @@ def prepare(a: Attempt) -> None:
 
 @run.step(name="run")
 def run_step(a: Attempt) -> None:
-    """Run VASP, remedy a recognized failure, or fail with what was diagnosed."""
+    """Run VASP, remedy a recognized failure, or fail with what was diagnosed.
+
+    :param a: Execute this VASP workflow attempt.
+    """
 
     execute(a, next_step="publish")
 
 
 @run.step
 def publish(a: Attempt) -> None:
-    """Publish the finished calculation and complete the job."""
+    """Publish the finished calculation and complete the job.
+
+    :param a: Publish results and complete this VASP attempt.
+    """
 
     publish_files(a, prefix=text_parameter(a, "data_prefix", "vasp"))
     a.succeed()
