@@ -374,10 +374,13 @@ def test_v1_atomic_replay_is_idempotent(tmp_path: Path) -> None:
 
 def _v1_package(root: Path, manifest: str, program: str) -> Path:
     root.mkdir()
-    (root / "workflow.toml").write_text(manifest, encoding="utf-8")
+    (root / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
     runner = root / "ht_steps"
     runner.write_text(program, encoding="utf-8")
     runner.chmod(0o755)
+    script = root / "report.sh"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.chmod(0o755)
     return root
 
 
@@ -395,8 +398,11 @@ attempts = 2
 [workflow.outputs.result]
 entry_type = "records"
 
-[workflow.postprocess]
-file = "postprocess.py"
+[workflow.collect]
+file = "collect.py"
+
+[workflow.postprocess.report]
+file = "report.sh"
 '''
 
 _V1_PROGRAM = '''#!/usr/bin/env bash
@@ -410,9 +416,9 @@ HT_TASK_FINISHED
 def test_v1_language_manifest_package_runs_and_collects(tmp_path: Path) -> None:
     package = _v1_package(tmp_path / "package", _V1_MANIFEST, _V1_PROGRAM)
     (package / "result.txt.template").write_text("$value\n", encoding="utf-8")
-    (package / "postprocess.py").write_text(
+    (package / "collect.py").write_text(
         "from httk.core import DataRecord\n"
-        "def postprocess(record):\n"
+        "def collect(record):\n"
         "    value = (record.workdir / 'result.txt').read_text().strip()\n"
         "    return {'result': DataRecord.from_value('https://example.test/result', 'result', value)}\n",
         encoding="utf-8",
@@ -439,21 +445,22 @@ def test_v1_language_manifest_package_runs_and_collects(tmp_path: Path) -> None:
         "legacy_priority": 3,
         "attempts": 2,
     }
-    assert not (jobs[0].payload / "workflow.toml").exists()
-    assert not (jobs[0].payload / "postprocess.py").exists()
+    assert not (jobs[0].payload / "httk_workflow.toml").exists()
+    assert not (jobs[0].payload / "collect.py").exists()
+    assert not (jobs[0].payload / "report.sh").exists()
 
     with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
         manager.run_until_idle(timeout=15)
     assert all(workspace.find_marker_by_id(job.job_id).kind == "succeeded" for job in jobs)  # type: ignore[union-attr]
     collected = list(collect(workspace))
     assert {cast(Any, item.outputs["result"]).value for item in collected} == {"one", "two", "three"}
-    assert all(item.run is not None and item.missing_postprocessor is None for item in collected)
+    assert all(item.run is not None and item.missing_collector is None for item in collected)
 
 
 def test_v1_language_campaign_snapshots_template_members(tmp_path: Path) -> None:
     package = _v1_package(tmp_path / "package", _V1_MANIFEST, _V1_PROGRAM)
     (package / "result.txt.template").write_text("$value\n", encoding="utf-8")
-    (package / "postprocess.py").write_text("def postprocess(record): return {}\n", encoding="utf-8")
+    (package / "collect.py").write_text("def collect(record): return {}\n", encoding="utf-8")
     workspace = Workspace.initialize(tmp_path / "workspace")
     campaign = new_jobs(
         workspace,
@@ -468,7 +475,7 @@ def test_v1_language_campaign_snapshots_template_members(tmp_path: Path) -> None
 
 def test_v1_snapshot_preserves_empty_directories_and_modes(tmp_path: Path) -> None:
     package = _v1_package(tmp_path / "package", _V1_MANIFEST, _V1_PROGRAM)
-    (package / "postprocess.py").write_text("def postprocess(record): return {}\n", encoding="utf-8")
+    (package / "collect.py").write_text("def collect(record): return {}\n", encoding="utf-8")
     empty = package / "empty"
     empty.mkdir()
     empty.chmod(0o700)
@@ -504,7 +511,7 @@ def test_v1_ht_instantiate_contract_runs_and_unlinks_script(tmp_path: Path) -> N
     (package / "ht.instantiate.py").write_text(
         "from pathlib import Path\nPath('generated.txt').write_text(value)\n", encoding="utf-8"
     )
-    (package / "postprocess.py").write_text("def postprocess(record): return {}\n", encoding="utf-8")
+    (package / "collect.py").write_text("def collect(record): return {}\n", encoding="utf-8")
     load_workflow_package(package)
     workspace = Workspace.initialize(tmp_path / "workspace")
     job = new_job(workspace, package, inputs={"value": "instantiated"})
@@ -520,14 +527,15 @@ def test_v1_template_runner_is_rendered_executable_and_runs(tmp_path: Path) -> N
     manifest = _V1_MANIFEST.replace("tests.v1.package", "tests.v1.template")
     package = tmp_path / "package"
     package.mkdir()
-    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
     runner = package / "ht_steps.template"
     runner.write_text(
         _V1_PROGRAM.replace("cat ../result.txt > result.txt", "printf '%s\\n' \"value-$value\" > result.txt"),
         encoding="utf-8",
     )
     runner.chmod(0o751)
-    (package / "postprocess.py").write_text("def postprocess(record): return {}\n", encoding="utf-8")
+    (package / "collect.py").write_text("def collect(record): return {}\n", encoding="utf-8")
+    (package / "report.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     load_workflow_package(package)
     workspace = Workspace.initialize(tmp_path / "workspace")
     job = new_job(workspace, package, inputs={"value": "rendered"})
@@ -562,5 +570,5 @@ def test_v1_bare_directory_is_realized_and_degraded_on_collect(tmp_path: Path) -
     assert marker is not None and marker.kind == "succeeded"
     collected = next(collect(workspace))
     assert collected.outputs == {}
-    assert collected.missing_postprocessor is not None
-    assert "declares [workflow.postprocess]" in collected.missing_postprocessor
+    assert collected.missing_collector is not None
+    assert "declares [workflow.collect]" in collected.missing_collector

@@ -72,6 +72,8 @@ from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlparse
 
+from httk.core import FileRecord
+
 from httk.workflow._util import sha256_file
 from httk.workflow.languages import (
     LanguageOutputsMissingError,
@@ -831,9 +833,7 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
     )
 
 
-def _file_descriptor(
-    record: "JobRecord", value: Mapping[str, object], prefix: str, port: str, index: int
-) -> dict[str, object]:
+def _file_record(record: "JobRecord", value: Mapping[str, object], prefix: str, port: str, index: int) -> FileRecord:
     recorded = value.get("path")
     if not isinstance(recorded, str):
         raise ValueError(f"{record.workspace_id}:{record.job_id}: CWL File output {port!r} has no string path")
@@ -870,35 +870,56 @@ def _file_descriptor(
         )
     descriptor_path = actual.relative_to(root).as_posix()
     basename = value.get("basename")
-    descriptor: dict[str, object] = {
-        "kind": "File",
-        "path": descriptor_path,
-        "basename": basename if isinstance(basename, str) else recorded_path.name,
-    }
+    name = basename if isinstance(basename, str) else recorded_path.name
+    size: int | None = None
+    digest: str | None = None
     if actual is not None:
-        descriptor["sha256"] = sha256_file(actual)
-        descriptor["size"] = actual.stat().st_size
+        digest = sha256_file(actual)
+        size = actual.stat().st_size
     elif isinstance(value.get("size"), int) and not isinstance(value.get("size"), bool):
-        descriptor["size"] = value["size"]
-    return descriptor
+        size = value["size"]
+    return FileRecord(
+        url=descriptor_path,
+        name=name,
+        size=size,
+        # Host MIME databases would make the identity host-dependent; guessing is banned.
+        media_type=None,
+        sha256=digest,
+    )
 
 
 def _file_value(record: "JobRecord", value: object, prefix: str, port: str, index: int = 0) -> object:
     if isinstance(value, Mapping) and value.get("class") == "File":
-        return _file_descriptor(record, value, prefix, port, index)
+        return _file_record(record, value, prefix, port, index)
     if isinstance(value, list) and any(isinstance(item, Mapping) and item.get("class") == "File" for item in value):
-        return [_file_value(record, item, prefix, port, offset) for offset, item in enumerate(value)]
+        # Single files are first-class ``files`` entries; lists deliberately stay DataRecord descriptors.
+        return [
+            (
+                {
+                    "kind": "File",
+                    "path": file.url,
+                    "basename": file.name,
+                    "sha256": file.sha256,
+                    "size": file.size,
+                }
+                if isinstance(file := _file_value(record, item, prefix, port, offset), FileRecord)
+                else file
+            )
+            for offset, item in enumerate(value)
+        ]
     return value
 
 
-def postprocess(record: "JobRecord") -> Mapping[str, object]:
+def collect(record: "JobRecord") -> Mapping[str, object]:
     """Convert one CWL runner output document into provenance-capable records."""
 
     prefix = _parameter(record, "cwl_data_prefix", "cwl")
     raw_outputs = _load_outputs(record, "cwl-outputs.json", prefix)
     roles = _output_roles(record, "cwl_output_roles", raw_outputs)
     return {
-        role: _data_record(role, _file_value(record, value, prefix, port))
+        role: converted
+        if isinstance(converted := _file_value(record, value, prefix, port), FileRecord)
+        else _data_record(role, converted)
         for port, value in raw_outputs.items()
         for role in (str(roles[port]),)
     }
@@ -909,12 +930,12 @@ LANGUAGE = WorkflowLanguage(
     steps=("start", "enter", "advance", "collect"),
     initial_step="start",
     requires_document=True,
-    has_default_postprocessor=True,
+    has_default_collector=True,
     matches=_matches,
     ports=_ports,
     validate_runner=_validate_runner,
     prepare=_prepare,
-    postprocess=postprocess,
+    collect=collect,
 )
 
 

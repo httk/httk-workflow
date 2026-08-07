@@ -19,6 +19,10 @@ The object keys are labels, unique per side. Targets are loose served-entry
 references. The declaration is carried verbatim by workflow; this page
 documents the collection used by `run_record`.
 
+File-valued output roles yield run edges with `type = "files"` and the
+corresponding `FileRecord` id, so stored provenance names the file entry
+directly.
+
 ## Declared and observed
 
 Inputs known while scaffolding can be declared in `JobSpec`:
@@ -69,4 +73,4 @@ the exact published package. See {doc}`workflow_packages`.
 
 VASP runners will adopt this declaration in future work.
 
-Built-in VASP result collection and postprocessing are documented in {doc}`collecting`.
+Built-in VASP result collection is documented in {doc}`collecting`.

@@ -48,7 +48,12 @@ os.rename(temporary, control / "outcome.ready")
 
 def _cli_package(root: Path) -> Path:
     manifest = _MANIFEST.replace("tests.package", "tests.cli.package").replace("test-package", "cli-package")
-    return _package(root, manifest).resolve()
+    manifest += '\n[workflow.postprocess.report]\nfile = "scripts/report.sh"\ndescription = "write a report"\n'
+    package = _package(root, manifest)
+    scripts = package / "scripts"
+    scripts.mkdir()
+    (scripts / "report.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    return package.resolve()
 
 
 def _context(tmp_path: Path) -> CLIContext:
@@ -132,7 +137,7 @@ def test_job_new_accepts_a_package_path_and_rejects_workflow_selection_errors(tm
     empty = tmp_path / "not-a-package"
     empty.mkdir()
     assert command(["job", "new", workspace, "--workflow-dir", str(empty)], context) == 2
-    assert "containing workflow.toml" in capsys.readouterr().err
+    assert "containing httk_workflow.toml" in capsys.readouterr().err
 
 
 def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_path: Path, capsys) -> None:
@@ -147,16 +152,18 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
     assert "inputs:" in text and "initial_structure" in text
     assert "parameters:" in text and "label" in text
     assert "outputs:" in text and "relaxed_structure" in text
+    assert "postprocess scripts:" in text and "report: scripts/report.sh — write a report" in text
     assert "generated from manifest" in text
-    assert "instantiate hook: yes" in text and "postprocess hook: yes" in text
+    assert "instantiate hook: yes" in text and "collect hook: yes" in text
     assert not before.exists()
 
     assert command(["describe", str(package), "--json"], context) == 0
     directory = json.loads(capsys.readouterr().out)
     assert directory["hooks"] == {
         "instantiate": {"present": True, "file": "instantiate.py", "packaged": False},
-        "postprocess": {"present": True, "file": "postprocess.py", "packaged": False},
+        "collect": {"present": True, "file": "collect.py", "packaged": False},
     }
+    assert directory["postprocess"] == {"report": {"file": "scripts/report.sh", "description": "write a report"}}
 
     provider = load_workflow_package(package)
     try:
@@ -178,23 +185,34 @@ def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path:
     context = _context(tmp_path)
     assert command(["describe", "vasp-relax", "--json"], context) == 0
     packaged = json.loads(capsys.readouterr().out)
-    assert packaged["hooks"]["postprocess"] == {"present": True, "file": None, "packaged": True}
+    assert packaged["hooks"]["collect"] == {"present": True, "file": None, "packaged": True}
     assert packaged["hooks"]["instantiate"] == {"present": False, "file": None, "packaged": True}
     assert packaged["inputs"]["structure"]["role"] == "initial_structure"
     assert packaged["inputs"]["structure"]["entry_type"] == "structures"
+    assert packaged["postprocess"] == {
+        "relaxation-report": {
+            "file": "scripts/relaxation_report",
+            "description": "write a relaxation summary (text + JSON) into the job's postprocess directory",
+        }
+    }
+    assert command(["describe", "vasp-relax"], context) == 0
+    assert "relaxation-report: scripts/relaxation_report" in capsys.readouterr().out
 
     no_hooks = _package(
         tmp_path / "no-hooks",
         _MANIFEST.replace('[workflow.instantiate]\nfile = "instantiate.py"\n\n', "").replace(
-            '[workflow.postprocess]\nfile = "postprocess.py"\n\n', ""
+            '[workflow.collect]\nfile = "collect.py"\n\n', ""
         ),
     )
     assert command(["describe", str(no_hooks), "--json"], context) == 0
     directory = json.loads(capsys.readouterr().out)
     assert directory["hooks"] == {
         "instantiate": {"present": False, "file": None, "packaged": False},
-        "postprocess": {"present": False, "file": None, "packaged": False},
+        "collect": {"present": False, "file": None, "packaged": False},
     }
+    assert directory["postprocess"] == {}
+    assert command(["describe", str(no_hooks)], context) == 0
+    assert "postprocess scripts:\n  -" in capsys.readouterr().out
 
 
 def test_directory_package_runs_and_job_records_retain_the_tree_pin(tmp_path: Path) -> None:

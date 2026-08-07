@@ -188,7 +188,7 @@ def run_directory(record: JobRecord) -> Path:
 
     directory = record.workdir
     if directory is None:
-        raise ValueError("v1 postprocess record has no workdir")
+        raise ValueError("v1 collect record has no workdir")
     return directory
 
 
@@ -262,9 +262,9 @@ def collect_finished_tree(
     declaration: Mapping[str, object] | None = None
     if workflow_dir is not None:
         provider = load_workflow_package(Path(workflow_dir), register=False)
-        if not callable(provider.postprocessor):
-            raise ValueError(f"workflow package {Path(workflow_dir) / 'workflow.toml'} has no postprocessor")
-        hook = provider.postprocessor
+        if not callable(provider.collector):
+            raise ValueError(f"workflow package {Path(workflow_dir) / 'httk_workflow.toml'} has no collector")
+        hook = provider.collector
         workflow_id = provider.workflow_id
         declaration = provider.declarations.get("workflow")
     base = Path(root).resolve()
@@ -285,7 +285,7 @@ def collect_finished_tree(
                 assert extract is not None
                 raw_outputs = extract(task)
             if not isinstance(raw_outputs, Mapping):
-                raise ValueError("postprocessor must return a mapping of output roles")
+                raise ValueError("collector must return a mapping of output roles")
             if provider is None:
                 record = _infer_record(record, raw_outputs)
             yield _assemble_collected(f"{record.workspace_id}:{record.job_id}", record, provider, run, raw_outputs)

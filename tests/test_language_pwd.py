@@ -125,7 +125,7 @@ def _poison_document(log: Path, marker: Path) -> dict[str, object]:
 
 def _package(root: Path, document: dict[str, object], *, runner_extra: str = "") -> Path:
     root.mkdir(parents=True, exist_ok=True)
-    (root / "workflow.toml").write_text(
+    (root / "httk_workflow.toml").write_text(
         f'''[workflow]
 id = "tests.language.{root.name}"
 
@@ -258,11 +258,11 @@ def test_pwd_language_collects_scalar_records_and_degrades_when_unregistered(
     (job.payload / "run" / "pwd-outputs.json").unlink()
     degraded = next(collect(workspace))
     assert degraded.outputs == {}
-    assert degraded.missing_postprocessor is not None
-    assert "pwd-outputs.json" in degraded.missing_postprocessor
+    assert degraded.missing_collector is not None
+    assert "pwd-outputs.json" in degraded.missing_collector
 
 
-def test_pwd_manifest_postprocess_override_wins(
+def test_pwd_manifest_collect_override_wins(
     tmp_path: Path, workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     package = _package(
@@ -270,15 +270,15 @@ def test_pwd_manifest_postprocess_override_wins(
         _ARITHMETIC,
         runner_extra='''
 
-[workflow.postprocess]
-file = "postprocess.py"
+[workflow.collect]
+file = "collect.py"
 ''',
     )
-    (package / "postprocess.py").write_text(
+    (package / "collect.py").write_text(
         '''from httk.core import DataRecord
 
 
-def postprocess(record):
+def collect(record):
     return {"result": DataRecord.from_value("https://example.test/custom", "custom", 9)}
 ''',
         encoding="utf-8",
@@ -287,7 +287,7 @@ def postprocess(record):
     _drive(workspace)
     provider = load_workflow_package(package)
 
-    item = next(collect(workspace, allow_job_postprocessor=True))
+    item = next(collect(workspace, allow_job_collector=True))
     scaffold_module._WORKFLOW_PROVIDERS.pop(provider.workflow_id, None)
     result = item.outputs["result"]
     assert isinstance(result, DataRecord)

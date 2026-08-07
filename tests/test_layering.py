@@ -34,6 +34,7 @@ COMMON_LAYER = (
     "journal",
     "transactions",
     "packages",
+    "postprocessing",
 )
 
 #: The consumer packages. None may import another. The future ``httk_v1``

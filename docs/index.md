@@ -30,11 +30,11 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`runtime_helpers` — the Python authoring SDK: `Runner`, `Attempt`, steps
 - {doc}`native_bash_api` — the same surface in Bash
 - {doc}`sdk_parity` — the normative table both of the above must agree with
-- {doc}`vasp_runners` — the packaged runners, for campaigns that write none
+- {doc}`vasp_runners` — the packaged runners and relaxation report, for campaigns that write none
 - {doc}`workflow_packages` — authoring directory packages and their manifest
 - {doc}`declarations` — saying what a workflow *is*, for a data layer
 - {doc}`provenance` — turning one `JobRecord` into one `httk.core.Run`
-- {doc}`collecting` — collecting provider-postprocessed outputs and products
+- {doc}`collecting` — collecting provider-produced outputs and products
 - {doc}`workflow_languages` — CWL, PWD, and httk-v1 runner realizations
 - {doc}`notebooks/examples` — worked examples as a notebook
 

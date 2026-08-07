@@ -121,16 +121,16 @@ def _core():
 
 @dataclass(frozen=True)
 class CollectedJob:
-    """Represent one job after workflow postprocessing and provenance assembly.
+    """Represent one job after workflow collecting and provenance assembly.
 
     :param workflow_id: Identify the workflow that produced the job.
-    :param outputs: Map declared output roles to postprocessor results.
-    :param unfulfilled: Name declared output roles omitted after a postprocessor
+    :param outputs: Map declared output roles to collector results.
+    :param unfulfilled: Name declared output roles omitted after a collector
         ran; leave empty for degraded jobs.
     :param run: Carry the framework-assembled run provenance.
     :param products: Carry the framework-assembled product links.
     :param record: Preserve the mechanical job readout behind the collection.
-    :param missing_postprocessor: Explain why postprocessing was unavailable,
+    :param missing_collector: Explain why collecting was unavailable,
         or leave it unset when collection completed.
     """
 
@@ -140,7 +140,7 @@ class CollectedJob:
     run: httk.core.Run
     products: tuple[httk.core.ProductLink, ...]
     record: JobRecord
-    missing_postprocessor: str | None = None
+    missing_collector: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -897,7 +897,7 @@ def _entry_edge(identity: str, role: str, value: object, declared: Mapping[str, 
     return _core().RunEdge(role, entry_type, entry_id)
 
 
-def _postprocessor(value: object) -> Callable[[JobRecord], Mapping[str, object]] | None:
+def _collector(value: object) -> Callable[[JobRecord], Mapping[str, object]] | None:
     if callable(value):
         return cast(Callable[[JobRecord], Mapping[str, object]], value)
     if not isinstance(value, str) or ":" not in value:
@@ -907,33 +907,33 @@ def _postprocessor(value: object) -> Callable[[JobRecord], Mapping[str, object]]
     return cast(Callable[[JobRecord], Mapping[str, object]], function) if callable(function) else None
 
 
-def _job_postprocessor(
+def _job_collector(
     workspace: Workspace, record: JobRecord, workflow_id: str
 ) -> tuple[Callable[[JobRecord], Mapping[str, object]] | None, WorkflowProvider | None, str | None]:
-    """Resolve a postprocessor from the job's pinned directory runner tree."""
+    """Resolve a collector from the job's pinned directory runner tree."""
 
     runner = record.job.get("runner")
     if not isinstance(runner, Mapping):
-        return None, None, "job-pinned postprocessor requires a runner mapping"
+        return None, None, "job-pinned collector requires a runner mapping"
     if runner.get("source") != "workspace":
-        return None, None, "job-pinned postprocessor requires runner.source='workspace'"
+        return None, None, "job-pinned collector requires runner.source='workspace'"
     path_value = runner.get("path")
     if not isinstance(path_value, str):
-        return None, None, "job-pinned postprocessor requires a workspace runner path"
+        return None, None, "job-pinned collector requires a workspace runner path"
     try:
         store_tree = workspace.runner_store_path(path_value)
     except Exception as exc:
-        return None, None, f"job-pinned postprocessor runner path is invalid: {exc}"
+        return None, None, f"job-pinned collector runner path is invalid: {exc}"
     store_root = workspace.runners.resolve()
     try:
         resolved_tree = store_tree.resolve()
     except OSError as exc:
-        return None, None, f"job-pinned postprocessor runner tree cannot be resolved: {exc}"
+        return None, None, f"job-pinned collector runner tree cannot be resolved: {exc}"
     if store_tree.is_symlink() or not resolved_tree.is_relative_to(store_root) or not store_tree.is_dir():
-        return None, None, f"job-pinned postprocessor requires a directory runner tree: {store_tree}"
+        return None, None, f"job-pinned collector requires a directory runner tree: {store_tree}"
     pinned = runner.get("sha256")
     if not isinstance(pinned, str):
-        return None, None, "job-pinned postprocessor requires runner.sha256"
+        return None, None, "job-pinned collector requires runner.sha256"
     try:
         actual = tree_digest(store_tree)
     except Exception as exc:
@@ -944,27 +944,27 @@ def _job_postprocessor(
             None,
             f"pinned runner tree was modified: {store_tree} digest {actual} does not match pinned {pinned}",
         )
-    manifest = store_tree / "workflow.toml"
+    manifest = store_tree / "httk_workflow.toml"
     if not manifest.is_file():
-        return None, None, f"job-pinned postprocessor manifest is missing: {manifest}"
+        return None, None, f"job-pinned collector manifest is missing: {manifest}"
     try:
         from .packages import _tree_hook, parse_workflow_manifest
 
         provider = parse_workflow_manifest(store_tree)
     except Exception as exc:
-        return None, None, f"job-pinned postprocessor manifest is invalid: {exc}"
+        return None, None, f"job-pinned collector manifest is invalid: {exc}"
     if provider.workflow_id != workflow_id:
         return (
             None,
             None,
-            f"job-pinned postprocessor manifest id {provider.workflow_id!r} does not match job workflow {workflow_id!r}",
+            f"job-pinned collector manifest id {provider.workflow_id!r} does not match job workflow {workflow_id!r}",
         )
-    if provider.postprocess_file is None:
-        return None, None, "job-pinned workflow tree has no postprocess hook"
+    if provider.collect_file is None:
+        return None, None, "job-pinned workflow tree has no collect hook"
     return (
         cast(
             Callable[[JobRecord], Mapping[str, object]],
-            _tree_hook(store_tree, pinned, provider.postprocess_file, "postprocess"),
+            _tree_hook(store_tree, pinned, provider.collect_file, "collect"),
         ),
         provider,
         None,
@@ -1026,9 +1026,9 @@ def collect(
     *,
     states: Iterable[str] = DEFAULT_COLLECT_STATES,
     placement: str | PurePosixPath | None = None,
-    allow_job_postprocessor: bool = False,
+    allow_job_collector: bool = False,
 ) -> Iterator[CollectedJob]:
-    """Collect records through registered or explicitly allowed job postprocessors.
+    """Collect records through registered or explicitly allowed job collectors.
 
     A fallback reads and verifies the package manifest from the pinned runner
     tree itself. A changed pinned tree raises ``_PinnedTreeError``, which degrades
@@ -1038,10 +1038,10 @@ def collect(
     :param workspace: Read jobs from this workspace.
     :param states: Select the stopped state kinds to report.
     :param placement: Restrict results to this placement and its descendants.
-    :param allow_job_postprocessor: Permit digest-verified postprocessors from
+    :param allow_job_collector: Permit digest-verified collectors from
         job-pinned workspace package trees.
     :yields: Framework-assembled collected jobs, including degraded jobs.
-    :raises ValueError: If a registered postprocessor fails to resolve or
+    :raises ValueError: If a registered collector fails to resolve or
         returns invalid output roles.
     """
 
@@ -1056,9 +1056,9 @@ def collect(
         run = run_record(record)
         fallback = False
         try:
-            adapter = _postprocessor(provider.postprocessor if provider is not None else None)
+            adapter = _collector(provider.collector if provider is not None else None)
         except Exception as exc:
-            raise ValueError(f"{identity}: postprocessor resolution failed: {exc}") from exc
+            raise ValueError(f"{identity}: collector resolution failed: {exc}") from exc
         language_fallback = False
         if adapter is None:
             parameters = record.job.get("parameters")
@@ -1067,12 +1067,12 @@ def collect(
             if isinstance(parameters, Mapping):
                 language_realization = parameters.get("workflow_realization") == "language"
                 language_name = parameters.get("workflow_language")
-            package_postprocess = (
+            package_collect = (
                 language_realization
                 and isinstance(parameters, Mapping)
-                and parameters.get("workflow_postprocess") == "package"
+                and parameters.get("workflow_collect") == "package"
             )
-            if provider is None and package_postprocess:
+            if provider is None and package_collect:
                 yield CollectedJob(
                     workflow_id,
                     {},
@@ -1080,14 +1080,14 @@ def collect(
                     run,
                     (),
                     record,
-                    f"{identity}: workflow package postprocess hook is unavailable without its registered provider; "
+                    f"{identity}: workflow package collect hook is unavailable without its registered provider; "
                     "collect while the package is registered",
                 )
                 continue
             if provider is None and language_realization and isinstance(language_name, str):
                 try:
                     lang = languages.language(language_name)
-                    if not lang.has_default_postprocessor:
+                    if not lang.has_default_collector:
                         yield CollectedJob(
                             workflow_id,
                             {},
@@ -1095,11 +1095,11 @@ def collect(
                             run,
                             (),
                             record,
-                            f"{identity}: workflow language {language_name!r} has no default postprocessor; "
-                            "its package declares [workflow.postprocess]",
+                            f"{identity}: workflow language {language_name!r} has no default collector; "
+                            "its package declares [workflow.collect]",
                         )
                         continue
-                    adapter = lang.postprocess
+                    adapter = lang.collect
                 except Exception as exc:
                     yield CollectedJob(
                         workflow_id,
@@ -1108,33 +1108,31 @@ def collect(
                         run,
                         (),
                         record,
-                        f"{identity}: workflow language {language_name!r} postprocessor unavailable: {exc}",
+                        f"{identity}: workflow language {language_name!r} collector unavailable: {exc}",
                     )
                     continue
                 language_fallback = True
         if adapter is None:
-            if not allow_job_postprocessor:
+            if not allow_job_collector:
                 reason = (
-                    f"no provider for workflow {workflow_id!r}; pass allow_job_postprocessor=True to use a pinned "
+                    f"no provider for workflow {workflow_id!r}; pass allow_job_collector=True to use a pinned "
                     "workspace workflow tree"
                     if provider is None
-                    else f"no postprocessor registered for workflow {workflow_id!r}; pass "
-                    "allow_job_postprocessor=True to use a pinned workspace workflow tree"
+                    else f"no collector registered for workflow {workflow_id!r}; pass "
+                    "allow_job_collector=True to use a pinned workspace workflow tree"
                 )
                 yield CollectedJob(workflow_id, {}, (), run, (), record, reason)
                 continue
-            adapter, fallback_provider, fallback_reason = _job_postprocessor(workspace, record, workflow_id)
+            adapter, fallback_provider, fallback_reason = _job_collector(workspace, record, workflow_id)
             if adapter is None or fallback_provider is None:
-                yield CollectedJob(
-                    workflow_id, {}, (), run, (), record, fallback_reason or "job postprocessor unavailable"
-                )
+                yield CollectedJob(workflow_id, {}, (), run, (), record, fallback_reason or "job collector unavailable")
                 continue
             provider = fallback_provider
             fallback = True
         try:
             raw_outputs = adapter(record)
             if not isinstance(raw_outputs, Mapping):
-                raise ValueError("postprocessor must return a mapping of output roles")
+                raise ValueError("collector must return a mapping of output roles")
             yield _assemble_collected(identity, record, provider, run, raw_outputs)
         except Exception as exc:
             from .packages import _PinnedTreeError
@@ -1155,4 +1153,4 @@ def collect(
                 continue
             if str(exc).startswith(identity + ":"):
                 raise
-            raise ValueError(f"{identity}: postprocessor failed: {exc}") from exc
+            raise ValueError(f"{identity}: collector failed: {exc}") from exc

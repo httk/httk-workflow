@@ -195,8 +195,8 @@ attempts = 10
 [workflow.inputs.structure]
 entry_type = "structures"
 
-[workflow.postprocess]
-file = "postprocess.py"
+[workflow.collect]
+file = "collect.py"
 ```
 
 The package may contain `ht_steps`, `ht_run`, their `.template` forms, ordinary
@@ -211,8 +211,8 @@ template engine preserves v1 syntax: `$name`, `$(expr)`, `${code}`, `\$`, and
 
 These jobs require `V1TaskManager`, invoked as `httk workflow v1 run`. The
 default `TaskManager` deliberately skips jobs using the v1 executor. Collection
-is performed by the package's authored `[workflow.postprocess]` hook; v1 has no
-default language postprocessor.
+is performed by the package's authored `[workflow.collect]` hook; v1 has no
+default language collector.
 
 ## Finished-tree harvest
 

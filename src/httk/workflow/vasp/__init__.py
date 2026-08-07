@@ -60,7 +60,7 @@ register_citation(
 
 # Imported for its registration side effect: the packaged VASP workflows join
 # the scaffold's provider registry when this package is imported.
-from . import postprocess as _postprocess  # noqa: F401
+from . import collect as _collect  # noqa: F401
 from . import workflows as _workflows  # noqa: F401 - import registers packaged workflows
 from .diagnostics import (
     VASP_RESTART_ARTIFACTS,

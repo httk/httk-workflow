@@ -7,6 +7,9 @@ thing — relax a structure, run a single point, or both in sequence — writes 
 runner at all: it submits jobs that name one of the installed files in
 `httk.workflow.vasp.runners`.
 
+Their result hooks live in `httk.workflow.vasp.collect` as
+`collect_vasp_relax`, `collect_vasp_static`, and `collect_vasp_relax_static`.
+
 | Runner | Workflow | Steps |
 | --- | --- | --- |
 | `vasp_relax.py` | `httk.vasp.relax` | publish, prepare, run |
@@ -138,6 +141,21 @@ The `publish` step publishes the files named by the `collect` parameter into the
 job's transactional data, under `data_prefix`. `vasp_relax_static.py` archives the relaxation inside the
 workdir before the single point overwrites it, and publishes the two stages side by
 side as `relax/` and `static/`.
+
+## relaxation-report
+
+The packaged vasp-relax, vasp-relax-bash, and vasp-relax-static workflows
+declare the relaxation-report postprocess script. Run it after collection:
+
+~~~console
+httk workflow postprocess WS --script relaxation-report
+~~~
+
+It reads HTTK_WORKFLOW_DATA_DIR (or HTTK_WORKFLOW_WORKDIR when no
+transactional data directory exists), finds the published OUTCAR and CONTCAR
+files, and writes relaxation_report.txt and relaxation_report.json into
+workdir/postprocess/relaxation-report/. Missing files are reported as
+unavailable and do not make the script fail.
 
 ## Failure codes
 
