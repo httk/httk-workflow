@@ -178,6 +178,8 @@ step composed lives in shell state, so the subshell costs a step nothing.
 | Call | What it returns |
 | --- | --- |
 | `httk_workflow_parameter NAME [DEFAULT]` | one member of the job's opaque `parameters` object |
+| `httk_workflow_setting NAME [DEFAULT]` | one application setting: job parameter, `HTTK_*`, workspace setting, then the call default |
+| `httk_workflow_environment NAME [DEFAULT]` | one declared workflow environment value: job override, declared setting `HTTK_*`, workspace setting, declaration default, then the call default |
 | `httk_workflow_context [FIELD]` | the attempt context, or one field of it |
 | `httk_workflow_state_get NAME` | one key of the job's JSON state |
 | `httk_workflow_declaration NAME` | one workflow declaration: the observed document, else the declared one; 1 when neither exists |
@@ -188,6 +190,11 @@ step composed lives in shell state, so the subshell costs a step nothing.
 | `$HTTK_WORKFLOW_DURABLE` | `1` on a storage-durable workspace, `0` otherwise |
 
 A step starts in its workdir, so ordinary relative paths are workdir paths.
+
+`httk_workflow_environment` only reads names declared by the workflow and
+returns exit status 1 for an undeclared or unresolved name without a default.
+The declared environment metadata and per-job overrides are described in
+{doc}`workflow_packages`.
 
 `$HTTK_WORKFLOW_DURABLE` is the durability contract for a Bash runner. There is
 no new function: every outcome, transaction, spawn, and workdir batch you publish
@@ -257,17 +264,18 @@ read back from the draft by whichever process asks next.
 | Call | Meaning |
 | --- | --- |
 | `httk_workflow_advance STEP [--state NAME=VALUE ...] [--priority N]` | run `STEP` next; the state is written before publication |
-| `httk_workflow_gather STEP [--when C] [--count N] [--on-impossible STEP]` | wait for the children spawned on this attempt, then run `STEP` |
+| `httk_workflow_gather STEP [--when C] [--count N] [--on-impossible STEP] [--priority N]` | wait for the children spawned on this attempt, then run `STEP` at the optional priority |
 | `httk_workflow_succeed` | the job is done |
 | `httk_workflow_retry REASON` | repeat this activation within the job's attempt budget |
 | `httk_workflow_pause REASON` | stop until an operator resumes the job |
-| `httk_workflow_fail CODE MESSAGE [--details @FILE.json] [--retryable]` | the canonical failure record |
+| `httk_workflow_fail CODE MESSAGE [--details @FILE.json] [--retryable] [--priority N]` | the canonical failure record at the optional terminal priority |
 
 `fail` publishes the one canonical failure object,
 `{"code", "message", "details", "retryable"}`, which is exactly what a Python
 runner and the manager itself publish. `CODE` is the string a job lists in
 `retry_on`; `--retryable` declares that repeating the attempt could help, which
-the manager honours within the job's budgets.
+the manager honours within the job's budgets; `--priority` changes the terminal
+marker priority.
 
 Every step name these calls accept is checked against the registered set at the
 call that names it, so `httk_workflow_advance colect` is refused immediately,
@@ -313,6 +321,7 @@ prepare a payload directory and spawn that with `--payload`.
 the same bundle that creates them, which is what makes the join resolvable — and
 runs `STEP` when the condition holds. `--when` is `all_succeeded` (the default),
 `all_terminal`, `any_succeeded`, `any_terminal`, or `at_least` with `--count`.
+`--priority` changes the priority of the activation that resumes after the join.
 When the condition can no longer be met the job advances to `--on-impossible` if
 one is named, and fails with `dependency_failure` otherwise.
 

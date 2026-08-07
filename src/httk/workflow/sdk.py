@@ -47,6 +47,7 @@ from .models import (
     JOB_STATE_DIRECTORY,
     Failure,
     JobDefinition,
+    _matches_environment_type,
     validate_declaration_name,
     validate_declarations,
     validate_failure,
@@ -538,6 +539,70 @@ class Attempt:
             return settings[name]
         return default
 
+    def environment(self, name: str, default: object = _MISSING) -> object:
+        """Resolve one declared workflow environment value through its layers.
+
+        Overrides, the declared setting's environment variable, workspace settings,
+        the declaration default, and *default* are consulted in that order.
+
+        :param name: The declared environment name to look up.
+        :param default: The value to return when no declared value exists.
+        :return: The resolved environment value.
+        :raises KeyError: If the name is undeclared or unresolved without a default.
+        """
+
+        environment = self.job.environment
+        declared = environment.get("declared", {})
+        if not isinstance(declared, Mapping) or name not in declared:
+            available = ", ".join(sorted(declared)) if isinstance(declared, Mapping) else "none"
+            raise KeyError(
+                f"workflow environment {name!r} is not declared; declared environment: {available or 'none'}"
+            )
+        metadata = declared[name]
+        if not isinstance(metadata, Mapping):  # pragma: no cover - JobDefinition validates this
+            raise KeyError(f"workflow environment {name!r} is malformed")
+        overrides = environment.get("overrides", {})
+        if isinstance(overrides, Mapping) and name in overrides:
+            return overrides[name]
+        setting = metadata.get("setting", name)
+        if not isinstance(setting, str):  # pragma: no cover - JobDefinition validates this
+            setting = name
+        variable = "HTTK_" + setting.upper().replace(".", "_")
+        if variable in os.environ:
+            return self._environment_layer(name, metadata, os.environ[variable], f"environment variable {variable}")
+        settings = self.context.settings
+        if setting in settings:
+            return self._environment_layer(name, metadata, settings[setting], f"workspace setting {setting!r}")
+        if "default" in metadata:
+            return metadata["default"]
+        if isinstance(default, _Missing):
+            raise KeyError(f"workflow environment {name!r} is unresolved")
+        return default
+
+    @staticmethod
+    def _environment_layer(name: str, metadata: Mapping[str, object], value: object, layer: str) -> object:
+        """Decode and validate one external workflow environment layer."""
+
+        environment_type = metadata.get("type")
+        if not isinstance(environment_type, str):
+            return value
+        if environment_type == "string" and isinstance(value, str):
+            return value
+        decoded = value
+        if isinstance(value, str):
+            try:
+                decoded = json.loads(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"workflow environment {name!r} from {layer} is not valid JSON for declared type "
+                    f"{environment_type!r}"
+                ) from exc
+        if not _matches_environment_type(decoded, environment_type):
+            raise ValueError(
+                f"workflow environment {name!r} from {layer} does not match declared type {environment_type!r}"
+            )
+        return decoded
+
     def declare(self, name: str, document: Mapping[str, object]) -> Path:
         """Record the observed workflow declaration *name* of this job.
 
@@ -731,6 +796,7 @@ class Attempt:
         count: int | None = None,
         on_impossible: str | None = None,
         rejoin: Iterable[str] = (),
+        priority: int | None = None,
     ) -> Path:
         """Wait for this attempt's and optionally earlier children, then run *step*.
 
@@ -746,6 +812,7 @@ class Attempt:
         :param count: The required count when ``when`` is ``at_least``.
         :param on_impossible: The step to run when the condition cannot be met.
         :param rejoin: Labels of children observed by an earlier join activation.
+        :param priority: The priority of the join activation, when changed.
         :return: The path of the published wait outcome.
         :raises ValueError: If no children were spawned or rejoined, a rejoined label is unknown, or a named step is invalid.
         """
@@ -797,7 +864,7 @@ class Attempt:
                 "gather requires children spawned on this attempt or rejoin entries, and neither was provided"
             )
         join = join_mapping(children, when, count, on_impossible, rejoin_children)
-        return self._publish("wait", next_step=step, join=join)
+        return self._publish("wait", next_step=step, priority=priority, join=join)
 
     def succeed(self) -> Path:
         """Publish the successful completion of this job.
@@ -832,6 +899,7 @@ class Attempt:
         *,
         details: Mapping[str, object] | None = None,
         retryable: bool = False,
+        priority: int | None = None,
     ) -> Path:
         """Publish a structured terminal failure.
 
@@ -843,11 +911,12 @@ class Attempt:
         :param message: The human-readable failure message.
         :param details: Optional structured failure details.
         :param retryable: Whether repeating this attempt could help.
+        :param priority: The terminal priority, when changed.
         :return: The path of the published outcome.
         """
 
         failure = Failure(code, message, details=details, retryable=retryable)
-        return self._publish("fail", failure=failure.as_mapping())
+        return self._publish("fail", failure=failure.as_mapping(), priority=priority)
 
     def _reject_published(self) -> None:
         """Refuse a second outcome, before anything of the first is disturbed."""

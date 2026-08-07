@@ -77,6 +77,7 @@ MAXIMUM_PARAMETERS_BYTES = 262144
 # own allowance of exactly the same size as ``parameters`` for exactly the same
 # reason: a declaration describes one job, it is not a place for bulk content.
 MAXIMUM_DECLARATIONS_BYTES = 262144
+MAXIMUM_ENVIRONMENT_BYTES = 262144
 
 _UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _TAG_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
@@ -189,6 +190,76 @@ def validate_parameters(value: object, name: str = "parameters") -> dict[str, ob
             "put bulk content in the job payload or in transactional data instead"
         )
     return dict(mapping)
+
+
+def _matches_environment_type(value: object, environment_type: str) -> bool:
+    if environment_type == "string":
+        return isinstance(value, str)
+    if environment_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if environment_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if environment_type == "boolean":
+        return isinstance(value, bool)
+    if environment_type == "array":
+        return isinstance(value, list)
+    return isinstance(value, dict)
+
+
+def validate_environment(value: object, name: str = "environment") -> dict[str, object]:
+    """Validate the declared and overridden workflow environment of a job.
+
+    :param value: The environment mapping to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated environment mapping.
+    :raises httk.workflow.errors.FormatError: If the mapping or its values are invalid.
+    """
+
+    mapping = require_mapping(value, name)
+    declared_raw = require_mapping(mapping.get("declared", {}), f"{name}.declared")
+    overrides_raw = require_mapping(mapping.get("overrides", {}), f"{name}.overrides")
+    declared: dict[str, dict[str, object]] = {}
+    for key, raw in declared_raw.items():
+        if not isinstance(key, str) or not key:
+            raise FormatError(f"{name}.declared keys must be nonempty strings")
+        metadata = require_mapping(raw, f"{name}.declared.{key}")
+        unknown = sorted(set(metadata) - {"type", "description", "default", "setting"})
+        if unknown:
+            raise FormatError(f"{name}.declared.{key} has unsupported members: {', '.join(unknown)}")
+        if "description" in metadata:
+            require_string(metadata["description"], f"{name}.declared.{key}.description")
+        environment_type = metadata.get("type")
+        if environment_type is not None:
+            environment_type = require_string(environment_type, f"{name}.declared.{key}.type")
+            if environment_type not in {"string", "number", "integer", "boolean", "array", "object"}:
+                raise FormatError(f"{name}.declared.{key}.type is invalid")
+            if "default" in metadata and not _matches_environment_type(metadata["default"], environment_type):
+                raise FormatError(f"{name}.declared.{key}.default does not match type {environment_type!r}")
+        setting = metadata.get("setting")
+        if setting is not None:
+            setting = require_string(setting, f"{name}.declared.{key}.setting")
+        if (
+            setting is not None
+            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", setting) is None
+        ):
+            raise FormatError(f"{name}.declared.{key}.setting must be a nonempty dotted identifier")
+        declared[key] = dict(metadata)
+    overrides: dict[str, object] = {}
+    for key, override in overrides_raw.items():
+        if key not in declared:
+            raise FormatError(f"{name}.overrides.{key} is not declared")
+        environment_type = declared[key].get("type")
+        if isinstance(environment_type, str) and not _matches_environment_type(override, environment_type):
+            raise FormatError(f"{name}.overrides.{key} does not match type {environment_type!r}")
+        overrides[key] = override
+    result = {"declared": declared, "overrides": overrides}
+    try:
+        size = len(json_bytes(result))
+    except (TypeError, ValueError) as exc:
+        raise FormatError(f"{name} must contain only JSON values: {exc}") from exc
+    if size > MAXIMUM_ENVIRONMENT_BYTES:
+        raise FormatError(f"{name} exceeds the {MAXIMUM_ENVIRONMENT_BYTES}-byte limit")
+    return result
 
 
 def validate_declaration_name(value: object, name: str = "declaration name") -> str:
@@ -1089,6 +1160,8 @@ class JobDefinition:
     retry_policy: RetryPolicy
     resources: Mapping[str, object]
     parameters: Mapping[str, object]
+    #: The declared and overridden workflow environment of this job.
+    environment: Mapping[str, object]
     #: The workflow declarations of this job, carried verbatim, keyed by name.
     declarations: Mapping[str, Mapping[str, object]]
     parent: Mapping[str, object] | None
@@ -1206,6 +1279,8 @@ class JobDefinition:
         resources = require_mapping(value.get("resources", {}), "resources")
         parameters_raw = value.get("parameters")
         parameters = {} if parameters_raw is None else validate_parameters(parameters_raw)
+        environment_raw = value.get("environment")
+        environment = {} if environment_raw is None else validate_environment(environment_raw)
         declarations_raw = value.get("declarations")
         declarations = {} if declarations_raw is None else validate_declarations(declarations_raw)
         parent_raw = value.get("parent")
@@ -1230,6 +1305,7 @@ class JobDefinition:
             retry_policy=RetryPolicy.from_mapping(value.get("retry_policy", {})),
             resources=dict(resources),
             parameters=parameters,
+            environment=environment,
             declarations=declarations,
             parent=None if parent is None else dict(parent),
             raw=dict(value),

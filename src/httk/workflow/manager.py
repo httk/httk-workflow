@@ -106,6 +106,12 @@ _CANCELLING_MEMBERS = (
 )
 
 
+def _setting_variable_name(key: str) -> str:
+    """Return the environment variable synthesized for one setting name."""
+
+    return "HTTK_" + key.upper().replace(".", "_")
+
+
 @dataclass
 class RunningAttempt:
     """Track one locally running job attempt.
@@ -1109,11 +1115,23 @@ class TaskManager:
         )
         if job.data_mode == "transactional":
             environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
+        declared_environment = job.environment.get("declared", {})
+        consumed_variables: set[str] = set()
+        if isinstance(declared_environment, Mapping):
+            consumed_variables = {
+                _setting_variable_name(setting)
+                for name, metadata in declared_environment.items()
+                if isinstance(metadata, Mapping)
+                for setting in (metadata.get("setting", name),)
+                if isinstance(setting, str)
+            }
         for key in sorted(settings):
             value = settings[key]
             if isinstance(value, bool) or not isinstance(value, (str, int, float)):
                 continue
-            variable = "HTTK_" + key.upper().replace(".", "_")
+            variable = _setting_variable_name(key)
+            if variable in consumed_variables:
+                continue
             if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable) is None:
                 _LOGGER.warning("setting %s has an invalid environment variable name; not exported", key)
                 continue
