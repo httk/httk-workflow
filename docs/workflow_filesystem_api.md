@@ -2586,8 +2586,9 @@ rule.
 
 ## Relationship to *httk* v1
 
-The `httk-v1` runner executor and `httk-v1-taskmanager` compatibility executor
-implement the following mapping for instantiated *httk* v1 task templates:
+The packaged `httk.workflow.languages.httk_v1.v1_runner` is an ordinary
+installed `path` runner used by converted packages. The normal manager applies
+the following mapping for instantiated *httk* v1 task templates:
 
 | *httk* v1 | This protocol |
 | --- | --- |
@@ -2622,13 +2623,14 @@ without those grandchildren, so a migrated workflow that requires subtree
 completion must make the child join its own descendants before succeeding or
 name the additional jobs explicitly in the ancestor's join.
 
-The shipped adapter makes each discovered direct subtask an explicit child.
-Each such child applies the same rule recursively, so ordinary nested *httk* v1 task
-trees retain subtree completion. It uses `all_terminal`, rather than
-`all_succeeded`, because *httk* v1 resumed a `waitsubtasks` parent once no descendant
-remained in an active state; broken descendants did not keep it waiting.
-Legacy `ht.task.*.<status>` symlinks are derived operator views only. The *httk₂*
-marker and journal remain authoritative.
+The shipped runner makes each discovered direct subtask an explicit native
+child. Each such child applies the same rule recursively, so ordinary nested
+*httk* v1 task trees retain subtree completion. It uses `all_terminal`, rather
+than `all_succeeded`, because *httk* v1 resumed a `waitsubtasks` parent once no
+descendant remained in an active state; broken descendants did not keep it
+waiting. The original legacy task directories remain in place; they are not
+mirrored with symlinks. Native child payloads, markers, and journal state are
+authoritative, and state-based deduplication prevents rediscovering a child.
 
 The principal improvements are:
 

@@ -16,16 +16,15 @@ package.** It is one nested command tree: each group answers `--help`, each
 command answers `--help`, and a mistyped action is reported by the group it was
 mistyped in.
 
-Two further executables are installed, and both are thin aliases that reuse the
-canonical tree's own parsers and handlers rather than a second implementation
-of it. They remain supported; prefer the canonical spelling in new work and in
-anything you write down.
+One further executable is installed as a thin alias that reuses the canonical
+tree's own parsers and handlers rather than a second implementation. It remains
+supported; prefer the canonical spelling in new work and in anything you write
+down.
 
 | Executable | Alias of | Kept for |
 | --- | --- | --- |
 | `httk workflow` | — | **canonical** |
 | `httk-taskmanager` | `httk workflow workspace`/`job`/`manager` leaves | operators and scripts predating `httk workflow` |
-| `httk-v1-taskmanager` | `httk workflow v1` | *httk* v1 compatibility operators |
 
 ```text
 httk-taskmanager init     ->  httk workflow workspace init
@@ -33,14 +32,10 @@ httk-taskmanager submit   ->  httk workflow job submit
 httk-taskmanager run      ->  httk workflow manager run
 httk-taskmanager status   ->  httk workflow workspace status
 httk-taskmanager request  ->  httk workflow job request
-
-httk-v1-taskmanager prepare  ->  httk workflow v1 prepare
-httk-v1-taskmanager submit   ->  httk workflow v1 submit
-httk-v1-taskmanager run      ->  httk workflow v1 run
 ```
 
-Both aliases keep their own flags, including the `--durable`/`--no-durable`
-switch they have always accepted *before* the subcommand. The canonical tree
+The alias keeps its own flags, including the `--durable`/`--no-durable`
+switch it has always accepted *before* the subcommand. The canonical tree
 carries the same switch on the leaf that acts on it, so both spellings work.
 
 ## The complete tree
@@ -54,7 +49,7 @@ httk workflow collect
 httk workflow postprocess
 httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-managers
-httk workflow v1         prepare | submit | run | collect
+httk workflow v1         collect
 httk workflow config     init | show | set | unset | import-v1
 httk workflow project    init | import-v1 | show | doctor | manifest create | manifest verify
 httk workflow remote     list | add | configure | install | import-v1 | show | remove
@@ -133,7 +128,7 @@ the marker is an honest inference rather than provenance metadata.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `job new WORKSPACE` | scaffold and submit jobs from a workflow | `--workflow` or `--workflow-dir` (one required), `--parameter`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
+| `job new WORKSPACE` | scaffold and submit jobs from a workflow | `--workflow` or `--workflow-dir` (one required), `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
 | `job submit WORKSPACE SOURCE` | submit one prepared payload directory | `--placement` (required), `--move` |
 | `job request WORKSPACE JOB_ID ACTION` | publish an operator request | `--operator`, `--reason` (both required), `--priority`, `--step`, `--force` |
 | `job list WORKSPACE` | list the jobs as a cheap table | `--kind`, `--placement`, `--json` |
@@ -152,7 +147,6 @@ Language documents use `job new --workflow DOCUMENT`; see
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--raw`, `--allow-job-collector`, `--into PATH` |
-| `v1 collect ROOT` | harvest a pre-existing v1 result tree | `--workflow-dir PKG`, `--into PATH`, `--json` |
 
 ### postprocess — run a curated script
 
@@ -195,21 +189,11 @@ scheduler over its adapter — `--count N` managers, `--workers N` workers each.
 Both manager commands run until idle by default; `--idle` keeps serving. This is
 the command that subsumed the old `transfer start-manager`.
 
-### `v1` — *httk* v1 task templates on the v2 engine
+### `v1` — harvesting finished *httk* v1 trees
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `v1 prepare SOURCE DESTINATION` | turn an instantiated v1 task into a payload | `--taskset` (default `default`), `--tag`, `--step`, `--priority`, `--attempts` |
-| `v1 submit WORKSPACE SOURCE` | prepare and submit one v1 task | `--placement` (required), `--taskset` (default `default`) |
-| `v1 run WORKSPACE` | run only the httk-v1 jobs of a workspace | `--taskset` (default `any`), `--wrap`, `--task-timeout`, `--workers`, `--idle`, `--idle-timeout` |
-
-`--taskset` deliberately defaults differently between siblings, because the
-siblings mean different things by it. `prepare` and `submit` **assign** a task
-set to the job they create, so their default is the ordinary `default` set;
-`run` **filters** the jobs it will claim, so its default is `any`, which accepts
-every set. Unifying them would either strand every submitted job under a manager
-filtering for one set, or quietly file every prepared task under a set literally
-named `any`.
+| `v1 collect ROOT` | harvest a pre-existing v1 result tree | `--workflow-dir PKG`, `--into PATH`, `--json` |
 
 ### `config` — the per-user configuration and identity
 
@@ -358,7 +342,8 @@ children always inherit their parent's workspace. See {doc}`campaigns`.
 ## Creating jobs
 
 `job new` scaffolds and submits jobs from a workflow — a registered workflow id,
-alias, or the path of a runner file — and needs no prepared payload:
+alias, runner file, package directory, or bare language document — and needs no
+prepared payload:
 
 ```console
 httk workflow job new WORKSPACE --workflow vasp-relax --input structure=POSCAR --tag silicon
@@ -366,7 +351,10 @@ httk workflow job new WORKSPACE --workflow vasp-relax --input-from structure str
 httk workflow job new WORKSPACE --workflow ./my_runner.py --step characterize --parameter sites=8
 ```
 
-`--parameter NAME=VALUE` supplies an opaque implementation knob; `--input-from
+`--parameter NAME=VALUE` supplies an opaque implementation knob;
+`--environment NAME=VALUE` overrides one declared workflow environment entry;
+and `--format LANG` selects the language of a bare document or directory.
+`--input-from
 NAME SOURCE...` loads a file or the readable files in a directory, realizes the
 declared payload destination, and creates one job per file for a batch. `--file
 NAME=PATH` stages anything else, `--input NAME=PATH` stages one declared input,
@@ -385,8 +373,12 @@ the document or template directory is resolved as a language realization:
 httk workflow job new WS --workflow flow.cwl --input message=echo
 httk workflow job new WS --workflow workflow.json --parameter pwd_module_path='["."]'
 httk workflow job new WS --workflow maker.json
-httk workflow job new WS --workflow ./v1-template --parameter encut=520
+httk workflow job new WS --workflow ./v1-template --format httk-v1 --parameter encut=520
 ```
+
+The same `--format` option accepts `cwl`, `pwd`, `jobflow`, and `httk-v1` for
+bare inputs. A bare v1 directory requires `--format httk-v1`; manifest packages
+and registered ids reject the option because their language is already known.
 
 See {doc}`workflow_languages` for package manifests, bare-document rules,
 the supported CWL subset, PWD security, jobflow Makers, and language collection.

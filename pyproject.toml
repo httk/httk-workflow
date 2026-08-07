@@ -47,7 +47,6 @@ Issues = "https://github.com/httk/httk-workflow/issues"
 
 [project.scripts]
 httk-taskmanager = "httk.workflow.cli:main"
-httk-v1-taskmanager = "httk.workflow.compat.v1.cli:main"
 
 [project.optional-dependencies]
 dev = [

@@ -13,6 +13,7 @@ import configparser
 import hashlib
 import logging
 import os
+import re
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
@@ -25,7 +26,6 @@ import httk.core
 from ...collecting import CollectedJob, JobRecord, _assemble_collected
 from ...models import make_job_key
 from ...packages import load_workflow_package
-from . import parse_v1_task_name
 
 if TYPE_CHECKING:
     from ...scaffold import WorkflowProvider
@@ -33,6 +33,22 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 _RUN_FORMAT = "%Y-%m-%d_%H.%M.%S"
 _V1_UUID_NAMESPACE = uuid.UUID("f4a4b2d1-7e5a-4b1f-9a0d-2f3c8e6b1d90")
+_TASK_PATTERN = re.compile(
+    r"^ht\.task\.(?P<taskset>[^.]+)\.(?P<task_id>[^.]+)\.(?P<step>[^.]+)\."
+    r"(?P<restarts>[0-9]+)\.(?P<owner>[^.]+)\.(?P<priority>[1-5])\."
+    r"(?P<status>waitstart|waitstep|waitsubtasks|running|finished|broken|stopped|timeout)$"
+)
+
+
+def parse_v1_task_name(value: str) -> dict[str, str] | None:
+    """Parse a legacy task basename, returning ``None`` when unrelated.
+
+    :param value: Parse this legacy task basename.
+    :return: Parsed task fields, or ``None`` for an unrelated name.
+    """
+
+    match = _TASK_PATTERN.fullmatch(value)
+    return None if match is None else match.groupdict()
 
 
 @dataclass(frozen=True)

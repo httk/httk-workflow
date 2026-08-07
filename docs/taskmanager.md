@@ -564,6 +564,7 @@ the process identity and commits the `running` marker before releasing that
 gate. If the manager disappears during this narrow launch interval, the gated
 process observes end-of-file and exits without executing the runner.
 
-`httk workflow manager run` executes only the normal `path` runner executor. Legacy
-`ht_steps` jobs use a distinct executor and are intentionally left untouched;
-run those with [*httk* v1 task compatibility](v1_compatibility.md).
+`httk workflow manager run` executes the normal `path` runner executor. Converted
+`httk-v1` packages use that same path through their packaged v1 runner; select
+their `taskset` claim pool with the manager's `--pool` option. See
+[*httk* v1 task compatibility](v1_compatibility.md).

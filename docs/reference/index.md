@@ -19,7 +19,8 @@ in its `__all__` — rather than every source object. The three layers are:
   `httk.workflow.vasp` and the `httk.workflow.compat` engines
   (`httk.workflow.compat.v1`, `httk.workflow.languages.cwl`,
   `httk.workflow.languages.pwd`, `httk.workflow.languages.jobflow`, and
-  `httk.workflow.languages.httk_v1`).
+  `httk.workflow.languages.httk_v1`). The language registration modules are
+  public; their packaged runner modules are internal implementation details.
 
 ```{toctree}
 :maxdepth: 2

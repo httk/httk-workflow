@@ -215,6 +215,20 @@ def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path:
     assert "postprocess scripts:\n  -" in capsys.readouterr().out
 
 
+def test_workflow_describe_renders_environment(tmp_path: Path, capsys) -> None:
+    package = _package(
+        tmp_path / "describe-environment",
+        _MANIFEST
+        + '\n[workflow.environment.command]\ntype = "string"\nsetting = "tool.command"\ndefault = "echo"\ndescription = "The command."\n',
+    )
+    context = _context(tmp_path)
+    assert load_workflow_package(package, register=False).environment
+    assert command(["describe", str(package)], context) == 0
+    output = capsys.readouterr().out
+    assert "environment:" in output
+    assert "command: type=string, setting=tool.command, default=echo, description=The command." in output
+
+
 def test_directory_package_runs_and_job_records_retain_the_tree_pin(tmp_path: Path) -> None:
     package = _cli_package(tmp_path / "package")
     (package / "run").write_text(_SUCCESS_RUNNER, encoding="utf-8")

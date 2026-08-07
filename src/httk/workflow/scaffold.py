@@ -149,6 +149,7 @@ class WorkflowProvider:
     :param collect_file: Name the directory package's collector.
     :param postprocess_scripts: Map curated postprocess script names to package members and descriptions.
     :param parameters: Declare the workflow's parameter metadata.
+    :param environment: Declare the workflow's environment metadata.
     :param outputs: Declare the workflow's output metadata.
     :param declaration_uri: Identify the source declaration URI.
     :param declaration_file: Name the source declaration file.
@@ -176,6 +177,7 @@ class WorkflowProvider:
     collect_file: str | None = None
     postprocess_scripts: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    environment: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
     declaration_file: str | None = None
@@ -216,6 +218,7 @@ class WorkflowProvider:
         object.__setattr__(self, "inputs", MappingProxyType(inputs))
         object.__setattr__(self, "runner_options", MappingProxyType(dict(self.runner_options)))
         object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
+        object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
         object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
         object.__setattr__(self, "_input_metadata", MappingProxyType(dict(self._input_metadata)))
@@ -288,6 +291,7 @@ class JobItem(TypedDict, total=False):
     inputs: Mapping[str, object]
     files: Mapping[str, str | os.PathLike[str]]
     parameters: Mapping[str, object]
+    environment: Mapping[str, object]
     tag: str | None
     name: str
     placement: str | PurePosixPath
@@ -328,6 +332,7 @@ class ResolvedWorkflow:
     :param collect_file: Name the directory package's collector.
     :param postprocess_scripts: Preserve curated postprocess script metadata.
     :param parameters: Preserve the workflow's parameter metadata.
+    :param environment: Preserve the workflow's environment metadata.
     :param outputs: Preserve the workflow's output metadata.
     :param declaration_uri: Identify the source declaration URI.
     :param declaration_file: Name the source declaration file.
@@ -358,6 +363,7 @@ class ResolvedWorkflow:
     collect_file: str | None = None
     postprocess_scripts: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    environment: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
     declaration_file: str | None = None
@@ -383,6 +389,7 @@ class ResolvedWorkflow:
                 raise ValueError("directory-only fields are not allowed on a packaged resolved workflow")
         object.__setattr__(self, "runner_options", MappingProxyType(dict(self.runner_options)))
         object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
+        object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
 
     @property
     def store_name(self) -> str:
@@ -687,6 +694,7 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
         collect_file=provider.collect_file,
         postprocess_scripts=provider.postprocess_scripts,
         parameters=provider.parameters,
+        environment=provider.environment,
         outputs=provider.outputs,
         declaration_uri=provider.declaration_uri,
         declaration_file=provider.declaration_file,
@@ -700,6 +708,7 @@ def resolve_workflow(
     workflow_id: str | None = None,
     step: str | None = None,
     data_mode: DataMode | None = None,
+    format: str | None = None,
 ) -> ResolvedWorkflow:
     """Return the :class:`ResolvedWorkflow` *workflow* names.
 
@@ -713,15 +722,24 @@ def resolve_workflow(
     :param workflow_id: Override the resolved workflow id.
     :param step: Override the resolved initial step.
     :param data_mode: Override the resolved data mode.
+    :param format: Force a language for a bare document or directory.
     :return: The resolved workflow description.
     :raises ValueError: If the workflow cannot be found or its description is invalid.
     """
 
     text = os.fspath(workflow)
     resolved = registered_workflow(text)
+    if resolved is not None and format is not None:
+        raise ValueError(
+            "--format applies only to bare workflow documents or directories; registered workflows use their manifest language"
+        )
     if resolved is None:
         path = Path(text).expanduser()
         if path.is_dir() and (path / "httk_workflow.toml").is_file():
+            if format is not None:
+                raise ValueError(
+                    "--format cannot be used with a workflow package directory; its language comes from the manifest"
+                )
             from .packages import load_workflow_package
 
             provider = load_workflow_package(path, register=False)
@@ -752,6 +770,7 @@ def resolve_workflow(
                 collect_file=provider.collect_file,
                 postprocess_scripts=provider.postprocess_scripts,
                 parameters=provider.parameters,
+                environment=provider.environment,
                 outputs=provider.outputs,
                 declaration_uri=provider.declaration_uri,
                 declaration_file=provider.declaration_file,
@@ -761,7 +780,18 @@ def resolve_workflow(
             from . import languages
 
             resolved_path = path.resolve()
-            lang = languages.match_document(resolved_path)
+            if format is None:
+                lang = languages.match_document(resolved_path)
+            else:
+                lang = languages.language(format)
+                if lang.document_policy == "forbidden" and not resolved_path.is_dir():
+                    raise ValueError(
+                        f"workflow language {lang.name!r} forbids documents; --format {format!r} requires a directory target"
+                    )
+                if lang.document_policy != "forbidden" and not resolved_path.is_file():
+                    raise ValueError(
+                        f"workflow language {lang.name!r} expects a document file for --format {format!r}: {resolved_path}"
+                    )
             if lang is not None:
                 ports = lang.ports(resolved_path)
                 directory = resolved_path if resolved_path.is_dir() else None
@@ -786,6 +816,7 @@ def resolve_workflow(
                     declarations={"workflow": _workflow_declaration(summary, input_metadata, outputs)},
                     directory=directory,
                     outputs=outputs,
+                    environment=lang.environment,
                     _input_metadata=input_metadata,
                 )
             elif path.is_file():
@@ -909,6 +940,7 @@ def new_job(
     inputs: Mapping[str, object] | None = None,
     files: Mapping[str, str | os.PathLike[str]] | None = None,
     parameters: Mapping[str, object] | None = None,
+    environment: Mapping[str, object] | None = None,
     tag: str | None = None,
     placement: str | PurePosixPath = DEFAULT_PLACEMENT,
     priority: int | None = None,
@@ -916,6 +948,7 @@ def new_job(
     data_mode: DataMode | None = None,
     publish: PublishMode = "workspace",
     step: str | None = None,
+    format: str | None = None,
     workflow_id: str | None = None,
     name: str | None = None,
 ) -> ScaffoldedJob:
@@ -941,6 +974,7 @@ def new_job(
     :param inputs: Supply declared workflow inputs.
     :param files: Map payload names to files to stage.
     :param parameters: Supply opaque job parameters.
+    :param environment: Supply overrides for declared workflow environment values.
     :param tag: Set the job tag.
     :param placement: Place the job within the workspace.
     :param priority: Set the scheduling priority.
@@ -948,19 +982,23 @@ def new_job(
     :param data_mode: Override the workflow data mode.
     :param publish: Select workspace publication or installed reference.
     :param step: Override the workflow's initial step.
+    :param format: Force a language for a bare workflow document or directory.
     :param workflow_id: Override the workflow id in the job definition.
     :param name: Set the job's display name.
     :return: The submitted job description.
     :raises ValueError: If workflow, inputs, placement, or job settings are invalid.
     """
 
-    prepared = _prepare(workspace, workflow, publish=publish, step=step, workflow_id=workflow_id, data_mode=data_mode)
+    prepared = _prepare(
+        workspace, workflow, publish=publish, step=step, workflow_id=workflow_id, data_mode=data_mode, format=format
+    )
     return _submit(
         workspace,
         prepared,
         inputs=inputs,
         files=files,
         parameters=parameters,
+        environment=environment,
         tag=tag,
         placement=placement,
         priority=priority,
@@ -977,6 +1015,7 @@ def new_jobs(
     inputs: Mapping[str, object] | None = None,
     files: Mapping[str, str | os.PathLike[str]] | None = None,
     parameters: Mapping[str, object] | None = None,
+    environment: Mapping[str, object] | None = None,
     tag: str | None = None,
     placement: str | PurePosixPath = DEFAULT_PLACEMENT,
     priority: int | None = None,
@@ -984,6 +1023,7 @@ def new_jobs(
     data_mode: DataMode | None = None,
     publish: PublishMode = "workspace",
     step: str | None = None,
+    format: str | None = None,
     workflow_id: str | None = None,
     name: str | None = None,
 ) -> Iterator[ScaffoldedJob]:
@@ -1007,6 +1047,7 @@ def new_jobs(
     :param inputs: Supply shared declared workflow inputs.
     :param files: Supply shared payload files.
     :param parameters: Supply shared opaque job parameters.
+    :param environment: Supply shared declared environment overrides.
     :param tag: Set the shared job tag.
     :param placement: Set the shared workspace placement.
     :param priority: Set the shared scheduling priority.
@@ -1014,6 +1055,7 @@ def new_jobs(
     :param data_mode: Override the workflow data mode.
     :param publish: Select workspace publication or installed reference.
     :param step: Override the workflow's initial step.
+    :param format: Force a language for a bare workflow document or directory.
     :param workflow_id: Override the workflow id in each job definition.
     :param name: Set the shared display name.
     :return: An iterator yielding each submitted job description.
@@ -1030,7 +1072,9 @@ def new_jobs(
             print(job.job_key)
     """
 
-    prepared = _prepare(workspace, workflow, publish=publish, step=step, workflow_id=workflow_id, data_mode=data_mode)
+    prepared = _prepare(
+        workspace, workflow, publish=publish, step=step, workflow_id=workflow_id, data_mode=data_mode, format=format
+    )
     for item in items:
         yield _submit(
             workspace,
@@ -1038,6 +1082,7 @@ def new_jobs(
             inputs={**(inputs or {}), **item.get("inputs", {})},
             files={**(files or {}), **item.get("files", {})},
             parameters={**(parameters or {}), **item.get("parameters", {})},
+            environment={**(environment or {}), **item.get("environment", {})},
             tag=item.get("tag", tag),
             placement=item.get("placement", placement),
             priority=item.get("priority", priority),
@@ -1054,6 +1099,7 @@ def _prepare(
     step: str | None,
     workflow_id: str | None,
     data_mode: DataMode | None,
+    format: str | None,
 ) -> _Prepared:
     """Resolve one workflow and make its runner referenceable, exactly once.
 
@@ -1061,7 +1107,7 @@ def _prepare(
     supplies the runner reference and payload members.
     """
 
-    resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode)
+    resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode, format=format)
     if resolved.language is not None:
         from . import languages
 
@@ -1177,6 +1223,7 @@ def _language_request(resolved: ResolvedWorkflow) -> LanguageRequest:
         inputs=resolved._input_metadata,
         outputs=resolved.outputs,
         parameters=resolved.parameters,
+        environment=resolved.environment,
         excluded_members=excluded,
     )
 
@@ -1225,6 +1272,7 @@ def _submit(
     inputs: Mapping[str, object] | None,
     files: Mapping[str, str | os.PathLike[str]] | None,
     parameters: Mapping[str, object] | None,
+    environment: Mapping[str, object] | None,
     tag: str | None,
     placement: str | PurePosixPath,
     priority: int | None,
@@ -1265,6 +1313,23 @@ def _submit(
         supplied_inputs = dict(inputs or {})
         _stage_inputs(staging, workflow, supplied_inputs, instantiate=prepared.instantiate is not None)
         supplied_parameters = dict(parameters or {})
+        supplied_environment = dict(environment or {})
+        declared_environment = workflow.environment
+        unknown_environment = sorted(set(supplied_environment) - set(declared_environment))
+        if unknown_environment:
+            declared_names = ", ".join(sorted(declared_environment)) or "none"
+            raise ValueError(
+                f"workflow environment name {unknown_environment[0]!r} is not declared; declared names: {declared_names}"
+            )
+        if supplied_environment:
+            from .packages import _matches_input_type
+
+            for environment_name, value in supplied_environment.items():
+                environment_type = declared_environment[environment_name].get("type")
+                if isinstance(environment_type, str) and not _matches_input_type(value, environment_type):
+                    raise ValueError(
+                        f"workflow environment {environment_name!r} does not match type {environment_type!r}"
+                    )
         reserved_parameters = set(prepared.parameters) | set(prepared.reserved_parameters)
         collisions = sorted(set(supplied_parameters) & reserved_parameters)
         if collisions:
@@ -1295,6 +1360,14 @@ def _submit(
             priority=500 if priority is None else priority,
             required_capabilities=tuple(sorted(set(prepared.required_capabilities))),
             parameters=validate_parameters(job_parameters),
+            environment=(
+                {
+                    "declared": {name: dict(metadata) for name, metadata in declared_environment.items()},
+                    "overrides": supplied_environment,
+                }
+                if declared_environment
+                else {}
+            ),
             declarations=workflow.declarations,
         )
         if prepared.finalize is not None:

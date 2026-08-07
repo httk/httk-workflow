@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sys
 import tomllib
 from collections.abc import Callable, Mapping
@@ -168,6 +169,49 @@ def _validate_parameters(raw: Mapping[str, object], directory: Path) -> dict[str
         if "default" in table:
             entry["default"] = table["default"]
         result[parameter] = entry
+    return result
+
+
+def _validate_environment(raw: Mapping[str, object], directory: Path) -> dict[str, dict[str, object]]:
+    result: dict[str, dict[str, object]] = {}
+    for name, value in raw.items():
+        environment = _validate_name(name, "[workflow.environment] name", directory)
+        table = _table(value, f"[workflow.environment.{environment}]", directory)
+        path = f"[workflow.environment.{environment}]"
+        _unknown(table, {"type", "description", "default", "setting"}, path, directory)
+        environment_type = _optional_string(table, "type", path, directory)
+        if environment_type is not None and environment_type not in {
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "array",
+            "object",
+        }:
+            raise _error(directory, f"{path}.type is not one of string, number, integer, boolean, array, object")
+        description = _optional_string(table, "description", path, directory)
+        if (
+            "default" in table
+            and environment_type is not None
+            and not _matches_input_type(table["default"], environment_type)
+        ):
+            raise _error(directory, f"{path}.default does not match type {environment_type!r}")
+        setting = _optional_string(table, "setting", path, directory)
+        if (
+            setting is not None
+            and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", setting) is None
+        ):
+            raise _error(directory, f"{path}.setting must be a nonempty dotted identifier")
+        entry: dict[str, object] = {}
+        if environment_type is not None:
+            entry["type"] = environment_type
+        if description is not None:
+            entry["description"] = description
+        if "default" in table:
+            entry["default"] = table["default"]
+        if setting is not None:
+            entry["setting"] = setting
+        result[environment] = entry
     return result
 
 
@@ -434,6 +478,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
             "postprocess",
             "inputs",
             "parameters",
+            "environment",
             "outputs",
         },
         "[workflow]",
@@ -584,6 +629,10 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
             postprocess_scripts[script_name] = {"file": member, "description": description_value}
 
     parameters = _validate_parameters(_table(workflow.get("parameters", {}), "[workflow.parameters]", root), root)
+    manifest_environment = _validate_environment(
+        _table(workflow.get("environment", {}), "[workflow.environment]", root), root
+    )
+    environment = {**(lang.environment if lang is not None else {}), **manifest_environment}
     outputs = _validate_outputs(
         _table(workflow.get("outputs", {}), "[workflow.outputs]", root),
         input_metadata,
@@ -659,6 +708,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         collect_file=collect_file,
         postprocess_scripts=postprocess_scripts,
         parameters=parameters,
+        environment=environment,
         outputs=outputs,
         declaration_uri=declaration_uri,
         declaration_file=None,

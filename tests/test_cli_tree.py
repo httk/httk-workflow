@@ -16,7 +16,6 @@ from httk.core.cli import CLIContext
 
 from httk.workflow import Workspace, workflow_cli
 from httk.workflow import cli as native_cli
-from httk.workflow.compat.v1 import cli as v1_cli
 from httk.workflow.projects import initialize_project
 from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
 from httk.workflow.workflow_cli import _campaign, command
@@ -42,7 +41,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "runner": ("publish", "describe"),
     "job": ("new", "submit", "request", "list", "show", "log", "why", "debug"),
     "manager": ("run",),
-    "v1": ("prepare", "submit", "run", "collect"),
+    "v1": ("collect",),
     "config": ("init", "show", "set", "unset", "import-v1"),
     "project": ("init", "import-v1", "show", "doctor", "manifest"),
     "remote": ("list", "add", "configure", "install", "import-v1", "show", "remove"),
@@ -131,10 +130,6 @@ def test_the_removed_spellings_are_absent_from_the_help(tmp_path: Path, capsys) 
     assert command(["transfer", "--help"], _context(tmp_path)) == 0
     assert "SRC DST" in capsys.readouterr().out
 
-    assert command(["v1", "run", "--help"], _context(tmp_path)) == 0
-    v1_run = capsys.readouterr().out
-    assert "--taskset" in v1_run and "--set" not in v1_run
-
 
 def test_postprocess_is_a_single_verb(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
@@ -196,15 +191,6 @@ ALIASED_TASKMANAGER = (
     ),
 )
 
-ALIASED_V1 = (
-    (["prepare", "SRC", "DST", "--tag", "t"], ["v1", "prepare", "SRC", "DST", "--tag", "t"]),
-    (
-        ["submit", "WS", "SRC", "--placement", "p/0"],
-        ["v1", "submit", "WS", "SRC", "--placement", "p/0"],
-    ),
-    (["run", "WS", "--taskset", "vasp"], ["v1", "run", "WS", "--taskset", "vasp"]),
-)
-
 
 @pytest.mark.parametrize("alias_argv, canonical_argv", ALIASED_TASKMANAGER)
 def test_httk_taskmanager_maps_onto_the_canonical_tree(
@@ -215,18 +201,6 @@ def test_httk_taskmanager_maps_onto_the_canonical_tree(
     canonical = workflow_cli.build_parser("httk workflow", _context(tmp_path)).parse_args(canonical_argv)
     alias = native_cli._parser().parse_args(alias_argv)  # pyright: ignore[reportPrivateUsage]
     # The same function, reached with the same values: an alias cannot drift.
-    assert alias.handler is canonical.handler
-    assert _namespace(alias) == _namespace(canonical)
-
-
-@pytest.mark.parametrize("alias_argv, canonical_argv", ALIASED_V1)
-def test_httk_v1_taskmanager_maps_onto_the_canonical_tree(
-    alias_argv: list[str],
-    canonical_argv: list[str],
-    tmp_path: Path,
-) -> None:
-    canonical = workflow_cli.build_parser("httk workflow", _context(tmp_path)).parse_args(canonical_argv)
-    alias = v1_cli._parser().parse_args(alias_argv)  # pyright: ignore[reportPrivateUsage]
     assert alias.handler is canonical.handler
     assert _namespace(alias) == _namespace(canonical)
 
@@ -245,11 +219,10 @@ def test_the_taskmanager_alias_really_does_the_work_it_names(tmp_path: Path, cap
     assert capsys.readouterr().out == alias
 
 
-def test_both_executables_say_which_spelling_is_canonical(capsys) -> None:
-    for parser in (native_cli._parser(), v1_cli._parser()):  # pyright: ignore[reportPrivateUsage]
-        parser.print_help()
-        printed = capsys.readouterr().out
-        assert "httk workflow" in printed and "canonical" in printed
+def test_taskmanager_alias_says_which_spelling_is_canonical(capsys) -> None:
+    native_cli._parser().print_help()  # pyright: ignore[reportPrivateUsage]
+    printed = capsys.readouterr().out
+    assert "httk workflow" in printed and "canonical" in printed
 
 
 def test_the_executables_still_take_their_durability_switch_before_the_command() -> None:
@@ -258,7 +231,6 @@ def test_the_executables_still_take_their_durability_switch_before_the_command()
     assert parser.parse_args(["--no-durable", "init", "WS"]).no_durable is True
     # And after it, which the canonical tree is what makes possible.
     assert parser.parse_args(["init", "WS", "--no-durable"]).no_durable is True
-    assert v1_cli._parser().parse_args(["--no-durable", "run", "WS"]).no_durable is True  # pyright: ignore[reportPrivateUsage]
 
 
 # ---------------------------------------------------------------------------
@@ -269,10 +241,6 @@ def test_the_executables_still_take_their_durability_switch_before_the_command()
 def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
 
-    # The v1 task-set filter is --taskset only; the old --set no longer parses.
-    assert parser.parse_args(["v1", "run", "WS", "--taskset", "vasp"]).taskset == "vasp"
-    with pytest.raises(SystemExit):
-        parser.parse_args(["v1", "run", "WS", "--set", "vasp"])
     # But --set on `remote configure` is, and stays, KEY=VALUE settings.
     assert parser.parse_args(["remote", "configure", "cluster", "--set", "host=a"]).set == ["host=a"]
     with pytest.raises(SystemExit):
@@ -291,8 +259,6 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
     assert parser.parse_args(["run", "WS", "--idle"]).idle is True
     with pytest.raises(SystemExit):
         parser.parse_args(["manager", "run", "WS", "--timeout", "5"])
-    with pytest.raises(SystemExit):
-        parser.parse_args(["v1", "run", "WS", "--until-" + "idle"])
 
 
 def test_top_level_run_is_manager_run_with_pinned_defaults(tmp_path: Path) -> None:
@@ -356,15 +322,6 @@ def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
     # The removed group subcommands no longer parse as group actions: they are just
     # more of the verb's own trailing vector now.
     assert parser.parse_args(["transfer", "send", "c", "J"]).args == ["send", "c", "J"]
-
-
-def test_the_v1_siblings_default_their_task_set_differently_on_purpose(tmp_path: Path) -> None:
-    """`prepare` and `submit` assign a task set; `run` filters by one."""
-
-    parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    assert parser.parse_args(["v1", "prepare", "A", "B"]).taskset == "default"
-    assert parser.parse_args(["v1", "submit", "WS", "SRC", "--placement", "p"]).taskset == "default"
-    assert parser.parse_args(["v1", "run", "WS"]).taskset == "any"
 
 
 # ---------------------------------------------------------------------------

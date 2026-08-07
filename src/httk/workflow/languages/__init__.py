@@ -150,6 +150,7 @@ class LanguageRequest:
     :param inputs: Describe the workflow inputs.
     :param outputs: Describe the requested workflow outputs.
     :param parameters: Describe the declared workflow parameters.
+    :param environment: Describe the declared workflow environment.
     :param excluded_members: Package members the realization must not stage.
     """
 
@@ -160,6 +161,7 @@ class LanguageRequest:
     inputs: Mapping[str, Mapping[str, object]]
     outputs: Mapping[str, Mapping[str, object]]
     parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    environment: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     excluded_members: tuple[str, ...] = ()
 
 
@@ -211,6 +213,7 @@ class WorkflowLanguage:
     :param open_ports: Skip manifest port validation when document ports cannot be enumerated statically.
     :param has_default_collector: Provide a default collector path.
     :param allows_modes: Permit manifest data and workdir mode overrides.
+    :param environment: Declare language-provided environment metadata.
     """
 
     name: str
@@ -225,6 +228,7 @@ class WorkflowLanguage:
     open_ports: bool = False
     has_default_collector: bool = True
     allows_modes: bool = True
+    environment: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
 
 def available_languages() -> tuple[str, ...]:

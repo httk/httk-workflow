@@ -1,22 +1,19 @@
-"""Realize legacy httk v1 template directories as workflow jobs."""
+"""Realize legacy httk v1 task packages through the ordinary runner path."""
 
 from __future__ import annotations
 
 import os
+import shlex
 import stat
+import sys
 from collections.abc import Mapping
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path, PurePosixPath
+from string import Template
 from typing import TYPE_CHECKING, cast
 
-from httk.workflow.compat.v1 import (
-    V1_CAPABILITY,
-    V1_EXECUTOR,
-    V2_TO_V1_PRIORITY,
-    _execute_instantiator,
-    templates,
-)
-from httk.workflow.languages import LanguagePorts, LanguageRequest, LanguageScaffold, WorkflowLanguage
+from httk.workflow.languages import LanguagePorts, LanguageRequest, LanguageScaffold, WorkflowLanguage, runner_reference
 from httk.workflow.protocol import validate_label
 
 if TYPE_CHECKING:
@@ -24,7 +21,11 @@ if TYPE_CHECKING:
     from httk.workflow.runtime_builders import JobSpec
     from httk.workflow.scaffold import InstantiateContext
 
+PACKAGE = __name__
+RUNNER = "v1_runner.py"
 PROGRAMS = ("ht_steps", "ht_run")
+V1_PRIORITY_MAP = {1: 100, 2: 300, 3: 500, 4: 700, 5: 900}
+V2_TO_V1_PRIORITY = {value: key for key, value in V1_PRIORITY_MAP.items()}
 
 
 def _program(root: Path) -> str | None:
@@ -35,9 +36,10 @@ def _program(root: Path) -> str | None:
 
 
 def matches(path: Path) -> bool:
-    """Return whether *path* is a bare v1 task directory."""
+    """Return false: bare v1 directories require an explicit format."""
 
-    return path.is_dir() and not (path / "httk_workflow.toml").is_file() and _program(path) is not None
+    del path
+    return False
 
 
 def ports(path: Path) -> LanguagePorts:
@@ -80,13 +82,11 @@ def _snapshot_package(root: Path, excluded: tuple[str, ...]) -> tuple[dict[str, 
                 if entry.is_dir(follow_symlinks=False):
                     directories[member] = stat.S_IMODE(entry.stat(follow_symlinks=False).st_mode)
                     visit(Path(entry.path), relative)
-                    continue
-                if not entry.is_file(follow_symlinks=False):
+                elif entry.is_file(follow_symlinks=False):
+                    if member not in excluded_set:
+                        snapshot[member] = (Path(entry.path).read_bytes(), stat.S_IMODE(entry.stat().st_mode))
+                else:
                     raise ValueError(f"httk-v1 package member must be a regular file: {member}")
-                if member in excluded_set:
-                    continue
-                mode = stat.S_IMODE(entry.stat(follow_symlinks=False).st_mode)
-                snapshot[member] = (Path(entry.path).read_bytes(), mode)
 
     visit(root)
     return directories, snapshot
@@ -105,6 +105,89 @@ def _write_snapshot(payload: Path, snapshot: tuple[Mapping[str, int], Mapping[st
         payload.joinpath(*PurePosixPath(member).parts).chmod(directories[member])
 
 
+def _render_template(source: Path, destination: Path, values: Mapping[str, object]) -> None:
+    """Render one trusted v1 template exactly as the legacy renderer did."""
+
+    locals_: dict[str, object] = {}
+    globals_ = dict(values)
+    rendered = Template(Template(source.read_text(encoding="utf-8")).safe_substitute(locals_)).safe_substitute(globals_)
+    shebang, separator, body = rendered.partition("\n")
+    if shebang.startswith("#!") and separator:
+        rendered, output = body, shebang + separator
+    else:
+        output = ""
+    lexer = shlex.shlex(rendered)
+    lexer.whitespace = ""
+    eval_nesting = exec_nesting = 0
+    command = ""
+    for token in lexer:
+        if eval_nesting == 0 and exec_nesting == 0:
+            if token == "\\":
+                token += lexer.get_token() or ""
+            if token == "$":
+                token += lexer.get_token() or ""
+            if token == "$(":
+                eval_nesting, command = 1, ""
+                continue
+            if token == "${":
+                exec_nesting, command = 1, ""
+                continue
+            output += "$" if token == "\\$" else token
+        elif exec_nesting:
+            if token == "{":
+                exec_nesting += 1
+            if token == "}":
+                exec_nesting -= 1
+            if exec_nesting == 0:
+                old_stdout = sys.stdout
+                sys.stdout = StringIO()
+                try:
+                    exec(command, globals_, locals_)  # noqa: S102 - v1 templates intentionally execute trusted code
+                    output += sys.stdout.getvalue()
+                finally:
+                    sys.stdout = old_stdout
+                output = output.removesuffix("\n")
+                continue
+            command += token
+        else:
+            if token == "(":
+                eval_nesting += 1
+            if token == ")":
+                eval_nesting -= 1
+            if eval_nesting == 0:
+                output += str(eval(command, globals_, locals_))
+                continue
+            command += token
+    destination.write_text(output, encoding="utf-8")
+    destination.chmod(stat.S_IMODE(source.stat().st_mode))
+
+
+def _apply_templates(payload: Path, values: Mapping[str, object]) -> None:
+    for source in sorted(payload.rglob("*.template")):
+        if source.is_file():
+            target = source.with_name(source.name.removesuffix(".template"))
+            _render_template(source, target, values)
+            source.unlink()
+
+
+def _execute_instantiator(payload: Path, globals_: Mapping[str, object]) -> None:
+    script = payload / "ht.instantiate.py"
+    if not script.is_file():
+        raise ValueError("instantiate_globals were supplied but ht.instantiate.py is missing")
+    namespace = dict(globals_)
+    namespace.setdefault("__file__", str(script))
+    namespace.setdefault("__name__", "__httk_v1_instantiate__")
+    old_cwd, old_argv = Path.cwd(), sys.argv
+    try:
+        os.chdir(payload)
+        sys.argv = [str(script)]
+        exec(compile(script.read_bytes(), str(script), "exec"), namespace, namespace)  # noqa: S102
+    finally:
+        sys.argv = old_argv
+        os.chdir(old_cwd)
+    script.unlink()
+
+
 def prepare(request: LanguageRequest) -> LanguageScaffold:
     """Prepare one v1 package realization."""
 
@@ -115,13 +198,10 @@ def prepare(request: LanguageRequest) -> LanguageScaffold:
     if program is None:
         raise ValueError(f"{root}: no ht_steps or ht_run program found")
     snapshot = _snapshot_package(root, request.excluded_members)
-    options = request.runner_options
-    taskset = str(options.get("taskset", "default"))
-    attempts = cast(int, options.get("attempts", 10))
+    taskset = str(request.runner_options.get("taskset", "default"))
+    attempts = cast(int, request.runner_options.get("attempts", 10))
 
     def instantiate(ctx: InstantiateContext) -> None:
-        """Copy, render, and execute the trusted v1 realization."""
-
         _write_snapshot(ctx.payload, snapshot)
         supplied: dict[str, object] = {}
         for name, value in ctx.inputs.items():
@@ -132,18 +212,15 @@ def prepare(request: LanguageRequest) -> LanguageScaffold:
                 supplied[name] = httk.core.load(os.fspath(value))
             else:
                 supplied[name] = value
-        globals_ = {key: value for key, value in {**ctx.parameters, **supplied}.items() if key != "workflow_language"}
-        templates.apply_templates_in_place(ctx.payload, globals_)
-        script = ctx.payload / "ht.instantiate.py"
-        if script.is_file():
-            _execute_instantiator(ctx.payload, globals_)
+        values = {key: value for key, value in {**ctx.parameters, **supplied}.items() if key != "workflow_language"}
+        _apply_templates(ctx.payload, values)
+        if (ctx.payload / "ht.instantiate.py").is_file():
+            _execute_instantiator(ctx.payload, values)
         runner = ctx.payload / program
         if not runner.is_file() or not os.access(runner, os.X_OK):
             raise ValueError(f"legacy runner is missing or not executable: {runner}")
 
     def finalize(spec: JobSpec) -> JobSpec:
-        """Apply the v1 executor, retry, claim, and persistent-workdir contract."""
-
         return replace(
             spec,
             compatibility={
@@ -164,14 +241,11 @@ def prepare(request: LanguageRequest) -> LanguageScaffold:
         documents={},
         files={},
         parameters={"workflow_language": "httk-v1"},
-        runner=None,
-        payload_runner=program,
-        runner_executor=V1_EXECUTOR,
+        runner=runner_reference(PACKAGE, RUNNER),
         workdir_path="ht.run.current",
-        required_capabilities=(V1_CAPABILITY,),
+        required_capabilities=(),
         instantiate=instantiate,
         finalize=finalize,
-        reserved_parameters=(),
     )
 
 
@@ -194,4 +268,10 @@ LANGUAGE = WorkflowLanguage(
     validate_runner=validate_runner,
     prepare=prepare,
     collect=collect,
+    environment={
+        "httk_v1.timeout": {"type": "integer", "default": 21600},
+        "httk_v1.wrapper": {"type": "string", "default": ""},
+        "httk_v1.log_compression": {"type": "string", "default": "bzip2"},
+        "httk_v1.root": {"type": "string", "default": ""},
+    },
 )

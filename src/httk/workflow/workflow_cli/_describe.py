@@ -78,8 +78,8 @@ def _declaration_document(workflow: ResolvedWorkflow) -> dict[str, object]:
     return {"present": True, "id": document.get("$id"), "origin": origin}
 
 
-def _workflow_description(target: str) -> dict[str, object]:
-    workflow = resolve_workflow(target)
+def _workflow_description(target: str, format: str | None = None) -> dict[str, object]:
+    workflow = resolve_workflow(target, format=format)
     source = workflow.directory if workflow.directory is not None else workflow.source
     return {
         "format": WORKFLOW_DESCRIPTION_FORMAT,
@@ -95,6 +95,7 @@ def _workflow_description(target: str) -> dict[str, object]:
         "workdir_mode": workflow.workdir_mode,
         "inputs": _input_document(workflow),
         "parameters": {name: dict(metadata) for name, metadata in workflow.parameters.items()},
+        "environment": {name: dict(metadata) for name, metadata in workflow.environment.items()},
         "outputs": _output_document(workflow),
         "postprocess": {name: dict(script) for name, script in workflow.postprocess_scripts.items()},
         "declaration": _declaration_document(workflow),
@@ -140,7 +141,12 @@ def _render_text(description: Mapping[str, object]) -> str:
     for step in steps:
         assert isinstance(step, Mapping)
         lines.append(f"  {'*' if step['initial'] else '-'} {step['name']}")
-    for title, key in (("inputs", "inputs"), ("parameters", "parameters"), ("outputs", "outputs")):
+    for title, key in (
+        ("inputs", "inputs"),
+        ("parameters", "parameters"),
+        ("environment", "environment"),
+        ("outputs", "outputs"),
+    ):
         lines.append(f"{title}:")
         values = description[key]
         assert isinstance(values, Mapping)
@@ -149,6 +155,10 @@ def _render_text(description: Mapping[str, object]) -> str:
             continue
         for name, value in values.items():
             assert isinstance(value, Mapping)
+            if key == "environment":
+                value = {
+                    field: value[field] for field in ("type", "setting", "default", "description") if field in value
+                }
             details = ", ".join(f"{field}={_value(item)}" for field, item in value.items())
             lines.append(f"  {name}: {details}")
     lines.append("postprocess scripts:")
@@ -178,7 +188,7 @@ def _render_text(description: Mapping[str, object]) -> str:
 def handle_workflow_describe(arguments: argparse.Namespace, context: Any) -> int:
     """Describe one workflow without publishing or touching a workspace."""
 
-    description = _workflow_description(arguments.target)
+    description = _workflow_description(arguments.target, arguments.format)
     print(json.dumps(description, indent=2, sort_keys=True) if arguments.json else _render_text(description))
     return 0
 
@@ -196,4 +206,9 @@ def build_describe_parser(
         handler=handle_workflow_describe,
     )
     describe.add_argument("target", metavar="TARGET", help="workflow id, alias, runner file, or package directory")
+    describe.add_argument(
+        "--format",
+        metavar="LANG",
+        help="force LANG for a bare workflow document or directory",
+    )
     describe.add_argument("--json", action="store_true", help="print the description as one JSON object")

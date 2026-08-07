@@ -51,17 +51,9 @@ from ._common import (
     _vasp,
 )
 from ._compat import (
-    _v1_pool,
     add_v1_collect_arguments,
-    add_v1_job_arguments,
-    add_v1_prepare_arguments,
-    add_v1_run_arguments,
-    add_v1_submit_arguments,
     build_v1_parser,
     handle_v1_collect,
-    handle_v1_prepare,
-    handle_v1_run,
-    handle_v1_submit,
 )
 from ._describe import build_describe_parser, handle_workflow_describe
 from ._job import (

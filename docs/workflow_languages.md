@@ -13,7 +13,7 @@ workflow machinery.
 | CWL | `job new WS --workflow flow.cwl` | `pkg:httk.workflow.languages.cwl/cwl_runner.py` |
 | PWD | `job new WS --workflow graph.json` | `pkg:httk.workflow.languages.pwd/pwd_runner.py` |
 | jobflow | `job new WS --workflow maker.json`, or a package with `language = "jobflow"` | `pkg:httk.workflow.languages.jobflow/jobflow_runner.py` |
-| httk-v1 | a template directory, or a package with `language = "httk-v1"` | payload runner under executor `httk-v1` |
+| httk-v1 | a bare task directory with `--format httk-v1`, or a package with `language = "httk-v1"` | `pkg:httk.workflow.languages.httk_v1/v1_runner.py` through the ordinary `path` runner |
 
 The CWL realization needs `httk-workflow[cwl]` when the document is prepared.
 The normalized plan is carried by the job, so the machine executing the job
@@ -190,7 +190,7 @@ not a FireWorks runner.
 
 ### httk-v1 package
 
-The v1 form has no document member:
+The v1 form has no document member and uses the ordinary manager:
 
 ```toml
 [workflow]
@@ -211,21 +211,30 @@ file = "collect.py"
 The source directory must contain executable `ht_steps` or `ht_run`, including
 `.template` forms. `taskset` selects the claim pool and `attempts` sets the v1
 retry budget. `data_mode` and `workdir_mode` are forbidden: the realization
-forces no transactional data and persistent `ht.run.current`.
+forces no transactional data and persistent `ht.run.current`. The packaged
+`v1_runner.py` runs through the normal `path` executor, with no v1-specific
+manager or capability. See {doc}`v1_compatibility` for the environment entries
+and legacy runtime behavior.
 
 ## Bare documents and one-shot jobs
 
 `job new` recognizes a bare CWL document, a PWD `.json` graph, a jobflow Maker
-`.json` document, or a bare v1 template directory:
+`.json` document, or a bare v1 template directory when its format is explicit:
 
 ```console
 httk workflow job new WS --workflow flow.cwl --input message=echo
 httk workflow job new WS --workflow workflow.json \
   --parameter pwd_module_path='["."]'
 httk workflow job new WS --workflow maker.json
-httk workflow job new WS --workflow ./v1-template \
+httk workflow job new WS --workflow ./v1-template --format httk-v1 \
   --parameter structure=structures/si.cif
 ```
+
+Use the generic `--format LANG` option for any bare document or directory when
+matching by path is not appropriate. `cwl`, `pwd`, and `jobflow` select their
+corresponding bare document readers; `httk-v1` requires a directory and is
+never auto-matched. A manifest package directory and a registered workflow id
+reject `--format` because their language is already declared.
 
 The resolver synthesizes an anonymous workflow with id `<language>.<stem>`.
 Document input ports become hook-consumed inputs; document outputs become
@@ -240,8 +249,8 @@ shared: the workflow is resolved and prepared once, then instantiated once per
 job. For httk-v1, the source package is snapshotted at preparation, so edits
 made during a campaign cannot leak into later jobs. Symlinks in a v1 package
 are rejected. Language-produced parameters are reserved; a caller collision is
-an error. `publish=` is ignored for language workflows because their runners
-are installed or selected by the v1 executor, not copied to the workspace
+an error. `publish=` is ignored for language workflows because their
+realizations supply installed runners rather than copying them to the workspace
 runner store.
 
 ## Collection

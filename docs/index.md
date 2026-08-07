@@ -4,15 +4,15 @@ This site documents the *httk-workflow* module. For the full documentation of
 *httk₂*, see [docs.httk.org](https://docs.httk.org).
 
 The module implements a recoverable, language-neutral workflow protocol whose
-source of truth is a single atomically renamed state marker per job. It presents
-three layers, each with its own import home: the **filesystem protocol**
+source of truth is a single atomically renamed state marker per job. The
+`httk-taskmanager` executable remains a compatibility alias. It presents three
+layers, each with its own import home: the **filesystem protocol**
 (`httk.workflow.protocol`), the **execution and authoring** surface
 (`httk.workflow` — `Runner`, `Attempt` — with lower-level helpers in
 `httk.workflow.runtime`), and **orchestration and management** (`Workspace`,
 `TaskManager`, `collect`, and named submodules for transfers, remotes, and
 compatibility). Installations register the canonical `httk workflow` command
-tree, plus the `httk-taskmanager` and `httk-v1-taskmanager` executables, which
-are aliases of it.
+tree and the `httk-taskmanager` alias.
 
 ```{admonition} Quick links
 :class: tip

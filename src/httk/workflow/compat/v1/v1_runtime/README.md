@@ -7,7 +7,7 @@ The historic source paths are retained as thin redirect files:
 
 They load the attributed compatibility implementations below `compat/`, so
 existing `ht_steps` files can source the exact old names through the
-`HTTK_DIR` environment variable supplied by `httk-v1-taskmanager`.
+`HTTK_DIR` environment variable supplied by the packaged httk-v1 runner.
 
 The compatibility functions retain their httk v1 behavior. Native v2 runners
 instead use `httk.workflow.Runner` and `httk.workflow.Attempt` together with the

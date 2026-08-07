@@ -140,13 +140,12 @@ _INTERNAL_MODULES = (
     "adapter_runtime",
     "cli",
     "workflow_cli",
-    # Compatibility internals: the engines are public, their runners and the
-    # v1 CLI alias and shared import tail are not.
+    # Language runners are internal; the language registration modules are
+    # public.
     "languages.cwl.cwl_runner",
     "languages.pwd.pwd_runner",
     "languages.jobflow.jobflow_runner",
-    "compat.v1._runner",
-    "compat.v1.cli",
+    "languages.httk_v1.v1_runner",
     # The VASP facade is public; the cohesive modules it re-exports are not.
     "vasp.inputs",
     "vasp.diagnostics",
@@ -160,7 +159,7 @@ nitpick_ignore_regex = [
     (
         r"py:.*",
         r"(DataMode|WorkdirMode|PublishMode|RunnerSource|StepHandler|JoinCondition"
-        r"|DiagnosticSeverity|EventMonitor|RemedyChange|RemedySequence|MarkerFault|V1Materializer)",
+        r"|DiagnosticSeverity|EventMonitor|RemedyChange|RemedySequence|MarkerFault)",
     ),
 ]
 copybutton_prompt_text = r">>> |\.\.\. |\$ "

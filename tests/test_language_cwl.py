@@ -306,6 +306,12 @@ def test_bare_cwl_document_runs_and_collects_without_a_provider(package: Path, w
     assert (workspace.root / output.url).read_text(encoding="utf-8").strip() == "hello"
 
 
+def test_bare_cwl_document_can_be_forced(package: Path, workspace: Workspace) -> None:
+    assert resolve_workflow(package / "echo.cwl", format="cwl").language == "cwl"
+    with pytest.raises(ValueError, match="available languages"):
+        resolve_workflow(package / "echo.cwl", format="unknown")
+
+
 def test_cli_job_new_accepts_a_bare_cwl_document(package: Path, workspace: Workspace, tmp_path: Path, capsys) -> None:
     name = register_ws(CLIContext("httk", tmp_path), workspace.root, "bare-cwl")
     assert (
