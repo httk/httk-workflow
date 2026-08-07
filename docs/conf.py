@@ -142,9 +142,8 @@ _INTERNAL_MODULES = (
     "workflow_cli",
     # Compatibility internals: the engines are public, their runners and the
     # v1 CLI alias and shared import tail are not.
-    "compat._integration",
-    "compat.cwl.cwl_runner",
-    "compat.pwd.pwd_runner",
+    "languages.cwl.cwl_runner",
+    "languages.pwd.pwd_runner",
     "compat.v1._runner",
     "compat.v1.cli",
     # The VASP facade is public; the cohesive modules it re-exports are not.
@@ -210,8 +209,10 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.vasp",
         "httk.workflow.compat",
         "httk.workflow.compat.v1",
-        "httk.workflow.compat.cwl",
-        "httk.workflow.compat.pwd",
+        "httk.workflow.languages",
+        "httk.workflow.languages.cwl",
+        "httk.workflow.languages.pwd",
+        "httk.workflow.languages.httk_v1",
     }
 )
 

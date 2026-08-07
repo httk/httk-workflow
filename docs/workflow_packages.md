@@ -43,6 +43,30 @@ httk workflow describe ./my-workflow
 httk workflow job new WS --workflow-dir ./my-workflow --input structure=POSCAR
 ```
 
+## Runner realizations
+
+`[workflow.runner]` selects one of three forms. The executable form is the
+ordinary package runner. The language forms delegate instantiate, run, and
+default collection to the registered language realization.
+
+| Form | Manifest selector | Required/allowed members | Runner contract |
+| --- | --- | --- | --- |
+| executable entry | no `language` | `entry`, `steps`, `initial_step`, `data_mode`, `workdir_mode` | package `run` plus the declared step set |
+| document language | `language = "cwl"` or `"pwd"` and `document` | language keys only; `port` is allowed on document inputs/outputs | installed `cwl_runner.py` or `pwd_runner.py` |
+| httk-v1 | `language = "httk-v1"` and no `document` | `taskset`, `attempts`; no mode keys | package snapshot under executor `httk-v1`, with `ht_steps` or `ht_run` |
+
+For language forms, `entry`, `steps`, and `initial_step` are forbidden because
+the language supplies built-in steps. `[workflow.instantiate]` is forbidden
+because language inputs are hook-consumed. `destination` is forbidden on
+CWL/PWD and on httk-v1 inputs; an omitted v1 destination is an
+`ht.instantiate.py` global. Language workflows may declare
+`[workflow.postprocess]` to override the default. CWL and PWD have defaults;
+httk-v1 has none and normally declares a hook.
+
+Language manifests cannot set `data_mode` or `workdir_mode` for httk-v1: they
+are forced to `none` and persistent `ht.run.current`. Unknown language keys are
+errors.
+
 ## `workflow.toml` reference
 
 This is the complete manifest vocabulary validated by
@@ -70,29 +94,37 @@ declaration_uri = "https://example.org/workflows/relax"
 # declaration_file = "declaration.json"
 ```
 
-### `[workflow.runner]`
+### `[workflow.runner]`: executable form
 
-This table is required. `steps` is a nonempty list of strings. If `initial_step`
-is omitted, `start` is selected when present; a one-step runner uses that one
-step; otherwise `initial_step` is required and must name a listed step.
+With no `language`, the table is a normal executable runner. `steps` is a
+nonempty list; if `initial_step` is omitted, `start` is selected when present,
+or the sole step is selected. Otherwise `initial_step` is required.
 
 | Key | Required/default | Meaning |
 | --- | --- | --- |
-| `entry` | `"run"` | Reserved relative entry member. It must be named `run`; custom entry names are not yet supported. |
-| `initial_step` | `"start"` when present; otherwise the sole step | First step for a scaffolded job. |
+| `entry` | `"run"` | Relative entry member; it must be named `run`. |
+| `initial_step` | `"start"` when present; otherwise sole step | First scaffolded step. |
 | `steps` | required | Nonempty runner step list. |
 | `data_mode` | `"none"` | `"none"` or `"transactional"`. |
 | `workdir_mode` | `"persistent"` | `"persistent"` or `"isolated"`. |
 
-```toml
-[workflow.runner]
-# Reserved: the manager's tree entry point must be named "run".
-entry = "run"
-initial_step = "start"
-steps = ["start", "finish"]
-data_mode = "transactional"
-workdir_mode = "persistent"
-```
+### `[workflow.runner]`: language vocabulary
+
+| Key | CWL/PWD | httk-v1 | Meaning |
+| --- | --- | --- | --- |
+| `language` | required: `"cwl"` or `"pwd"` | required: `"httk-v1"` | Select the realization. |
+| `document` | required, relative regular member | forbidden | Language document member. |
+| `port` | optional on an input/output table | forbidden | Alias a manifest name to a document port. |
+| `modules` | PWD only, list of relative `.py` members | forbidden | Package Python modules to stage. |
+| `module_path` | PWD only, list of import roots | forbidden | Additional PWD import roots. |
+| `allowed_modules` | PWD only, list of module prefixes | forbidden | PWD import allowlist. |
+| `taskset` | forbidden | label, default `"default"` | v1 claim pool. |
+| `attempts` | forbidden | integer, default `10` | v1 retry budget. |
+| `entry`, `steps`, `initial_step` | forbidden | forbidden | Built-in language steps. |
+| `data_mode`, `workdir_mode` | allowed only in executable form | forbidden | v1 forces `none`/persistent. |
+
+For a document language, each effective input and output port must exist in the
+document and may occur only once. `port` defaults to the manifest name.
 
 ### Hook tables
 
@@ -114,7 +146,7 @@ Every input table accepts these keys:
 
 | Key | Meaning |
 | --- | --- |
-| `destination` | Optional payload-relative destination. Omit it when the instantiate hook consumes the value; omission requires `[workflow.instantiate]`. Existing input and payload-relative-name validation applies. |
+| `destination` | Optional payload-relative destination for executable runners. Omit it when `[workflow.instantiate]` consumes the value. Language runners forbid it because the language hook consumes every input; for httk-v1 an omitted destination is an `ht.instantiate.py` global. |
 | `description` | Optional input description. |
 | `entry_type` | Optional declaration entry type. |
 | `ref` | Optional declaration reference. |
@@ -272,6 +304,13 @@ runner store. Publication computes one tree digest, installs a read-only tree,
 and records the full digest in `job.json`. Republish of identical content is an
 idempotent no-op; changed content cannot replace an existing name without an
 explicit replacement. The manager verifies the same digest before execution.
+
+`publish=` is ignored for language workflows: CWL/PWD use their installed
+runner and httk-v1 uses its payload runner and executor. `new_jobs` and CLI
+`--input-from` campaigns prepare a language package once and instantiate it per
+job. Language-produced parameter names are reserved and collisions fail
+loudly. httk-v1 snapshots the complete package at preparation, so edits made
+after preparation do not change later jobs; symlinks are rejected.
 
 The usual lifecycle is instantiate, run, then collect:
 

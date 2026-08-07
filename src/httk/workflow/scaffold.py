@@ -59,6 +59,7 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
 if TYPE_CHECKING:
     from .collecting import JobRecord
+    from .languages import LanguageRequest
 
 from ._util import sha256_file, tree_digest, validate_inputs
 from .errors import FormatError
@@ -129,6 +130,9 @@ class WorkflowProvider:
     :param workflow_id: Name the workflow in registrations and job definitions.
     :param runner_package: Name the package containing a packaged runner.
     :param runner_file: Name the runner file beside the package module.
+    :param language: Name the language runner realization, when applicable.
+    :param document: Name the language document package member.
+    :param runner_options: Supply language-specific runner options.
     :param initial_step: Select the default starting step.
     :param alias: Provide an alternate registered name.
     :param steps: Declare the steps the runner provides.
@@ -152,6 +156,9 @@ class WorkflowProvider:
     workflow_id: str
     runner_package: str | None = None
     runner_file: str | None = None
+    language: str | None = None
+    document: str | None = None
+    runner_options: Mapping[str, object] = field(default_factory=dict)
     initial_step: str = "start"
     alias: str | None = None
     steps: tuple[str, ...] = ()
@@ -173,20 +180,30 @@ class WorkflowProvider:
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        packaged = self.runner_package is not None or self.runner_file is not None
-        if packaged != (self.runner_package is not None and self.runner_file is not None):
-            raise ValueError("a workflow provider must supply both runner_package and runner_file")
-        if packaged == (self.directory is not None):
-            raise ValueError("a workflow provider must be packaged or directory-sourced, exclusively")
-        if packaged and (
-            self.entry != "run"
-            or self.instantiate_file is not None
-            or self.postprocess_file is not None
-            or self.declaration_file is not None
-        ):
-            raise ValueError("directory-only fields are not allowed on a packaged workflow provider")
-        if self.directory is not None and (not self.entry or PurePosixPath(self.entry).is_absolute()):
-            raise ValueError(f"workflow directory entry must be a relative member: {self.entry!r}")
+        if self.language is not None:
+            if self.runner_package is not None or self.runner_file is not None:
+                raise ValueError("a language workflow cannot supply a runner package or file")
+            if self.directory is None:
+                raise ValueError("a language workflow provider must be directory-sourced")
+            if self.entry != "run" or self.instantiate_file is not None:
+                raise ValueError("language workflow runner fields are implied by the language")
+            if not self.instantiate:
+                raise ValueError("a language workflow provider must have instantiate enabled")
+        else:
+            packaged = self.runner_package is not None or self.runner_file is not None
+            if packaged != (self.runner_package is not None and self.runner_file is not None):
+                raise ValueError("a workflow provider must supply both runner_package and runner_file")
+            if packaged == (self.directory is not None):
+                raise ValueError("a workflow provider must be packaged or directory-sourced, exclusively")
+            if packaged and (
+                self.entry != "run"
+                or self.instantiate_file is not None
+                or self.postprocess_file is not None
+                or self.declaration_file is not None
+            ):
+                raise ValueError("directory-only fields are not allowed on a packaged workflow provider")
+            if self.directory is not None and (not self.entry or PurePosixPath(self.entry).is_absolute()):
+                raise ValueError(f"workflow directory entry must be a relative member: {self.entry!r}")
         inputs = validate_inputs(self.inputs)
         if any(destination is None for destination in inputs.values()) and not self.instantiate:
             raise ValueError(f"workflow {self.workflow_id!r} has hook-consumed inputs and requires an instantiate hook")
@@ -195,6 +212,7 @@ class WorkflowProvider:
         ):
             raise ValueError(f"workflow alias must match [a-z0-9._-]+: {self.alias!r}")
         object.__setattr__(self, "inputs", MappingProxyType(inputs))
+        object.__setattr__(self, "runner_options", MappingProxyType(dict(self.runner_options)))
         object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
         object.__setattr__(self, "_input_metadata", MappingProxyType(dict(self._input_metadata)))
@@ -284,6 +302,10 @@ class ResolvedWorkflow:
 
     :param source: Locate the runner file or workflow package directory.
     :param workflow_id: Name the resolved workflow.
+    :param language: Name the language runner realization, when applicable.
+    :param document: Name the language document package member.
+    :param runner_options: Preserve language-specific runner options.
+    :param document_path: Locate the absolute language document.
     :param initial_step: Select the step a job starts at.
     :param alias: Preserve the registered workflow alias.
     :param steps: Preserve the steps the runner provides.
@@ -309,6 +331,10 @@ class ResolvedWorkflow:
     source: Path
     workflow_id: str
     initial_step: str
+    language: str | None = None
+    document: str | None = None
+    runner_options: Mapping[str, object] = field(default_factory=dict)
+    document_path: Path | None = None
     alias: str | None = None
     steps: tuple[str, ...] = ()
     data_mode: DataMode = "none"
@@ -331,15 +357,24 @@ class ResolvedWorkflow:
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        if self.packaged is not None and self.directory is not None:
-            raise ValueError("a resolved workflow cannot be packaged and directory-sourced")
-        if self.packaged is not None and (
-            self.entry != "run"
-            or self.instantiate_file is not None
-            or self.postprocess_file is not None
-            or self.declaration_file is not None
-        ):
-            raise ValueError("directory-only fields are not allowed on a packaged resolved workflow")
+        if self.language is not None:
+            if self.packaged is not None or (self.directory is None and self.document_path is None):
+                raise ValueError("a language workflow must have a source document or directory")
+            if self.entry != "run" or self.instantiate_file is not None:
+                raise ValueError("language workflow runner fields are implied by the language")
+            if not self.instantiate:
+                raise ValueError("a language workflow must have instantiate enabled")
+        else:
+            if self.packaged is not None and self.directory is not None:
+                raise ValueError("a resolved workflow cannot be packaged and directory-sourced")
+            if self.packaged is not None and (
+                self.entry != "run"
+                or self.instantiate_file is not None
+                or self.postprocess_file is not None
+                or self.declaration_file is not None
+            ):
+                raise ValueError("directory-only fields are not allowed on a packaged resolved workflow")
+        object.__setattr__(self, "runner_options", MappingProxyType(dict(self.runner_options)))
 
     @property
     def store_name(self) -> str:
@@ -353,6 +388,8 @@ class ResolvedWorkflow:
         :return: The digest-pinned runner-store name.
         """
 
+        if self.language is not None:
+            raise ValueError("a language workflow is never published to the runner store")
         if self.directory is not None:
             return f"{self.directory.name}.{tree_digest(self.directory)[:12]}"
         digest = sha256_file(self.source)
@@ -416,11 +453,20 @@ class _Prepared:
     """A workflow whose runner is resolved once for every job that will use it."""
 
     workflow: ResolvedWorkflow
-    runner_source: Literal["workspace", "installed"]
+    runner_source: Literal["payload", "workspace", "installed"]
     runner_path: str
-    runner_sha256: str
+    runner_sha256: str | None
     data_mode: DataMode
-    instantiate: Callable[[InstantiateContext], object] | None
+    runner_executor: str = "path"
+    payload_runner: str | None = None
+    workdir_path: str | None = None
+    required_capabilities: tuple[str, ...] = ()
+    reserved_parameters: tuple[str, ...] = ()
+    documents: Mapping[str, str | bytes] = field(default_factory=dict)
+    files: Mapping[str, Path] = field(default_factory=dict)
+    parameters: Mapping[str, object] = field(default_factory=dict)
+    instantiate: Callable[[InstantiateContext], object] | None = None
+    finalize: Callable[[JobSpec], JobSpec] | None = None
 
 
 @dataclass
@@ -606,6 +652,14 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
     return ResolvedWorkflow(
         source=source,
         workflow_id=provider.workflow_id,
+        language=provider.language,
+        document=provider.document,
+        runner_options=provider.runner_options,
+        document_path=(
+            provider.directory.resolve() / provider.document
+            if provider.directory is not None and provider.document
+            else None
+        ),
         alias=provider.alias,
         initial_step=provider.initial_step,
         steps=provider.steps,
@@ -664,6 +718,14 @@ def resolve_workflow(
             resolved = ResolvedWorkflow(
                 source=provider.directory or path.resolve(),
                 workflow_id=provider.workflow_id,
+                language=provider.language,
+                document=provider.document,
+                runner_options=provider.runner_options,
+                document_path=(
+                    (provider.directory or path.resolve()).resolve() / provider.document
+                    if provider.document is not None
+                    else None
+                ),
                 alias=provider.alias,
                 initial_step=provider.initial_step,
                 steps=provider.steps,
@@ -684,22 +746,55 @@ def resolve_workflow(
                 declaration_file=provider.declaration_file,
                 _input_metadata=provider._input_metadata,
             )
-        elif not path.is_file():
+        elif path.exists():
+            from . import languages
+
+            resolved_path = path.resolve()
+            lang = languages.match_document(resolved_path)
+            if lang is not None:
+                ports = lang.ports(resolved_path)
+                directory = resolved_path if resolved_path.is_dir() else None
+                document_path = resolved_path if resolved_path.is_file() else None
+                name = resolved_path.name if resolved_path.is_dir() else resolved_path.stem
+                summary = f"the {lang.name} document {resolved_path.name}"
+                input_metadata = {port: {"role": port} for port in ports.inputs}
+                outputs = {port: {"entry_type": "records", "role": port} for port in ports.outputs}
+                from .packages import _workflow_declaration
+
+                resolved = ResolvedWorkflow(
+                    source=resolved_path,
+                    workflow_id=f"{lang.name}.{_sanitize_tag(name) or 'document'}",
+                    initial_step=lang.initial_step,
+                    language=lang.name,
+                    runner_options={},
+                    document_path=document_path,
+                    steps=lang.steps,
+                    summary=summary,
+                    inputs={port: None for port in ports.inputs},
+                    instantiate=True,
+                    declarations={"workflow": _workflow_declaration(summary, input_metadata, outputs)},
+                    directory=directory,
+                    outputs=outputs,
+                    _input_metadata=input_metadata,
+                )
+            elif path.is_file():
+                described = describe_runner(path)
+                steps = tuple(cast(list[str], described["steps"]))
+                resolved = ResolvedWorkflow(
+                    source=path.resolve(),
+                    workflow_id=str(described["workflow"]),
+                    initial_step=_initial_step(path, steps, step),
+                    steps=steps,
+                    summary=f"the runner {path}",
+                    inputs=cast(dict[str, str | None], described.get("inputs", {})),
+                    instantiate=bool(described.get("instantiate", False)),
+                )
+            else:
+                raise ValueError(f"unknown workflow path {text!r}: it is not a workflow package or language document")
+        else:
             known = ", ".join(registered_workflows()) or "none registered"
             raise ValueError(
                 f"unknown workflow {text!r}: it is neither a registered workflow ({known}) nor an existing runner file"
-            )
-        else:
-            described = describe_runner(path)
-            steps = tuple(cast(list[str], described["steps"]))
-            resolved = ResolvedWorkflow(
-                source=path.resolve(),
-                workflow_id=str(described["workflow"]),
-                initial_step=_initial_step(path, steps, step),
-                steps=steps,
-                summary=f"the runner {path}",
-                inputs=cast(dict[str, str | None], described.get("inputs", {})),
-                instantiate=bool(described.get("instantiate", False)),
             )
     if workflow_id is not None:
         resolved = replace(resolved, workflow_id=workflow_id)
@@ -827,7 +922,8 @@ def new_job(
     that said nothing. *publish* ``workspace`` publishes the runner
     file into the workspace runner store and pins its digest; ``installed``
     references a packaged runner through the reserved ``pkg:`` form instead and
-    copies nothing.
+    copies nothing. It is ignored for language workflows, whose realization
+    chooses the runner itself.
 
     :param workspace: Provide the workspace receiving the job.
     :param workflow: Select the workflow or runner file.
@@ -948,9 +1044,54 @@ def _prepare(
     workflow_id: str | None,
     data_mode: DataMode | None,
 ) -> _Prepared:
-    """Resolve one workflow and make its runner referenceable, exactly once."""
+    """Resolve one workflow and make its runner referenceable, exactly once.
+
+    ``publish`` is ignored for language workflows because their realization
+    supplies the runner reference and payload members.
+    """
 
     resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode)
+    if resolved.language is not None:
+        from . import languages
+
+        lang = languages.language(resolved.language)
+        scaffolded = lang.prepare(_language_request(resolved))
+        if scaffolded.runner is not None:
+            runner = scaffolded.runner
+            runner_source = cast(Literal["payload", "workspace", "installed"], str(runner["source"]))
+            runner_path = str(runner["path"])
+            runner_sha256 = None if runner_source == "payload" else str(runner["sha256"])
+            runner_executor = str(runner.get("executor", scaffolded.runner_executor))
+        else:
+            if scaffolded.payload_runner is None:
+                raise ValueError(f"language {resolved.language!r} did not provide a runner")
+            runner_source = "payload"
+            runner_path = scaffolded.payload_runner
+            runner_sha256 = None
+            runner_executor = scaffolded.runner_executor
+        parameters = dict(scaffolded.parameters)
+        parameters["workflow_realization"] = "language"
+        reserved_parameters = (*scaffolded.reserved_parameters, "workflow_realization")
+        if resolved.postprocess_file is not None:
+            parameters["workflow_postprocess"] = "package"
+            reserved_parameters = (*reserved_parameters, "workflow_postprocess")
+        return _Prepared(
+            workflow=resolved,
+            runner_source=runner_source,
+            runner_path=runner_path,
+            runner_sha256=runner_sha256,
+            data_mode=resolved.data_mode,
+            runner_executor=runner_executor,
+            payload_runner=scaffolded.payload_runner,
+            workdir_path=scaffolded.workdir_path,
+            required_capabilities=tuple(sorted(set(scaffolded.required_capabilities))),
+            reserved_parameters=reserved_parameters,
+            documents=scaffolded.documents,
+            files=scaffolded.files,
+            parameters=parameters,
+            instantiate=scaffolded.instantiate,
+            finalize=scaffolded.finalize,
+        )
     if publish == "installed":
         if resolved.directory is not None:
             raise ValueError(
@@ -999,6 +1140,33 @@ def _prepare(
         runner_sha256=runner_sha256,
         data_mode=resolved.data_mode,
         instantiate=instantiate,
+    )
+
+
+def _language_request(resolved: ResolvedWorkflow) -> LanguageRequest:
+    """Build the language request, including package-only exclusions."""
+
+    from . import languages
+
+    excluded: tuple[str, ...] = ()
+    if resolved.directory is not None:
+        from .packages import MANIFEST_NAME
+
+        members = [MANIFEST_NAME]
+        members.extend(
+            member for member in (resolved.postprocess_file, resolved.declaration_file) if member is not None
+        )
+        if not (resolved.directory / MANIFEST_NAME).is_file():
+            members = []
+        excluded = tuple(dict.fromkeys(members))
+    return languages.LanguageRequest(
+        workflow_id=resolved.workflow_id,
+        directory=resolved.directory,
+        document=resolved.document_path,
+        runner_options=resolved.runner_options,
+        inputs=resolved._input_metadata,
+        outputs=resolved.outputs,
+        excluded_members=excluded,
     )
 
 
@@ -1063,10 +1231,34 @@ def _submit(
     caller_tag = tag
     try:
         staging.mkdir(parents=True, exist_ok=False)
-        _stage_files(staging, files or {})
+        user_files = dict(files or {})
+        prepared_members: dict[str, str] = {}
+        for member in (*prepared.documents, *prepared.files):
+            relative = payload_relative(member).as_posix()
+            if relative in prepared_members:
+                raise ValueError(f"prepared member {member!r} collides with {prepared_members[relative]!r}")
+            prepared_members[relative] = member
+        for member in user_files:
+            relative = payload_relative(member).as_posix()
+            if relative in prepared_members:
+                raise ValueError(f"prepared member {prepared_members[relative]!r} collides with user file {member!r}")
+        _stage_files(staging, user_files)
+        for member, text in prepared.documents.items():
+            destination = staging.joinpath(*payload_relative(member).parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(text, bytes):
+                destination.write_bytes(text)
+            else:
+                destination.write_text(text, encoding="utf-8")
+        _stage_files(staging, prepared.files)
         supplied_inputs = dict(inputs or {})
         _stage_inputs(staging, workflow, supplied_inputs, instantiate=prepared.instantiate is not None)
-        job_parameters = dict(parameters or {})
+        supplied_parameters = dict(parameters or {})
+        reserved_parameters = set(prepared.parameters) | set(prepared.reserved_parameters)
+        collisions = sorted(set(supplied_parameters) & reserved_parameters)
+        if collisions:
+            raise ValueError(f"user parameter collides with reserved language parameter {collisions[0]!r}")
+        job_parameters = {**supplied_parameters, **prepared.parameters}
         if prepared.instantiate is not None:
             context = InstantiateContext(
                 payload=staging,
@@ -1077,23 +1269,28 @@ def _submit(
             prepared.instantiate(context)
             job_parameters = context.parameters
             tag = caller_tag if caller_tag is not None else context.tag
-        job = prepare_job_payload(
-            staging,
-            JobSpec(
-                name=name or f"{workflow.workflow_id}: {tag or 'job'}",
-                workflow=workflow.workflow_id,
-                runner_path=prepared.runner_path,
-                runner_source=prepared.runner_source,
-                runner_sha256=prepared.runner_sha256,
-                initial_step=workflow.initial_step,
-                tag=tag,
-                workdir_mode=workdir_mode,
-                data_mode=prepared.data_mode,
-                priority=500 if priority is None else priority,
-                parameters=validate_parameters(job_parameters),
-                declarations=workflow.declarations,
-            ),
+        spec = JobSpec(
+            name=name or f"{workflow.workflow_id}: {tag or 'job'}",
+            workflow=workflow.workflow_id,
+            runner_executor=prepared.runner_executor,
+            runner_path=prepared.runner_path,
+            runner_source=prepared.runner_source,
+            runner_sha256=prepared.runner_sha256,
+            initial_step=workflow.initial_step,
+            tag=tag,
+            workdir_mode=workdir_mode,
+            workdir_path=prepared.workdir_path if prepared.workdir_path is not None else "run",
+            data_mode=prepared.data_mode,
+            priority=500 if priority is None else priority,
+            required_capabilities=tuple(sorted(set(prepared.required_capabilities))),
+            parameters=validate_parameters(job_parameters),
+            declarations=workflow.declarations,
         )
+        if prepared.finalize is not None:
+            spec = prepared.finalize(spec)
+            if not isinstance(spec, JobSpec):
+                raise ValueError("language finalize hook must return a JobSpec")
+        job = prepare_job_payload(staging, spec)
         marker = workspace.submit(staging, normalized, move=True)
     finally:
         shutil.rmtree(staging, ignore_errors=True)

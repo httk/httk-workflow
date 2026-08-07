@@ -36,9 +36,9 @@ python -m pip install httk-workflow
 ```
 
 One optional extra exists. `httk-workflow[cwl]` adds the CWL *parser* needed to
-run `httk workflow import cwl`; executing what was imported needs nothing extra,
-so the extra belongs only on the machine that does the importing. Importing
-Python Workflow Definition documents needs no extra at all.
+prepare the CWL language realization; executing the normalized plan needs
+nothing extra, so the extra belongs only on the machine that creates the job.
+Python Workflow Definition documents need no extra at all.
 
 ## Running tests
 
@@ -72,7 +72,7 @@ stay serial within their group while the rest of the suite runs in parallel.
   needs no runner written at all — see [`docs/vasp_runners.md`](docs/vasp_runners.md).
 - **Runs workflows written elsewhere.** Python Workflow Definition and CWL
   documents become ordinary jobs; see
-  [`docs/importing_workflows.md`](docs/importing_workflows.md).
+  [`docs/workflow_languages.md`](docs/workflow_languages.md).
 - **Reaches other machines.** Versioned [remote adapters](docs/adapter_authoring.md)
   send work to a cluster, start managers there, and fetch results back through
   crash-recoverable detached transfer.

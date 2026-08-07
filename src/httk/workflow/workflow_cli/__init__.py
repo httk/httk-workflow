@@ -51,17 +51,14 @@ from ._common import (
     _vasp,
 )
 from ._compat import (
-    _add_import_arguments,
-    _print_imported,
     _v1_pool,
+    add_v1_collect_arguments,
     add_v1_job_arguments,
     add_v1_prepare_arguments,
     add_v1_run_arguments,
     add_v1_submit_arguments,
-    build_import_parser,
     build_v1_parser,
-    handle_import_cwl,
-    handle_import_pwd,
+    handle_v1_collect,
     handle_v1_prepare,
     handle_v1_run,
     handle_v1_submit,
@@ -174,7 +171,6 @@ def build_parser(program: str, context: CLIContext) -> argparse.ArgumentParser:
     build_runner_parser(groups)
     build_job_parser(groups)
     build_describe_parser(groups)
-    build_import_parser(groups)
     build_collect_parser(groups)
     build_run_parser(groups)
     build_manager_parser(groups)

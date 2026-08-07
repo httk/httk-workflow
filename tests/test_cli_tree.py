@@ -42,7 +42,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "runner": ("publish", "describe"),
     "job": ("new", "submit", "request", "list", "show", "log", "why", "debug"),
     "manager": ("run",),
-    "v1": ("prepare", "submit", "run"),
+    "v1": ("prepare", "submit", "run", "collect"),
     "config": ("init", "show", "set", "unset", "import-v1"),
     "project": ("init", "import-v1", "show", "doctor", "manifest"),
     "remote": ("list", "add", "configure", "install", "import-v1", "show", "remove"),
@@ -52,7 +52,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
 #: Superseded group spellings that were removed: ``tasks`` was the transfer
 #: group and ``computer`` the remote group, both before the renames; ``internal``
 #: was the hidden home of ``receive``. None of them parses any more.
-REMOVED_GROUPS = ("tasks", "computer", "internal")
+REMOVED_GROUPS = ("tasks", "computer", "internal", "import")
 
 
 def _context(tmp_path: Path) -> CLIContext:

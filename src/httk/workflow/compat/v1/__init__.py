@@ -28,13 +28,19 @@ __all__ = [
     "V1_PRIORITY_MAP",
     "V1_WORKFLOW",
     "V2_TO_V1_PRIORITY",
+    "V1FinishedTask",
     "V1RunnerExecutor",
     "V1TaskManager",
     "bundled_v1_root",
+    "code_of",
+    "collect_finished_tree",
+    "finished_tasks",
     "legacy_priority",
     "parse_v1_task_name",
     "prepare_v1_payload",
+    "run_directory",
     "submit_v1_task",
+    "task_file",
 ]
 
 V1_EXECUTOR = "httk-v1"
@@ -377,8 +383,6 @@ class V1RunnerExecutor:
         :param payload: Validate the runner and runtime files in this payload.
         """
         compatibility = _compatibility(job)
-        if job.workflow != V1_WORKFLOW:
-            raise FormatError(f"httk-v1 executor cannot execute workflow {job.workflow!r}")
         program = str(compatibility.get("program", ""))
         if program not in {"ht_steps", "ht_run"}:
             raise FormatError("compatibility.program must be ht_steps or ht_run")
@@ -680,3 +684,13 @@ def _reconcile_legacy_link(workspace: Workspace, marker: Marker, link: Mapping[s
             os.rename(candidate, desired)
             return
     _replace_with_relative_symlink(desired, target)
+
+
+from .reader import (
+    V1FinishedTask,
+    code_of,
+    collect_finished_tree,
+    finished_tasks,
+    run_directory,
+    task_file,
+)

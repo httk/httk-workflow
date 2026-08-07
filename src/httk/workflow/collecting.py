@@ -49,6 +49,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote
 
+from . import languages
 from ._util import read_json, require_mapping, require_string, tree_digest
 from .errors import FormatError
 from .introspection import (
@@ -970,6 +971,56 @@ def _job_postprocessor(
     )
 
 
+def _assemble_collected(
+    identity: str,
+    record: JobRecord,
+    provider: object | None,
+    run: httk.core.Run,
+    outputs: Mapping[str, object],
+) -> CollectedJob:
+    """Validate outputs and overlay their edges onto one collected run."""
+
+    workflow_id = record.job.get("workflow")
+    workflow_id = workflow_id if isinstance(workflow_id, str) else ""
+    roles = _output_roles(_job_workflow_document(record, provider))
+    unknown = [role for role in outputs if role not in roles]
+    if unknown:
+        raise ValueError(f"{identity}: unknown output role {unknown[0]!r}")
+    unfulfilled = tuple(role for role in roles if role not in outputs)
+    owned = tuple(_entry_edge(identity, role, value, roles[role]) for role, value in outputs.items())
+    core = _core()
+    run = core.Run(
+        workflow_declaration_uri=run.workflow_declaration_uri,
+        inputs=run.inputs,
+        artifacts=_overlay_edges(run.artifacts, owned),
+        outputs=_overlay_edges(run.outputs, owned),
+        immutable_id=run.immutable_id,
+        last_modified=run.last_modified,
+    )
+    products: list[httk.core.ProductLink] = []
+    input_edges = {edge.label: edge for edge in run.inputs}
+    owned_edges = {edge.label: edge for edge in owned}
+    for role, curation in _provider_output_roles(provider).items():
+        source_role = curation.get("product_of")
+        output_edge = owned_edges.get(role)
+        if isinstance(source_role, str):
+            source_edge = input_edges.get(source_role) or owned_edges.get(source_role)
+        else:
+            source_edge = None
+        if output_edge is not None and source_edge is not None:
+            products.append(
+                core.ProductLink(
+                    source_type=source_edge.entry_type,
+                    source_id=source_edge.entry_id,
+                    target_type=output_edge.entry_type,
+                    target_id=output_edge.entry_id,
+                    label=role,
+                    workflow_declaration_uri=run.workflow_declaration_uri,
+                )
+            )
+    return CollectedJob(workflow_id, dict(outputs), unfulfilled, run, tuple(products), record)
+
+
 def collect(
     workspace: Workspace,
     *,
@@ -997,8 +1048,6 @@ def collect(
     from .provenance import run_record
     from .scaffold import workflow_provider
 
-    core = _core()
-
     for record in job_records(workspace, states=states, placement=placement):
         identity = f"{record.workspace_id}:{record.job_id}"
         workflow_id = record.job.get("workflow")
@@ -1010,6 +1059,59 @@ def collect(
             adapter = _postprocessor(provider.postprocessor if provider is not None else None)
         except Exception as exc:
             raise ValueError(f"{identity}: postprocessor resolution failed: {exc}") from exc
+        language_fallback = False
+        if adapter is None:
+            parameters = record.job.get("parameters")
+            language_realization = False
+            language_name: object = None
+            if isinstance(parameters, Mapping):
+                language_realization = parameters.get("workflow_realization") == "language"
+                language_name = parameters.get("workflow_language")
+            package_postprocess = (
+                language_realization
+                and isinstance(parameters, Mapping)
+                and parameters.get("workflow_postprocess") == "package"
+            )
+            if provider is None and package_postprocess:
+                yield CollectedJob(
+                    workflow_id,
+                    {},
+                    (),
+                    run,
+                    (),
+                    record,
+                    f"{identity}: workflow package postprocess hook is unavailable without its registered provider; "
+                    "collect while the package is registered",
+                )
+                continue
+            if provider is None and language_realization and isinstance(language_name, str):
+                try:
+                    lang = languages.language(language_name)
+                    if not lang.has_default_postprocessor:
+                        yield CollectedJob(
+                            workflow_id,
+                            {},
+                            (),
+                            run,
+                            (),
+                            record,
+                            f"{identity}: workflow language {language_name!r} has no default postprocessor; "
+                            "its package declares [workflow.postprocess]",
+                        )
+                        continue
+                    adapter = lang.postprocess
+                except Exception as exc:
+                    yield CollectedJob(
+                        workflow_id,
+                        {},
+                        (),
+                        run,
+                        (),
+                        record,
+                        f"{identity}: workflow language {language_name!r} postprocessor unavailable: {exc}",
+                    )
+                    continue
+                language_fallback = True
         if adapter is None:
             if not allow_job_postprocessor:
                 reason = (
@@ -1033,43 +1135,7 @@ def collect(
             raw_outputs = adapter(record)
             if not isinstance(raw_outputs, Mapping):
                 raise ValueError("postprocessor must return a mapping of output roles")
-            roles = _output_roles(_job_workflow_document(record, provider))
-            unknown = [role for role in raw_outputs if role not in roles]
-            if unknown:
-                raise ValueError(f"{identity}: unknown output role {unknown[0]!r}")
-            outputs = dict(raw_outputs)
-            unfulfilled = tuple(role for role in roles if role not in outputs)
-            owned = tuple(_entry_edge(identity, role, value, roles[role]) for role, value in outputs.items())
-            run = core.Run(
-                workflow_declaration_uri=run.workflow_declaration_uri,
-                inputs=run.inputs,
-                artifacts=_overlay_edges(run.artifacts, owned),
-                outputs=_overlay_edges(run.outputs, owned),
-                immutable_id=run.immutable_id,
-                last_modified=run.last_modified,
-            )
-            products: list[httk.core.ProductLink] = []
-            input_edges = {edge.label: edge for edge in run.inputs}
-            owned_edges = {edge.label: edge for edge in owned}
-            for role, curation in _provider_output_roles(provider).items():
-                source_role = curation.get("product_of")
-                output_edge = owned_edges.get(role)
-                if isinstance(source_role, str):
-                    source_edge = input_edges.get(source_role) or owned_edges.get(source_role)
-                else:
-                    source_edge = None
-                if output_edge is not None and source_edge is not None:
-                    products.append(
-                        core.ProductLink(
-                            source_type=source_edge.entry_type,
-                            source_id=source_edge.entry_id,
-                            target_type=output_edge.entry_type,
-                            target_id=output_edge.entry_id,
-                            label=role,
-                            workflow_declaration_uri=run.workflow_declaration_uri,
-                        )
-                    )
-            yield CollectedJob(workflow_id, outputs, unfulfilled, run, tuple(products), record)
+            yield _assemble_collected(identity, record, provider, run, raw_outputs)
         except Exception as exc:
             from .packages import _PinnedTreeError
 
@@ -1083,6 +1149,9 @@ def collect(
                     record,
                     f"pinned runner tree was modified: {exc}",
                 )
+                continue
+            if language_fallback and isinstance(exc, languages.LanguageOutputsMissingError):
+                yield CollectedJob(workflow_id, {}, (), run, (), record, str(exc))
                 continue
             if str(exc).startswith(identity + ":"):
                 raise

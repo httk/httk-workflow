@@ -58,6 +58,33 @@ _DECLARATION = {
     "outputs": [{"name": "relaxed_structure", "entry_type": "structures"}],
 }
 
+_LANGUAGE_CWL = """
+cwlVersion: v1.2
+class: CommandLineTool
+baseCommand: echo
+inputs:
+  message:
+    type: string
+    inputBinding: {position: 1}
+outputs:
+  spoken:
+    type: stdout
+stdout: spoken.txt
+"""
+
+_LANGUAGE_PWD = {
+    "version": "0.1.0",
+    "nodes": [
+        {"id": 0, "type": "function", "value": "module.echo"},
+        {"id": 1, "type": "input", "value": "hello", "name": "message"},
+        {"id": 2, "type": "output", "name": "result"},
+    ],
+    "edges": [
+        {"target": 0, "targetPort": "message", "source": 1, "sourcePort": None},
+        {"target": 2, "targetPort": None, "source": 0, "sourcePort": None},
+    ],
+}
+
 
 def _package(root: Path, manifest: str = _MANIFEST) -> Path:
     root.mkdir(parents=True, exist_ok=True)
@@ -72,6 +99,33 @@ def _package(root: Path, manifest: str = _MANIFEST) -> Path:
         "def postprocess(record):\n    return {}\n",
         encoding="utf-8",
     )
+    return root
+
+
+def _language_package(root: Path, language: str = "cwl", manifest_extra: str = "") -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    document = "echo.cwl" if language == "cwl" else "workflow.json"
+    output_name = "spoken" if language == "cwl" else "result"
+    content = f'''[workflow]
+id = "tests.{language}"
+
+[workflow.runner]
+language = "{language}"
+document = "{document}"
+{manifest_extra}
+
+[workflow.inputs.message]
+entry_type = "strings"
+
+[workflow.outputs.{output_name}]
+entry_type = "strings"
+'''
+    (root / "workflow.toml").write_text(content, encoding="utf-8")
+    if language == "cwl":
+        (root / "echo.cwl").write_text(_LANGUAGE_CWL, encoding="utf-8")
+    else:
+        (root / "workflow.json").write_text(json.dumps(_LANGUAGE_PWD), encoding="utf-8")
+        (root / "module.py").write_text("def echo(message):\n    return message\n", encoding="utf-8")
     return root
 
 
@@ -107,6 +161,182 @@ def test_manifest_parses_and_generates_the_declared_roles(tmp_path: Path) -> Non
     }
     assert provider.declarations["workflow"] == workflow_declaration_from_manifest(provider)
     assert provider.outputs["relaxed"]["product_of"] == "initial_structure"
+
+
+def test_cwl_language_manifest_uses_registry_defaults(tmp_path: Path) -> None:
+    provider = parse_workflow_manifest(_language_package(tmp_path / "cwl"))
+    assert provider.language == "cwl"
+    assert provider.document == "echo.cwl"
+    assert provider.steps == ("start", "enter", "advance", "collect")
+    assert provider.instantiate is True and provider.inputs == {"message": None}
+    assert provider.postprocessor == "httk.workflow.languages.cwl:postprocess"
+    assert workflow_declaration_from_manifest(provider)["inputs"] == [{"name": "message", "entry_type": "strings"}]
+
+
+def test_pwd_language_manifest_keeps_runner_options(tmp_path: Path) -> None:
+    provider = parse_workflow_manifest(
+        _language_package(
+            tmp_path / "pwd",
+            "pwd",
+            'modules = ["module.py"]\nallowed_modules = ["module"]',
+        )
+    )
+    assert provider.language == "pwd"
+    assert provider.steps == ("execute",) and provider.initial_step == "execute"
+    assert provider.runner_options == {"modules": ["module.py"], "allowed_modules": ["module"]}
+    assert provider.inputs == {"message": None}
+
+
+def test_language_postprocess_file_overrides_default(tmp_path: Path) -> None:
+    package = _language_package(tmp_path / "cwl", manifest_extra='\n[workflow.postprocess]\nfile = "postprocess.py"')
+    (package / "postprocess.py").write_text("def postprocess(record):\n    return {}\n", encoding="utf-8")
+    provider = parse_workflow_manifest(package)
+    assert provider.postprocess_file == "postprocess.py"
+    assert callable(provider.postprocessor)
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ('entry = "run"', "entry is implied by language"),
+        ('steps = ["start"]', "steps is implied by language"),
+        ('initial_step = "start"', "initial_step is implied by language"),
+    ],
+)
+def test_language_runner_fields_are_forbidden(tmp_path: Path, extra: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_workflow_manifest(_language_package(tmp_path / "package", manifest_extra=extra))
+
+
+def test_language_manifest_forbids_instantiate_and_destinations(tmp_path: Path) -> None:
+    package = _language_package(tmp_path / "instantiate")
+    manifest = (package / "workflow.toml").read_text(encoding="utf-8")
+    (package / "workflow.toml").write_text(manifest + '\n[workflow.instantiate]\nfile = "run.py"\n', encoding="utf-8")
+    (package / "run.py").write_text("def instantiate(context): pass\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[workflow\.instantiate\].*implied"):
+        parse_workflow_manifest(package)
+    package = _language_package(tmp_path / "destination")
+    manifest = (
+        (package / "workflow.toml")
+        .read_text(encoding="utf-8")
+        .replace('entry_type = "strings"', 'entry_type = "strings"\ndestination = "message"')
+    )
+    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[workflow\.inputs\.message\]\.destination.*implied"):
+        parse_workflow_manifest(package)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        'document = "missing.cwl"',
+        'language = "unknown"\ndocument = "echo.cwl"',
+        'modules = []',
+    ],
+)
+def test_language_manifest_reports_missing_or_invalid_runner_data(tmp_path: Path, change: str) -> None:
+    package = _language_package(tmp_path / "package")
+    manifest = (package / "workflow.toml").read_text(encoding="utf-8")
+    if change.startswith("document"):
+        manifest = manifest.replace('document = "echo.cwl"', change)
+        message = "document.*does not exist"
+    elif change.startswith("language"):
+        manifest = manifest.replace('language = "cwl"\ndocument = "echo.cwl"', change)
+        message = "available languages.*cwl.*pwd"
+    else:
+        manifest = manifest.replace('document = "echo.cwl"', 'document = "echo.cwl"\n' + change)
+        message = "unknown runner option"
+    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        parse_workflow_manifest(package)
+
+
+def test_language_ports_default_and_validate_names(tmp_path: Path) -> None:
+    package = _language_package(tmp_path / "ports", manifest_extra='')
+    manifest = (
+        (package / "workflow.toml")
+        .read_text(encoding="utf-8")
+        .replace('[workflow.outputs.spoken]', '[workflow.outputs.spoken]\nport = "missing"')
+    )
+    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[workflow\.outputs\.spoken\].*known ports: spoken"):
+        parse_workflow_manifest(package)
+    package = _language_package(tmp_path / "default")
+    manifest = (
+        (package / "workflow.toml")
+        .read_text(encoding="utf-8")
+        .replace("[workflow.inputs.message]", '[workflow.inputs.message]\nport = "message"')
+    )
+    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    provider = parse_workflow_manifest(package)
+    assert provider._input_metadata["message"]["port"] == "message"
+
+
+def test_language_inputs_reject_duplicate_effective_ports(tmp_path: Path) -> None:
+    package = _language_package(tmp_path / "inputs")
+    manifest = (
+        (package / "workflow.toml").read_text(encoding="utf-8")
+        + """
+[workflow.inputs.message_alias]
+entry_type = "strings"
+port = "message"
+"""
+    )
+    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    with pytest.raises(
+        ValueError, match=r"\[workflow\.inputs\.message_alias\].*\[workflow\.inputs\.message\].*message"
+    ):
+        parse_workflow_manifest(package)
+
+
+def test_language_outputs_reject_duplicate_effective_ports(tmp_path: Path) -> None:
+    package = _language_package(tmp_path / "outputs")
+    manifest = (
+        (package / "workflow.toml").read_text(encoding="utf-8")
+        + """
+[workflow.outputs.spoken_alias]
+entry_type = "strings"
+port = "spoken"
+"""
+    )
+    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[workflow\.outputs\.spoken_alias\].*\[workflow\.outputs\.spoken\].*spoken"):
+        parse_workflow_manifest(package)
+
+
+def test_port_is_rejected_in_entry_manifests(tmp_path: Path) -> None:
+    manifest = _MANIFEST.replace('[workflow.inputs.structure]', '[workflow.inputs.structure]\nport = "structure"')
+    with pytest.raises(ValueError, match=r"\[workflow\.inputs\.structure\].*port"):
+        parse_workflow_manifest(_package(tmp_path / "entry", manifest))
+
+
+def test_language_resolution_scaffolds_without_publishing(tmp_path: Path) -> None:
+    package = _language_package(tmp_path / "package")
+    provider = load_workflow_package(package, register=False)
+    resolved = resolve_workflow(package)
+    assert resolved.language == provider.language
+    assert resolved.document_path == package.resolve() / "echo.cwl"
+    with pytest.raises(ValueError, match="never published"):
+        _ = resolved.store_name
+    job = new_job(Workspace.initialize(tmp_path / "workspace"), package)
+    definition = JobDefinition.from_path(job.payload / "job.json")
+    assert definition.runner_path.as_posix() == "pkg:httk.workflow.languages.cwl/cwl_runner.py"
+    assert definition.runner_source == "installed"
+    assert definition.parameters["workflow_language"] == "cwl"
+    assert definition.parameters["cwl_document"] == "files/workflow.cwl.json"
+    assert definition.parameters["cwl_output_roles"] == {"spoken": "spoken"}
+    assert (job.payload / "files" / "workflow.cwl.json").is_file()
+    assert (job.payload / "files" / "inputs.json").is_file()
+
+
+def test_pwd_module_members_are_package_files(tmp_path: Path) -> None:
+    package = _language_package(tmp_path / "missing", "pwd", 'modules = ["missing.py"]')
+    with pytest.raises(ValueError, match="modules.*does not exist"):
+        parse_workflow_manifest(package)
+    package = _language_package(tmp_path / "text", "pwd", 'modules = ["module.txt"]')
+    (package / "module.txt").write_text("", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\.py"):
+        parse_workflow_manifest(package)
 
 
 def test_manifest_rejects_duplicate_output_roles(tmp_path: Path) -> None:
@@ -274,7 +504,16 @@ def test_load_register_alias_and_register_false(tmp_path: Path, monkeypatch: pyt
     with pytest.raises(ValueError, match="collides"):
         load_workflow_package(tmp_path / "collision")
     assert collision.workflow_id == "tests.other"
-    monkeypatch.delitem(scaffold._WORKFLOW_PROVIDERS, loaded.workflow_id)
+    scaffold._WORKFLOW_PROVIDERS.pop(loaded.workflow_id, None)
+
+
+def test_workflow_package_precedes_document_matching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    package = _package(tmp_path / "package")
+    from httk.workflow import languages
+
+    monkeypatch.setattr(languages, "match_document", lambda path: pytest.fail("package reached document matching"))
+
+    assert resolve_workflow(package).workflow_id == "tests.package"
 
 
 def test_directory_workflow_scaffolds_from_the_published_tree_and_pins_declarations(tmp_path: Path) -> None:

@@ -73,8 +73,6 @@ from ..campaigns import (
     write_campaign,
 )
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, collect, job_records
-from ..compat.cwl import import_cwl
-from ..compat.pwd import import_pwd
 from ..compat.v1 import V1TaskManager, prepare_v1_payload, submit_v1_task
 from ..configuration import (
     import_v1_configuration,

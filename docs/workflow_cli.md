@@ -50,11 +50,10 @@ httk workflow workspace  init | list | default | move | forget | delete | status
 httk workflow runner     publish | describe
 httk workflow job        new | submit | request | list | show | log | why | debug
 httk workflow describe   TARGET [--json]
-httk workflow import     pwd | cwl
 httk workflow collect
 httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-managers
-httk workflow v1         prepare | submit | run
+httk workflow v1         prepare | submit | run | collect
 httk workflow config     init | show | set | unset | import-v1
 httk workflow project    init | import-v1 | show | doctor | manifest create | manifest verify
 httk workflow remote     list | add | configure | install | import-v1 | show | remove
@@ -144,25 +143,15 @@ the marker is an honest inference rather than provenance metadata.
 
 `JOB` is a job UUID, a `tag--uuid` job key, or any unique prefix of either.
 
-### `import` — workflows written in another language
-
-| Command | What it does | Notable options |
-| --- | --- | --- |
-| `import pwd WORKSPACE DOCUMENT` | import one Python Workflow Definition document as one job | `--module`, `--module-path`, `--input`, `--allow-module`, `--attempts`, `--allow-unknown-version`, `--placement`, `--tag`, `--name`, `--priority`, `--data-mode`, `--json` |
-| `import cwl WORKSPACE WORKFLOW INPUTS` | import one CWL workflow or command-line tool as one job | `--placement`, `--tag`, `--name`, `--priority`, `--data-mode`, `--json` |
-
-Both print one tab-separated `job_key<TAB>payload` line, or a JSON report with
-`--json`, exactly as `job new` does. Importing is one way, and neither writes a
-runner file: the job references the packaged runner of the format through the
-reserved installed form. `import cwl` needs `pip install httk-workflow[cwl]` on
-the machine that imports, and nothing extra on the machine that runs the result.
-See {doc}`importing_workflows`.
+Language documents use `job new --workflow DOCUMENT`; see
+{doc}`workflow_languages` for PWD, CWL, and httk-v1 details.
 
 ### `collect` — the finished jobs, as summaries
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--raw`, `--allow-job-postprocessor`, `--into PATH` |
+| `v1 collect ROOT` | harvest a pre-existing v1 result tree | `--workflow-dir PKG`, `--into PATH`, `--json` |
 
 ### `describe` — inspect a workflow without publishing it
 
@@ -367,21 +356,26 @@ file is published into the workspace runner store and pinned by digest unless
 `--publish installed` names a packaged runner where it is installed. See
 {doc}`quickstart`.
 
-## Importing workflows written elsewhere
+## Running language documents
 
-A Python Workflow Definition document or a CWL document becomes one job without
-being rewritten:
+Run a PWD or CWL document directly with `job new --workflow DOCUMENT`;
+the document or template directory is resolved as a language realization:
 
 ```console
-httk workflow import pwd WORKSPACE workflow.json --module workflow.py --tag arithmetic
-httk workflow import cwl WORKSPACE flow.cwl job.yml --tag echo --data-mode transactional
+httk workflow job new WS --workflow flow.cwl --input message=echo
+httk workflow job new WS --workflow workflow.json --parameter pwd_module_path='["."]'
+httk workflow job new WS --workflow ./v1-template --parameter encut=520
 ```
 
-The imported job runs on httk's own runner and manager — no other engine is
-invoked, and `cwltool` is neither used nor bundled — and it is claimed, retried,
-journalled and collected like every other job. {doc}`importing_workflows`
-documents both formats, the supported CWL subset, everything that is refused and
-why, and what running a PWD document means for security.
+See {doc}`workflow_languages` for package manifests, bare-document rules,
+the supported CWL subset, PWD security, and language collection.
+
+Harvest old v1 results without submitting them:
+
+```console
+httk workflow v1 collect ROOT --workflow-dir PKG
+httk workflow v1 collect ROOT --workflow-dir PKG --into results.sqlite
+```
 
 ## Inspecting and debugging jobs
 

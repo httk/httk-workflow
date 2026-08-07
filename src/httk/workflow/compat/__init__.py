@@ -10,12 +10,9 @@ here teaches them a compatibility format.
 ``v1``
     httk *v1* task templates, run unchanged on the v2 engine
     (:mod:`httk.workflow.compat.v1`).
-``cwl``
-    the Common Workflow Language, imported as jobs and executed natively —
-    never by cwltool (:mod:`httk.workflow.compat.cwl`).
-``pwd``
-    the Python Workflow Definition exchange format, imported as jobs
-    (:mod:`httk.workflow.compat.pwd`).
+
+Language support lives in :mod:`httk.workflow.languages`; this package keeps
+only the ``v1`` compatibility layer.
 
 None of these subpackages imports another, none imports the manager or the
 generic CLI internals, and none is imported by the common execution layer.

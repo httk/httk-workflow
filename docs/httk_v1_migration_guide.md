@@ -804,6 +804,110 @@ reproducibility.
 Do not delete or reinterpret the old queue as part of cutover. Archive it
 read-only according to the project's provenance and retention policy.
 
+## 15. Wrap an existing template as a package
+
+An existing template directory can become a package without first rendering it:
+
+```text
+silicon-relax/
+├── workflow.toml
+├── ht_steps.template
+├── ht.instantiate.py
+├── INCAR.template
+└── postprocess.py
+```
+
+Use a manifest that makes the v1 contract explicit:
+
+```toml
+[workflow]
+id = "legacy.silicon-relax"
+
+[workflow.runner]
+language = "httk-v1"
+taskset = "vasp"
+attempts = 10
+
+[workflow.inputs.structure]
+entry_type = "structures"
+
+[workflow.parameters.encut]
+type = "number"
+default = 520
+
+[workflow.postprocess]
+file = "postprocess.py"
+```
+
+Submit a one-shot job or a structure campaign:
+
+```console
+httk workflow job new WS --workflow ./silicon-relax \
+  --input-from structure structures/*.cif --parameter encut=520
+httk workflow v1 run WS --taskset vasp
+httk workflow collect WS
+```
+
+At preparation, the package is snapshotted and each job gets its own rendered
+payload. `ht_steps` or `ht_run` must be executable after rendering. The v1
+template engine is intentionally trusted and supports `$name`, `$(expr)`,
+`${code}`, escaped `\$`, and `.template` filenames. Its implementation is
+available as `apply_templates` in `httk.workflow.compat.v1.templates`.
+
+`ht.instantiate.py` receives declared inputs and parameters as globals. A
+path-valued input with `entry_type` is loaded through `httk.core.load` before
+that execution, which is why a CIF campaign can feed structure objects. The
+script is still v1 Python, not a compatibility promise for every old import:
+an `ht.instantiate.py` written against v1's own Python API (for example v1
+`Structure`) works only when it receives objects compatible with that API. Port
+the script or supply compatible objects when it crosses this boundary.
+
+## 16. Harvest old result trees
+
+Use `finished_tasks` to inspect a tree and `collect_finished_tree` to run its
+package postprocessor against every finished task:
+
+```python
+from httk.workflow.compat.v1 import collect_finished_tree, finished_tasks
+
+for task in finished_tasks("/archive/ht-results"):
+    print(task.task_id, task.rundir, task.code_name, task.code_version)
+
+collected = collect_finished_tree(
+    "/archive/ht-results", workflow_dir="./silicon-relax"
+)
+```
+
+The CLI equivalent is:
+
+```console
+httk workflow v1 collect /archive/ht-results \
+  --workflow-dir ./silicon-relax --into results.sqlite
+```
+
+The harvester selects the latest dated `ht.run.*`, reads code metadata from
+lines 2–3 of `ht_steps` or `ht_run`, and calls the authored hook using
+`run_directory`, `code_of`, and `task_file` from
+`httk.workflow.compat.v1`. A per-task hook failure degrades that task and the
+sweep continues. Manifest-backed UUIDv5 identity survives tree relocation;
+path-derived identity does not.
+
+## 17. What stays behind
+
+The compatibility layer does not recreate every v1 subsystem:
+
+| v1 surface left behind | v2 replacement |
+| --- | --- |
+| ssh/rsync computer templates and send/receive transport | v2 remotes and transfer protocol |
+| openmaterialsdb submission and signing arc | v2 project manifests, keys, and remote transfer |
+| `ht.parameters` resource fields | declared workflow inputs, opaque parameters, and manager policy |
+| `--daemon` | explicit v2 managers and workers |
+| runtime priority rewrites | immutable job priority and recorded operator requests |
+
+These are migration boundaries, not hidden package options. Keep a v1
+installation only where the compatibility runner or a trusted template still
+needs it.
+
 ## Migration checklist
 
 - [ ] An instantiated *httk* v1 task runs successfully through compatibility.

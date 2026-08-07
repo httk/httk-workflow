@@ -178,5 +178,23 @@ can inspect the job-pinned package tree, validate its own manifest and digest,
 and load that tree's postprocess hook; refusals degrade only that job. See
 {doc}`workflow_packages` for the trust tiers and package hook contract.
 
+### Language fallback and degradation
+
+For a language job, provider dispatch is followed by the job's own
+`workflow_language` parameter. A provider-less CWL or PWD job then uses the
+language default postprocessor: `cwl-outputs.json` or `pwd-outputs.json` is read
+from the workdir or transactional data tree, ports are mapped to declared
+roles, and values become `DataRecord` objects. CWL `File` values are accepted
+only when their paths remain inside the workspace, workdir, or data tree; the
+result records a file descriptor and sha256.
+
+A package with a custom hook records `workflow_postprocess = "package"`.
+Provider-less collection of that job degrades with a registration hint; it
+does not silently run the language default. httk-v1 has no default at all and
+degrades with a message to declare `[workflow.postprocess]`. The
+`allow_job_postprocessor` pinned-tree fallback is attempted only after this
+language fallback, and only with a matching digest and manifest. Any
+postprocessor failure degrades that job and does not stop the sweep.
+
 For the distinction between declared entry-typed inputs and opaque implementation
 parameters, see {doc}`workflow_packages` and {doc}`declarations`.

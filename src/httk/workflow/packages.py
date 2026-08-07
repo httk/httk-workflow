@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any, cast
 
+from . import languages
 from ._util import tree_digest, validate_inputs
 from .errors import FormatError
 from .models import validate_declarations
@@ -98,11 +99,18 @@ def _validate_name(name: object, path: str, directory: Path) -> str:
 
 
 def _validate_input_table(
-    raw: Mapping[str, object], name: str, directory: Path
+    raw: Mapping[str, object],
+    name: str,
+    directory: Path,
+    *,
+    language: bool = False,
+    allow_port: bool = False,
 ) -> tuple[dict[str, object], str | None]:
     path = f"[workflow.inputs.{name}]"
-    _unknown(raw, {"destination", "description", "entry_type", "ref", "role"}, path, directory)
+    _unknown(raw, {"destination", "description", "entry_type", "ref", "role", "port"}, path, directory)
     destination = raw.get("destination")
+    if language and destination is not None:
+        raise _error(directory, f"{path}.destination is implied by the language")
     if destination is not None:
         try:
             validate_inputs({name: destination})
@@ -111,6 +119,14 @@ def _validate_input_table(
             raise _error(directory, f"{path}.destination is invalid: {exc}") from exc
     role = _optional_string(raw, "role", path, directory) or name
     result: dict[str, object] = {"role": role}
+    if "port" in raw:
+        port = _string(raw, "port", path, directory)
+        assert port is not None
+        if not allow_port:
+            raise _error(directory, f"{path}.port is only valid for a language workflow with a document")
+        result["port"] = port
+    elif allow_port:
+        result["port"] = name
     if destination is not None:
         result["destination"] = destination
     for key in ("description", "entry_type", "ref"):
@@ -170,7 +186,12 @@ def _matches_input_type(value: object, input_type: str) -> bool:
 
 
 def _validate_outputs(
-    raw: Mapping[str, object], inputs: Mapping[str, Mapping[str, object]], directory: Path
+    raw: Mapping[str, object],
+    inputs: Mapping[str, Mapping[str, object]],
+    directory: Path,
+    *,
+    language: bool = False,
+    allow_port: bool = False,
 ) -> dict[str, dict[str, object]]:
     result: dict[str, dict[str, object]] = {}
     roles: set[str] = set()
@@ -179,7 +200,7 @@ def _validate_outputs(
         output = _validate_name(name, "[workflow.outputs] name", directory)
         table = _table(value, f"[workflow.outputs.{output}]", directory)
         path = f"[workflow.outputs.{output}]"
-        _unknown(table, {"entry_type", "ref", "description", "product_of", "role"}, path, directory)
+        _unknown(table, {"entry_type", "ref", "description", "product_of", "role", "port"}, path, directory)
         entry_type = _string(table, "entry_type", path, directory, required=True)
         role = _optional_string(table, "role", path, directory) or output
         if role in roles:
@@ -187,6 +208,14 @@ def _validate_outputs(
         roles.add(role)
         product_of = _optional_string(table, "product_of", path, directory)
         entry: dict[str, object] = {"entry_type": entry_type, "role": role}
+        if "port" in table:
+            port = _string(table, "port", path, directory)
+            assert port is not None
+            if not allow_port:
+                raise _error(directory, f"{path}.port is only valid for a language workflow with a document")
+            entry["port"] = port
+        elif allow_port:
+            entry["port"] = output
         for key in ("ref", "description"):
             optional = _optional_string(table, key, path, directory)
             if optional is not None:
@@ -314,13 +343,30 @@ def workflow_declaration_from_manifest(provider: WorkflowProvider) -> dict[str, 
     :return: The generated workflow declaration.
     """
 
+    return _workflow_declaration(
+        provider.summary,
+        provider._input_metadata,
+        provider.outputs,
+        declaration_uri=provider.declaration_uri,
+    )
+
+
+def _workflow_declaration(
+    description: str,
+    input_metadata: Mapping[str, Mapping[str, object]],
+    output_metadata: Mapping[str, Mapping[str, object]],
+    *,
+    declaration_uri: str | None = None,
+) -> dict[str, object]:
+    """Build the declaration shape shared by packages and anonymous workflows."""
+
     document: dict[str, object] = {}
-    if provider.declaration_uri is not None:
-        document["$id"] = provider.declaration_uri
-    if provider.summary:
-        document["description"] = provider.summary
+    if declaration_uri is not None:
+        document["$id"] = declaration_uri
+    if description:
+        document["description"] = description
     inputs: list[dict[str, object]] = []
-    for name, entry in provider._input_metadata.items():
+    for name, entry in input_metadata.items():
         if "entry_type" not in entry:
             continue
         input_entry = {"name": entry.get("role", name), "entry_type": entry["entry_type"]}
@@ -329,7 +375,7 @@ def workflow_declaration_from_manifest(provider: WorkflowProvider) -> dict[str, 
                 input_entry[key] = entry[key]
         inputs.append(input_entry)
     outputs: list[dict[str, object]] = []
-    for name, entry in provider.outputs.items():
+    for name, entry in output_metadata.items():
         output: dict[str, object] = {"name": entry.get("role", name), "entry_type": entry["entry_type"]}
         for key in ("ref", "description"):
             if key in entry:
@@ -406,28 +452,65 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     declaration_uri = _optional_string(workflow, "declaration_uri", "[workflow]", root)
 
     runner = _table(workflow.get("runner"), "[workflow.runner]", root)
-    _unknown(runner, {"entry", "initial_step", "steps", "data_mode", "workdir_mode"}, "[workflow.runner]", root)
-    entry = _member(root, runner.get("entry", "run"), "[workflow.runner].entry")
-    if entry != "run":
-        raise _error(root, "custom entries are not yet supported; the tree entry point must be named run")
-    steps_raw = runner.get("steps")
-    if (
-        not isinstance(steps_raw, list)
-        or not steps_raw
-        or not all(isinstance(step, str) and step for step in steps_raw)
-    ):
-        raise _error(root, "[workflow.runner].steps must be a nonempty list of strings")
-    steps = tuple(str(step) for step in steps_raw)
-    initial_step = _optional_string(runner, "initial_step", "[workflow.runner]", root)
-    if initial_step is None:
-        if "start" in steps:
-            initial_step = "start"
-        elif len(steps) == 1:
-            initial_step = steps[0]
+    language_name = _optional_string(runner, "language", "[workflow.runner]", root)
+    lang = None
+    document_member: str | None = None
+    runner_options: dict[str, object] = {}
+    if language_name is not None:
+        try:
+            lang = languages.language(language_name)
+        except ValueError as exc:
+            raise _error(root, f"[workflow.runner].language: {exc}") from exc
+        for key in ("entry", "steps", "initial_step"):
+            if key in runner:
+                raise _error(root, f"[workflow.runner].{key} is implied by language {language_name!r}")
+        if "instantiate" in workflow:
+            raise _error(root, f"[workflow.instantiate] is implied by language {language_name!r}")
+        if lang.requires_document:
+            document_member = _member(root, runner.get("document"), "[workflow.runner].document")
+        elif "document" in runner:
+            raise _error(root, f"[workflow.runner].document is not used by language {language_name!r}")
+        if not lang.allows_modes:
+            for mode in ("data_mode", "workdir_mode"):
+                if mode in runner:
+                    raise _error(root, f"[workflow.runner].{mode} is not supported by language {language_name!r}")
+        runner_options = {
+            key: value
+            for key, value in runner.items()
+            if key not in {"language", "document", "data_mode", "workdir_mode"}
+        }
+        try:
+            lang.validate_runner(runner_options, root)
+        except ValueError as exc:
+            raise _error(root, f"[workflow.runner]: {exc}") from exc
+        entry = "run"
+        steps = lang.steps
+        initial_step = lang.initial_step
+    else:
+        _unknown(runner, {"entry", "initial_step", "steps", "data_mode", "workdir_mode"}, "[workflow.runner]", root)
+        entry = _member(root, runner.get("entry", "run"), "[workflow.runner].entry")
+        if entry != "run":
+            raise _error(root, "custom entries are not yet supported; the tree entry point must be named run")
+        steps_raw = runner.get("steps")
+        if (
+            not isinstance(steps_raw, list)
+            or not steps_raw
+            or not all(isinstance(step, str) and step for step in steps_raw)
+        ):
+            raise _error(root, "[workflow.runner].steps must be a nonempty list of strings")
+        steps = tuple(str(step) for step in steps_raw)
+        requested_initial_step = _optional_string(runner, "initial_step", "[workflow.runner]", root)
+        if requested_initial_step is None:
+            if "start" in steps:
+                initial_step = "start"
+            elif len(steps) == 1:
+                initial_step = steps[0]
+            else:
+                raise _error(root, "[workflow.runner].initial_step is required when steps omit 'start'")
         else:
-            raise _error(root, "[workflow.runner].initial_step is required when steps omit 'start'")
-    if initial_step not in steps:
-        raise _error(root, f"[workflow.runner].initial_step {initial_step!r} is not in steps")
+            initial_step = requested_initial_step
+        if initial_step not in steps:
+            raise _error(root, f"[workflow.runner].initial_step {initial_step!r} is not in steps")
     data_mode = runner.get("data_mode", "none")
     workdir_mode = runner.get("workdir_mode", "persistent")
     if data_mode not in {"none", "transactional"}:
@@ -442,7 +525,13 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     for name, value in raw_inputs.items():
         input_name = _validate_name(name, "[workflow.inputs] name", root)
         table = _table(value, f"[workflow.inputs.{input_name}]", root)
-        metadata, destination = _validate_input_table(table, input_name, root)
+        metadata, destination = _validate_input_table(
+            table,
+            input_name,
+            root,
+            language=lang is not None,
+            allow_port=lang is not None and document_member is not None,
+        )
         if str(metadata["role"]) in roles:
             raise _error(root, f"[workflow.inputs.{input_name}].role is duplicated")
         roles.add(str(metadata["role"]))
@@ -454,7 +543,9 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         instantiate = _table(workflow["instantiate"], "[workflow.instantiate]", root)
         _unknown(instantiate, {"file"}, "[workflow.instantiate]", root)
         instantiate_file = _member(root, instantiate.get("file"), "[workflow.instantiate].file", python=True)
-    if any(destination is None for destination in inputs.values()) and instantiate_file is None:
+    if lang is not None:
+        instantiate_file = None
+    if lang is None and any(destination is None for destination in inputs.values()) and instantiate_file is None:
         raise _error(root, "hook-consumed workflow inputs require [workflow.instantiate]")
 
     postprocess_file: str | None = None
@@ -464,11 +555,60 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         postprocess_file = _member(root, postprocess.get("file"), "[workflow.postprocess].file", python=True)
 
     parameters = _validate_parameters(_table(workflow.get("parameters", {}), "[workflow.parameters]", root), root)
-    outputs = _validate_outputs(_table(workflow.get("outputs", {}), "[workflow.outputs]", root), input_metadata, root)
+    outputs = _validate_outputs(
+        _table(workflow.get("outputs", {}), "[workflow.outputs]", root),
+        input_metadata,
+        root,
+        language=lang is not None,
+        allow_port=lang is not None and document_member is not None,
+    )
+    if lang is not None and document_member is not None:
+        document_path = (root / document_member).resolve()
+        try:
+            ports = lang.ports(document_path)
+        except Exception as exc:
+            raise _error(root, f"[workflow.runner].document: {exc}") from exc
+        known_inputs = ", ".join(ports.inputs) or "none"
+        known_outputs = ", ".join(ports.outputs) or "none"
+        seen_inputs: dict[str, str] = {}
+        for name, metadata in input_metadata.items():
+            port = str(metadata["port"])
+            if port not in ports.inputs:
+                raise _error(
+                    root,
+                    f"[workflow.inputs.{name}].port {port!r} is not a document input port; known ports: {known_inputs}",
+                )
+            previous = seen_inputs.get(port)
+            if previous is not None:
+                raise _error(
+                    root,
+                    f"[workflow.inputs.{name}].port duplicates "
+                    f"[workflow.inputs.{previous}].port for document port {port!r}",
+                )
+            seen_inputs[port] = name
+        seen_outputs: dict[str, str] = {}
+        for name, metadata in outputs.items():
+            port = str(metadata["port"])
+            if port not in ports.outputs:
+                raise _error(
+                    root,
+                    f"[workflow.outputs.{name}].port {port!r} is not a document output port; known ports: {known_outputs}",
+                )
+            previous = seen_outputs.get(port)
+            if previous is not None:
+                raise _error(
+                    root,
+                    f"[workflow.outputs.{name}].port duplicates "
+                    f"[workflow.outputs.{previous}].port for document port {port!r}",
+                )
+            seen_outputs[port] = name
     provider = WorkflowProvider(
         workflow_id=workflow_id,
         runner_package=None,
         runner_file=None,
+        language=language_name,
+        document=document_member,
+        runner_options=runner_options,
         initial_step=initial_step,
         alias=alias,
         steps=steps,
@@ -476,7 +616,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         workdir_mode=workdir_mode,  # type: ignore[arg-type]
         summary=description,
         inputs=inputs,
-        instantiate=instantiate_file is not None,
+        instantiate=lang is not None or instantiate_file is not None,
         declarations={},
         directory=root.resolve(),
         entry=entry,
@@ -487,6 +627,11 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         declaration_uri=declaration_uri,
         declaration_file=None,
         _input_metadata=input_metadata,
+        postprocessor=(
+            f"httk.workflow.languages.{language_name.replace('-', '_')}:postprocess"
+            if language_name is not None and lang is not None and lang.has_default_postprocessor
+            else None
+        ),
     )
     declaration_member: str | None = None
     if "declaration_file" in workflow:

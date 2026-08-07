@@ -73,11 +73,11 @@ release = [
   "twine>=6.0",
 ]
 default = []
-# Importing CWL needs a CWL *parser*; executing what was imported does not, so
-# this extra belongs on the machine that runs `httk workflow import cwl` and
-# nowhere else. cwltool is deliberately absent: httk executes the normalized
-# document on its own runner and manager, and never shells out to another engine.
-# The Python Workflow Definition importer needs no extra at all — its documents
+# The CWL language realization needs a CWL *parser* when a document is prepared;
+# executing the normalized plan does not, so this extra belongs on the machine
+# that creates the job. cwltool is deliberately absent: httk executes the plan
+# on its own runner and manager, and never shells out to another engine.
+# The Python Workflow Definition realization needs no extra at all — its documents
 # are plain JSON, and the `python-workflow-definition` package is used as a
 # stricter validator only when an environment happens to have it.
 cwl = [
@@ -116,10 +116,10 @@ namespaces = true
 "httk.workflow.vasp.runners" = [
   "*.sh",
 ]
-# httk.workflow.compat.cwl and httk.workflow.compat.pwd follow the same rule and
+# httk.workflow.languages.cwl and httk.workflow.languages.pwd follow the same rule and
 # need no entry of their own: cwl_runner.py and pwd_runner.py are modules of those
-# packages, so a job referencing pkg:httk.workflow.compat.cwl/... or
-# pkg:httk.workflow.compat.pwd/... finds them wherever the package was installed.
+# packages, so a job referencing pkg:httk.workflow.languages.cwl/... or
+# pkg:httk.workflow.languages.pwd/... finds them wherever the package was installed.
 # Nothing beside them is data.
 
 [tool.pytest.ini_options]
