@@ -44,6 +44,7 @@ CONSUMER_ENGINES = (
     "httk.workflow.compat.v1",
     "httk.workflow.languages.cwl",
     "httk.workflow.languages.pwd",
+    "httk.workflow.languages.jobflow",
 )
 
 CONSUMER_OWNERS = {
@@ -51,6 +52,7 @@ CONSUMER_OWNERS = {
     "httk.workflow.compat.v1": ("httk.workflow.compat.v1", "httk.workflow.languages.httk_v1"),
     "httk.workflow.languages.cwl": ("httk.workflow.languages.cwl",),
     "httk.workflow.languages.pwd": ("httk.workflow.languages.pwd",),
+    "httk.workflow.languages.jobflow": ("httk.workflow.languages.jobflow",),
 }
 
 #: Generic machinery a consumer must never reach up into: the manager sees only
@@ -149,7 +151,9 @@ def test_languages_registry_is_common_and_lazy() -> None:
             imported.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module == "httk.workflow.languages":
             imported.update(f"{node.module}.{alias.name}" for alias in node.names)
-    assert not any(_names(f"httk.workflow.languages.{name}", item) for name in ("cwl", "pwd") for item in imported)
+    assert not any(
+        _names(f"httk.workflow.languages.{name}", item) for name in ("cwl", "pwd", "jobflow") for item in imported
+    )
 
 
 def _consumer_modules() -> list[Path]:
@@ -166,7 +170,7 @@ def _consumer_modules() -> list[Path]:
         if path.name == "cli.py":
             continue
         paths.append(path)
-    for name in ("cwl", "pwd", "httk_v1"):
+    for name in ("cwl", "pwd", "jobflow", "httk_v1"):
         package = WORKFLOW / "languages" / name
         if package.is_dir():
             paths.extend(sorted(package.rglob("*.py")))

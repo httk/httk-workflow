@@ -4,18 +4,16 @@ Language modules live beside this module and self-describe via a module-level
 ``LANGUAGE``.
 """
 
-from __future__ import annotations
-
 import hashlib
 import importlib
 import json
 import pkgutil
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from httk.workflow._util import sha256_file
 
@@ -27,6 +25,7 @@ if TYPE_CHECKING:
     from httk.workflow.scaffold import InstantiateContext
 
 __all__ = [
+    "DocumentPolicy",
     "LanguageOutputsMissingError",
     "LanguagePorts",
     "LanguageRequest",
@@ -39,23 +38,25 @@ __all__ = [
     "runner_reference",
 ]
 
+type DocumentPolicy = Literal["required", "optional", "forbidden"]
+
 
 class LanguageOutputsMissingError(ValueError):
     """A language job has no readable published outputs document."""
 
 
-def _identity(record: JobRecord) -> str:
+def _identity(record: "JobRecord") -> str:
     return f"{record.workspace_id}:{record.job_id}"
 
 
-def _parameter(record: JobRecord, name: str, default: str) -> str:
+def _parameter(record: "JobRecord", name: str, default: str) -> str:
     parameters = record.job.get("parameters")
     return (
         str(parameters[name]) if isinstance(parameters, Mapping) and isinstance(parameters.get(name), str) else default
     )
 
 
-def _load_outputs(record: JobRecord, filename: str, prefix: str) -> Mapping[str, object]:
+def _load_outputs(record: "JobRecord", filename: str, prefix: str) -> Mapping[str, object]:
     workdir = record.workdir
     data = record.data
     workdir_path = None if workdir is None else workdir / filename
@@ -76,7 +77,7 @@ def _load_outputs(record: JobRecord, filename: str, prefix: str) -> Mapping[str,
     )
 
 
-def _output_roles(record: JobRecord, name: str, outputs: Mapping[str, object]) -> dict[str, object]:
+def _output_roles(record: "JobRecord", name: str, outputs: Mapping[str, object]) -> dict[str, object]:
     parameters = record.job.get("parameters")
     raw = parameters.get(name) if isinstance(parameters, Mapping) else None
     roles = raw if isinstance(raw, Mapping) else {}
@@ -85,7 +86,7 @@ def _output_roles(record: JobRecord, name: str, outputs: Mapping[str, object]) -
     }
 
 
-_CUSTOM_DEFINITIONS: dict[tuple[str, str], httk.core.PropertyDefinition] = {}
+_CUSTOM_DEFINITIONS: dict[tuple[str, str], "httk.core.PropertyDefinition"] = {}
 _ROLE_NAME = re.compile(r"[^A-Za-z0-9_]+")
 
 
@@ -107,7 +108,7 @@ def _value_kind(value: object) -> tuple[str, str]:
     return "dict", ""
 
 
-def _data_record(role: str, value: object) -> httk.core.DataRecord:
+def _data_record(role: str, value: object) -> "httk.core.DataRecord":
     import httk.core
 
     kind, limitation = _value_kind(value)
@@ -148,6 +149,7 @@ class LanguageRequest:
     :param runner_options: Supply options for the language runner.
     :param inputs: Describe the workflow inputs.
     :param outputs: Describe the requested workflow outputs.
+    :param parameters: Describe the declared workflow parameters.
     :param excluded_members: Package members the realization must not stage.
     """
 
@@ -157,6 +159,7 @@ class LanguageRequest:
     runner_options: Mapping[str, object]
     inputs: Mapping[str, Mapping[str, object]]
     outputs: Mapping[str, Mapping[str, object]]
+    parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     excluded_members: tuple[str, ...] = ()
 
 
@@ -188,8 +191,8 @@ class LanguageScaffold:
     required_capabilities: tuple[str, ...] = ()
     reserved_parameters: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
-    instantiate: Callable[[InstantiateContext], object] | None = None
-    finalize: Callable[[JobSpec], JobSpec] | None = None
+    instantiate: Callable[["InstantiateContext"], object] | None = None
+    finalize: Callable[["JobSpec"], "JobSpec"] | None = None
 
 
 @dataclass(frozen=True)
@@ -204,7 +207,8 @@ class WorkflowLanguage:
     :param validate_runner: Validate runner options for a document.
     :param prepare: Prepare a language request for execution.
     :param collect: Convert a completed job record into language outputs.
-    :param requires_document: Require a source document in package manifests.
+    :param document_policy: State whether package manifests require, allow, or forbid a source document.
+    :param open_ports: Skip manifest port validation when document ports cannot be enumerated statically.
     :param has_default_collector: Provide a default collector path.
     :param allows_modes: Permit manifest data and workdir mode overrides.
     """
@@ -216,8 +220,9 @@ class WorkflowLanguage:
     ports: Callable[[Path], LanguagePorts]
     validate_runner: Callable[[Mapping[str, object], Path], None]
     prepare: Callable[[LanguageRequest], LanguageScaffold]
-    collect: Callable[[JobRecord], Mapping[str, object]]
-    requires_document: bool = True
+    collect: Callable[["JobRecord"], Mapping[str, object]]
+    document_policy: DocumentPolicy = "required"
+    open_ports: bool = False
     has_default_collector: bool = True
     allows_modes: bool = True
 

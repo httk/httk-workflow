@@ -187,6 +187,128 @@ def test_pwd_language_manifest_keeps_runner_options(tmp_path: Path) -> None:
     assert provider.inputs == {"message": None}
 
 
+def _jobflow_package(root: Path, runner: str, *, document: bool = False) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    document_line = 'document = "maker.json"\n' if document else ""
+    (root / "httk_workflow.toml").write_text(
+        f'''[workflow]
+id = "tests.jobflow"
+
+[workflow.runner]
+language = "jobflow"
+{document_line}{runner}
+
+[workflow.inputs.structure]
+entry_type = "records"
+port = "make_structure"
+
+[workflow.outputs.result]
+entry_type = "records"
+port = "dynamic_output"
+''',
+        encoding="utf-8",
+    )
+    if document:
+        (root / "maker.json").write_text(json.dumps({"@module": "atomate2", "@class": "Maker"}), encoding="utf-8")
+    return root
+
+
+def test_jobflow_language_manifest_accepts_maker_and_open_ports(tmp_path: Path) -> None:
+    provider = parse_workflow_manifest(
+        _jobflow_package(tmp_path / "maker", 'maker = "atomate2.vasp.flows.core:DoubleRelaxMaker"')
+    )
+    assert provider.language == "jobflow"
+    assert provider.document is None
+    assert provider.steps == ("start", "advance", "enter")
+    assert provider.runner_options == {"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"}
+    assert provider.inputs == {"structure": None}
+    assert provider.collector == "httk.workflow.languages.jobflow:collect"
+
+
+def test_jobflow_manifest_rejects_duplicate_input_ports(tmp_path: Path) -> None:
+    package = _jobflow_package(tmp_path / "duplicate-input", 'maker = "atomate2:Maker"')
+    manifest = (package / "httk_workflow.toml").read_text(encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(
+        manifest
+        + '''
+[workflow.inputs.structure_alias]
+entry_type = "records"
+port = "make_structure"
+''',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"structure_alias.*port duplicates.*structure.*make_structure"):
+        parse_workflow_manifest(package)
+
+
+def test_jobflow_manifest_rejects_duplicate_output_ports(tmp_path: Path) -> None:
+    package = _jobflow_package(tmp_path / "duplicate-output", 'maker = "atomate2:Maker"')
+    manifest = (package / "httk_workflow.toml").read_text(encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(
+        manifest
+        + '''
+[workflow.outputs.result_alias]
+entry_type = "records"
+port = "dynamic_output"
+''',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"result_alias.*port duplicates.*result.*dynamic_output"):
+        parse_workflow_manifest(package)
+
+
+def test_jobflow_manifest_preserves_declared_maker_parameters(tmp_path: Path) -> None:
+    package = _jobflow_package(tmp_path / "parameters", 'maker = "atomate2:Maker"')
+    manifest = (package / "httk_workflow.toml").read_text(encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(
+        manifest + '\n[workflow.parameters.relax_steps]\ntype = "integer"\ndefault = 300\n', encoding="utf-8"
+    )
+
+    provider = parse_workflow_manifest(package)
+
+    assert provider.parameters == {"relax_steps": {"type": "integer", "default": 300}}
+
+
+@pytest.mark.parametrize(
+    ("runner", "document", "message"),
+    [
+        ('maker = "atomate2:Maker"', True, "both"),
+        ("", False, "neither"),
+        ('maker = "atomate2:Maker"\nmaker_options = {}', False, "unknown runner option"),
+    ],
+)
+def test_jobflow_language_manifest_validates_source_and_options(
+    tmp_path: Path, runner: str, document: bool, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_workflow_manifest(_jobflow_package(tmp_path / message.replace(" ", "-"), runner, document=document))
+
+
+def test_required_and_forbidden_language_documents_remain_enforced(tmp_path: Path) -> None:
+    package = _language_package(tmp_path / "cwl")
+    manifest = (package / "httk_workflow.toml").read_text(encoding="utf-8").replace('document = "echo.cwl"\n', "")
+    (package / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
+    with pytest.raises(ValueError, match="requires.*document"):
+        parse_workflow_manifest(package)
+
+    v1 = tmp_path / "v1"
+    v1.mkdir()
+    (v1 / "httk_workflow.toml").write_text(
+        '''[workflow]
+id = "tests.v1"
+
+[workflow.runner]
+language = "httk-v1"
+document = "maker.json"
+''',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="not used"):
+        parse_workflow_manifest(v1)
+
+
 def test_language_collect_file_overrides_default(tmp_path: Path) -> None:
     package = _language_package(tmp_path / "cwl", manifest_extra='\n[workflow.collect]\nfile = "collect.py"')
     (package / "collect.py").write_text("def collect(record):\n    return {}\n", encoding="utf-8")

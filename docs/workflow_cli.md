@@ -145,7 +145,7 @@ the marker is an honest inference rather than provenance metadata.
 `JOB` is a job UUID, a `tag--uuid` job key, or any unique prefix of either.
 
 Language documents use `job new --workflow DOCUMENT`; see
-{doc}`workflow_languages` for PWD, CWL, and httk-v1 details.
+{doc}`workflow_languages` for PWD, CWL, jobflow, and httk-v1 details.
 
 ### `collect` — the finished jobs, as summaries
 
@@ -378,17 +378,18 @@ file is published into the workspace runner store and pinned by digest unless
 
 ## Running language documents
 
-Run a PWD or CWL document directly with `job new --workflow DOCUMENT`;
+Run a PWD, CWL, or jobflow document directly with `job new --workflow DOCUMENT`;
 the document or template directory is resolved as a language realization:
 
 ```console
 httk workflow job new WS --workflow flow.cwl --input message=echo
 httk workflow job new WS --workflow workflow.json --parameter pwd_module_path='["."]'
+httk workflow job new WS --workflow maker.json
 httk workflow job new WS --workflow ./v1-template --parameter encut=520
 ```
 
 See {doc}`workflow_languages` for package manifests, bare-document rules,
-the supported CWL subset, PWD security, and language collection.
+the supported CWL subset, PWD security, jobflow Makers, and language collection.
 
 Harvest old v1 results without submitting them:
 
