@@ -1861,6 +1861,7 @@ Supported conditions are:
 - `all_succeeded`;
 - `all_terminal`;
 - `any_succeeded`;
+- `any_terminal`;
 - `at_least`, with a successful-child count.
 
 The waiting journal frame contains each exact child identity, its spawn
@@ -1940,6 +1941,7 @@ contains enough terminal nonsuccess states to make the condition false:
 - `any_succeeded`: every child is terminal and none succeeded;
 - `at_least N`: succeeded children plus nonterminal children is less than `N`;
 - `all_terminal`: never impossible merely because a child failed.
+- `any_terminal`: never impossible.
 
 A manually continuable `failed` child still counts as terminal nonsuccess in
 the current vector. If success is currently impossible, `on_impossible`

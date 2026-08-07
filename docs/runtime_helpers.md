@@ -234,7 +234,7 @@ no half-outcome ever reaches the manager.
 | Call | Meaning |
 | --- | --- |
 | `a.advance(step, state=..., priority=...)` | run `step` next; `state` is written before publication |
-| `a.gather(step, when=..., count=..., on_impossible=...)` | wait for the children spawned on this attempt, then run `step` |
+| `a.gather(step, when=..., count=..., on_impossible=..., rejoin=...)` | wait for children spawned on this attempt and earlier-activation labels named by `rejoin`, then run `step` |
 | `a.succeed()` | the job is done |
 | `a.retry(reason)` | repeat this activation within the job's attempt budget |
 | `a.pause(reason)` | stop until an operator resumes the job |
@@ -278,10 +278,10 @@ a.spawn(a.workdir / "child", label="prepared", placement="project/children")
 
 ### Gathering them
 
-`a.gather(step)` joins exactly the children spawned on this attempt — the same
-bundle that creates them, which is what makes the join resolvable — and runs
-`step` when the condition holds. `when` is `all_succeeded` (the default),
-`all_terminal`, `any_succeeded`, or `at_least` with `count`. When the condition
+`a.gather(step)` joins the children spawned on this attempt and can add children
+from earlier activations by label with `rejoin=(...)`. It runs `step` when the
+condition holds. `when` is `all_succeeded` (the default), `all_terminal`,
+`any_succeeded`, `any_terminal`, or `at_least` with `count`. When the condition
 can no longer be met the job advances to `on_impossible` if one is named, and
 fails with `dependency_failure` otherwise. A named child the manager cannot
 resolve fails the parent with `dependency_failure` once its grace expires,

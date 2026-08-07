@@ -109,7 +109,7 @@ _CHILD_FIELDS = (
     "data",
     "data_generation",
 )
-_JOIN_CONDITIONS = ("all_succeeded", "all_terminal", "any_succeeded", "at_least")
+_JOIN_CONDITIONS = ("all_succeeded", "all_terminal", "any_succeeded", "any_terminal", "at_least")
 
 
 class _Absent(Exception):
