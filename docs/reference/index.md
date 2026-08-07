@@ -18,7 +18,8 @@ in its `__all__` — rather than every source object. The three layers are:
   `httk.workflow.projects`, plus the domain and compatibility consumers
   `httk.workflow.vasp` and the `httk.workflow.compat` engines
   (`httk.workflow.compat.v1`, `httk.workflow.languages.cwl`,
-  `httk.workflow.languages.pwd`, and `httk.workflow.languages.httk_v1`).
+  `httk.workflow.languages.pwd`, `httk.workflow.languages.jobflow`, and
+  `httk.workflow.languages.httk_v1`).
 
 ```{toctree}
 :maxdepth: 2
@@ -27,5 +28,6 @@ autoapi/httk/workflow/index
 autoapi/httk/workflow/languages/index
 autoapi/httk/workflow/languages/cwl/index
 autoapi/httk/workflow/languages/pwd/index
+autoapi/httk/workflow/languages/jobflow/index
 autoapi/httk/workflow/languages/httk_v1/index
 ```

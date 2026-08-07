@@ -467,10 +467,14 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
                 raise _error(root, f"[workflow.runner].{key} is implied by language {language_name!r}")
         if "instantiate" in workflow:
             raise _error(root, f"[workflow.instantiate] is implied by language {language_name!r}")
-        if lang.requires_document:
+        if lang.document_policy == "required":
+            if "document" not in runner:
+                raise _error(root, f"workflow language {language_name!r} requires [workflow.runner].document")
             document_member = _member(root, runner.get("document"), "[workflow.runner].document")
-        elif "document" in runner:
+        elif lang.document_policy == "forbidden" and "document" in runner:
             raise _error(root, f"[workflow.runner].document is not used by language {language_name!r}")
+        elif lang.document_policy == "optional" and "document" in runner:
+            document_member = _member(root, runner.get("document"), "[workflow.runner].document")
         if not lang.allows_modes:
             for mode in ("data_mode", "workdir_mode"):
                 if mode in runner:
@@ -484,6 +488,12 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
             lang.validate_runner(runner_options, root)
         except ValueError as exc:
             raise _error(root, f"[workflow.runner]: {exc}") from exc
+        if lang.document_policy == "optional":
+            has_maker = "maker" in runner_options
+            if document_member is not None and has_maker:
+                raise _error(root, "[workflow.runner] give either document= or maker=, not both")
+            if document_member is None and not has_maker:
+                raise _error(root, "[workflow.runner] give either document= or maker=, not neither")
         entry = "run"
         steps = lang.steps
         initial_step = lang.initial_step
@@ -531,7 +541,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
             input_name,
             root,
             language=lang is not None,
-            allow_port=lang is not None and document_member is not None,
+            allow_port=lang is not None and (document_member is not None or lang.open_ports),
         )
         if str(metadata["role"]) in roles:
             raise _error(root, f"[workflow.inputs.{input_name}].role is duplicated")
@@ -579,24 +589,27 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         input_metadata,
         root,
         language=lang is not None,
-        allow_port=lang is not None and document_member is not None,
+        allow_port=lang is not None and (document_member is not None or lang.open_ports),
     )
-    if lang is not None and document_member is not None:
-        document_path = (root / document_member).resolve()
-        try:
-            ports = lang.ports(document_path)
-        except Exception as exc:
-            raise _error(root, f"[workflow.runner].document: {exc}") from exc
-        known_inputs = ", ".join(ports.inputs) or "none"
-        known_outputs = ", ".join(ports.outputs) or "none"
+    if lang is not None and (document_member is not None or lang.open_ports):
+        static_ports: languages.LanguagePorts | None = None
+        if document_member is not None and not lang.open_ports:
+            document_path = (root / document_member).resolve()
+            try:
+                static_ports = lang.ports(document_path)
+            except Exception as exc:
+                raise _error(root, f"[workflow.runner].document: {exc}") from exc
         seen_inputs: dict[str, str] = {}
         for name, metadata in input_metadata.items():
             port = str(metadata["port"])
-            if port not in ports.inputs:
-                raise _error(
-                    root,
-                    f"[workflow.inputs.{name}].port {port!r} is not a document input port; known ports: {known_inputs}",
-                )
+            if static_ports is not None:
+                known_inputs = ", ".join(static_ports.inputs) or "none"
+                if port not in static_ports.inputs:
+                    raise _error(
+                        root,
+                        f"[workflow.inputs.{name}].port {port!r} is not a document input port; "
+                        f"known ports: {known_inputs}",
+                    )
             previous = seen_inputs.get(port)
             if previous is not None:
                 raise _error(
@@ -608,11 +621,14 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         seen_outputs: dict[str, str] = {}
         for name, metadata in outputs.items():
             port = str(metadata["port"])
-            if port not in ports.outputs:
-                raise _error(
-                    root,
-                    f"[workflow.outputs.{name}].port {port!r} is not a document output port; known ports: {known_outputs}",
-                )
+            if static_ports is not None:
+                known_outputs = ", ".join(static_ports.outputs) or "none"
+                if port not in static_ports.outputs:
+                    raise _error(
+                        root,
+                        f"[workflow.outputs.{name}].port {port!r} is not a document output port; "
+                        f"known ports: {known_outputs}",
+                    )
             previous = seen_outputs.get(port)
             if previous is not None:
                 raise _error(

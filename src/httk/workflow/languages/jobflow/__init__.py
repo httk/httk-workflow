@@ -1,0 +1,213 @@
+"""Prepare atomate2 jobflow Maker workflows for httk workflow jobs.
+
+Declared workflow parameters are Maker constructor configuration: the runner builds ``Class(**params)`` for the
+``maker=`` form and ``dataclasses.replace(maker, **params)`` for the document form, so declared parameters override
+document Maker fields; language plumbing parameters are reserved-prefixed and never Maker-bound.
+"""
+
+import json
+import os
+import re
+import shutil
+from collections.abc import Mapping
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
+
+from httk.workflow.languages import (
+    LanguagePorts,
+    LanguageRequest,
+    LanguageScaffold,
+    WorkflowLanguage,
+    _data_record,
+    _load_outputs,
+    _output_roles,
+    _parameter,
+    runner_reference,
+)
+from httk.workflow.scaffold import FILES_DIRECTORY, payload_relative
+
+if TYPE_CHECKING:
+    from httk.workflow.collecting import JobRecord
+    from httk.workflow.runtime_builders import JobSpec
+
+PACKAGE = __name__
+RUNNER = "jobflow_runner.py"
+DOCUMENT_FILE = f"{FILES_DIRECTORY}/maker.json"
+STAGED_DIRECTORY = f"{FILES_DIRECTORY}/inputs"
+DEFAULT_DATA_PREFIX = "jobflow"
+OUTPUTS_FILE = "jobflow-outputs.json"
+
+_MAKER_SPEC = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*:[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class JobflowFormatError(ValueError):
+    """A jobflow Maker document or runner configuration is invalid."""
+
+
+def _maker_document(raw: object, source: str) -> dict[str, object]:
+    if not isinstance(raw, dict) or not isinstance(raw.get("@module"), str) or not isinstance(raw.get("@class"), str):
+        raise JobflowFormatError(f"{source} must be a JSON object with string @module and @class members")
+    return raw
+
+
+def _read_document(path: Path) -> dict[str, object]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise JobflowFormatError(f"cannot read jobflow Maker document {path}: {exc}") from exc
+    return _maker_document(raw, str(path))
+
+
+def _matches(path: Path) -> bool:
+    if not path.is_file() or path.suffix != ".json":
+        return False
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return isinstance(raw, dict) and isinstance(raw.get("@module"), str) and isinstance(raw.get("@class"), str)
+
+
+def _ports(path: Path) -> LanguagePorts:
+    del path
+    return LanguagePorts(inputs=(), outputs=("output",))
+
+
+def _validate_runner(options: Mapping[str, object], root: Path) -> None:
+    del root
+    for key, value in options.items():
+        if key not in {"maker"}:
+            raise ValueError(f"unknown runner option {key!r} for jobflow")
+        if not isinstance(value, str) or _MAKER_SPEC.fullmatch(value) is None:
+            raise ValueError("runner option 'maker' must be a dotted Maker spec like 'module:Class'")
+
+
+def _prepare(request: LanguageRequest) -> LanguageScaffold:
+    options = request.runner_options
+    has_document = request.document is not None
+    has_maker = "maker" in options
+    if has_document == has_maker:
+        raise JobflowFormatError("give [workflow.runner] either maker= or document=, not both/neither")
+
+    documents: dict[str, str | bytes] = {}
+    parameters: dict[str, object] = {"workflow_language": "jobflow"}
+    if has_document:
+        assert request.document is not None
+        loaded = _read_document(request.document)
+        documents[DOCUMENT_FILE] = json.dumps(loaded, indent=2, sort_keys=True)
+        parameters["jobflow_document"] = DOCUMENT_FILE
+    else:
+        maker = options["maker"]
+        parameters["jobflow_maker"] = maker
+    declared_parameters = tuple(sorted(request.parameters))
+    if declared_parameters:
+        parameters["jobflow_maker_parameters"] = declared_parameters
+        defaults = {name: metadata["default"] for name, metadata in request.parameters.items() if "default" in metadata}
+        if defaults:
+            parameters["jobflow_maker_defaults"] = defaults
+    parameters["jobflow_output_roles"] = {
+        str(metadata.get("port", name)): str(metadata.get("role", name)) for name, metadata in request.outputs.items()
+    }
+    root = (request.directory or (request.document.parent if request.document is not None else Path.cwd())).resolve()
+
+    def instantiate(ctx: object) -> object:
+        """Stage file inputs and preserve literal JSON inputs for jobflow."""
+
+        from httk.workflow.scaffold import InstantiateContext
+
+        assert isinstance(ctx, InstantiateContext)
+        inputs: dict[str, dict[str, object]] = {}
+        for name, value in ctx.inputs.items():
+            metadata = request.inputs.get(name, {})
+            label = str(metadata.get("port", name))
+            source: Path | None = None
+            if isinstance(value, (str, os.PathLike)):
+                candidate = Path(os.fspath(value))
+                source = (candidate if candidate.is_absolute() else root / candidate).resolve()
+                if not source.is_file():
+                    source = None
+            if source is None:
+                try:
+                    json.dumps(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"workflow input {name!r} must be JSON-serializable") from exc
+                inputs[label] = {"kind": "value", "value": value}
+                continue
+            member = PurePosixPath(STAGED_DIRECTORY) / label / source.name
+            relative = payload_relative(member.as_posix())
+            destination = ctx.payload.joinpath(*relative.parts)
+            if destination.exists():
+                raise ValueError(f"generated member {member.as_posix()!r} collides with an existing payload member")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            inputs[label] = {"kind": "path", "value": relative.as_posix()}
+        ctx.parameters["jobflow_inputs"] = inputs
+        return None
+
+    def finalize(spec: "JobSpec") -> "JobSpec":
+        """Pin jobflow jobs to a persistent workdir with unlimited activations."""
+        return replace(spec, workdir_mode="persistent", maximum_activations=None)
+
+    return LanguageScaffold(
+        documents=documents,
+        files={},
+        parameters=parameters,
+        runner=runner_reference(PACKAGE, RUNNER),
+        reserved_parameters=("jobflow_inputs",),
+        required_capabilities=(),
+        instantiate=instantiate,
+        finalize=finalize,
+    )
+
+
+def collect(record: "JobRecord") -> Mapping[str, object]:
+    """Convert one jobflow runner output document into provenance records.
+
+    :param record: The completed job record containing runner outputs.
+    :return: Output records keyed by their declared workflow roles.
+    """
+
+    prefix = _parameter(record, "jobflow_data_prefix", DEFAULT_DATA_PREFIX)
+    raw_outputs = _load_outputs(record, OUTPUTS_FILE, prefix)
+    roles = _output_roles(record, "jobflow_output_roles", raw_outputs)
+    return {str(roles[port]): _data_record(str(roles[port]), value) for port, value in raw_outputs.items()}
+
+
+def document_from_maker(maker: object) -> str:
+    """Serialize one MSONable Maker using monty.
+
+    :param maker: A Maker object exposing ``as_dict()``.
+    :return: A sorted, indented JSON Maker document.
+    :raises JobflowFormatError: If *maker* has no usable MSONable document.
+
+    Monty must be installed when this helper is called.
+    """
+
+    as_dict = getattr(maker, "as_dict", None)
+    if not callable(as_dict):
+        raise JobflowFormatError("maker must provide as_dict(); monty is required to serialize it")
+    from monty.json import MontyEncoder
+
+    try:
+        serialized = json.dumps(as_dict(), cls=MontyEncoder, indent=2, sort_keys=True)
+        _maker_document(json.loads(serialized), "maker")
+    except (TypeError, ValueError) as exc:
+        raise JobflowFormatError(f"maker did not serialize to a valid MSONable document: {exc}") from exc
+    return serialized
+
+
+LANGUAGE = WorkflowLanguage(
+    name="jobflow",
+    steps=("start", "advance", "enter"),
+    initial_step="start",
+    document_policy="optional",
+    open_ports=True,
+    has_default_collector=True,
+    allows_modes=False,
+    matches=_matches,
+    ports=_ports,
+    validate_runner=_validate_runner,
+    prepare=_prepare,
+    collect=collect,
+)

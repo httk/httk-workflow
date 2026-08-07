@@ -45,7 +45,7 @@ httk workflow job new WS --workflow-dir ./my-workflow --input structure=POSCAR
 
 ## Runner realizations
 
-`[workflow.runner]` selects one of three forms. The executable form is the
+`[workflow.runner]` selects one of four forms. The executable form is the
 ordinary package runner. The language forms delegate instantiate, run, and
 default collection to the registered language realization.
 
@@ -53,19 +53,20 @@ default collection to the registered language realization.
 | --- | --- | --- | --- |
 | executable entry | no `language` | `entry`, `steps`, `initial_step`, `data_mode`, `workdir_mode` | package `run` plus the declared step set |
 | document language | `language = "cwl"` or `"pwd"` and `document` | language keys only; `port` is allowed on document inputs/outputs | installed `cwl_runner.py` or `pwd_runner.py` |
+| jobflow | `language = "jobflow"` and `maker` or `document` | `maker` or `document` (exactly one); `port` is allowed on inputs/outputs; no mode keys | installed `jobflow_runner.py` |
 | httk-v1 | `language = "httk-v1"` and no `document` | `taskset`, `attempts`; no mode keys | package snapshot under executor `httk-v1`, with `ht_steps` or `ht_run` |
 
 For language forms, `entry`, `steps`, and `initial_step` are forbidden because
 the language supplies built-in steps. `[workflow.instantiate]` is forbidden
 because language inputs are hook-consumed. `destination` is forbidden on
-CWL/PWD and on httk-v1 inputs; an omitted v1 destination is an
+CWL/PWD, jobflow, and httk-v1 inputs; an omitted v1 destination is an
 `ht.instantiate.py` global. Language workflows may declare
 `[workflow.collect]` to override the default. CWL and PWD have defaults;
-httk-v1 has none and normally declares a hook.
+jobflow has a default; httk-v1 has none and normally declares a hook.
 
-Language manifests cannot set `data_mode` or `workdir_mode` for httk-v1: they
-are forced to `none` and persistent `ht.run.current`. Unknown language keys are
-errors.
+Language manifests cannot set `data_mode` or `workdir_mode` for jobflow or
+httk-v1. Jobflow pins the workdir persistent; httk-v1 forces `none` and
+persistent `ht.run.current`. Unknown language keys are errors.
 
 ## `httk_workflow.toml` reference
 
@@ -110,21 +111,24 @@ or the sole step is selected. Otherwise `initial_step` is required.
 
 ### `[workflow.runner]`: language vocabulary
 
-| Key | CWL/PWD | httk-v1 | Meaning |
-| --- | --- | --- | --- |
-| `language` | required: `"cwl"` or `"pwd"` | required: `"httk-v1"` | Select the realization. |
-| `document` | required, relative regular member | forbidden | Language document member. |
-| `port` | optional on an input/output table | forbidden | Alias a manifest name to a document port. |
-| `modules` | PWD only, list of relative `.py` members | forbidden | Package Python modules to stage. |
-| `module_path` | PWD only, list of import roots | forbidden | Additional PWD import roots. |
-| `allowed_modules` | PWD only, list of module prefixes | forbidden | PWD import allowlist. |
-| `taskset` | forbidden | label, default `"default"` | v1 claim pool. |
-| `attempts` | forbidden | integer, default `10` | v1 retry budget. |
-| `entry`, `steps`, `initial_step` | forbidden | forbidden | Built-in language steps. |
-| `data_mode`, `workdir_mode` | allowed only in executable form | forbidden | v1 forces `none`/persistent. |
+| Key | CWL/PWD | jobflow | httk-v1 | Meaning |
+| --- | --- | --- | --- | --- |
+| `language` | required: `"cwl"` or `"pwd"` | required: `"jobflow"` | required: `"httk-v1"` | Select the realization. |
+| `document` | required, relative regular member | optional, relative regular member; mutually exclusive with `maker` | forbidden | Language document member. |
+| `maker` | forbidden | required when `document` is omitted; `module:Class` Maker spec | forbidden | Import a Maker class for the jobflow root. |
+| `port` | optional on an input/output table | optional on an input/output table | forbidden | Alias a manifest name to a document or jobflow port. |
+| `modules` | PWD only, list of relative `.py` members | forbidden | forbidden | Package Python modules to stage. |
+| `module_path` | PWD only, list of import roots | forbidden | forbidden | Additional PWD import roots. |
+| `allowed_modules` | PWD only, list of module prefixes | forbidden | forbidden | PWD import allowlist. |
+| `taskset` | forbidden | forbidden | label, default `"default"` | v1 claim pool. |
+| `attempts` | forbidden | forbidden | integer, default `10` | v1 retry budget. |
+| `entry`, `steps`, `initial_step` | forbidden | forbidden | forbidden | Built-in language steps. |
+| `data_mode`, `workdir_mode` | allowed only in executable form | forbidden; jobflow pins a persistent workdir | forbidden | v1 forces `none`/persistent. |
 
 For a document language, each effective input and output port must exist in the
-document and may occur only once. `port` defaults to the manifest name.
+document and may occur only once. `port` defaults to the manifest name. Jobflow
+has open ports because Maker `make()` signatures are not inspected during
+manifest preparation.
 
 ### Hook tables
 
@@ -349,7 +353,7 @@ and records the full digest in `job.json`. Republish of identical content is an
 idempotent no-op; changed content cannot replace an existing name without an
 explicit replacement. The manager verifies the same digest before execution.
 
-`publish=` is ignored for language workflows: CWL/PWD use their installed
+`publish=` is ignored for language workflows: CWL/PWD/jobflow use their installed
 runner and httk-v1 uses its payload runner and executor. `new_jobs` and CLI
 `--input-from` campaigns prepare a language package once and instantiate it per
 job. Language-produced parameter names are reserved and collisions fail

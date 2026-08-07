@@ -1176,6 +1176,7 @@ def _language_request(resolved: ResolvedWorkflow) -> LanguageRequest:
         runner_options=resolved.runner_options,
         inputs=resolved._input_metadata,
         outputs=resolved.outputs,
+        parameters=resolved.parameters,
         excluded_members=excluded,
     )
 

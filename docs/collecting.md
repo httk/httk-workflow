@@ -185,12 +185,12 @@ and load that tree's collect hook; refusals degrade only that job. See
 ### Language fallback and degradation
 
 For a language job, provider dispatch is followed by the job's own
-`workflow_language` parameter. A provider-less CWL or PWD job then uses the
-language default collector: `cwl-outputs.json` or `pwd-outputs.json` is read
-from the workdir or transactional data tree, ports are mapped to declared
-roles, and values become `DataRecord` objects. CWL `File` values are accepted
-only when their paths remain inside the workspace, workdir, or data tree; the
-result records a file descriptor and sha256.
+`workflow_language` parameter. A provider-less CWL, PWD, or jobflow job then
+uses the language default collector: its output document is read from the
+workdir or transactional data tree, ports are mapped to declared roles, and
+values become `DataRecord` objects. CWL `File` values are accepted only when
+their paths remain inside the workspace, workdir, or data tree; the result
+records a file descriptor and sha256. Jobflow reads `jobflow-outputs.json`.
 
 A package with a custom hook records `workflow_collect = "package"`.
 Provider-less collection of that job degrades with a registration hint; it

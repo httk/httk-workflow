@@ -83,6 +83,17 @@ cwl = [
   "cwl-utils>=0.32,<1",
   "cwl-upgrader>=1.2,<2",
 ]
+# The jobflow language needs no extra to prepare or collect jobs; these extras
+# belong on the machine that runs the job. `jobflow` supports any jobflow Maker
+# and structure inputs via pymatgen; `atomate2` additionally provides its Maker library.
+jobflow = [
+  "jobflow>=0.3.1,<0.4",
+  "pymatgen",
+]
+atomate2 = [
+  "atomate2>=0.1.5,<1",
+  "jobflow>=0.3.1,<0.4",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
