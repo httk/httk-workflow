@@ -1,0 +1,436 @@
+httk.workflow.languages.pwd
+===========================
+
+.. py:module:: httk.workflow.languages.pwd
+
+.. autoapi-nested-parse::
+
+   Running one Python Workflow Definition document as one *httk₂* job.
+
+   The `Python Workflow Definition <https://github.com/pythonworkflow/python-workflow-definition>`_
+   (PWD) is a small JSON exchange format: a list of ``nodes`` and a list of
+   ``edges``. A node is a Python function named ``module.function``, a literal
+   input, or a named output; an edge connects one node's output port to another
+   node's input port. The format is deliberately machine-facing — several workflow
+   engines read and write it — and this module is *httk₂* reading it.
+
+   .. code-block:: python
+
+       from httk.workflow import Workspace, new_job
+
+       workspace = Workspace.initialize("workflow-workspace")
+       job = new_job(workspace, "workflow.json", parameters={"pwd_module_path": ["."]})
+
+   The import is one way and produces exactly one job. The whole graph runs inside
+   that job, sequentially, in topological order, by the packaged
+   ``pwd_runner.py`` — no runner file is written per workflow, and no per-node job
+   is created: a PWD node is one Python call, which is not worth a claim, a lease
+   and a process of its own.
+
+   The document travels in the job's ``parameters`` when it fits within
+   *maximum_embedded_bytes*, and in ``files/pwd.json`` with a document pointer when
+   it does not, because ``parameters`` is bounded by
+   :data:`~httk.workflow.models.MAXIMUM_PARAMETERS_BYTES` and a generated document can
+   be much larger than that.
+
+   .. warning::
+
+      Running a PWD document **executes the Python functions it names**. There is
+      no sandbox and there cannot be one: the format's whole content is
+      ``module.function`` references. Import a document exactly as carefully as you
+      would run the module it names. Passing *allowed_modules* records an allowlist
+      of module prefixes in the job, which the runner refuses to import outside of.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.languages.pwd.MAXIMUM_PARAMETERS_BYTES
+   httk.workflow.languages.pwd.FILES_DIRECTORY
+   httk.workflow.languages.pwd.PACKAGE
+   httk.workflow.languages.pwd.RUNNER
+   httk.workflow.languages.pwd.KNOWN_VERSIONS
+   httk.workflow.languages.pwd.DOCUMENT_FILE
+   httk.workflow.languages.pwd.DEFAULT_MAXIMUM_EMBEDDED_BYTES
+   httk.workflow.languages.pwd.LANGUAGE
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.workflow.languages.pwd.PwdFormatError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.languages.pwd.LanguagePorts
+   httk.workflow.languages.pwd.LanguageRequest
+   httk.workflow.languages.pwd.LanguageScaffold
+   httk.workflow.languages.pwd.WorkflowLanguage
+   httk.workflow.languages.pwd.PwdDocument
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.languages.pwd.runner_reference
+   httk.workflow.languages.pwd.load_pwd_document
+   httk.workflow.languages.pwd.validate_pwd_document
+   httk.workflow.languages.pwd.collect
+
+
+Package Contents
+----------------
+
+.. py:class:: LanguagePorts
+
+   The named input and output ports of one language document.
+
+   :param inputs: Names of the document's input ports.
+   :param outputs: Names of the document's output ports.
+
+
+   .. py:attribute:: inputs
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: outputs
+      :type:  tuple[str, Ellipsis]
+
+
+.. py:class:: LanguageRequest
+
+   The data supplied when preparing one language workflow.
+
+   :param workflow_id: Identify the workflow being prepared.
+   :param directory: Locate the workflow package, when it has one.
+   :param document: Locate the source workflow document, when it has one.
+   :param runner_options: Supply options for the language runner.
+   :param inputs: Describe the workflow inputs.
+   :param outputs: Describe the requested workflow outputs.
+   :param excluded_members: Package members the realization must not stage.
+
+
+   .. py:attribute:: workflow_id
+      :type:  str
+
+
+   .. py:attribute:: directory
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: document
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: runner_options
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: inputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: outputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: excluded_members
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+.. py:class:: LanguageScaffold
+
+   The files, runner, and hooks prepared for one language workflow.
+
+   :param documents: Text or byte documents to write into the payload.
+   :param files: Files to stage into the payload.
+   :param parameters: Job parameters produced by preparation.
+   :param runner: Runner description for the job, when one is supplied.
+   :param runner_executor: Select the runner executor.
+   :param payload_runner: Name a runner staged in the payload.
+   :param workdir_path: Name the workdir below the job payload.
+   :param required_capabilities: Require these manager capabilities.
+   :param reserved_parameters: Names reserved for per-job realization output.
+   :param warnings: Preserve preparation warnings.
+   :param instantiate: Supply the per-job hook called after input staging.
+   :param finalize: Transform the per-job ``JobSpec`` immediately before its payload is prepared.
+
+
+   .. py:attribute:: documents
+      :type:  collections.abc.Mapping[str, str | bytes]
+
+
+   .. py:attribute:: files
+      :type:  collections.abc.Mapping[str, pathlib.Path]
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: runner
+      :type:  collections.abc.Mapping[str, object] | None
+
+
+   .. py:attribute:: runner_executor
+      :type:  str
+      :value: 'path'
+
+
+
+   .. py:attribute:: payload_runner
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: workdir_path
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: required_capabilities
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: reserved_parameters
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: warnings
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: instantiate
+      :type:  collections.abc.Callable[[httk.workflow.scaffold.InstantiateContext], object] | None
+      :value: None
+
+
+
+   .. py:attribute:: finalize
+      :type:  collections.abc.Callable[[httk.workflow.runtime_builders.JobSpec], httk.workflow.runtime_builders.JobSpec] | None
+      :value: None
+
+
+
+.. py:class:: WorkflowLanguage
+
+   The operations a workflow language exposes to the common layer.
+
+   :param name: Name the language.
+   :param steps: Declare the runner's steps.
+   :param initial_step: Select the runner's initial step.
+   :param matches: Identify documents belonging to the language.
+   :param ports: Read the input and output ports of a document.
+   :param validate_runner: Validate runner options for a document.
+   :param prepare: Prepare a language request for execution.
+   :param collect: Convert a completed job record into language outputs.
+   :param requires_document: Require a source document in package manifests.
+   :param has_default_collector: Provide a default collector path.
+   :param allows_modes: Permit manifest data and workdir mode overrides.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: steps
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: initial_step
+      :type:  str
+
+
+   .. py:attribute:: matches
+      :type:  collections.abc.Callable[[pathlib.Path], bool]
+
+
+   .. py:attribute:: ports
+      :type:  collections.abc.Callable[[pathlib.Path], LanguagePorts]
+
+
+   .. py:attribute:: validate_runner
+      :type:  collections.abc.Callable[[collections.abc.Mapping[str, object], pathlib.Path], None]
+
+
+   .. py:attribute:: prepare
+      :type:  collections.abc.Callable[[LanguageRequest], LanguageScaffold]
+
+
+   .. py:attribute:: collect
+      :type:  collections.abc.Callable[[httk.workflow.collecting.JobRecord], collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: requires_document
+      :type:  bool
+      :value: True
+
+
+
+   .. py:attribute:: has_default_collector
+      :type:  bool
+      :value: True
+
+
+
+   .. py:attribute:: allows_modes
+      :type:  bool
+      :value: True
+
+
+
+.. py:function:: runner_reference(package, name)
+
+   Return the ``runner`` member of a ``job.json`` running one packaged runner.
+
+   The reserved ``pkg:`` form names the runner inside its own consumer package,
+   and the digest is taken from the installed bytes, which is exactly what the
+   manager verifies before it stages and executes them.
+
+
+.. py:data:: MAXIMUM_PARAMETERS_BYTES
+   :value: 262144
+
+
+.. py:data:: FILES_DIRECTORY
+   :value: 'files'
+
+
+.. py:data:: PACKAGE
+   :value: 'httk.workflow.languages.pwd'
+
+
+.. py:data:: RUNNER
+   :value: 'pwd_runner.py'
+
+
+.. py:data:: KNOWN_VERSIONS
+   :value: ('0.1.0',)
+
+
+.. py:data:: DOCUMENT_FILE
+   :value: 'files/pwd.json'
+
+
+.. py:data:: DEFAULT_MAXIMUM_EMBEDDED_BYTES
+   :value: 131072
+
+
+.. py:exception:: PwdFormatError
+
+   Bases: :py:obj:`ValueError`
+
+
+   A document that is not a Python Workflow Definition this importer accepts.
+
+
+.. py:class:: PwdDocument
+
+   One validated PWD document, and the order its function nodes run in.
+
+   :param raw: Preserve the validated source document.
+   :param nodes: Preserve validated nodes keyed by identifier.
+   :param edges: Preserve validated graph edges.
+   :param order: Record the topological node execution order.
+
+
+   .. py:attribute:: raw
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: nodes
+      :type:  collections.abc.Mapping[int, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: edges
+      :type:  tuple[collections.abc.Mapping[str, object], Ellipsis]
+
+
+   .. py:attribute:: order
+      :type:  tuple[int, Ellipsis]
+
+
+   .. py:property:: version
+      :type: str | None
+
+
+      Return the document version when one is declared.
+
+
+   .. py:property:: functions
+      :type: tuple[str, Ellipsis]
+
+
+      Every ``module.function`` this document would import, in node order.
+
+
+   .. py:property:: input_names
+      :type: tuple[str, Ellipsis]
+
+
+      The names of every input node, in node order.
+
+
+   .. py:property:: output_names
+      :type: tuple[str, Ellipsis]
+
+
+      The names of every output node, in node order.
+
+
+.. py:function:: load_pwd_document(path, *, allow_unknown_version = False)
+
+   Read and validate one PWD document from *path*.
+
+   :param path: Read the PWD JSON document at this path.
+   :param allow_unknown_version: Try versions outside the supported set.
+   :return: The validated PWD document.
+   :raises httk.workflow.languages.pwd.PwdFormatError: If the file cannot be read, parsed, or validated.
+
+
+.. py:function:: validate_pwd_document(raw, *, source = 'the document', allow_unknown_version = False)
+
+   Validate the shape of one PWD document and order its nodes.
+
+   Every member the format defines is checked; every member it does not define
+   is preserved untouched, so a document carrying an engine's own annotations
+   survives the round trip into the job payload. When the
+   ``python-workflow-definition`` package happens to be installed it is asked
+   for a second opinion — it is never a dependency of *httk-workflow*, only a
+   stricter validator when it is there.
+
+   :param raw: Validate this decoded PWD document.
+   :param source: Identify the document in validation errors.
+   :param allow_unknown_version: Try versions outside the supported set.
+   :return: The validated PWD document.
+   :raises httk.workflow.languages.pwd.PwdFormatError: If the document shape, graph, or version is invalid.
+
+
+.. py:function:: collect(record)
+
+   Convert one PWD runner output document into provenance-capable records.
+
+
+.. py:data:: LANGUAGE
+

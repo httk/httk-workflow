@@ -1,0 +1,779 @@
+httk.workflow.sdk
+=================
+
+.. py:module:: httk.workflow.sdk
+
+.. autoapi-nested-parse::
+
+   The Python authoring SDK for native *httk₂* workflow runners.
+
+   One runner is one program that implements the steps of one workflow. Steps are
+   registered on a :class:`Runner`, and :meth:`Runner.main` dispatches the step the
+   manager asked for to the handler that implements it, giving it one
+   :class:`Attempt` object:
+
+   .. code-block:: python
+
+       from httk.workflow import ChildSpec, Runner
+
+       run = Runner("defects")
+
+
+       @run.step
+       def characterize(a):
+           for site in range(a.parameter("sites")):
+               a.spawn(ChildSpec(step="relax", parameters={"site": site}), label=f"site-{site}")
+           a.gather("aggregate", on_impossible="triage")
+
+
+       if __name__ == "__main__":
+           raise SystemExit(run.main())
+
+   Nothing declares the shape of the workflow up front: a step decides at run time
+   which children to spawn and which step runs next, so the graph of a job is
+   whatever its steps published. Exactly one outcome is published per attempt, and
+   the handler that returns without publishing one, or raises, is reported as such
+   instead of leaving the attempt ambiguous.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.sdk.RUNNER_DESCRIPTION_FORMAT
+   httk.workflow.sdk.RUNNER_ERROR_FORMAT
+   httk.workflow.sdk.InstantiateHandler
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.sdk.RunnerRef
+   httk.workflow.sdk.ChildSpec
+   httk.workflow.sdk.ChildResult
+   httk.workflow.sdk.ChildrenView
+   httk.workflow.sdk.Attempt
+   httk.workflow.sdk.Runner
+
+
+Module Contents
+---------------
+
+.. py:data:: RUNNER_DESCRIPTION_FORMAT
+   :value: 'httk-workflow-runner-description'
+
+
+.. py:data:: RUNNER_ERROR_FORMAT
+   :value: 'httk-workflow-runner-error'
+
+
+.. py:type:: InstantiateHandler
+   :canonical: Callable[[Any], object]
+
+
+.. py:class:: RunnerRef
+
+   Which runner executes a child job synthesized by :class:`ChildSpec`.
+
+   A synthesized child has no payload of its own, so its runner must be one that
+   lives outside a payload: an entry of the workspace runner store, or an
+   installed runner on the machine that runs it. :meth:`inherit` copies the
+   reference of the spawning job itself, which is what a campaign whose steps all
+   live in one published runner wants.
+
+   :param source: The location from which the child runner is loaded.
+   :param path: The workspace or installed runner path when one is selected.
+   :param sha256: The digest pin for a workspace or installed runner.
+
+
+   .. py:attribute:: source
+      :type:  Literal['inherit', 'workspace', 'installed']
+      :value: 'inherit'
+
+
+
+   .. py:attribute:: path
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: sha256
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:method:: inherit()
+      :classmethod:
+
+
+      Reference exactly the runner of the spawning job.
+
+      :return: The inherited runner reference.
+
+
+
+   .. py:method:: workspace(path, sha256)
+      :classmethod:
+
+
+      Reference one runner published in the workspace runner store.
+
+      :param path: The path within the workspace runner store.
+      :param sha256: The runner digest.
+      :return: The workspace runner reference.
+
+
+
+   .. py:method:: installed(path, sha256)
+      :classmethod:
+
+
+      Reference one runner installed on the machine that runs the child.
+
+      :param path: The installed runner path.
+      :param sha256: The runner digest.
+      :return: The installed runner reference.
+
+
+
+.. py:class:: ChildSpec
+
+   A complete child job described by the step and parameters it starts with.
+
+   Everything not given follows the spawning job: its workflow, its claim pool,
+   its priority, its resources, and its runner. The child therefore differs from
+   its parent in exactly what the campaign varies, which is normally only *step*
+   and *parameters*.
+
+   :param step: The first step the child runs.
+   :param parameters: The opaque implementation knobs given to the child.
+   :param declarations: The workflow declarations carried by the child.
+   :param runner: The runner reference used to execute the child.
+   :param name: The child job name, or a generated name when omitted.
+   :param workflow: The child's workflow identifier, or the parent's when omitted.
+   :param tag: The child's optional job tag, or the spawn label when omitted.
+   :param workdir_mode: Whether the child's workdir persists or is isolated.
+   :param workdir_path: The child's relative workdir path.
+   :param data_mode: Whether the child has transactional data.
+   :param priority: The child's priority, or the parent's when omitted.
+   :param claim_pool: The child's claim pool, or the parent's when omitted.
+   :param required_capabilities: Capabilities required by the child.
+   :param resources: Resources requested by the child, or the parent's when omitted.
+   :param maximum_attempts_per_activation: The child's per-activation attempt budget.
+   :param maximum_total_attempts: The child's total attempt budget.
+   :param maximum_activations: The child's activation budget.
+   :param retry_on: Failure codes eligible for manager-detected retry.
+
+
+   .. py:attribute:: step
+      :type:  str
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: declarations
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: runner
+      :type:  RunnerRef
+
+
+   .. py:attribute:: name
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: workflow
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: tag
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: workdir_mode
+      :type:  Literal['persistent', 'isolated']
+      :value: 'persistent'
+
+
+
+   .. py:attribute:: workdir_path
+      :type:  str
+      :value: 'run'
+
+
+
+   .. py:attribute:: data_mode
+      :type:  Literal['none', 'transactional']
+      :value: 'none'
+
+
+
+   .. py:attribute:: priority
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: claim_pool
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: required_capabilities
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: resources
+      :type:  collections.abc.Mapping[str, object] | None
+      :value: None
+
+
+
+   .. py:attribute:: maximum_attempts_per_activation
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: maximum_total_attempts
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: maximum_activations
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: retry_on
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+.. py:class:: ChildResult
+
+   What one gathering step may know about one child it spawned.
+
+   Every member is derived from authoritative state by the manager before the
+   gathering activation starts, so reading a child is a pure read of the
+   attempt context and never a scan of the workspace. Paths are absolute.
+
+
+   .. py:attribute:: label
+      :type:  str | None
+
+
+   .. py:attribute:: job_id
+      :type:  str
+
+
+   .. py:attribute:: job_key
+      :type:  str
+
+
+   .. py:attribute:: kind
+      :type:  str
+
+
+   .. py:attribute:: failure
+      :type:  httk.workflow.models.Failure | None
+
+
+   .. py:attribute:: placement
+      :type:  pathlib.PurePosixPath
+
+
+   .. py:attribute:: payload
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: workdir
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: data
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: data_generation
+      :type:  int | None
+
+
+   .. py:attribute:: raw
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:property:: succeeded
+      :type: bool
+
+
+      Report whether this child ended successfully.
+
+
+   .. py:property:: failed
+      :type: bool
+
+
+      Report whether this child ended badly.
+
+
+.. py:class:: ChildrenView
+
+   The children observed by the join that started this activation.
+
+   The view is empty for an activation that follows no join, so a step can read
+   it unconditionally.
+
+
+   .. py:attribute:: all
+      :type:  tuple[ChildResult, Ellipsis]
+      :value: ()
+
+
+
+   .. py:property:: succeeded
+      :type: tuple[ChildResult, Ellipsis]
+
+
+      The children that ended successfully, in spawn order.
+
+
+   .. py:property:: failed
+      :type: tuple[ChildResult, Ellipsis]
+
+
+      The children that ended badly, in spawn order.
+
+
+   .. py:property:: labels
+      :type: tuple[str, Ellipsis]
+
+
+      The labels of every observed child, in spawn order.
+
+
+   .. py:method:: get(label, default = None)
+
+      Return the child spawned under *label*, or *default*.
+
+      :param label: The unique spawn label to find.
+      :param default: The value to return when no child has that label.
+      :return: The matching child, or the default value.
+
+
+
+.. py:class:: Attempt(context, *, control, payload, workdir, workspace, data = None, step = None, runner = None)
+
+   Everything one attempt of one step may read, do, and publish.
+
+   An attempt owns exactly one implicit outcome draft. The draft is created by
+   the first :meth:`spawn`, :meth:`put`, or :meth:`remove`, and it is published
+   by exactly one of :meth:`advance`, :meth:`gather`, :meth:`succeed`,
+   :meth:`retry`, :meth:`pause`, or :meth:`fail`. Publication is the single
+   atomic rename the manager observes, so nothing a step did takes effect until
+   the step says how it ended.
+
+   :param context: The manager-written identity and restart context.
+   :param control: The attempt control directory.
+   :param payload: The immutable job payload directory.
+   :param workdir: The directory in which the step works.
+   :param workspace: The workspace root containing the job.
+   :param data: The job's transactional data directory, when enabled.
+   :param step: The step this attempt runs, or the context step when omitted.
+   :param runner: The runner dispatching this attempt, when available.
+
+
+   .. py:attribute:: context
+
+
+   .. py:attribute:: control
+
+
+   .. py:attribute:: payload
+
+
+   .. py:attribute:: workdir
+
+
+   .. py:attribute:: workspace
+
+
+   .. py:attribute:: data
+      :value: None
+
+
+
+   .. py:attribute:: step
+
+
+   .. py:attribute:: state
+
+
+   .. py:attribute:: log
+
+
+   .. py:method:: initialize(environment = None, *, runner = None)
+      :classmethod:
+
+
+      Bind this process to its attempt and recover an interrupted one.
+
+      Recovery replays every workdir batch an earlier attempt sealed but did not
+      get to apply, so a handler always starts from a workdir whose sealed
+      changes are complete. This is the only constructor a runner needs.
+
+      :param environment: The process environment, or the current environment when omitted.
+      :param runner: The runner dispatching this attempt, when called by :meth:`Runner.main`.
+      :return: The initialized attempt.
+      :raises ValueError: If the manager-written attempt environment or context is invalid.
+
+
+
+   .. py:property:: job
+      :type: httk.workflow.models.JobDefinition
+
+
+      The immutable definition of the job this attempt belongs to.
+
+
+   .. py:property:: parameters
+      :type: collections.abc.Mapping[str, object]
+
+
+      The application-defined ``parameters`` object of this job.
+
+
+   .. py:property:: children
+      :type: ChildrenView
+
+
+      The children observed by the join that started this activation.
+
+
+   .. py:property:: published
+      :type: bool
+
+
+      Report whether this attempt already published its outcome.
+
+
+   .. py:method:: parameter(name, default = _MISSING)
+
+      Return one member of the job's ``parameters`` object.
+
+      Without a *default*, a missing parameter is a :exc:`KeyError`: a step that
+      needs a parameter cannot run without it, and saying so immediately is better
+      than failing later on a value that was never there.
+
+      :param name: The parameter name to look up.
+      :param default: The value to return when the parameter is absent.
+      :return: The parameter value or the supplied default.
+      :raises KeyError: If the parameter is absent and no default was supplied.
+
+
+
+   .. py:method:: setting(name, default = None)
+
+      Resolve one application setting through its layers.
+
+      The layers are consulted most-specific first, and the first that has the
+      name wins: this job's ``parameters`` object, then the environment variable
+      ``HTTK_`` + the name upper-cased with dots as underscores (so
+      ``vasp.command`` reads ``HTTK_VASP_COMMAND``), then the workspace's
+      application settings, then *default*. This is how a step reads the VASP
+      command a workspace was configured with without the operator exporting it
+      for every job, while still letting one job or one shell override it.
+
+      :param name: The dotted application setting name to resolve.
+      :param default: The value to return when no layer defines the setting.
+      :return: The first value found in the resolution layers, or the default.
+
+
+
+   .. py:method:: declare(name, document)
+
+      Record the observed workflow declaration *name* of this job.
+
+      The static declarations of a job are the ones ``job.json`` carried at
+      submission, and they cannot change. A dynamic campaign nevertheless only
+      learns at run time what it actually consumed and produced, so a step
+      writes the refined document here and it is stored beside the job state as
+      ``.httk-job/declarations/<name>.json``, atomically. The bytes are carried
+      verbatim: nothing here interprets the document, whose own members say
+      which vocabulary and version it follows.
+
+      The write is runner-private, so it never disturbs the payload digest, and
+      repeating it overwrites: what a job observed is whatever its last word on
+      the subject was. A collect reports the observed document beside the
+      declared one and never merges the two.
+
+      :param name: The declaration name to record.
+      :param document: The declaration document to store verbatim.
+      :return: The path of the stored observed declaration.
+      :raises httk.workflow.errors.FormatError: If the declaration name or document is invalid.
+
+
+
+   .. py:method:: declaration(name)
+
+      Return the workflow declaration *name*, observed first.
+
+      The document this job observed is returned when one was written,
+      otherwise the one ``job.json`` declared, otherwise ``None``.
+
+      :param name: The declaration name to read.
+      :return: The observed or declared document, or ``None`` when absent.
+      :raises httk.workflow.errors.FormatError: If the declaration name is invalid or its document is malformed.
+
+
+
+   .. py:method:: run(argv, *, timeout = None, cwd = None, environment = None, termination_grace = 10.0)
+
+      Run an argv array in the workdir and reap its process group.
+
+      :param argv: The command and its arguments.
+      :param timeout: The maximum runtime before terminating the process group.
+      :param cwd: The working directory, or this attempt's workdir when omitted.
+      :param environment: The complete child environment, or the process environment when omitted.
+      :param termination_grace: The grace period after a timeout before forceful termination.
+      :return: The completed command result.
+
+
+
+   .. py:method:: workdir_batch()
+
+      Start a replayable group of workdir changes.
+
+      :return: A batch that seals changes for replay after interruption.
+
+
+
+   .. py:method:: put(source, destination)
+
+      Stage one file or directory for the job's transactional data.
+
+      The operation is applied by the manager when the outcome is committed,
+      exactly once, whatever happens to this process in between. Operation
+      identifiers are generated in call order, so replaying the same step
+      produces the same manifest.
+
+      :param source: The file or directory to stage.
+      :param destination: The destination path in transactional data.
+      :return: The generated transaction operation identifier.
+      :raises ValueError: If this job has no transactional data.
+
+
+
+   .. py:method:: remove(destination, *, missing_ok = False)
+
+      Remove one path from the job's transactional data.
+
+      :param destination: The path to remove from transactional data.
+      :param missing_ok: Whether an absent destination is acceptable.
+      :return: The generated transaction operation identifier.
+      :raises ValueError: If this job has no transactional data.
+
+
+
+   .. py:method:: spawn(child, *, label, placement = None)
+
+      Register one child job under *label*, to be created on publication.
+
+      *child* is either a :class:`ChildSpec`, which needs no payload at all, or
+      the path of a prepared payload directory. The label is mandatory and must
+      be unique within one attempt: it is how :meth:`gather` and
+      :attr:`children` name this child later.
+
+      :param child: The child specification or prepared payload directory.
+      :param label: The unique label used to observe the child later.
+      :param placement: The workspace placement for the child, or this attempt's placement when omitted.
+      :return: The reference to the registered child.
+      :raises ValueError: If the child or label is invalid, or the label is reused.
+
+
+
+   .. py:method:: advance(step, *, state = None, priority = None)
+
+      Publish a new activation of this job at *step*.
+
+      *state* is written to :attr:`state` before the outcome is published, so
+      the step that runs next always finds the state that decided to run it.
+
+      :param step: The next registered step.
+      :param state: State members to merge before publication.
+      :param priority: The priority of the new activation, when changed.
+      :return: The path of the published outcome.
+      :raises RuntimeError: If this attempt already published an outcome.
+
+
+
+   .. py:method:: gather(step, *, when = 'all_succeeded', count = None, on_impossible = None)
+
+      Wait for the children spawned on this attempt, then run *step*.
+
+      The join names exactly the children :meth:`spawn` registered on this
+      attempt, which is also the bundle that creates them, so the manager can
+      always resolve it. *when* is one of ``all_succeeded``, ``all_terminal``,
+      ``any_succeeded``, or ``at_least`` with *count*. When the condition can no
+      longer be met, the job advances to *on_impossible* if one is named and
+      fails with ``dependency_failure`` otherwise.
+
+      :param step: The step to run when the join condition is met.
+      :param when: The child completion condition.
+      :param count: The required count when ``when`` is ``at_least``.
+      :param on_impossible: The step to run when the condition cannot be met.
+      :return: The path of the published wait outcome.
+      :raises ValueError: If no children were spawned or a named step is invalid.
+
+
+
+   .. py:method:: succeed()
+
+      Publish the successful completion of this job.
+
+      :return: The path of the published outcome.
+
+
+
+   .. py:method:: retry(reason)
+
+      Ask for another attempt of this same activation.
+
+      :param reason: The reason recorded with the retry request.
+      :return: The path of the published outcome.
+
+
+
+   .. py:method:: pause(reason)
+
+      Pause this job until an operator resumes it.
+
+      :param reason: The reason recorded with the pause request.
+      :return: The path of the published outcome.
+
+
+
+   .. py:method:: fail(code, message, *, details = None, retryable = False)
+
+      Publish a structured terminal failure.
+
+      ``code`` is the token a job lists in ``retry_on``. ``retryable`` declares
+      that repeating this attempt could help, which the manager honours within
+      the attempt budgets of the job.
+
+      :param code: The stable failure code.
+      :param message: The human-readable failure message.
+      :param details: Optional structured failure details.
+      :param retryable: Whether repeating this attempt could help.
+      :return: The path of the published outcome.
+
+
+
+.. py:class:: Runner(workflow, *, inputs = None)
+
+   The registered steps of one workflow and the dispatch into them.
+
+   A runner is created once at module level, its steps are registered with
+   :meth:`step` before any work happens, and :meth:`main` is what the manager
+   invokes. Registration is therefore complete before the first step runs, which
+   is what lets every step name in a published outcome be checked against the
+   steps that really exist.
+
+   :param workflow: The workflow identifier and registry key implemented by this runner.
+   :param inputs: The immutable creation-time staged-input declarations.
+
+
+   .. py:attribute:: workflow
+
+
+   .. py:property:: inputs
+      :type: collections.abc.Mapping[str, str | None]
+
+
+      The immutable declared-input staging map.
+
+
+   .. py:property:: steps
+      :type: frozenset[str]
+
+
+      The names of every registered step.
+
+
+   .. py:property:: has_instantiate
+      :type: bool
+
+
+      Whether this runner has a creation-time instantiate hook.
+
+
+   .. py:method:: step(function: StepHandler) -> StepHandler
+                  step(*, name: str | None = None) -> collections.abc.Callable[[StepHandler], StepHandler]
+
+      Register one step handler, named after the function unless *name* is given.
+
+      :param function: The step handler, or ``None`` when used as a decorator factory.
+      :param name: The registered step name, or the handler name when omitted.
+      :return: The handler or a decorator that registers it.
+      :raises ValueError: If the step name is invalid or already registered.
+
+
+
+   .. py:method:: instantiate(function)
+
+      Register the hook receiving ``httk.workflow.scaffold.InstantiateContext``.
+
+      :param function: The creation-time instantiate handler.
+      :return: The handler, unchanged.
+      :raises ValueError: If an instantiate handler is already registered.
+
+
+
+   .. py:method:: description()
+
+      Return the machine-readable description of this runner.
+
+      :return: The runner description document.
+
+
+
+   .. py:method:: main(argv = None)
+
+      Run the step this process was launched for and publish its outcome.
+
+      Asked to describe itself — through ``HTTK_WORKFLOW_DESCRIBE=1`` or
+      ``--describe`` — the runner prints its description and exits without
+      touching anything, so a tool can enumerate the steps of a runner it is
+      not running.
+
+      Every ending is an outcome: a step that publishes none is reported as
+      ``no_outcome``, an unimplemented step as ``unknown_step``, and a step that
+      raises leaves an ``error.json`` breadcrumb and lets the exception reach the
+      manager, whose retry policy owns what happens next.
+
+      :param argv: Command-line arguments, or the process arguments when omitted.
+      :return: Zero after dispatching or describing the runner.
+
+
+

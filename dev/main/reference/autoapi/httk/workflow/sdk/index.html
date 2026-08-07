@@ -1,0 +1,1541 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../../../../../genindex.html"><link rel="search" title="Search" href="../../../../../search.html"><link rel="next" title="httk.workflow.shell_bridge" href="../shell_bridge/index.html"><link rel="prev" title="httk.workflow.scaffold" href="../scaffold/index.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>httk.workflow.sdk - httk-workflow dev:main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:main) — content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../../../index.html"><div class="brand">httk-workflow dev:main documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../../../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:main documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../../../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../../../../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_protocol_api.html">The filesystem protocol API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../runtime_helpers.html">Native runner helpers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../native_bash_api.html">Native Bash runner API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../sdk_parity.html">Python and Bash authoring parity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../vasp_runners.html">Packaged VASP runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_packages.html">Workflow packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_languages.html">Workflow-language runner realizations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../taskmanager.html">Task-manager usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_cli.html">Project and workflow command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../adapter_authoring.html">Writing a remote adapter</a></li>
+<li class="toctree-l1 current has-children"><a class="reference internal" href="../../../../index.html">Reference</a><input aria-label="Toggle navigation of Reference" checked="" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l2 current has-children"><a class="reference internal" href="../index.html">httk.workflow</a><input aria-label="Toggle navigation of httk.workflow" checked="" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="../adapter_protocol/index.html">httk.workflow.adapter_protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../adapters/index.html">httk.workflow.adapters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../collecting/index.html">httk.workflow.collecting</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../compat/index.html">httk.workflow.compat</a><input aria-label="Toggle navigation of httk.workflow.compat" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../compat/v1/index.html">httk.workflow.compat.v1</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../configuration/index.html">httk.workflow.configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../errors/index.html">httk.workflow.errors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../executors/index.html">httk.workflow.executors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../hygiene/index.html">httk.workflow.hygiene</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../manifests/index.html">httk.workflow.manifests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../projects/index.html">httk.workflow.projects</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../protocol/index.html">httk.workflow.protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../provenance/index.html">httk.workflow.provenance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../runtime/index.html">httk.workflow.runtime</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../runtime_utils/index.html">httk.workflow.runtime_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../scaffold/index.html">httk.workflow.scaffold</a></li>
+<li class="toctree-l3 current current-page"><a class="current reference internal" href="#">httk.workflow.sdk</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../shell_bridge/index.html">httk.workflow.shell_bridge</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../supervision/index.html">httk.workflow.supervision</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../transfers/index.html">httk.workflow.transfers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../vasp/index.html">httk.workflow.vasp</a></li>
+</ul>
+</li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../notebooks/examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_filesystem_api.html">Workflow filesystem API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../../../../../_sources/reference/autoapi/httk/workflow/sdk/index.rst.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="module-httk.workflow.sdk">
+<span id="httk-workflow-sdk"></span><h1>httk.workflow.sdk<a class="headerlink" href="#module-httk.workflow.sdk" title="Link to this heading">¶</a></h1>
+<p>The Python authoring SDK for native <em>httk₂</em> workflow runners.</p>
+<p>One runner is one program that implements the steps of one workflow. Steps are
+registered on a <a class="reference internal" href="#httk.workflow.sdk.Runner" title="httk.workflow.sdk.Runner"><code class="xref py py-class docutils literal notranslate"><span class="pre">Runner</span></code></a>, and <a class="reference internal" href="#httk.workflow.sdk.Runner.main" title="httk.workflow.sdk.Runner.main"><code class="xref py py-meth docutils literal notranslate"><span class="pre">Runner.main()</span></code></a> dispatches the step the
+manager asked for to the handler that implements it, giving it one
+<a class="reference internal" href="#httk.workflow.sdk.Attempt" title="httk.workflow.sdk.Attempt"><code class="xref py py-class docutils literal notranslate"><span class="pre">Attempt</span></code></a> object:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">httk.workflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">ChildSpec</span><span class="p">,</span> <span class="n">Runner</span>
+
+<span class="n">run</span> <span class="o">=</span> <span class="n">Runner</span><span class="p">(</span><span class="s2">&quot;defects&quot;</span><span class="p">)</span>
+
+
+<span class="nd">@run</span><span class="o">.</span><span class="n">step</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">characterize</span><span class="p">(</span><span class="n">a</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">site</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">a</span><span class="o">.</span><span class="n">parameter</span><span class="p">(</span><span class="s2">&quot;sites&quot;</span><span class="p">)):</span>
+        <span class="n">a</span><span class="o">.</span><span class="n">spawn</span><span class="p">(</span><span class="n">ChildSpec</span><span class="p">(</span><span class="n">step</span><span class="o">=</span><span class="s2">&quot;relax&quot;</span><span class="p">,</span> <span class="n">parameters</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;site&quot;</span><span class="p">:</span> <span class="n">site</span><span class="p">}),</span> <span class="n">label</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;site-</span><span class="si">{</span><span class="n">site</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span><span class="s2">&quot;aggregate&quot;</span><span class="p">,</span> <span class="n">on_impossible</span><span class="o">=</span><span class="s2">&quot;triage&quot;</span><span class="p">)</span>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+    <span class="k">raise</span> <span class="ne">SystemExit</span><span class="p">(</span><span class="n">run</span><span class="o">.</span><span class="n">main</span><span class="p">())</span>
+</pre></div>
+</div>
+<p>Nothing declares the shape of the workflow up front: a step decides at run time
+which children to spawn and which step runs next, so the graph of a job is
+whatever its steps published. Exactly one outcome is published per attempt, and
+the handler that returns without publishing one, or raises, is reported as such
+instead of leaving the attempt ambiguous.</p>
+<section id="attributes">
+<h2>Attributes<a class="headerlink" href="#attributes" title="Link to this heading">¶</a></h2>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.sdk.RUNNER_DESCRIPTION_FORMAT" title="httk.workflow.sdk.RUNNER_DESCRIPTION_FORMAT"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RUNNER_DESCRIPTION_FORMAT</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.sdk.RUNNER_ERROR_FORMAT" title="httk.workflow.sdk.RUNNER_ERROR_FORMAT"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RUNNER_ERROR_FORMAT</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.sdk.InstantiateHandler" title="httk.workflow.sdk.InstantiateHandler"><code class="xref py py-obj docutils literal notranslate"><span class="pre">InstantiateHandler</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="classes">
+<h2>Classes<a class="headerlink" href="#classes" title="Link to this heading">¶</a></h2>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.sdk.RunnerRef" title="httk.workflow.sdk.RunnerRef"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RunnerRef</span></code></a></p></td>
+<td><p>Which runner executes a child job synthesized by <a class="reference internal" href="#httk.workflow.sdk.ChildSpec" title="httk.workflow.sdk.ChildSpec"><code class="xref py py-class docutils literal notranslate"><span class="pre">ChildSpec</span></code></a>.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.sdk.ChildSpec" title="httk.workflow.sdk.ChildSpec"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ChildSpec</span></code></a></p></td>
+<td><p>A complete child job described by the step and parameters it starts with.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.sdk.ChildResult" title="httk.workflow.sdk.ChildResult"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ChildResult</span></code></a></p></td>
+<td><p>What one gathering step may know about one child it spawned.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.sdk.ChildrenView" title="httk.workflow.sdk.ChildrenView"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ChildrenView</span></code></a></p></td>
+<td><p>The children observed by the join that started this activation.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.sdk.Attempt" title="httk.workflow.sdk.Attempt"><code class="xref py py-obj docutils literal notranslate"><span class="pre">Attempt</span></code></a></p></td>
+<td><p>Everything one attempt of one step may read, do, and publish.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.sdk.Runner" title="httk.workflow.sdk.Runner"><code class="xref py py-obj docutils literal notranslate"><span class="pre">Runner</span></code></a></p></td>
+<td><p>The registered steps of one workflow and the dispatch into them.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="module-contents">
+<h2>Module Contents<a class="headerlink" href="#module-contents" title="Link to this heading">¶</a></h2>
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.sdk.RUNNER_DESCRIPTION_FORMAT">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.sdk.</span></span><span class="sig-name descname"><span class="pre">RUNNER_DESCRIPTION_FORMAT</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'httk-workflow-runner-description'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#RUNNER_DESCRIPTION_FORMAT"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.RUNNER_DESCRIPTION_FORMAT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.sdk.RUNNER_ERROR_FORMAT">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.sdk.</span></span><span class="sig-name descname"><span class="pre">RUNNER_ERROR_FORMAT</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'httk-workflow-runner-error'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#RUNNER_ERROR_FORMAT"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.RUNNER_ERROR_FORMAT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py type">
+<dt class="sig sig-object py" id="httk.workflow.sdk.InstantiateHandler">
+<span class="property"><span class="k"><span class="pre">type</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.sdk.</span></span><span class="sig-name descname"><span class="pre">InstantiateHandler</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">Callable</span><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><span class="pre">object</span></a><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#InstantiateHandler"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.InstantiateHandler" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="httk.workflow.sdk.RunnerRef">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.sdk.</span></span><span class="sig-name descname"><span class="pre">RunnerRef</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#RunnerRef"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.RunnerRef" title="Link to this definition">¶</a></dt>
+<dd><p>Which runner executes a child job synthesized by <a class="reference internal" href="#httk.workflow.sdk.ChildSpec" title="httk.workflow.sdk.ChildSpec"><code class="xref py py-class docutils literal notranslate"><span class="pre">ChildSpec</span></code></a>.</p>
+<p>A synthesized child has no payload of its own, so its runner must be one that
+lives outside a payload: an entry of the workspace runner store, or an
+installed runner on the machine that runs it. <a class="reference internal" href="#httk.workflow.sdk.RunnerRef.inherit" title="httk.workflow.sdk.RunnerRef.inherit"><code class="xref py py-meth docutils literal notranslate"><span class="pre">inherit()</span></code></a> copies the
+reference of the spawning job itself, which is what a campaign whose steps all
+live in one published runner wants.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>source</strong> – The location from which the child runner is loaded.</p></li>
+<li><p><strong>path</strong> – The workspace or installed runner path when one is selected.</p></li>
+<li><p><strong>sha256</strong> – The digest pin for a workspace or installed runner.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.RunnerRef.source">
+<span class="sig-name descname"><span class="pre">source</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'inherit'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'workspace'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'installed'</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'inherit'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#RunnerRef.source"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.RunnerRef.source" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.RunnerRef.path">
+<span class="sig-name descname"><span class="pre">path</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#RunnerRef.path"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.RunnerRef.path" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.RunnerRef.sha256">
+<span class="sig-name descname"><span class="pre">sha256</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#RunnerRef.sha256"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.RunnerRef.sha256" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.RunnerRef.inherit">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">inherit</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#RunnerRef.inherit"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.RunnerRef.inherit" title="Link to this definition">¶</a></dt>
+<dd><p>Reference exactly the runner of the spawning job.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The inherited runner reference.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#httk.workflow.sdk.RunnerRef" title="httk.workflow.sdk.RunnerRef">RunnerRef</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.RunnerRef.workspace">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">workspace</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sha256</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#RunnerRef.workspace"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.RunnerRef.workspace" title="Link to this definition">¶</a></dt>
+<dd><p>Reference one runner published in the workspace runner store.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>path</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.PurePosixPath" title="(in Python v3.14)"><em>pathlib.PurePosixPath</em></a>) – The path within the workspace runner store.</p></li>
+<li><p><strong>sha256</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The runner digest.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The workspace runner reference.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#httk.workflow.sdk.RunnerRef" title="httk.workflow.sdk.RunnerRef">RunnerRef</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.RunnerRef.installed">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">installed</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">sha256</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#RunnerRef.installed"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.RunnerRef.installed" title="Link to this definition">¶</a></dt>
+<dd><p>Reference one runner installed on the machine that runs the child.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>path</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.PurePosixPath" title="(in Python v3.14)"><em>pathlib.PurePosixPath</em></a>) – The installed runner path.</p></li>
+<li><p><strong>sha256</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The runner digest.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The installed runner reference.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#httk.workflow.sdk.RunnerRef" title="httk.workflow.sdk.RunnerRef">RunnerRef</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.sdk.</span></span><span class="sig-name descname"><span class="pre">ChildSpec</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec" title="Link to this definition">¶</a></dt>
+<dd><p>A complete child job described by the step and parameters it starts with.</p>
+<p>Everything not given follows the spawning job: its workflow, its claim pool,
+its priority, its resources, and its runner. The child therefore differs from
+its parent in exactly what the campaign varies, which is normally only <em>step</em>
+and <em>parameters</em>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>step</strong> – The first step the child runs.</p></li>
+<li><p><strong>parameters</strong> – The opaque implementation knobs given to the child.</p></li>
+<li><p><strong>declarations</strong> – The workflow declarations carried by the child.</p></li>
+<li><p><strong>runner</strong> – The runner reference used to execute the child.</p></li>
+<li><p><strong>name</strong> – The child job name, or a generated name when omitted.</p></li>
+<li><p><strong>workflow</strong> – The child’s workflow identifier, or the parent’s when omitted.</p></li>
+<li><p><strong>tag</strong> – The child’s optional job tag, or the spawn label when omitted.</p></li>
+<li><p><strong>workdir_mode</strong> – Whether the child’s workdir persists or is isolated.</p></li>
+<li><p><strong>workdir_path</strong> – The child’s relative workdir path.</p></li>
+<li><p><strong>data_mode</strong> – Whether the child has transactional data.</p></li>
+<li><p><strong>priority</strong> – The child’s priority, or the parent’s when omitted.</p></li>
+<li><p><strong>claim_pool</strong> – The child’s claim pool, or the parent’s when omitted.</p></li>
+<li><p><strong>required_capabilities</strong> – Capabilities required by the child.</p></li>
+<li><p><strong>resources</strong> – Resources requested by the child, or the parent’s when omitted.</p></li>
+<li><p><strong>maximum_attempts_per_activation</strong> – The child’s per-activation attempt budget.</p></li>
+<li><p><strong>maximum_total_attempts</strong> – The child’s total attempt budget.</p></li>
+<li><p><strong>maximum_activations</strong> – The child’s activation budget.</p></li>
+<li><p><strong>retry_on</strong> – Failure codes eligible for manager-detected retry.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.step">
+<span class="sig-name descname"><span class="pre">step</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.step"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.step" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.parameters">
+<span class="sig-name descname"><span class="pre">parameters</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><span class="pre">collections.abc.Mapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><span class="pre">object</span></a><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.parameters"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.parameters" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.declarations">
+<span class="sig-name descname"><span class="pre">declarations</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><span class="pre">collections.abc.Mapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><span class="pre">collections.abc.Mapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><span class="pre">object</span></a><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.declarations"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.declarations" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.runner">
+<span class="sig-name descname"><span class="pre">runner</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#httk.workflow.sdk.RunnerRef" title="httk.workflow.sdk.RunnerRef"><span class="pre">RunnerRef</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.runner"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.runner" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.name">
+<span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.name"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.name" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.workflow">
+<span class="sig-name descname"><span class="pre">workflow</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.workflow"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.workflow" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.tag">
+<span class="sig-name descname"><span class="pre">tag</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.tag"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.tag" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.workdir_mode">
+<span class="sig-name descname"><span class="pre">workdir_mode</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'persistent'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'isolated'</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'persistent'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.workdir_mode"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.workdir_mode" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.workdir_path">
+<span class="sig-name descname"><span class="pre">workdir_path</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'run'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.workdir_path"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.workdir_path" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.data_mode">
+<span class="sig-name descname"><span class="pre">data_mode</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">Literal</span><span class="p"><span class="pre">[</span></span><span class="s"><span class="pre">'none'</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="s"><span class="pre">'transactional'</span></span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'none'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.data_mode"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.data_mode" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.priority">
+<span class="sig-name descname"><span class="pre">priority</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.priority"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.priority" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.claim_pool">
+<span class="sig-name descname"><span class="pre">claim_pool</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.claim_pool"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.claim_pool" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.required_capabilities">
+<span class="sig-name descname"><span class="pre">required_capabilities</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Ellipsis</span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.required_capabilities"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.required_capabilities" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.resources">
+<span class="sig-name descname"><span class="pre">resources</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><span class="pre">collections.abc.Mapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><span class="pre">object</span></a><span class="p"><span class="pre">]</span></span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.resources"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.resources" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.maximum_attempts_per_activation">
+<span class="sig-name descname"><span class="pre">maximum_attempts_per_activation</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.maximum_attempts_per_activation"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.maximum_attempts_per_activation" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.maximum_total_attempts">
+<span class="sig-name descname"><span class="pre">maximum_total_attempts</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.maximum_total_attempts"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.maximum_total_attempts" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.maximum_activations">
+<span class="sig-name descname"><span class="pre">maximum_activations</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.maximum_activations"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.maximum_activations" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildSpec.retry_on">
+<span class="sig-name descname"><span class="pre">retry_on</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Ellipsis</span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildSpec.retry_on"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildSpec.retry_on" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.sdk.</span></span><span class="sig-name descname"><span class="pre">ChildResult</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult" title="Link to this definition">¶</a></dt>
+<dd><p>What one gathering step may know about one child it spawned.</p>
+<p>Every member is derived from authoritative state by the manager before the
+gathering activation starts, so reading a child is a pure read of the
+attempt context and never a scan of the workspace. Paths are absolute.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.label">
+<span class="sig-name descname"><span class="pre">label</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.label"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.label" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.job_id">
+<span class="sig-name descname"><span class="pre">job_id</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.job_id"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.job_id" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.job_key">
+<span class="sig-name descname"><span class="pre">job_key</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.job_key"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.job_key" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.kind">
+<span class="sig-name descname"><span class="pre">kind</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.kind"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.kind" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.failure">
+<span class="sig-name descname"><span class="pre">failure</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">httk.workflow.models.Failure</span><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.failure"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.failure" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.placement">
+<span class="sig-name descname"><span class="pre">placement</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.PurePosixPath" title="(in Python v3.14)"><span class="pre">pathlib.PurePosixPath</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.placement"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.placement" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.payload">
+<span class="sig-name descname"><span class="pre">payload</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.payload"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.payload" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.workdir">
+<span class="sig-name descname"><span class="pre">workdir</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.workdir"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.workdir" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.data">
+<span class="sig-name descname"><span class="pre">data</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.data"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.data" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.data_generation">
+<span class="sig-name descname"><span class="pre">data_generation</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><span class="pre">int</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.data_generation"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.data_generation" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.raw">
+<span class="sig-name descname"><span class="pre">raw</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><span class="pre">collections.abc.Mapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><span class="pre">object</span></a><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.raw"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.raw" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.succeeded">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">succeeded</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><span class="pre">bool</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.succeeded"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.succeeded" title="Link to this definition">¶</a></dt>
+<dd><p>Report whether this child ended successfully.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildResult.failed">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">failed</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><span class="pre">bool</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildResult.failed"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildResult.failed" title="Link to this definition">¶</a></dt>
+<dd><p>Report whether this child ended badly.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildrenView">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.sdk.</span></span><span class="sig-name descname"><span class="pre">ChildrenView</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildrenView"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildrenView" title="Link to this definition">¶</a></dt>
+<dd><p>The children observed by the join that started this activation.</p>
+<p>The view is empty for an activation that follows no join, so a step can read
+it unconditionally.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildrenView.all">
+<span class="sig-name descname"><span class="pre">all</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#httk.workflow.sdk.ChildResult" title="httk.workflow.sdk.ChildResult"><span class="pre">ChildResult</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Ellipsis</span><span class="p"><span class="pre">]</span></span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">()</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildrenView.all"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildrenView.all" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildrenView.succeeded">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">succeeded</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#httk.workflow.sdk.ChildResult" title="httk.workflow.sdk.ChildResult"><span class="pre">ChildResult</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Ellipsis</span><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildrenView.succeeded"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildrenView.succeeded" title="Link to this definition">¶</a></dt>
+<dd><p>The children that ended successfully, in spawn order.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildrenView.failed">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">failed</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference internal" href="#httk.workflow.sdk.ChildResult" title="httk.workflow.sdk.ChildResult"><span class="pre">ChildResult</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Ellipsis</span><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildrenView.failed"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildrenView.failed" title="Link to this definition">¶</a></dt>
+<dd><p>The children that ended badly, in spawn order.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildrenView.labels">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">labels</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)"><span class="pre">tuple</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Ellipsis</span><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildrenView.labels"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildrenView.labels" title="Link to this definition">¶</a></dt>
+<dd><p>The labels of every observed child, in spawn order.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.ChildrenView.get">
+<span class="sig-name descname"><span class="pre">get</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">label</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">default</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#ChildrenView.get"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.ChildrenView.get" title="Link to this definition">¶</a></dt>
+<dd><p>Return the child spawned under <em>label</em>, or <em>default</em>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>label</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The unique spawn label to find.</p></li>
+<li><p><strong>default</strong> (<a class="reference internal" href="#httk.workflow.sdk.ChildResult" title="httk.workflow.sdk.ChildResult"><em>ChildResult</em></a><em> | </em><em>None</em>) – The value to return when no child has that label.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The matching child, or the default value.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="#httk.workflow.sdk.ChildResult" title="httk.workflow.sdk.ChildResult">ChildResult</a> | None</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.sdk.</span></span><span class="sig-name descname"><span class="pre">Attempt</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">context</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">control</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">payload</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">workdir</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">workspace</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">data</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">step</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">runner</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt" title="Link to this definition">¶</a></dt>
+<dd><p>Everything one attempt of one step may read, do, and publish.</p>
+<p>An attempt owns exactly one implicit outcome draft. The draft is created by
+the first <a class="reference internal" href="#httk.workflow.sdk.Attempt.spawn" title="httk.workflow.sdk.Attempt.spawn"><code class="xref py py-meth docutils literal notranslate"><span class="pre">spawn()</span></code></a>, <a class="reference internal" href="#httk.workflow.sdk.Attempt.put" title="httk.workflow.sdk.Attempt.put"><code class="xref py py-meth docutils literal notranslate"><span class="pre">put()</span></code></a>, or <a class="reference internal" href="#httk.workflow.sdk.Attempt.remove" title="httk.workflow.sdk.Attempt.remove"><code class="xref py py-meth docutils literal notranslate"><span class="pre">remove()</span></code></a>, and it is published
+by exactly one of <a class="reference internal" href="#httk.workflow.sdk.Attempt.advance" title="httk.workflow.sdk.Attempt.advance"><code class="xref py py-meth docutils literal notranslate"><span class="pre">advance()</span></code></a>, <a class="reference internal" href="#httk.workflow.sdk.Attempt.gather" title="httk.workflow.sdk.Attempt.gather"><code class="xref py py-meth docutils literal notranslate"><span class="pre">gather()</span></code></a>, <a class="reference internal" href="#httk.workflow.sdk.Attempt.succeed" title="httk.workflow.sdk.Attempt.succeed"><code class="xref py py-meth docutils literal notranslate"><span class="pre">succeed()</span></code></a>,
+<a class="reference internal" href="#httk.workflow.sdk.Attempt.retry" title="httk.workflow.sdk.Attempt.retry"><code class="xref py py-meth docutils literal notranslate"><span class="pre">retry()</span></code></a>, <a class="reference internal" href="#httk.workflow.sdk.Attempt.pause" title="httk.workflow.sdk.Attempt.pause"><code class="xref py py-meth docutils literal notranslate"><span class="pre">pause()</span></code></a>, or <a class="reference internal" href="#httk.workflow.sdk.Attempt.fail" title="httk.workflow.sdk.Attempt.fail"><code class="xref py py-meth docutils literal notranslate"><span class="pre">fail()</span></code></a>. Publication is the single
+atomic rename the manager observes, so nothing a step did takes effect until
+the step says how it ended.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>context</strong> (<a class="reference internal" href="../runtime/index.html#httk.workflow.runtime.AttemptContext" title="httk.workflow.runtime.AttemptContext"><em>httk.workflow.runtime.AttemptContext</em></a>) – The manager-written identity and restart context.</p></li>
+<li><p><strong>control</strong> (<a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><em>pathlib.Path</em></a>) – The attempt control directory.</p></li>
+<li><p><strong>payload</strong> (<a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><em>pathlib.Path</em></a>) – The immutable job payload directory.</p></li>
+<li><p><strong>workdir</strong> (<a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><em>pathlib.Path</em></a>) – The directory in which the step works.</p></li>
+<li><p><strong>workspace</strong> (<a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><em>pathlib.Path</em></a>) – The workspace root containing the job.</p></li>
+<li><p><strong>data</strong> (<a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><em>pathlib.Path</em></a><em> | </em><em>None</em>) – The job’s transactional data directory, when enabled.</p></li>
+<li><p><strong>step</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><em>None</em>) – The step this attempt runs, or the context step when omitted.</p></li>
+<li><p><strong>runner</strong> (<a class="reference internal" href="#httk.workflow.sdk.Runner" title="httk.workflow.sdk.Runner"><em>Runner</em></a><em> | </em><em>None</em>) – The runner dispatching this attempt, when available.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.context">
+<span class="sig-name descname"><span class="pre">context</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.context"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.context" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.control">
+<span class="sig-name descname"><span class="pre">control</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.control"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.control" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.payload">
+<span class="sig-name descname"><span class="pre">payload</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.payload"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.payload" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.workdir">
+<span class="sig-name descname"><span class="pre">workdir</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.workdir"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.workdir" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.workspace">
+<span class="sig-name descname"><span class="pre">workspace</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.workspace"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.workspace" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.data">
+<span class="sig-name descname"><span class="pre">data</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.data"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.data" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.step">
+<span class="sig-name descname"><span class="pre">step</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.step"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.step" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.state">
+<span class="sig-name descname"><span class="pre">state</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.state"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.state" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.log">
+<span class="sig-name descname"><span class="pre">log</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.log"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.log" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.initialize">
+<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">initialize</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">environment</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">runner</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.initialize"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.initialize" title="Link to this definition">¶</a></dt>
+<dd><p>Bind this process to its attempt and recover an interrupted one.</p>
+<p>Recovery replays every workdir batch an earlier attempt sealed but did not
+get to apply, so a handler always starts from a workdir whose sealed
+changes are complete. This is the only constructor a runner needs.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>environment</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><em>collections.abc.Mapping</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>] </em><em>| </em><em>None</em>) – The process environment, or the current environment when omitted.</p></li>
+<li><p><strong>runner</strong> (<a class="reference internal" href="#httk.workflow.sdk.Runner" title="httk.workflow.sdk.Runner"><em>Runner</em></a><em> | </em><em>None</em>) – The runner dispatching this attempt, when called by <a class="reference internal" href="#httk.workflow.sdk.Runner.main" title="httk.workflow.sdk.Runner.main"><code class="xref py py-meth docutils literal notranslate"><span class="pre">Runner.main()</span></code></a>.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The initialized attempt.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the manager-written attempt environment or context is invalid.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>Self</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.job">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">job</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">httk.workflow.models.JobDefinition</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.job"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.job" title="Link to this definition">¶</a></dt>
+<dd><p>The immutable definition of the job this attempt belongs to.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.parameters">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">parameters</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><span class="pre">collections.abc.Mapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><span class="pre">object</span></a><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.parameters"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.parameters" title="Link to this definition">¶</a></dt>
+<dd><p>The application-defined <code class="docutils literal notranslate"><span class="pre">parameters</span></code> object of this job.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.children">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">children</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference internal" href="#httk.workflow.sdk.ChildrenView" title="httk.workflow.sdk.ChildrenView"><span class="pre">ChildrenView</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.children"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.children" title="Link to this definition">¶</a></dt>
+<dd><p>The children observed by the join that started this activation.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.published">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">published</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><span class="pre">bool</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.published"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.published" title="Link to this definition">¶</a></dt>
+<dd><p>Report whether this attempt already published its outcome.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.parameter">
+<span class="sig-name descname"><span class="pre">parameter</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">default</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">_MISSING</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.parameter"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.parameter" title="Link to this definition">¶</a></dt>
+<dd><p>Return one member of the job’s <code class="docutils literal notranslate"><span class="pre">parameters</span></code> object.</p>
+<p>Without a <em>default</em>, a missing parameter is a <a class="reference external" href="https://docs.python.org/3/library/exceptions.html#KeyError" title="(in Python v3.14)"><code class="xref py py-exc docutils literal notranslate"><span class="pre">KeyError</span></code></a>: a step that
+needs a parameter cannot run without it, and saying so immediately is better
+than failing later on a value that was never there.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>name</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The parameter name to look up.</p></li>
+<li><p><strong>default</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><em>object</em></a>) – The value to return when the parameter is absent.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The parameter value or the supplied default.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#KeyError" title="(in Python v3.14)"><strong>KeyError</strong></a> – If the parameter is absent and no default was supplied.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)">object</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.setting">
+<span class="sig-name descname"><span class="pre">setting</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">default</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.setting"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.setting" title="Link to this definition">¶</a></dt>
+<dd><p>Resolve one application setting through its layers.</p>
+<p>The layers are consulted most-specific first, and the first that has the
+name wins: this job’s <code class="docutils literal notranslate"><span class="pre">parameters</span></code> object, then the environment variable
+<code class="docutils literal notranslate"><span class="pre">HTTK_</span></code> + the name upper-cased with dots as underscores (so
+<code class="docutils literal notranslate"><span class="pre">vasp.command</span></code> reads <code class="docutils literal notranslate"><span class="pre">HTTK_VASP_COMMAND</span></code>), then the workspace’s
+application settings, then <em>default</em>. This is how a step reads the VASP
+command a workspace was configured with without the operator exporting it
+for every job, while still letting one job or one shell override it.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>name</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The dotted application setting name to resolve.</p></li>
+<li><p><strong>default</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><em>object</em></a>) – The value to return when no layer defines the setting.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The first value found in the resolution layers, or the default.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)">object</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.declare">
+<span class="sig-name descname"><span class="pre">declare</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">document</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.declare"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.declare" title="Link to this definition">¶</a></dt>
+<dd><p>Record the observed workflow declaration <em>name</em> of this job.</p>
+<p>The static declarations of a job are the ones <code class="docutils literal notranslate"><span class="pre">job.json</span></code> carried at
+submission, and they cannot change. A dynamic campaign nevertheless only
+learns at run time what it actually consumed and produced, so a step
+writes the refined document here and it is stored beside the job state as
+<code class="docutils literal notranslate"><span class="pre">.httk-job/declarations/&lt;name&gt;.json</span></code>, atomically. The bytes are carried
+verbatim: nothing here interprets the document, whose own members say
+which vocabulary and version it follows.</p>
+<p>The write is runner-private, so it never disturbs the payload digest, and
+repeating it overwrites: what a job observed is whatever its last word on
+the subject was. A collect reports the observed document beside the
+declared one and never merges the two.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>name</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The declaration name to record.</p></li>
+<li><p><strong>document</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><em>collections.abc.Mapping</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><em>object</em></a><em>]</em>) – The declaration document to store verbatim.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The path of the stored observed declaration.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="../errors/index.html#httk.workflow.errors.FormatError" title="httk.workflow.errors.FormatError"><strong>httk.workflow.errors.FormatError</strong></a> – If the declaration name or document is invalid.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.declaration">
+<span class="sig-name descname"><span class="pre">declaration</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.declaration"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.declaration" title="Link to this definition">¶</a></dt>
+<dd><p>Return the workflow declaration <em>name</em>, observed first.</p>
+<p>The document this job observed is returned when one was written,
+otherwise the one <code class="docutils literal notranslate"><span class="pre">job.json</span></code> declared, otherwise <code class="docutils literal notranslate"><span class="pre">None</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>name</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The declaration name to read.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The observed or declared document, or <code class="docutils literal notranslate"><span class="pre">None</span></code> when absent.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="../errors/index.html#httk.workflow.errors.FormatError" title="httk.workflow.errors.FormatError"><strong>httk.workflow.errors.FormatError</strong></a> – If the declaration name is invalid or its document is malformed.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)">collections.abc.Mapping</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, <a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)">object</a>] | None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.run">
+<span class="sig-name descname"><span class="pre">run</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">argv</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cwd</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">environment</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">termination_grace</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10.0</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.run"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.run" title="Link to this definition">¶</a></dt>
+<dd><p>Run an argv array in the workdir and reap its process group.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>argv</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Sequence" title="(in Python v3.14)"><em>collections.abc.Sequence</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The command and its arguments.</p></li>
+<li><p><strong>timeout</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em> | </em><em>None</em>) – The maximum runtime before terminating the process group.</p></li>
+<li><p><strong>cwd</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>] </em><em>| </em><em>None</em>) – The working directory, or this attempt’s workdir when omitted.</p></li>
+<li><p><strong>environment</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><em>collections.abc.Mapping</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>] </em><em>| </em><em>None</em>) – The complete child environment, or the process environment when omitted.</p></li>
+<li><p><strong>termination_grace</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – The grace period after a timeout before forceful termination.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The completed command result.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="../runtime/index.html#httk.workflow.runtime.CommandResult" title="httk.workflow.runtime.CommandResult">httk.workflow.runtime.CommandResult</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.workdir_batch">
+<span class="sig-name descname"><span class="pre">workdir_batch</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.workdir_batch"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.workdir_batch" title="Link to this definition">¶</a></dt>
+<dd><p>Start a replayable group of workdir changes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>A batch that seals changes for replay after interruption.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>httk.workflow.runtime_builders.ReplayableWorkdirBatch</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.put">
+<span class="sig-name descname"><span class="pre">put</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">source</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">destination</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.put"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.put" title="Link to this definition">¶</a></dt>
+<dd><p>Stage one file or directory for the job’s transactional data.</p>
+<p>The operation is applied by the manager when the outcome is committed,
+exactly once, whatever happens to this process in between. Operation
+identifiers are generated in call order, so replaying the same step
+produces the same manifest.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>source</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The file or directory to stage.</p></li>
+<li><p><strong>destination</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The destination path in transactional data.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The generated transaction operation identifier.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If this job has no transactional data.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.remove">
+<span class="sig-name descname"><span class="pre">remove</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">destination</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">missing_ok</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.remove"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.remove" title="Link to this definition">¶</a></dt>
+<dd><p>Remove one path from the job’s transactional data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>destination</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The path to remove from transactional data.</p></li>
+<li><p><strong>missing_ok</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Whether an absent destination is acceptable.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The generated transaction operation identifier.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If this job has no transactional data.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.spawn">
+<span class="sig-name descname"><span class="pre">spawn</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">child</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">label</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">placement</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.spawn"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.spawn" title="Link to this definition">¶</a></dt>
+<dd><p>Register one child job under <em>label</em>, to be created on publication.</p>
+<p><em>child</em> is either a <a class="reference internal" href="#httk.workflow.sdk.ChildSpec" title="httk.workflow.sdk.ChildSpec"><code class="xref py py-class docutils literal notranslate"><span class="pre">ChildSpec</span></code></a>, which needs no payload at all, or
+the path of a prepared payload directory. The label is mandatory and must
+be unique within one attempt: it is how <a class="reference internal" href="#httk.workflow.sdk.Attempt.gather" title="httk.workflow.sdk.Attempt.gather"><code class="xref py py-meth docutils literal notranslate"><span class="pre">gather()</span></code></a> and
+<a class="reference internal" href="#httk.workflow.sdk.Attempt.children" title="httk.workflow.sdk.Attempt.children"><code class="xref py py-attr docutils literal notranslate"><span class="pre">children</span></code></a> name this child later.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>child</strong> (<a class="reference internal" href="#httk.workflow.sdk.ChildSpec" title="httk.workflow.sdk.ChildSpec"><em>ChildSpec</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The child specification or prepared payload directory.</p></li>
+<li><p><strong>label</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The unique label used to observe the child later.</p></li>
+<li><p><strong>placement</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.PurePosixPath" title="(in Python v3.14)"><em>pathlib.PurePosixPath</em></a><em> | </em><em>None</em>) – The workspace placement for the child, or this attempt’s placement when omitted.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The reference to the registered child.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the child or label is invalid, or the label is reused.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>httk.workflow.runtime_builders.ChildReference</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.advance">
+<span class="sig-name descname"><span class="pre">advance</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">step</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">state</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">priority</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.advance"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.advance" title="Link to this definition">¶</a></dt>
+<dd><p>Publish a new activation of this job at <em>step</em>.</p>
+<p><em>state</em> is written to <a class="reference internal" href="#httk.workflow.sdk.Attempt.state" title="httk.workflow.sdk.Attempt.state"><code class="xref py py-attr docutils literal notranslate"><span class="pre">state</span></code></a> before the outcome is published, so
+the step that runs next always finds the state that decided to run it.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>step</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The next registered step.</p></li>
+<li><p><strong>state</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><em>collections.abc.Mapping</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><em>object</em></a><em>] </em><em>| </em><em>None</em>) – State members to merge before publication.</p></li>
+<li><p><strong>priority</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em> | </em><em>None</em>) – The priority of the new activation, when changed.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The path of the published outcome.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#RuntimeError" title="(in Python v3.14)"><strong>RuntimeError</strong></a> – If this attempt already published an outcome.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.gather">
+<span class="sig-name descname"><span class="pre">gather</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">step</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">when</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'all_succeeded'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">count</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">on_impossible</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.gather"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.gather" title="Link to this definition">¶</a></dt>
+<dd><p>Wait for the children spawned on this attempt, then run <em>step</em>.</p>
+<p>The join names exactly the children <a class="reference internal" href="#httk.workflow.sdk.Attempt.spawn" title="httk.workflow.sdk.Attempt.spawn"><code class="xref py py-meth docutils literal notranslate"><span class="pre">spawn()</span></code></a> registered on this
+attempt, which is also the bundle that creates them, so the manager can
+always resolve it. <em>when</em> is one of <code class="docutils literal notranslate"><span class="pre">all_succeeded</span></code>, <code class="docutils literal notranslate"><span class="pre">all_terminal</span></code>,
+<code class="docutils literal notranslate"><span class="pre">any_succeeded</span></code>, or <code class="docutils literal notranslate"><span class="pre">at_least</span></code> with <em>count</em>. When the condition can no
+longer be met, the job advances to <em>on_impossible</em> if one is named and
+fails with <code class="docutils literal notranslate"><span class="pre">dependency_failure</span></code> otherwise.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>step</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The step to run when the join condition is met.</p></li>
+<li><p><strong>when</strong> (<em>httk.workflow.runtime_builders.JoinCondition</em>) – The child completion condition.</p></li>
+<li><p><strong>count</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a><em> | </em><em>None</em>) – The required count when <code class="docutils literal notranslate"><span class="pre">when</span></code> is <code class="docutils literal notranslate"><span class="pre">at_least</span></code>.</p></li>
+<li><p><strong>on_impossible</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><em>None</em>) – The step to run when the condition cannot be met.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The path of the published wait outcome.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If no children were spawned or a named step is invalid.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.succeed">
+<span class="sig-name descname"><span class="pre">succeed</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.succeed"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.succeed" title="Link to this definition">¶</a></dt>
+<dd><p>Publish the successful completion of this job.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The path of the published outcome.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.retry">
+<span class="sig-name descname"><span class="pre">retry</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">reason</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.retry"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.retry" title="Link to this definition">¶</a></dt>
+<dd><p>Ask for another attempt of this same activation.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>reason</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The reason recorded with the retry request.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The path of the published outcome.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.pause">
+<span class="sig-name descname"><span class="pre">pause</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">reason</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.pause"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.pause" title="Link to this definition">¶</a></dt>
+<dd><p>Pause this job until an operator resumes it.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>reason</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The reason recorded with the pause request.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The path of the published outcome.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Attempt.fail">
+<span class="sig-name descname"><span class="pre">fail</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">code</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">message</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">details</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">retryable</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Attempt.fail"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Attempt.fail" title="Link to this definition">¶</a></dt>
+<dd><p>Publish a structured terminal failure.</p>
+<p><code class="docutils literal notranslate"><span class="pre">code</span></code> is the token a job lists in <code class="docutils literal notranslate"><span class="pre">retry_on</span></code>. <code class="docutils literal notranslate"><span class="pre">retryable</span></code> declares
+that repeating this attempt could help, which the manager honours within
+the attempt budgets of the job.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>code</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The stable failure code.</p></li>
+<li><p><strong>message</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The human-readable failure message.</p></li>
+<li><p><strong>details</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><em>collections.abc.Mapping</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><em>object</em></a><em>] </em><em>| </em><em>None</em>) – Optional structured failure details.</p></li>
+<li><p><strong>retryable</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Whether repeating this attempt could help.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The path of the published outcome.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Runner">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.sdk.</span></span><span class="sig-name descname"><span class="pre">Runner</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">workflow</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">inputs</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Runner"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Runner" title="Link to this definition">¶</a></dt>
+<dd><p>The registered steps of one workflow and the dispatch into them.</p>
+<p>A runner is created once at module level, its steps are registered with
+<a class="reference internal" href="#httk.workflow.sdk.Runner.step" title="httk.workflow.sdk.Runner.step"><code class="xref py py-meth docutils literal notranslate"><span class="pre">step()</span></code></a> before any work happens, and <a class="reference internal" href="#httk.workflow.sdk.Runner.main" title="httk.workflow.sdk.Runner.main"><code class="xref py py-meth docutils literal notranslate"><span class="pre">main()</span></code></a> is what the manager
+invokes. Registration is therefore complete before the first step runs, which
+is what lets every step name in a published outcome be checked against the
+steps that really exist.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>workflow</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The workflow identifier and registry key implemented by this runner.</p></li>
+<li><p><strong>inputs</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><em>collections.abc.Mapping</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><em>None</em><em>] </em><em>| </em><em>None</em>) – The immutable creation-time staged-input declarations.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Runner.workflow">
+<span class="sig-name descname"><span class="pre">workflow</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Runner.workflow"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Runner.workflow" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Runner.inputs">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">inputs</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><span class="pre">collections.abc.Mapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Runner.inputs"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Runner.inputs" title="Link to this definition">¶</a></dt>
+<dd><p>The immutable declared-input staging map.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Runner.steps">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">steps</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#frozenset" title="(in Python v3.14)"><span class="pre">frozenset</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Runner.steps"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Runner.steps" title="Link to this definition">¶</a></dt>
+<dd><p>The names of every registered step.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Runner.has_instantiate">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">has_instantiate</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><span class="pre">bool</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Runner.has_instantiate"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Runner.has_instantiate" title="Link to this definition">¶</a></dt>
+<dd><p>Whether this runner has a creation-time instantiate hook.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Runner.step">
+<span class="sig-name descname"><span class="pre">step</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">function</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><span class="pre">StepHandler</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><span class="pre">StepHandler</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Runner.step"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Runner.step" title="Link to this definition">¶</a></dt>
+<dt class="sig sig-object py">
+<span class="sig-name descname"><span class="pre">step</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">name</span></span><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="n"><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="w"> </span><span class="o"><span class="pre">=</span></span><span class="w"> </span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span> <span class="sig-return"><span class="sig-return-icon">&#x2192;</span> <span class="sig-return-typehint"><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Callable" title="(in Python v3.14)"><span class="pre">collections.abc.Callable</span></a><span class="p"><span class="pre">[</span></span><span class="p"><span class="pre">[</span></span><span class="pre">StepHandler</span><span class="p"><span class="pre">]</span></span><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">StepHandler</span><span class="p"><span class="pre">]</span></span></span></span></dt>
+<dd><p>Register one step handler, named after the function unless <em>name</em> is given.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>function</strong> – The step handler, or <code class="docutils literal notranslate"><span class="pre">None</span></code> when used as a decorator factory.</p></li>
+<li><p><strong>name</strong> – The registered step name, or the handler name when omitted.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The handler or a decorator that registers it.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the step name is invalid or already registered.</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Runner.instantiate">
+<span class="sig-name descname"><span class="pre">instantiate</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">function</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Runner.instantiate"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Runner.instantiate" title="Link to this definition">¶</a></dt>
+<dd><p>Register the hook receiving <code class="docutils literal notranslate"><span class="pre">httk.workflow.scaffold.InstantiateContext</span></code>.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>function</strong> (<a class="reference internal" href="#httk.workflow.sdk.InstantiateHandler" title="httk.workflow.sdk.InstantiateHandler"><em>InstantiateHandler</em></a>) – The creation-time instantiate handler.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The handler, unchanged.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If an instantiate handler is already registered.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#httk.workflow.sdk.InstantiateHandler" title="httk.workflow.sdk.InstantiateHandler">InstantiateHandler</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Runner.description">
+<span class="sig-name descname"><span class="pre">description</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Runner.description"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Runner.description" title="Link to this definition">¶</a></dt>
+<dd><p>Return the machine-readable description of this runner.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p>The runner description document.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, <a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)">object</a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.sdk.Runner.main">
+<span class="sig-name descname"><span class="pre">main</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">argv</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/sdk.html#Runner.main"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.sdk.Runner.main" title="Link to this definition">¶</a></dt>
+<dd><p>Run the step this process was launched for and publish its outcome.</p>
+<p>Asked to describe itself — through <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_DESCRIBE=1</span></code> or
+<code class="docutils literal notranslate"><span class="pre">--describe</span></code> — the runner prints its description and exits without
+touching anything, so a tool can enumerate the steps of a runner it is
+not running.</p>
+<p>Every ending is an outcome: a step that publishes none is reported as
+<code class="docutils literal notranslate"><span class="pre">no_outcome</span></code>, an unimplemented step as <code class="docutils literal notranslate"><span class="pre">unknown_step</span></code>, and a step that
+raises leaves an <code class="docutils literal notranslate"><span class="pre">error.json</span></code> breadcrumb and lets the exception reach the
+manager, whose retry policy owns what happens next.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>argv</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Sequence" title="(in Python v3.14)"><em>collections.abc.Sequence</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>] </em><em>| </em><em>None</em>) – Command-line arguments, or the process arguments when omitted.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Zero after dispatching or describing the runner.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)">int</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="../shell_bridge/index.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">httk.workflow.shell_bridge</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="../scaffold/index.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">httk.workflow.scaffold</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">httk.workflow.sdk</a><ul>
+<li><a class="reference internal" href="#attributes">Attributes</a></li>
+<li><a class="reference internal" href="#classes">Classes</a></li>
+<li><a class="reference internal" href="#module-contents">Module Contents</a><ul>
+<li><a class="reference internal" href="#httk.workflow.sdk.RUNNER_DESCRIPTION_FORMAT"><code class="docutils literal notranslate"><span class="pre">RUNNER_DESCRIPTION_FORMAT</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.RUNNER_ERROR_FORMAT"><code class="docutils literal notranslate"><span class="pre">RUNNER_ERROR_FORMAT</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.InstantiateHandler"><code class="docutils literal notranslate"><span class="pre">InstantiateHandler</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.RunnerRef"><code class="docutils literal notranslate"><span class="pre">RunnerRef</span></code></a><ul>
+<li><a class="reference internal" href="#httk.workflow.sdk.RunnerRef.source"><code class="docutils literal notranslate"><span class="pre">RunnerRef.source</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.RunnerRef.path"><code class="docutils literal notranslate"><span class="pre">RunnerRef.path</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.RunnerRef.sha256"><code class="docutils literal notranslate"><span class="pre">RunnerRef.sha256</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.RunnerRef.inherit"><code class="docutils literal notranslate"><span class="pre">RunnerRef.inherit()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.RunnerRef.workspace"><code class="docutils literal notranslate"><span class="pre">RunnerRef.workspace()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.RunnerRef.installed"><code class="docutils literal notranslate"><span class="pre">RunnerRef.installed()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec"><code class="docutils literal notranslate"><span class="pre">ChildSpec</span></code></a><ul>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.step"><code class="docutils literal notranslate"><span class="pre">ChildSpec.step</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.parameters"><code class="docutils literal notranslate"><span class="pre">ChildSpec.parameters</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.declarations"><code class="docutils literal notranslate"><span class="pre">ChildSpec.declarations</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.runner"><code class="docutils literal notranslate"><span class="pre">ChildSpec.runner</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.name"><code class="docutils literal notranslate"><span class="pre">ChildSpec.name</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.workflow"><code class="docutils literal notranslate"><span class="pre">ChildSpec.workflow</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.tag"><code class="docutils literal notranslate"><span class="pre">ChildSpec.tag</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.workdir_mode"><code class="docutils literal notranslate"><span class="pre">ChildSpec.workdir_mode</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.workdir_path"><code class="docutils literal notranslate"><span class="pre">ChildSpec.workdir_path</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.data_mode"><code class="docutils literal notranslate"><span class="pre">ChildSpec.data_mode</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.priority"><code class="docutils literal notranslate"><span class="pre">ChildSpec.priority</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.claim_pool"><code class="docutils literal notranslate"><span class="pre">ChildSpec.claim_pool</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.required_capabilities"><code class="docutils literal notranslate"><span class="pre">ChildSpec.required_capabilities</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.resources"><code class="docutils literal notranslate"><span class="pre">ChildSpec.resources</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.maximum_attempts_per_activation"><code class="docutils literal notranslate"><span class="pre">ChildSpec.maximum_attempts_per_activation</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.maximum_total_attempts"><code class="docutils literal notranslate"><span class="pre">ChildSpec.maximum_total_attempts</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.maximum_activations"><code class="docutils literal notranslate"><span class="pre">ChildSpec.maximum_activations</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildSpec.retry_on"><code class="docutils literal notranslate"><span class="pre">ChildSpec.retry_on</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult"><code class="docutils literal notranslate"><span class="pre">ChildResult</span></code></a><ul>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.label"><code class="docutils literal notranslate"><span class="pre">ChildResult.label</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.job_id"><code class="docutils literal notranslate"><span class="pre">ChildResult.job_id</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.job_key"><code class="docutils literal notranslate"><span class="pre">ChildResult.job_key</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.kind"><code class="docutils literal notranslate"><span class="pre">ChildResult.kind</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.failure"><code class="docutils literal notranslate"><span class="pre">ChildResult.failure</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.placement"><code class="docutils literal notranslate"><span class="pre">ChildResult.placement</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.payload"><code class="docutils literal notranslate"><span class="pre">ChildResult.payload</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.workdir"><code class="docutils literal notranslate"><span class="pre">ChildResult.workdir</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.data"><code class="docutils literal notranslate"><span class="pre">ChildResult.data</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.data_generation"><code class="docutils literal notranslate"><span class="pre">ChildResult.data_generation</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.raw"><code class="docutils literal notranslate"><span class="pre">ChildResult.raw</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.succeeded"><code class="docutils literal notranslate"><span class="pre">ChildResult.succeeded</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildResult.failed"><code class="docutils literal notranslate"><span class="pre">ChildResult.failed</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildrenView"><code class="docutils literal notranslate"><span class="pre">ChildrenView</span></code></a><ul>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildrenView.all"><code class="docutils literal notranslate"><span class="pre">ChildrenView.all</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildrenView.succeeded"><code class="docutils literal notranslate"><span class="pre">ChildrenView.succeeded</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildrenView.failed"><code class="docutils literal notranslate"><span class="pre">ChildrenView.failed</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildrenView.labels"><code class="docutils literal notranslate"><span class="pre">ChildrenView.labels</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.ChildrenView.get"><code class="docutils literal notranslate"><span class="pre">ChildrenView.get()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt"><code class="docutils literal notranslate"><span class="pre">Attempt</span></code></a><ul>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.context"><code class="docutils literal notranslate"><span class="pre">Attempt.context</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.control"><code class="docutils literal notranslate"><span class="pre">Attempt.control</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.payload"><code class="docutils literal notranslate"><span class="pre">Attempt.payload</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.workdir"><code class="docutils literal notranslate"><span class="pre">Attempt.workdir</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.workspace"><code class="docutils literal notranslate"><span class="pre">Attempt.workspace</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.data"><code class="docutils literal notranslate"><span class="pre">Attempt.data</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.step"><code class="docutils literal notranslate"><span class="pre">Attempt.step</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.state"><code class="docutils literal notranslate"><span class="pre">Attempt.state</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.log"><code class="docutils literal notranslate"><span class="pre">Attempt.log</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.initialize"><code class="docutils literal notranslate"><span class="pre">Attempt.initialize()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.job"><code class="docutils literal notranslate"><span class="pre">Attempt.job</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.parameters"><code class="docutils literal notranslate"><span class="pre">Attempt.parameters</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.children"><code class="docutils literal notranslate"><span class="pre">Attempt.children</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.published"><code class="docutils literal notranslate"><span class="pre">Attempt.published</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.parameter"><code class="docutils literal notranslate"><span class="pre">Attempt.parameter()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.setting"><code class="docutils literal notranslate"><span class="pre">Attempt.setting()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.declare"><code class="docutils literal notranslate"><span class="pre">Attempt.declare()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.declaration"><code class="docutils literal notranslate"><span class="pre">Attempt.declaration()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.run"><code class="docutils literal notranslate"><span class="pre">Attempt.run()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.workdir_batch"><code class="docutils literal notranslate"><span class="pre">Attempt.workdir_batch()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.put"><code class="docutils literal notranslate"><span class="pre">Attempt.put()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.remove"><code class="docutils literal notranslate"><span class="pre">Attempt.remove()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.spawn"><code class="docutils literal notranslate"><span class="pre">Attempt.spawn()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.advance"><code class="docutils literal notranslate"><span class="pre">Attempt.advance()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.gather"><code class="docutils literal notranslate"><span class="pre">Attempt.gather()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.succeed"><code class="docutils literal notranslate"><span class="pre">Attempt.succeed()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.retry"><code class="docutils literal notranslate"><span class="pre">Attempt.retry()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.pause"><code class="docutils literal notranslate"><span class="pre">Attempt.pause()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Attempt.fail"><code class="docutils literal notranslate"><span class="pre">Attempt.fail()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Runner"><code class="docutils literal notranslate"><span class="pre">Runner</span></code></a><ul>
+<li><a class="reference internal" href="#httk.workflow.sdk.Runner.workflow"><code class="docutils literal notranslate"><span class="pre">Runner.workflow</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Runner.inputs"><code class="docutils literal notranslate"><span class="pre">Runner.inputs</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Runner.steps"><code class="docutils literal notranslate"><span class="pre">Runner.steps</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Runner.has_instantiate"><code class="docutils literal notranslate"><span class="pre">Runner.has_instantiate</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Runner.step"><code class="docutils literal notranslate"><span class="pre">Runner.step()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Runner.instantiate"><code class="docutils literal notranslate"><span class="pre">Runner.instantiate()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Runner.description"><code class="docutils literal notranslate"><span class="pre">Runner.description()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.sdk.Runner.main"><code class="docutils literal notranslate"><span class="pre">Runner.main()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../../../_static/documentation_options.js?v=fe42cd0d"></script>
+    <script src="../../../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../../../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../../../../../_static/selector.js?v=875006ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:main","versionPathDepth":2};</script>
+    </body>
+</html>

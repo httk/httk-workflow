@@ -1,0 +1,313 @@
+httk.workflow.languages
+=======================
+
+.. py:module:: httk.workflow.languages
+
+.. autoapi-nested-parse::
+
+   The registry of workflow-language runner realizations.
+
+   Language modules live beside this module and self-describe via a module-level
+   ``LANGUAGE``.
+
+
+
+Submodules
+----------
+
+.. toctree::
+   :maxdepth: 1
+
+   /reference/autoapi/httk/workflow/languages/cwl/index
+   /reference/autoapi/httk/workflow/languages/httk_v1/index
+   /reference/autoapi/httk/workflow/languages/pwd/index
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.workflow.languages.LanguageOutputsMissingError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.languages.LanguagePorts
+   httk.workflow.languages.LanguageRequest
+   httk.workflow.languages.LanguageScaffold
+   httk.workflow.languages.WorkflowLanguage
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.languages.available_languages
+   httk.workflow.languages.language
+   httk.workflow.languages.match_document
+   httk.workflow.languages.runner_path
+   httk.workflow.languages.runner_reference
+
+
+Package Contents
+----------------
+
+.. py:exception:: LanguageOutputsMissingError
+
+   Bases: :py:obj:`ValueError`
+
+
+   A language job has no readable published outputs document.
+
+
+.. py:class:: LanguagePorts
+
+   The named input and output ports of one language document.
+
+   :param inputs: Names of the document's input ports.
+   :param outputs: Names of the document's output ports.
+
+
+   .. py:attribute:: inputs
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: outputs
+      :type:  tuple[str, Ellipsis]
+
+
+.. py:class:: LanguageRequest
+
+   The data supplied when preparing one language workflow.
+
+   :param workflow_id: Identify the workflow being prepared.
+   :param directory: Locate the workflow package, when it has one.
+   :param document: Locate the source workflow document, when it has one.
+   :param runner_options: Supply options for the language runner.
+   :param inputs: Describe the workflow inputs.
+   :param outputs: Describe the requested workflow outputs.
+   :param excluded_members: Package members the realization must not stage.
+
+
+   .. py:attribute:: workflow_id
+      :type:  str
+
+
+   .. py:attribute:: directory
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: document
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: runner_options
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: inputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: outputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: excluded_members
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+.. py:class:: LanguageScaffold
+
+   The files, runner, and hooks prepared for one language workflow.
+
+   :param documents: Text or byte documents to write into the payload.
+   :param files: Files to stage into the payload.
+   :param parameters: Job parameters produced by preparation.
+   :param runner: Runner description for the job, when one is supplied.
+   :param runner_executor: Select the runner executor.
+   :param payload_runner: Name a runner staged in the payload.
+   :param workdir_path: Name the workdir below the job payload.
+   :param required_capabilities: Require these manager capabilities.
+   :param reserved_parameters: Names reserved for per-job realization output.
+   :param warnings: Preserve preparation warnings.
+   :param instantiate: Supply the per-job hook called after input staging.
+   :param finalize: Transform the per-job ``JobSpec`` immediately before its payload is prepared.
+
+
+   .. py:attribute:: documents
+      :type:  collections.abc.Mapping[str, str | bytes]
+
+
+   .. py:attribute:: files
+      :type:  collections.abc.Mapping[str, pathlib.Path]
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: runner
+      :type:  collections.abc.Mapping[str, object] | None
+
+
+   .. py:attribute:: runner_executor
+      :type:  str
+      :value: 'path'
+
+
+
+   .. py:attribute:: payload_runner
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: workdir_path
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: required_capabilities
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: reserved_parameters
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: warnings
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: instantiate
+      :type:  collections.abc.Callable[[httk.workflow.scaffold.InstantiateContext], object] | None
+      :value: None
+
+
+
+   .. py:attribute:: finalize
+      :type:  collections.abc.Callable[[httk.workflow.runtime_builders.JobSpec], httk.workflow.runtime_builders.JobSpec] | None
+      :value: None
+
+
+
+.. py:class:: WorkflowLanguage
+
+   The operations a workflow language exposes to the common layer.
+
+   :param name: Name the language.
+   :param steps: Declare the runner's steps.
+   :param initial_step: Select the runner's initial step.
+   :param matches: Identify documents belonging to the language.
+   :param ports: Read the input and output ports of a document.
+   :param validate_runner: Validate runner options for a document.
+   :param prepare: Prepare a language request for execution.
+   :param collect: Convert a completed job record into language outputs.
+   :param requires_document: Require a source document in package manifests.
+   :param has_default_collector: Provide a default collector path.
+   :param allows_modes: Permit manifest data and workdir mode overrides.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: steps
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: initial_step
+      :type:  str
+
+
+   .. py:attribute:: matches
+      :type:  collections.abc.Callable[[pathlib.Path], bool]
+
+
+   .. py:attribute:: ports
+      :type:  collections.abc.Callable[[pathlib.Path], LanguagePorts]
+
+
+   .. py:attribute:: validate_runner
+      :type:  collections.abc.Callable[[collections.abc.Mapping[str, object], pathlib.Path], None]
+
+
+   .. py:attribute:: prepare
+      :type:  collections.abc.Callable[[LanguageRequest], LanguageScaffold]
+
+
+   .. py:attribute:: collect
+      :type:  collections.abc.Callable[[httk.workflow.collecting.JobRecord], collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: requires_document
+      :type:  bool
+      :value: True
+
+
+
+   .. py:attribute:: has_default_collector
+      :type:  bool
+      :value: True
+
+
+
+   .. py:attribute:: allows_modes
+      :type:  bool
+      :value: True
+
+
+
+.. py:function:: available_languages()
+
+   Return the names of valid language modules available in this package.
+
+
+.. py:function:: language(name)
+
+   Return the registered language named *name*.
+
+   :param name: Name the language, using hyphens or underscores.
+   :return: The language registration.
+   :raises ValueError: If the module or its ``LANGUAGE`` is invalid.
+
+
+.. py:function:: match_document(path)
+
+   Return the first registered language matching *path*, if any.
+
+
+.. py:function:: runner_path(package, name)
+
+   Return the installed file of one packaged compat runner.
+
+   *package* is the importable package the runner file lives beside — its own
+   consumer package, e.g. ``httk.workflow.languages.cwl`` — so a compat engine
+   resolves and digest-pins the exact bytes it ships rather than a runner owned
+   by some shared module.
+
+
+.. py:function:: runner_reference(package, name)
+
+   Return the ``runner`` member of a ``job.json`` running one packaged runner.
+
+   The reserved ``pkg:`` form names the runner inside its own consumer package,
+   and the digest is taken from the installed bytes, which is exactly what the
+   manager verifies before it stages and executes them.
+
+

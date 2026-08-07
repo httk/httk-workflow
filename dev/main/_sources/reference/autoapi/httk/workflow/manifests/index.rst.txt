@@ -1,0 +1,299 @@
+httk.workflow.manifests
+=======================
+
+.. py:module:: httk.workflow.manifests
+
+.. autoapi-nested-parse::
+
+   Deterministic signed project manifests.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.manifests.MAINTENANCE_LOCK_FILE
+   httk.workflow.manifests.MAINTENANCE_LOCK_MAX_AGE_SECONDS
+   httk.workflow.manifests.VALID_TRUSTED
+   httk.workflow.manifests.VALID_UNKNOWN_KEY
+   httk.workflow.manifests.INVALID
+   httk.workflow.manifests.VERDICT_EXIT_CODES
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.manifests.MaintenanceLock
+   httk.workflow.manifests.ManifestVerification
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.manifests.read_maintenance_lock
+   httk.workflow.manifests.release_maintenance_lock
+   httk.workflow.manifests.workspace_maintenance_guard
+   httk.workflow.manifests.create_manifest
+   httk.workflow.manifests.resolve_trusted_keys
+   httk.workflow.manifests.verify_v2_manifest
+   httk.workflow.manifests.verify_legacy_manifest
+   httk.workflow.manifests.verify_manifest
+
+
+Module Contents
+---------------
+
+.. py:data:: MAINTENANCE_LOCK_FILE
+   :value: 'maintenance.lock'
+
+
+.. py:data:: MAINTENANCE_LOCK_MAX_AGE_SECONDS
+   :value: 86400
+
+
+.. py:data:: VALID_TRUSTED
+   :value: 'valid_trusted'
+
+
+.. py:data:: VALID_UNKNOWN_KEY
+   :value: 'valid_unknown_key'
+
+
+.. py:data:: INVALID
+   :value: 'invalid'
+
+
+.. py:data:: VERDICT_EXIT_CODES
+
+.. py:class:: MaintenanceLock
+
+   Record the holder of one workspace maintenance lock.
+
+   :param path: Locate the lock file.
+   :param pid: Record the holder process identifier, when readable.
+   :param hostname: Record the holder host, when readable.
+   :param created: Record the holder creation timestamp, when readable.
+   :param readable: Mark whether the lock contents could be read.
+
+
+   .. py:attribute:: path
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: pid
+      :type:  int | None
+
+
+   .. py:attribute:: hostname
+      :type:  str | None
+
+
+   .. py:attribute:: created
+      :type:  str | None
+
+
+   .. py:attribute:: readable
+      :type:  bool
+      :value: True
+
+
+
+   .. py:property:: age_seconds
+      :type: float | None
+
+
+      Age of the lock, or ``None`` when its timestamp is unusable.
+
+
+   .. py:property:: local
+      :type: bool
+
+
+      Whether the recorded host is the host inspecting the lock.
+
+
+   .. py:property:: dead
+      :type: bool
+
+
+      Whether a same-host holder process is known to be gone.
+
+
+   .. py:method:: is_stale(*, max_age_seconds = MAINTENANCE_LOCK_MAX_AGE_SECONDS)
+
+      Whether the lock can be reclaimed without operator confirmation.
+
+
+
+   .. py:method:: describe()
+
+      Describe the holder for an operator diagnostic.
+
+
+
+.. py:function:: read_maintenance_lock(workspace)
+
+   Describe the workspace maintenance lock, or ``None`` when it is absent.
+
+   :param workspace: Locate the workspace whose lock to inspect.
+   :return: The recorded lock, or ``None`` when no lock exists.
+
+
+.. py:function:: release_maintenance_lock(workspace, *, force = False)
+
+   Remove a stale, or with *force* any, maintenance lock and report it.
+
+   :param workspace: Locate the workspace whose lock to remove.
+   :param force: Permit removal of a lock that does not appear stale.
+   :return: A human-readable removal result.
+   :raises ValueError: If a live lock is protected by the default policy.
+
+
+.. py:function:: workspace_maintenance_guard(workspace)
+
+   Fence manager launches while a project snapshot is inspected.
+
+   :param workspace: Lock and inspect this workspace around the guarded work.
+   :return: A context manager that holds the maintenance lock.
+   :raises ValueError: If the workspace is already maintained or not quiescent.
+
+
+.. py:function:: create_manifest(project = None, *, output = None)
+
+   Create and atomically publish the signed v2 project manifest.
+
+   :param project: Locate the project to snapshot, or use discovery when unset.
+   :param output: Publish the manifest at this path, or use the project default.
+   :return: The published manifest path.
+   :raises ValueError: If the project is invalid or cannot be snapshotted.
+
+
+.. py:class:: ManifestVerification
+
+   What verifying one manifest against one tree established.
+
+   A signature check answers two separate questions, and reporting them as one
+   boolean loses the interesting one. *Does this manifest describe this tree,
+   unaltered?* is answered by the digests and the signature. *Was it made by
+   somebody this project trusts?* is answered only by comparing the signing key
+   with a trust anchor that did not come from the manifest itself.
+
+   :param verdict: Classify the verification result.
+   :param reason: Explain the classification.
+   :param manifest: Identify the verified manifest.
+   :param manifest_format: Identify the manifest format used.
+   :param public_key: Record the signing key, when readable.
+   :param trusted_keys: Record the trust anchors consulted.
+
+
+   .. py:attribute:: verdict
+      :type:  str
+
+
+   .. py:attribute:: reason
+      :type:  str
+
+
+   .. py:attribute:: manifest
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: manifest_format
+      :type:  str
+
+
+   .. py:attribute:: public_key
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: trusted_keys
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:property:: valid
+      :type: bool
+
+
+      Whether the manifest describes this tree and its signature verified.
+
+
+   .. py:property:: trusted
+      :type: bool
+
+
+      Whether the verified signature was made by a pinned key.
+
+
+   .. py:property:: exit_code
+      :type: int
+
+
+      The command-line status this verdict reports.
+
+
+   .. py:method:: as_mapping()
+
+      Return the JSON representation of this verdict.
+
+
+
+.. py:function:: resolve_trusted_keys(project = None, *, trusted_keys = None)
+
+   Return the trust anchors of *project* plus every explicitly named key.
+
+   An entry of *trusted_keys* is either a recorded key — ``ed25519:BASE64`` or
+   the bare base64 — or the path of a ``*.pub`` file holding one.
+
+   :param project: Locate the project whose pinned keys to include.
+   :param trusted_keys: Add explicit recorded keys or public-key files.
+   :return: Unique canonical trust-anchor values in stable order.
+   :raises ValueError: If an explicit key cannot be canonicalized.
+
+
+.. py:function:: verify_v2_manifest(root, path)
+
+   Report whether a v2 manifest describes *root* and its signature verifies.
+
+   This deliberately says nothing about *whose* key signed it: the key comes
+   out of the manifest header. Use :func:`verify_manifest` for the trust
+   decision.
+
+   :param root: Locate the tree the manifest should describe.
+   :param path: Locate the v2 manifest to verify.
+   :return: Whether the tree and signature verify, without a trust decision.
+
+
+.. py:function:: verify_legacy_manifest(root, path)
+
+   Verify a legacy manifest without modifying its project tree.
+
+   :param root: Locate the tree the manifest should describe.
+   :param path: Locate the legacy manifest to verify.
+   :return: Whether the legacy tree records and signature verify.
+
+
+.. py:function:: verify_manifest(project = None, *, manifest = None, trusted_keys = None)
+
+   Auto-detect a v2 or legacy manifest and verify it against its trust anchors.
+
+   The trust anchor is the key pinned in ``project.json`` — never the key the
+   manifest being verified names in its own header — plus any key passed in
+   *trusted_keys*, as a recorded value or as the path of a ``*.pub`` file.
+
+   :param project: Locate the project to discover and verify.
+   :param manifest: Select a manifest path instead of the project default.
+   :param trusted_keys: Add explicit trust anchors to the project keys.
+   :return: The detailed verification verdict.
+   :raises ValueError: If no project or usable manifest exists.
+
+

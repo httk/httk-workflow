@@ -1,0 +1,327 @@
+httk.workflow.compat.v1
+=======================
+
+.. py:module:: httk.workflow.compat.v1
+
+.. autoapi-nested-parse::
+
+   Compatibility support for instantiated httk v1 task templates.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.compat.v1.V1_EXECUTOR
+   httk.workflow.compat.v1.V1_CAPABILITY
+   httk.workflow.compat.v1.V1_WORKFLOW
+   httk.workflow.compat.v1.V1_PRIORITY_MAP
+   httk.workflow.compat.v1.V2_TO_V1_PRIORITY
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.compat.v1.V1RunnerExecutor
+   httk.workflow.compat.v1.V1TaskManager
+   httk.workflow.compat.v1.V1FinishedTask
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.compat.v1.bundled_v1_root
+   httk.workflow.compat.v1.legacy_priority
+   httk.workflow.compat.v1.prepare_v1_payload
+   httk.workflow.compat.v1.submit_v1_task
+   httk.workflow.compat.v1.parse_v1_task_name
+   httk.workflow.compat.v1.code_of
+   httk.workflow.compat.v1.collect_finished_tree
+   httk.workflow.compat.v1.finished_tasks
+   httk.workflow.compat.v1.run_directory
+   httk.workflow.compat.v1.task_file
+
+
+Package Contents
+----------------
+
+.. py:data:: V1_EXECUTOR
+   :value: 'httk-v1'
+
+
+.. py:data:: V1_CAPABILITY
+   :value: 'httk-v1'
+
+
+.. py:data:: V1_WORKFLOW
+   :value: 'httk.v1.ht_steps'
+
+
+.. py:data:: V1_PRIORITY_MAP
+
+.. py:data:: V2_TO_V1_PRIORITY
+
+.. py:function:: bundled_v1_root()
+
+   Return the packaged compatibility ``HTTK_DIR`` root.
+
+   :return: The packaged v1 runtime root.
+
+
+.. py:function:: legacy_priority(value)
+
+   Map a legacy priority from 1 through 5 onto the v2 range.
+
+   :param value: Map this legacy priority.
+   :return: The corresponding v2 priority.
+   :raises ValueError: If the priority is outside the legacy range.
+
+
+.. py:function:: prepare_v1_payload(source, destination, *, materializer = None, instantiate_globals = None, job_id = None, tag = 'v1-task', name = 'httk v1 task', initial_step = 'start', pool = 'default', priority = 3, attempts = 10, parent = None, root_placement = None, legacy_link = None)
+
+   Copy an instantiated v1 template and add its immutable v2 job definition.
+
+   ``materializer`` and ``instantiate_globals`` are mutually exclusive. The
+   latter executes trusted template code in the current interpreter and does
+   not restore removed v1 Python imports.
+
+   :param source: Copy the instantiated v1 template from this directory.
+   :param destination: Create the v2 payload at this directory.
+   :param materializer: Materialize the template with this callback.
+   :param instantiate_globals: Execute the template with these globals.
+   :param job_id: Set the job identifier, or generate one when unset.
+   :param tag: Set the job tag.
+   :param name: Set the job display name.
+   :param initial_step: Set the first runner step.
+   :param pool: Set the claim pool.
+   :param priority: Set the legacy priority.
+   :param attempts: Set the retry attempt count.
+   :param parent: Preserve the parent job reference.
+   :param root_placement: Preserve the legacy root placement.
+   :param legacy_link: Preserve the legacy directory link metadata.
+   :return: The immutable v2 job definition written to the payload.
+   :raises ValueError: If mutually exclusive options or retry values are invalid.
+
+
+.. py:function:: submit_v1_task(workspace, source, placement, *, materializer = None, instantiate_globals = None, job_id = None, tag = 'v1-task', name = 'httk v1 task', initial_step = 'start', pool = 'default', priority = 3, attempts = 10)
+
+   Prepare and atomically submit one legacy task through a v2 workspace.
+
+   :param workspace: Submit the task to this workspace.
+   :param source: Copy the instantiated v1 template from this directory.
+   :param placement: Submit the task at this placement.
+   :param materializer: Materialize the template with this callback.
+   :param instantiate_globals: Execute the template with these globals.
+   :param job_id: Set the job identifier, or generate one when unset.
+   :param tag: Set the job tag.
+   :param name: Set the job display name.
+   :param initial_step: Set the first runner step.
+   :param pool: Set the claim pool.
+   :param priority: Set the legacy priority.
+   :param attempts: Set the retry attempt count.
+   :return: The submitted job marker.
+
+
+.. py:function:: parse_v1_task_name(value)
+
+   Parse a legacy task basename, returning ``None`` when it is unrelated.
+
+   :param value: Parse this legacy task basename.
+   :return: Parsed task fields, or ``None`` for an unrelated name.
+
+
+.. py:class:: V1RunnerExecutor(*, runtime_root = None, timeout = 21600.0, wrapper = None, log_compression = 'bzip2', attempts = 10)
+
+   Runner executor which adapts v1 filesystem decisions to v2 outcomes.
+
+   :param runtime_root: Use this packaged v1 runtime root.
+   :param timeout: Limit one legacy process to this duration.
+   :param wrapper: Run legacy programs through this wrapper when set.
+   :param log_compression: Select the archived log compression.
+   :param attempts: Limit retries passed to the legacy runner.
+
+
+   .. py:attribute:: name
+      :value: 'httk-v1'
+
+
+
+   .. py:attribute:: runtime_root
+
+
+   .. py:attribute:: timeout
+      :value: 21600.0
+
+
+
+   .. py:attribute:: wrapper
+      :value: None
+
+
+
+   .. py:attribute:: log_compression
+      :value: 'bzip2'
+
+
+
+   .. py:attribute:: attempts
+      :value: 10
+
+
+
+   .. py:method:: validate(job, payload)
+
+      Validate a v1 job payload for execution.
+
+      :param job: Validate this job definition.
+      :param payload: Validate the runner and runtime files in this payload.
+
+
+
+   .. py:method:: command(launch)
+
+      Build the command for one v1 attempt.
+
+      :param launch: Read the job and launch context.
+      :return: The runner command argument vector.
+
+
+
+   .. py:method:: commit_outcome(commit)
+
+      Reconcile legacy child links after publishing an outcome.
+
+      :param commit: Read the committed outcome and payload.
+
+
+
+   .. py:method:: reconcile(workspace)
+
+      Reconcile legacy links for every marked job.
+
+      :param workspace: Scan this workspace for v1 jobs.
+
+
+
+   .. py:method:: marker_changed(workspace, marker)
+
+      Reconcile the legacy link for one changed marker.
+
+      :param workspace: Read the changed job from this workspace.
+      :param marker: Identify the changed job.
+
+
+
+.. py:class:: V1TaskManager(workspace, *, taskset = 'any', maximum_workers = 1, lease_seconds = None, heartbeat_interval = 30.0, unsafe_persistent_takeover = False, runtime_root = None, timeout = 21600.0, wrapper = None, log_compression = 'bzip2', attempts = 10)
+
+   Bases: :py:obj:`httk.workflow.TaskManager`
+
+
+   A task manager restricted to jobs using the httk v1 runner executor.
+
+   :param workspace: Manage v1 jobs in this workspace.
+   :param taskset: Restrict jobs to this taskset, or accept every taskset when ``any``.
+   :param maximum_workers: Run at most this many workers.
+   :param lease_seconds: Use this lease duration when set.
+   :param heartbeat_interval: Send worker heartbeats at this interval.
+   :param unsafe_persistent_takeover: Permit takeover of persistent workdirs.
+   :param runtime_root: Use this packaged v1 runtime root.
+   :param timeout: Limit one legacy process to this duration.
+   :param wrapper: Run legacy programs through this wrapper when set.
+   :param log_compression: Select the archived log compression.
+   :param attempts: Limit retries passed to the legacy runner.
+
+
+.. py:class:: V1FinishedTask
+
+   Describe one finished v1 task and its newest dated run directory.
+
+
+   .. py:attribute:: directory
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: rundir
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: taskset
+      :type:  str
+
+
+   .. py:attribute:: task_id
+      :type:  str
+
+
+   .. py:attribute:: computation_date
+      :type:  datetime.datetime
+
+
+   .. py:attribute:: code_name
+      :type:  str
+
+
+   .. py:attribute:: code_version
+      :type:  str
+
+
+   .. py:attribute:: description
+      :type:  str | None
+
+
+   .. py:attribute:: manifest_hash
+      :type:  str | None
+
+
+   .. py:property:: immutable_id
+      :type: str
+
+
+      Return the stable manifest id or a weaker path-derived identity.
+
+
+.. py:function:: code_of(program_path)
+
+   Read code name/version from lines 2 and 3 of a v1 program.
+
+   Both ht_steps and ht_run use this format. Missing, unreadable, or
+   malformed metadata returns the legacy fallback ("unknown", "0").
+
+
+.. py:function:: collect_finished_tree(root, *, workflow_dir = None, extract = None, workflow_id = 'httk.v1.finished')
+
+   Collect old finished trees through a package hook or direct extractor.
+
+   Exactly one of workflow_dir and extract is required. Unlike live
+   collection, a hook/extractor failure degrades only that task and the sweep
+   continues: old trees are expected to contain uneven historical results.
+
+
+.. py:function:: finished_tasks(root)
+
+   Lazily yield finished v1 tasks in deterministic walk order.
+
+   Every ht.task.* directory is a walk boundary, so nested subtasks are not
+   scanned. ht.run.current is intentionally ignored because only dated run
+   names define a computation date.
+
+
+.. py:function:: run_directory(record)
+
+   Return the result directory described by record.workdir.
+
+   Postprocess hooks must read result files from this path. Live v1 jobs use
+   ht.run.current; synthesized old-tree records use their dated run dir.
+
+
+.. py:function:: task_file(directory, name)
+
+   Return a plain or bzip2-compressed task member without opening it.
+
+

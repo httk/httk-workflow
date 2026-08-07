@@ -1,0 +1,1353 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="./">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="httk v1 task compatibility" href="v1_compatibility.html"><link rel="prev" title="Workflow filesystem API" href="workflow_filesystem_api.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Migrating an httk v1 workflow to httk₂ - httk-workflow dev:main documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:main) — content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="index.html"><div class="brand">httk-workflow dev:main documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:main documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_protocol_api.html">The filesystem protocol API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtime_helpers.html">Native runner helpers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="native_bash_api.html">Native Bash runner API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sdk_parity.html">Python and Bash authoring parity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="vasp_runners.html">Packaged VASP runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_packages.html">Workflow packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_languages.html">Workflow-language runner realizations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="taskmanager.html">Task-manager usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_cli.html">Project and workflow command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adapter_authoring.html">Writing a remote adapter</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="reference/index.html">Reference</a><input aria-label="Toggle navigation of Reference" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/index.html">httk.workflow</a><input aria-label="Toggle navigation of httk.workflow" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/adapter_protocol/index.html">httk.workflow.adapter_protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/adapters/index.html">httk.workflow.adapters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/collecting/index.html">httk.workflow.collecting</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/compat/index.html">httk.workflow.compat</a><input aria-label="Toggle navigation of httk.workflow.compat" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/compat/v1/index.html">httk.workflow.compat.v1</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/configuration/index.html">httk.workflow.configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/errors/index.html">httk.workflow.errors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/executors/index.html">httk.workflow.executors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/hygiene/index.html">httk.workflow.hygiene</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/manifests/index.html">httk.workflow.manifests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/projects/index.html">httk.workflow.projects</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/protocol/index.html">httk.workflow.protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/provenance/index.html">httk.workflow.provenance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/runtime/index.html">httk.workflow.runtime</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/runtime_utils/index.html">httk.workflow.runtime_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/scaffold/index.html">httk.workflow.scaffold</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/sdk/index.html">httk.workflow.sdk</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/shell_bridge/index.html">httk.workflow.shell_bridge</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/supervision/index.html">httk.workflow.supervision</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/transfers/index.html">httk.workflow.transfers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/vasp/index.html">httk.workflow.vasp</a></li>
+</ul>
+</li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="notebooks/examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_filesystem_api.html">Workflow filesystem API</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="_sources/httk_v1_migration_guide.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section class="tex2jax_ignore mathjax_ignore" id="migrating-an-httk-v1-workflow-to-httk2">
+<h1>Migrating an <em>httk</em> v1 workflow to <em>httk₂</em><a class="headerlink" href="#migrating-an-httk-v1-workflow-to-httk2" title="Link to this heading">¶</a></h1>
+<p><em>For maintainers of an httk v1 workflow, moving it to httk₂ at whatever pace suits.</em></p>
+<p>This guide takes an existing <code class="docutils literal notranslate"><span class="pre">ht_steps</span></code> or <code class="docutils literal notranslate"><span class="pre">ht_run</span></code> workflow from <em>httk</em> v1 to
+<em>httk-workflow</em>. You can keep the workflow unchanged behind the compatibility
+runner, migrate one job type at a time, or replace the legacy API completely
+with the native <em>httk₂</em> Bash or Python API.</p>
+<p>The central rule is:</p>
+<blockquote>
+<div><p>Migrate task definitions and newly instantiated task directories, not a live
+<em>httk</em> v1 task-manager queue.</p>
+</div></blockquote>
+<p>The <em>httk₂</em> manager never claims or rewrites an existing <em>httk</em> v1 queue tree. Once a task
+has been prepared and submitted to an <em>httk₂</em> workspace, its <code class="docutils literal notranslate"><span class="pre">job.json</span></code>, marker, and
+journal are authoritative.</p>
+<section id="choose-a-migration-route">
+<h2>1. Choose a migration route<a class="headerlink" href="#choose-a-migration-route" title="Link to this heading">¶</a></h2>
+<p>You do not need to migrate every workflow at once.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Route</p></th>
+<th class="head"><p>Workflow changes</p></th>
+<th class="head"><p>Manager</p></th>
+<th class="head"><p>Best use</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>Compatibility</p></td>
+<td><p>None, normally</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">v1</span> <span class="pre">run</span></code></p></td>
+<td><p>Establish an <em>httk₂</em> operational baseline quickly</p></td>
+</tr>
+<tr class="row-odd"><td><p>Mixed</p></td>
+<td><p>Per job type</p></td>
+<td><p>Both managers on one workspace</p></td>
+<td><p>Incremental migration with a direct fallback</p></td>
+</tr>
+<tr class="row-even"><td><p>Native Bash</p></td>
+<td><p>Replace <code class="docutils literal notranslate"><span class="pre">HT_TASK_*</span></code> and <code class="docutils literal notranslate"><span class="pre">VASP_*</span></code> calls</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">manager</span> <span class="pre">run</span></code></p></td>
+<td><p>Preserve a shell-oriented workflow</p></td>
+</tr>
+<tr class="row-odd"><td><p>Native Python</p></td>
+<td><p>Replace the runner with Python calls</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">manager</span> <span class="pre">run</span></code></p></td>
+<td><p>New development and more structured logic</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Start with compatibility unless you already have tests that describe the
+workflow’s inputs, outputs, restart behavior, and child-task behavior. A
+compatibility run gives you a useful reference result before semantics change.</p>
+</section>
+<section id="inventory-the-httk-v1-workflow">
+<h2>2. Inventory the <em>httk</em> v1 workflow<a class="headerlink" href="#inventory-the-httk-v1-workflow" title="Link to this heading">¶</a></h2>
+<p>Make a copy of an instantiated task directory and record:</p>
+<ul class="simple">
+<li><p>whether the entry point is <code class="docutils literal notranslate"><span class="pre">ht_steps</span></code> or <code class="docutils literal notranslate"><span class="pre">ht_run</span></code>;</p></li>
+<li><p>every sourced helper, especially
+<code class="docutils literal notranslate"><span class="pre">$HTTK_DIR/Execution/tasks/ht_tasks_api.sh</span></code> and
+<code class="docutils literal notranslate"><span class="pre">$HTTK_DIR/Execution/tasks/vasp/vasptools.sh</span></code>;</p></li>
+<li><p>use of <code class="docutils literal notranslate"><span class="pre">HT_TASK_ATOMIC_*</span></code>, <code class="docutils literal notranslate"><span class="pre">HT_TASK_CREATE</span></code>, <code class="docutils literal notranslate"><span class="pre">HT_TASK_SUBTASKS</span></code>,
+<code class="docutils literal notranslate"><span class="pre">HT_TASK_STORE_VAR</span></code>, controlled processes, checkers, templates, or
+compression;</p></li>
+<li><p>files that must survive a retry, such as <code class="docutils literal notranslate"><span class="pre">WAVECAR</span></code>, <code class="docutils literal notranslate"><span class="pre">CONTCAR</span></code>, or application
+checkpoints;</p></li>
+<li><p>files that are final results rather than attempt scratch;</p></li>
+<li><p>task-set, priority, timeout, retry-limit, and resource assumptions;</p></li>
+<li><p>any <code class="docutils literal notranslate"><span class="pre">ht.instantiate.py</span></code> imports from the old httk Python package (convert them as described in section 12);</p></li>
+<li><p>automatic VASP remedies on which the workflow depends;</p></li>
+<li><p>child tasks that may still be running independently.</p></li>
+</ul>
+<p>Do not infer completion from a legacy task-directory suffix alone. Capture the
+actual input files, logs, expected results, and exit behavior.</p>
+</section>
+<section id="run-the-workflow-unchanged-in-an-httk2-workspace">
+<h2>3. Run the workflow unchanged in an <em>httk₂</em> workspace<a class="headerlink" href="#run-the-workflow-unchanged-in-an-httk2-workspace" title="Link to this heading">¶</a></h2>
+<p>Initialize an <em>httk₂</em> workspace:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow workspace init workflow-workspace</span>
+</pre></div>
+</div>
+<p>The standalone alias is equivalent:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk-taskmanager init workflow-workspace</span>
+</pre></div>
+</div>
+<p>Prepare an already instantiated <em>httk</em> v1 task without consuming the source:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow v1 prepare legacy-task prepared-v1 \</span>
+<span class="go">  --tag silicon-relax \</span>
+<span class="go">  --taskset vasp \</span>
+<span class="go">  --priority 4 \</span>
+<span class="go">  --attempts 10</span>
+</pre></div>
+</div>
+<p>Submit the prepared payload:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow job submit workflow-workspace prepared-v1 \</span>
+<span class="go">  --placement migration/reference/silicon-relax</span>
+</pre></div>
+</div>
+<p>Preparation and submission can also be combined:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow v1 submit workflow-workspace legacy-task \</span>
+<span class="go">  --placement migration/reference/silicon-relax \</span>
+<span class="go">  --tag silicon-relax \</span>
+<span class="go">  --taskset vasp \</span>
+<span class="go">  --priority 4 \</span>
+<span class="go">  --attempts 10</span>
+</pre></div>
+</div>
+<p>Run only <em>httk</em> v1 compatibility jobs:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow v1 run workflow-workspace \</span>
+<span class="go">  --taskset any \</span>
+<span class="go">  --workers 4 \</span>
+</pre></div>
+</div>
+<p>The exact old source paths remain available below the compatibility
+<code class="docutils literal notranslate"><span class="pre">HTTK_DIR</span></code>. An unchanged step may therefore continue to use:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="nb">source</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HTTK_DIR</span><span class="s2">/Execution/tasks/ht_tasks_api.sh&quot;</span>
+<span class="nb">source</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HTTK_DIR</span><span class="s2">/Execution/tasks/vasp/vasptools.sh&quot;</span>
+</pre></div>
+</div>
+<p>Inspect the result through the <em>httk₂</em> source of truth:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow workspace status workflow-workspace --json</span>
+</pre></div>
+</div>
+<p>The compatibility runner preserves the persistent <code class="docutils literal notranslate"><span class="pre">ht.run.current/</span></code>
+workdir, translates <em>httk</em> v1 decisions and dynamic subtasks, and completes
+published <em>httk</em> v1 atomic sections after interruption. See
+<a class="reference internal" href="v1_compatibility.html"><span class="std std-doc"><em>httk</em> v1 task compatibility</span></a> for the precise
+compatibility boundary.</p>
+</section>
+<section id="migrate-project-configuration-and-remotes-separately">
+<h2>4. Migrate project, configuration, and remotes separately<a class="headerlink" href="#migrate-project-configuration-and-remotes-separately" title="Link to this heading">¶</a></h2>
+<p>These imports do not migrate workflow code or task queues.</p>
+<p>Import safe user configuration explicitly:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow config import-v1</span>
+</pre></div>
+</div>
+<p>Create <em>httk₂</em> project metadata from a local <code class="docutils literal notranslate"><span class="pre">ht.project</span></code> without modifying it:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow project import-v1 . --source ./ht.project</span>
+</pre></div>
+</div>
+<p>This imports safe metadata and public identities. It does not import private
+keys or the <em>httk</em> v1 queue. Imported project metadata records
+<code class="docutils literal notranslate"><span class="pre">legacy_queue_imported:</span> <span class="pre">false</span></code>. The imported project can record a workspace
+default, but the core-v2 workspace itself remains outside the project; detached
+transfer and transactional data are available to native jobs.</p>
+<p>The workspace registry is machine-owned in <em>httk₂</em>. An old <code class="docutils literal notranslate"><span class="pre">workspaces.json</span></code>
+is refused with a teaching error; remove it and re-register local workspaces
+with <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span> <span class="pre">PATH</span></code> (remote names are registered on their owning
+machine). <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">default</span> <span class="pre">NAME</span></code> replaces project workspace bindings: it
+records only the name in <code class="docutils literal notranslate"><span class="pre">project.json</span></code>, while the workspace remains outside
+the project.</p>
+<p>Recognized <em>httk</em> v1 computer definitions can be mapped explicitly into
+<em>httk₂</em> remotes:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow remote import-v1 ~/.httk/computers/cluster-a \</span>
+<span class="go">  --name cluster-a</span>
+<span class="go">httk workflow workspace init cluster-a:/remote/path/to/workflow-workspace \</span>
+<span class="go">  --name default</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">workspace_root</span></code> is retired. <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span> <span class="pre">REMOTE:PATH</span></code> performs the remote
+initialization and registration; <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">settings</span> <span class="pre">set</span> <span class="pre">REMOTE:NAME</span> <span class="pre">…</span></code> then
+sets scheduler and application settings on that workspace. <code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">import-v1</span></code>
+does not create a workspace: it preserves the legacy Runs hint in the remote’s
+<code class="docutils literal notranslate"><span class="pre">legacy_settings</span></code> so an operator can choose the path explicitly.</p>
+<p>Review every generated adapter before installation. Legacy shell executables
+and credentials are not copied or executed by the importer.</p>
+</section>
+<section id="run-compatibility-and-native-jobs-side-by-side">
+<h2>5. Run compatibility and native jobs side by side<a class="headerlink" href="#run-compatibility-and-native-jobs-side-by-side" title="Link to this heading">¶</a></h2>
+<p>The <em>httk</em> v1 and native managers select different runner executors, so they can share
+one <em>httk₂</em> workspace:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="gp"># </span>Terminal<span class="w"> </span>or<span class="w"> </span>service<span class="w"> </span><span class="m">1</span>:<span class="w"> </span>compatibility<span class="w"> </span><span class="nb">jobs</span>
+<span class="go">httk workflow v1 run workflow-workspace --taskset any --workers 2</span>
+
+<span class="gp"># </span>Terminal<span class="w"> </span>or<span class="w"> </span>service<span class="w"> </span><span class="m">2</span>:<span class="w"> </span>native<span class="w"> </span><span class="nb">jobs</span>
+<span class="go">httk workflow manager run workflow-workspace --pool vasp-native --workers 2</span>
+</pre></div>
+</div>
+<p>The shared core-v2 workspace already provides transactional data and detached
+transfer for native jobs.</p>
+<p>Give the first native version a new job UUID and preferably a distinct tag and
+placement. Do not edit the immutable <code class="docutils literal notranslate"><span class="pre">job.json</span></code> of an already submitted job to
+change its runner executor.</p>
+<p>Migrate one representative task first. Compare it with the compatibility
+reference before moving a larger batch.</p>
+</section>
+<section id="replace-the-httk-v1-control-flow-with-native-bash">
+<h2>6. Replace the <em>httk</em> v1 control flow with native Bash<a class="headerlink" href="#replace-the-httk-v1-control-flow-with-native-bash" title="Link to this heading">¶</a></h2>
+<p>A typical <em>httk</em> v1 runner looks like:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/env bash</span>
+
+<span class="nb">source</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HTTK_DIR</span><span class="s2">/Execution/tasks/ht_tasks_api.sh&quot;</span>
+<span class="nb">source</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HTTK_DIR</span><span class="s2">/Execution/tasks/vasp/vasptools.sh&quot;</span>
+HT_TASK_INIT<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$@</span><span class="s2">&quot;</span>
+
+<span class="k">case</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$STEP</span><span class="s2">&quot;</span><span class="w"> </span><span class="k">in</span>
+<span class="w">  </span>prepare<span class="o">)</span>
+<span class="w">    </span>VASP_PREPARE_CALC
+<span class="w">    </span>HT_TASK_NEXT<span class="w"> </span>run
+<span class="w">    </span><span class="p">;;</span>
+<span class="w">  </span>run<span class="o">)</span>
+<span class="w">    </span>VASP_PRECLEAN
+<span class="w">    </span>VASP_RUN_CONTROLLED<span class="w"> </span><span class="m">86400</span><span class="w"> </span>vasp_std
+<span class="w">    </span>HT_TASK_NEXT<span class="w"> </span>collect
+<span class="w">    </span><span class="p">;;</span>
+<span class="w">  </span>collect<span class="o">)</span>
+<span class="w">    </span>HT_TASK_FINISHED
+<span class="w">    </span><span class="p">;;</span>
+<span class="k">esac</span>
+</pre></div>
+</div>
+<div class="tip admonition">
+<p class="admonition-title">A relaxation may need no runner at all</p>
+<p>The workflow below ships with the module, in Bash and in Python, as
+<code class="docutils literal notranslate"><span class="pre">vasp_relax.sh</span></code> and <code class="docutils literal notranslate"><span class="pre">vasp_relax.py</span></code>. A campaign that wants the ordinary relaxation
+submits jobs naming the installed file and writes nothing: see
+<a class="reference internal" href="vasp_runners.html"><span class="doc">Packaged VASP runners</span></a>. Write your own when your practice differs from the packaged
+one — starting from a copy of it.</p>
+</div>
+<p>The native Bash equivalent sources paths supplied by the manager and publishes
+structured outcomes:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/env bash</span>
+<span class="nb">set</span><span class="w"> </span>-euo<span class="w"> </span>pipefail
+
+<span class="nb">source</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HTTK_WORKFLOW_BASH_API</span><span class="s2">&quot;</span>
+<span class="nb">source</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HTTK_WORKFLOW_VASP_BASH_API</span><span class="s2">&quot;</span>
+httk_workflow_runner<span class="w"> </span>vasp.relax<span class="w"> </span>prepare<span class="w"> </span>run<span class="w"> </span>collect
+
+step_prepare<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">  </span><span class="nb">local</span><span class="w"> </span>input
+<span class="w">  </span><span class="k">for</span><span class="w"> </span>input<span class="w"> </span><span class="k">in</span><span class="w"> </span>POSCAR<span class="w"> </span>INCAR<span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="o">[</span><span class="w"> </span>!<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$input</span><span class="s2">&quot;</span><span class="w"> </span><span class="o">]</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">      </span>cp<span class="w"> </span>--<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HTTK_WORKFLOW_JOB_DIR</span><span class="s2">/files/</span><span class="nv">$input</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="nv">$input</span><span class="s2">&quot;</span>
+<span class="w">    </span><span class="k">fi</span>
+<span class="w">  </span><span class="k">done</span>
+<span class="w">  </span>httk_vasp_prepare<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--options<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$HTTK_WORKFLOW_JOB_DIR</span><span class="s2">/files/vasp-options.json&quot;</span>
+<span class="w">  </span>httk_workflow_advance<span class="w"> </span>run
+<span class="o">}</span>
+
+step_run<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">  </span><span class="nb">local</span><span class="w"> </span><span class="nv">status</span><span class="o">=</span><span class="m">0</span>
+<span class="w">  </span>httk_vasp_preclean<span class="w"> </span>--keep<span class="w"> </span>WAVECAR
+<span class="w">  </span><span class="k">if</span><span class="w"> </span>httk_vasp_run<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--timeout<span class="w"> </span><span class="m">86400</span><span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--report<span class="w"> </span>vasp-run-report.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--<span class="w"> </span>vasp_std<span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">      </span>httk_workflow_advance<span class="w"> </span>collect
+<span class="w">      </span><span class="k">return</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="w">  </span><span class="nv">status</span><span class="o">=</span><span class="nv">$?</span>
+<span class="w">  </span><span class="k">if</span><span class="w"> </span>httk_vasp_remedy_plan<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>vasp-run-report.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>--output<span class="w"> </span>remedy.json<span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">      </span>httk_vasp_remedy_apply<span class="w"> </span>remedy.json
+<span class="w">      </span>httk_workflow_retry<span class="w"> </span><span class="s2">&quot;reviewed VASP remedy applied&quot;</span>
+<span class="w">      </span><span class="k">return</span>
+<span class="w">  </span><span class="k">fi</span>
+<span class="w">  </span>httk_workflow_fail<span class="w"> </span>vasp.failed<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="s2">&quot;VASP stopped with status </span><span class="nv">$status</span><span class="s2">&quot;</span>
+<span class="o">}</span>
+
+step_collect<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">  </span>httk_workflow_put<span class="w"> </span>OUTCAR<span class="w"> </span>results/OUTCAR<span class="w"> </span>&gt;/dev/null
+<span class="w">  </span>httk_workflow_put<span class="w"> </span>OSZICAR<span class="w"> </span>results/OSZICAR<span class="w"> </span>&gt;/dev/null
+<span class="w">  </span>httk_workflow_succeed
+<span class="o">}</span>
+
+httk_workflow_main
+</pre></div>
+</div>
+<p>The outcome functions publish exactly one decision and then <em>return</em>:
+<code class="docutils literal notranslate"><span class="pre">httk_workflow_main</span></code> owns the process exit status. Do not additionally return a
+legacy decision code or write <code class="docutils literal notranslate"><span class="pre">ht.nextstep</span></code>.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">collect</span></code> example uses transactional data. Its workspace is core-v2:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow workspace init native-workspace</span>
+</pre></div>
+</div>
+<p>If the job uses <code class="docutils literal notranslate"><span class="pre">data.mode:</span> <span class="pre">&quot;none&quot;</span></code>, omit the transaction and keep restartable
+working files in its persistent workdir instead.</p>
+<section id="prepare-the-native-payload">
+<h3>Prepare the native payload<a class="headerlink" href="#prepare-the-native-payload" title="Link to this heading">¶</a></h3>
+<p>Put the runner and static inputs below one payload directory:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">mkdir -p native-job/files</span>
+<span class="go">cp run.sh vasp-options.json POSCAR INCAR native-job/files/</span>
+<span class="go">chmod +x native-job/files/run.sh</span>
+</pre></div>
+</div>
+<p>Create the immutable <code class="docutils literal notranslate"><span class="pre">job.json</span></code> through the Python builder:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">httk.workflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">JobSpec</span><span class="p">,</span> <span class="n">prepare_job_payload</span>
+
+<span class="n">prepare_job_payload</span><span class="p">(</span>
+    <span class="s2">&quot;native-job&quot;</span><span class="p">,</span>
+    <span class="n">JobSpec</span><span class="p">(</span>
+        <span class="n">name</span><span class="o">=</span><span class="s2">&quot;silicon relaxation&quot;</span><span class="p">,</span>
+        <span class="n">workflow</span><span class="o">=</span><span class="s2">&quot;example.vasp-relax&quot;</span><span class="p">,</span>
+        <span class="n">runner_path</span><span class="o">=</span><span class="s2">&quot;files/run.sh&quot;</span><span class="p">,</span>
+        <span class="n">initial_step</span><span class="o">=</span><span class="s2">&quot;prepare&quot;</span><span class="p">,</span>
+        <span class="n">tag</span><span class="o">=</span><span class="s2">&quot;silicon-relax&quot;</span><span class="p">,</span>
+        <span class="n">workdir_mode</span><span class="o">=</span><span class="s2">&quot;persistent&quot;</span><span class="p">,</span>
+        <span class="n">data_mode</span><span class="o">=</span><span class="s2">&quot;transactional&quot;</span><span class="p">,</span>
+        <span class="n">priority</span><span class="o">=</span><span class="mi">700</span><span class="p">,</span>
+        <span class="n">claim_pool</span><span class="o">=</span><span class="s2">&quot;vasp-native&quot;</span><span class="p">,</span>
+        <span class="n">maximum_attempts_per_activation</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span>
+        <span class="n">maximum_total_attempts</span><span class="o">=</span><span class="mi">20</span><span class="p">,</span>
+    <span class="p">),</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>Submit and run it:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow job submit native-workspace native-job \</span>
+<span class="go">  --placement migration/native/silicon-relax</span>
+<span class="go">httk workflow manager run native-workspace \</span>
+<span class="go">  --pool vasp-native \</span>
+</pre></div>
+</div>
+<p>Static payload files are available below <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_JOB_DIR</span></code>; the selected
+workdir is <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_WORKDIR</span></code>. Copy or link static inputs into the
+workdir in an explicit preparation step when necessary.</p>
+</section>
+</section>
+<section id="translate-the-commonly-used-task-helpers">
+<h2>7. Translate the commonly used task helpers<a class="headerlink" href="#translate-the-commonly-used-task-helpers" title="Link to this heading">¶</a></h2>
+<p>The native API is intentionally not a spelling change of the <em>httk</em> v1 API.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p><em>httk</em> v1 operation</p></th>
+<th class="head"><p>Native Bash</p></th>
+<th class="head"><p>Native Python</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">HT_TASK_INIT</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_runner</span></code> plus <code class="docutils literal notranslate"><span class="pre">httk_workflow_main</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Runner.main()</span></code> dispatches the step</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">HT_TASK_NEXT</span> <span class="pre">step</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_advance</span> <span class="pre">step</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">a.advance(&quot;step&quot;)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">HT_TASK_FINISHED</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_succeed</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">a.succeed()</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">HT_TASK_BROKEN</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_fail</span> <span class="pre">CODE</span> <span class="pre">MESSAGE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">a.fail(code,</span> <span class="pre">message)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">HT_TASK_SUBTASKS</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_spawn</span></code> plus <code class="docutils literal notranslate"><span class="pre">httk_workflow_gather</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">a.spawn(ChildSpec(...),</span> <span class="pre">label=...)</span></code> plus <code class="docutils literal notranslate"><span class="pre">a.gather(step)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">HT_TASK_ATOMIC_*</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_put</span></code> / <code class="docutils literal notranslate"><span class="pre">remove</span></code> or a workdir spec</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">a.put()</span></code> / <code class="docutils literal notranslate"><span class="pre">a.remove()</span></code> or <code class="docutils literal notranslate"><span class="pre">a.workdir_batch()</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">HT_TASK_STORE_VAR</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_state_set</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">a.state[&quot;name&quot;]</span> <span class="pre">=</span> <span class="pre">value</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">HT_TASK_RUN_CONTROLLED</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_run</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">a.run(argv)</span></code> or <code class="docutils literal notranslate"><span class="pre">ProcessSupervisor</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">HT_TASK_SET_PRIORITY</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--priority</span></code> on an outcome</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">priority=</span></code> on publication</p></td>
+</tr>
+<tr class="row-odd"><td><p>run-log helpers</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_runlog_*</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">a.log.append()</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">HT_FCALC</span></code> / <code class="docutils literal notranslate"><span class="pre">HT_FTEST</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_calc</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">evaluate_expression()</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">HT_TEMPLATE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_template_render</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">render_template()</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>compress/uncompress</p></td>
+<td><p>explicit <code class="docutils literal notranslate"><span class="pre">httk_compress</span></code> / <code class="docutils literal notranslate"><span class="pre">httk_decompress</span></code> paths</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">compress_files()</span></code> / <code class="docutils literal notranslate"><span class="pre">decompress_files()</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">HT_FIND_NBR_NODES</span></code></p></td>
+<td><p>declared attempt resources</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">a.context.resources</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>State values are JSON, not sourced shell assignments:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>httk_workflow_state_set<span class="w"> </span>relaxation_index<span class="w"> </span><span class="m">3</span>
+httk_workflow_state_set<span class="w"> </span>phase<span class="w"> </span><span class="s1">&#39;&quot;ionic&quot;&#39;</span>
+
+<span class="nv">relaxation_index</span><span class="o">=</span><span class="k">$(</span>httk_workflow_state_get<span class="w"> </span>relaxation_index<span class="k">)</span>
+</pre></div>
+</div>
+<p>Templates use <code class="docutils literal notranslate"><span class="pre">string.Template</span></code> placeholders and an explicit JSON value file:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span># INCAR.template
+ENCUT = $ENCUT
+SYSTEM = $SYSTEM
+</pre></div>
+</div>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;ENCUT&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">520</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;SYSTEM&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;silicon&quot;</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>httk_template_render<span class="w"> </span>INCAR.template<span class="w"> </span>INCAR<span class="w"> </span>template-values.json
+</pre></div>
+</div>
+<p>There is no shell <code class="docutils literal notranslate"><span class="pre">eval</span></code> in the native template or arithmetic implementation.</p>
+</section>
+<section id="replace-controlled-run-checkers">
+<h2>8. Replace controlled-run checkers<a class="headerlink" href="#replace-controlled-run-checkers" title="Link to this heading">¶</a></h2>
+<p>For simple programs, use argv-only supervision directly:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="k">if</span><span class="w"> </span>httk_workflow_run<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--timeout<span class="w"> </span><span class="m">3600</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--report<span class="w"> </span>process-report.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--stdout<span class="w"> </span>program.out<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--stderr<span class="w"> </span>program.err<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--<span class="w"> </span>simulation<span class="w"> </span>--input<span class="w"> </span>input.dat<span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<span class="w">    </span>httk_workflow_advance<span class="w"> </span>collect
+<span class="k">else</span>
+<span class="w">  </span><span class="nv">status</span><span class="o">=</span><span class="nv">$?</span>
+<span class="w">  </span>httk_workflow_retry<span class="w"> </span><span class="s2">&quot;simulation stopped with status </span><span class="nv">$status</span><span class="s2">&quot;</span>
+<span class="k">fi</span>
+</pre></div>
+</div>
+<p>For application-specific monitoring, write a checker spec:</p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;httk-workflow-checker-spec&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;format_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;argv&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;./checker.py&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;required&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;sources&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;progress.log&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;progress&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;inactivity_timeout&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">600</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">]</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>This example assumes the executable checker and its specification were copied
+from the immutable job payload into the workdir during preparation.</p>
+<p>The executable reads <code class="docutils literal notranslate"><span class="pre">httk-workflow-checker-event</span></code> JSON lines from stdin and
+emits versioned results on stdout:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/env python3</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+
+<span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">sys</span><span class="o">.</span><span class="n">stdin</span><span class="p">:</span>
+    <span class="n">event</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">line</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">event</span><span class="p">[</span><span class="s2">&quot;event&quot;</span><span class="p">]</span> <span class="o">==</span> <span class="s2">&quot;line&quot;</span> <span class="ow">and</span> <span class="s2">&quot;FATAL&quot;</span> <span class="ow">in</span> <span class="n">event</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;line&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">):</span>
+        <span class="nb">print</span><span class="p">(</span>
+            <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span>
+                <span class="p">{</span>
+                    <span class="s2">&quot;format&quot;</span><span class="p">:</span> <span class="s2">&quot;httk-workflow-checker-result&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;format_version&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+                    <span class="s2">&quot;code&quot;</span><span class="p">:</span> <span class="s2">&quot;application_fatal&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;severity&quot;</span><span class="p">:</span> <span class="s2">&quot;fatal&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;summary&quot;</span><span class="p">:</span> <span class="s2">&quot;application reported a fatal error&quot;</span><span class="p">,</span>
+                    <span class="s2">&quot;source&quot;</span><span class="p">:</span> <span class="n">event</span><span class="p">[</span><span class="s2">&quot;source&quot;</span><span class="p">],</span>
+                    <span class="s2">&quot;evidence&quot;</span><span class="p">:</span> <span class="n">event</span><span class="p">[</span><span class="s2">&quot;line&quot;</span><span class="p">],</span>
+                    <span class="s2">&quot;stop&quot;</span><span class="p">:</span> <span class="kc">True</span><span class="p">,</span>
+                <span class="p">}</span>
+            <span class="p">),</span>
+            <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+        <span class="p">)</span>
+</pre></div>
+</div>
+<p>Invoke it without constructing a shell command:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>httk_workflow_run<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--checker<span class="w"> </span>checker.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--timeout<span class="w"> </span><span class="m">3600</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--<span class="w"> </span>simulation<span class="w"> </span>--input<span class="w"> </span>input.dat
+</pre></div>
+</div>
+<p>Checker diagnostics belong on stderr. Do not reproduce the <em>httk</em> v1 signal,
+temporary-message-file, or process-discovery convention.</p>
+</section>
+<section id="replace-vasp-helpers">
+<h2>9. Replace VASP helpers<a class="headerlink" href="#replace-vasp-helpers" title="Link to this heading">¶</a></h2>
+<p>VASP input choices can be recorded in JSON:</p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;kpoint_density&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">40.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;centering&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;Gamma&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;accuracy_per_atom&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.001</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;pseudopotential_library&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/data/vasp/potpaw_PBE&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;parallel_tag&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;NPAR&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;parallel_value&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;normalize_handedness&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="p">}</span>
+</pre></div>
+</div>
+<p>The native Bash operations include:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>httk_vasp_prepare<span class="w"> </span>--options<span class="w"> </span>vasp-options.json
+httk_vasp_get_tag<span class="w"> </span>EDIFF<span class="w"> </span>INCAR
+httk_vasp_set_tag<span class="w"> </span>ISYM<span class="w"> </span><span class="m">0</span><span class="w"> </span>INCAR
+httk_vasp_prepare_kpoints<span class="w"> </span><span class="m">40</span><span class="w"> </span>--centering<span class="w"> </span>Gamma
+httk_vasp_prepare_potcar<span class="w"> </span>/data/vasp/potpaw_PBE
+httk_vasp_nbands<span class="w"> </span>--divisor<span class="w"> </span><span class="m">4</span>
+httk_vasp_preclean<span class="w"> </span>--keep<span class="w"> </span>WAVECAR
+httk_vasp_run<span class="w"> </span>--timeout<span class="w"> </span><span class="m">86400</span><span class="w"> </span>--<span class="w"> </span>vasp_std
+httk_vasp_energy<span class="w"> </span>OSZICAR
+httk_vasp_volume<span class="w"> </span>vasprun.xml
+httk_vasp_promote_contcar
+httk_vasp_clean_outcar
+</pre></div>
+</div>
+<p>Important behavioral differences are:</p>
+<ul class="simple">
+<li><p>diagnostics work with VASP 5 and VASP 6 output;</p></li>
+<li><p>input diagnosis never changes files;</p></li>
+<li><p>remedies are bounded proposals under the explicit <code class="docutils literal notranslate"><span class="pre">reviewed-v1</span></code> policy;</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">httk_vasp_remedy_apply</span></code> is a separate, auditable mutation;</p></li>
+<li><p>remedy history records before and after input digests;</p></li>
+<li><p>rerun cleanup is explicit and can preserve named files;</p></li>
+<li><p>commands are argv arrays and never interpolated shell strings.</p></li>
+</ul>
+<p>The old Python modules <code class="docutils literal notranslate"><span class="pre">httk.task.ht_tasks_api</span></code> and
+<code class="docutils literal notranslate"><span class="pre">httk.task.vasptools</span></code> are not available in <em>httk₂</em>. Use the public functions in
+<code class="docutils literal notranslate"><span class="pre">httk.workflow</span></code> instead. Their independent design and the prior <em>httk</em> v1
+contributor work are described in the packaged compatibility <code class="docutils literal notranslate"><span class="pre">NOTICE</span></code>.</p>
+</section>
+<section id="migrate-dynamic-subtasks">
+<h2>10. Migrate dynamic subtasks<a class="headerlink" href="#migrate-dynamic-subtasks" title="Link to this heading">¶</a></h2>
+<p>Do not recreate the <em>httk</em> v1 <code class="docutils literal notranslate"><span class="pre">ht.task.&lt;set&gt;...waitstart</span></code> filename protocol in a
+native workflow. Prepare explicit child payloads and publish their identities
+with the parent outcome.</p>
+<p>A Python parent can create a fixed child set as follows:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">shutil</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">tempfile</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">uuid</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">httk.workflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">JobSpec</span><span class="p">,</span> <span class="n">Runner</span><span class="p">,</span> <span class="n">prepare_job_payload</span>
+
+<span class="n">run</span> <span class="o">=</span> <span class="n">Runner</span><span class="p">(</span><span class="s2">&quot;example.volume-scan&quot;</span><span class="p">)</span>
+
+
+<span class="nd">@run</span><span class="o">.</span><span class="n">step</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">branch</span><span class="p">(</span><span class="n">a</span><span class="p">):</span>
+    <span class="k">with</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">TemporaryDirectory</span><span class="p">(</span><span class="nb">dir</span><span class="o">=</span><span class="n">a</span><span class="o">.</span><span class="n">workdir</span><span class="p">)</span> <span class="k">as</span> <span class="n">draft_root</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">index</span><span class="p">,</span> <span class="n">parameter</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">((</span><span class="s2">&quot;0.95&quot;</span><span class="p">,</span> <span class="s2">&quot;1.00&quot;</span><span class="p">,</span> <span class="s2">&quot;1.05&quot;</span><span class="p">)):</span>
+            <span class="n">child</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">draft_root</span><span class="p">)</span> <span class="o">/</span> <span class="sa">f</span><span class="s2">&quot;child-</span><span class="si">{</span><span class="n">index</span><span class="si">}</span><span class="s2">&quot;</span>
+            <span class="n">shutil</span><span class="o">.</span><span class="n">copytree</span><span class="p">(</span><span class="n">a</span><span class="o">.</span><span class="n">payload</span> <span class="o">/</span> <span class="s2">&quot;files&quot;</span> <span class="o">/</span> <span class="s2">&quot;child-template&quot;</span><span class="p">,</span> <span class="n">child</span><span class="p">)</span>
+            <span class="p">(</span><span class="n">child</span> <span class="o">/</span> <span class="s2">&quot;parameter.txt&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span>
+                <span class="n">parameter</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">,</span>
+                <span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="n">child_id</span> <span class="o">=</span> <span class="n">uuid</span><span class="o">.</span><span class="n">uuid5</span><span class="p">(</span>
+                <span class="n">uuid</span><span class="o">.</span><span class="n">UUID</span><span class="p">(</span><span class="n">a</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">job_id</span><span class="p">),</span>
+                <span class="sa">f</span><span class="s2">&quot;volume-</span><span class="si">{</span><span class="n">index</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="n">prepare_job_payload</span><span class="p">(</span>
+                <span class="n">child</span><span class="p">,</span>
+                <span class="n">JobSpec</span><span class="p">(</span>
+                    <span class="n">name</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;volume point </span><span class="si">{</span><span class="n">index</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+                    <span class="n">workflow</span><span class="o">=</span><span class="s2">&quot;example.volume-point&quot;</span><span class="p">,</span>
+                    <span class="n">runner_path</span><span class="o">=</span><span class="s2">&quot;files/run.py&quot;</span><span class="p">,</span>
+                    <span class="n">tag</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;volume-</span><span class="si">{</span><span class="n">index</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+                    <span class="n">job_id</span><span class="o">=</span><span class="nb">str</span><span class="p">(</span><span class="n">child_id</span><span class="p">),</span>
+                    <span class="n">initial_step</span><span class="o">=</span><span class="s2">&quot;run&quot;</span><span class="p">,</span>
+                    <span class="n">claim_pool</span><span class="o">=</span><span class="s2">&quot;vasp-native&quot;</span><span class="p">,</span>
+                <span class="p">),</span>
+            <span class="p">)</span>
+            <span class="n">a</span><span class="o">.</span><span class="n">spawn</span><span class="p">(</span>
+                <span class="n">child</span><span class="p">,</span>
+                <span class="n">label</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;volume-</span><span class="si">{</span><span class="n">index</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+                <span class="n">placement</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;volume-scan/</span><span class="si">{</span><span class="n">index</span><span class="si">:</span><span class="s2">03d</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+            <span class="p">)</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span><span class="s2">&quot;collect&quot;</span><span class="p">,</span> <span class="n">when</span><span class="o">=</span><span class="s2">&quot;all_terminal&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>A child whose steps live in the same runner needs no payload at all: publish the
+runner once in the workspace and spawn a <code class="docutils literal notranslate"><span class="pre">ChildSpec</span></code>, which synthesizes the whole
+child job from its step and parameters and inherits the parent’s runner reference.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">a</span><span class="o">.</span><span class="n">spawn</span><span class="p">(</span><span class="n">ChildSpec</span><span class="p">(</span><span class="n">step</span><span class="o">=</span><span class="s2">&quot;run&quot;</span><span class="p">,</span> <span class="n">parameters</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;scale&quot;</span><span class="p">:</span> <span class="n">parameter</span><span class="p">}),</span> <span class="n">label</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;volume-</span><span class="si">{</span><span class="n">index</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>Use <code class="docutils literal notranslate"><span class="pre">all_succeeded</span></code> when any failed child should make the join impossible.
+<code class="docutils literal notranslate"><span class="pre">all_terminal</span></code> most closely matches the compatibility behavior in which a
+broken descendant no longer counts as active. Other native conditions are
+<code class="docutils literal notranslate"><span class="pre">any_succeeded</span></code> and <code class="docutils literal notranslate"><span class="pre">at_least</span></code>.</p>
+<p>A Bash step spawns the same children by step and parameters, and gathers exactly the
+ones it spawned:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="k">for</span><span class="w"> </span>index<span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="m">000</span><span class="w"> </span><span class="m">001</span><span class="p">;</span><span class="w"> </span><span class="k">do</span>
+<span class="w">    </span>httk_workflow_spawn<span class="w"> </span><span class="s2">&quot;volume-</span><span class="nv">$index</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>--step<span class="w"> </span>run<span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>--parameter<span class="w"> </span><span class="nv">scale</span><span class="o">=</span><span class="s2">&quot;0.</span><span class="nv">$index</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">        </span>--placement<span class="w"> </span><span class="s2">&quot;volume-scan/</span><span class="nv">$index</span><span class="s2">&quot;</span><span class="w"> </span>&gt;/dev/null
+<span class="k">done</span>
+httk_workflow_gather<span class="w"> </span>collect<span class="w"> </span>--when<span class="w"> </span>all_terminal
+</pre></div>
+</div>
+<p>The complete child set is sealed with the outcome. A native parent cannot add
+untracked children after publication. Child UUIDs must remain stable if the
+parent recreates the same unpublished outcome after an interrupted attempt.</p>
+</section>
+<section id="migrate-to-a-python-runner">
+<h2>11. Migrate to a Python runner<a class="headerlink" href="#migrate-to-a-python-runner" title="Link to this heading">¶</a></h2>
+<p>A native Python VASP runner can express the same steps without a shell facade:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/env python3</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">shutil</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">httk.workflow</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">Runner</span><span class="p">,</span>
+    <span class="n">VaspPreparationOptions</span><span class="p">,</span>
+    <span class="n">apply_vasp_remedy</span><span class="p">,</span>
+    <span class="n">plan_vasp_remedy</span><span class="p">,</span>
+    <span class="n">prepare_vasp_inputs</span><span class="p">,</span>
+    <span class="n">run_vasp</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">run</span> <span class="o">=</span> <span class="n">Runner</span><span class="p">(</span><span class="s2">&quot;example.vasp-relax&quot;</span><span class="p">)</span>
+
+
+<span class="nd">@run</span><span class="o">.</span><span class="n">step</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">prepare</span><span class="p">(</span><span class="n">a</span><span class="p">):</span>
+    <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;POSCAR&quot;</span><span class="p">,</span> <span class="s2">&quot;INCAR&quot;</span><span class="p">):</span>
+        <span class="n">destination</span> <span class="o">=</span> <span class="n">a</span><span class="o">.</span><span class="n">workdir</span> <span class="o">/</span> <span class="n">name</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">destination</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+            <span class="n">shutil</span><span class="o">.</span><span class="n">copy2</span><span class="p">(</span><span class="n">a</span><span class="o">.</span><span class="n">payload</span> <span class="o">/</span> <span class="s2">&quot;files&quot;</span> <span class="o">/</span> <span class="n">name</span><span class="p">,</span> <span class="n">destination</span><span class="p">)</span>
+    <span class="n">prepare_vasp_inputs</span><span class="p">(</span>
+        <span class="n">VaspPreparationOptions</span><span class="p">(</span>
+            <span class="n">kpoint_density</span><span class="o">=</span><span class="mi">40</span><span class="p">,</span>
+            <span class="n">centering</span><span class="o">=</span><span class="s2">&quot;Gamma&quot;</span><span class="p">,</span>
+            <span class="n">pseudopotential_library</span><span class="o">=</span><span class="s2">&quot;/data/vasp/potpaw_PBE&quot;</span><span class="p">,</span>
+            <span class="n">parallel_tag</span><span class="o">=</span><span class="s2">&quot;NPAR&quot;</span><span class="p">,</span>
+            <span class="n">parallel_value</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+        <span class="p">),</span>
+        <span class="n">directory</span><span class="o">=</span><span class="n">a</span><span class="o">.</span><span class="n">workdir</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">advance</span><span class="p">(</span><span class="s2">&quot;run&quot;</span><span class="p">)</span>
+
+
+<span class="nd">@run</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;run&quot;</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">run_step</span><span class="p">(</span><span class="n">a</span><span class="p">):</span>
+    <span class="n">report</span> <span class="o">=</span> <span class="n">run_vasp</span><span class="p">([</span><span class="s2">&quot;vasp_std&quot;</span><span class="p">],</span> <span class="n">directory</span><span class="o">=</span><span class="n">a</span><span class="o">.</span><span class="n">workdir</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">86400</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">report</span><span class="o">.</span><span class="n">classification</span> <span class="o">==</span> <span class="s2">&quot;completed&quot;</span><span class="p">:</span>
+        <span class="n">a</span><span class="o">.</span><span class="n">advance</span><span class="p">(</span><span class="s2">&quot;collect&quot;</span><span class="p">)</span>
+        <span class="k">return</span>
+
+    <span class="n">history</span> <span class="o">=</span> <span class="s2">&quot;.httk-vasp/remedies.json&quot;</span>
+    <span class="n">decision</span> <span class="o">=</span> <span class="n">plan_vasp_remedy</span><span class="p">(</span><span class="n">report</span><span class="o">.</span><span class="n">diagnostics</span><span class="p">,</span> <span class="n">history_path</span><span class="o">=</span><span class="n">history</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">decision</span><span class="o">.</span><span class="n">give_up</span><span class="p">:</span>
+        <span class="n">apply_vasp_remedy</span><span class="p">(</span><span class="n">decision</span><span class="p">,</span> <span class="n">directory</span><span class="o">=</span><span class="n">a</span><span class="o">.</span><span class="n">workdir</span><span class="p">,</span> <span class="n">history_path</span><span class="o">=</span><span class="n">history</span><span class="p">)</span>
+        <span class="n">a</span><span class="o">.</span><span class="n">retry</span><span class="p">(</span><span class="s2">&quot;reviewed VASP remedy applied&quot;</span><span class="p">)</span>
+        <span class="k">return</span>
+
+    <span class="n">a</span><span class="o">.</span><span class="n">fail</span><span class="p">(</span>
+        <span class="s2">&quot;vasp_failure&quot;</span><span class="p">,</span>
+        <span class="sa">f</span><span class="s2">&quot;VASP stopped with classification </span><span class="si">{</span><span class="n">report</span><span class="o">.</span><span class="n">classification</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="n">details</span><span class="o">=</span><span class="n">report</span><span class="o">.</span><span class="n">as_mapping</span><span class="p">(),</span>
+    <span class="p">)</span>
+
+
+<span class="nd">@run</span><span class="o">.</span><span class="n">step</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">collect</span><span class="p">(</span><span class="n">a</span><span class="p">):</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">a</span><span class="o">.</span><span class="n">workdir</span> <span class="o">/</span> <span class="s2">&quot;OUTCAR&quot;</span><span class="p">,</span> <span class="s2">&quot;results/OUTCAR&quot;</span><span class="p">)</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">put</span><span class="p">(</span><span class="n">a</span><span class="o">.</span><span class="n">workdir</span> <span class="o">/</span> <span class="s2">&quot;OSZICAR&quot;</span><span class="p">,</span> <span class="s2">&quot;results/OSZICAR&quot;</span><span class="p">)</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">succeed</span><span class="p">()</span>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">&quot;__main__&quot;</span><span class="p">:</span>
+    <span class="k">raise</span> <span class="ne">SystemExit</span><span class="p">(</span><span class="n">run</span><span class="o">.</span><span class="n">main</span><span class="p">())</span>
+</pre></div>
+</div>
+<p>There is no step-dispatch chain and no <code class="docutils literal notranslate"><span class="pre">unknown_step</span></code> branch to write: <code class="docutils literal notranslate"><span class="pre">Runner.main</span></code>
+dispatches the step the manager asked for, and reports an unimplemented step, a step
+that published nothing, and a step that raised as the corresponding outcome.</p>
+<p>As in the Bash example, the transaction requires a transactional-data job in a
+core-v2 workspace.</p>
+</section>
+<section id="converting-your-ht-instantiate-py">
+<h2>12. Converting your <code class="docutils literal notranslate"><span class="pre">ht.instantiate.py</span></code><a class="headerlink" href="#converting-your-ht-instantiate-py" title="Link to this heading">¶</a></h2>
+<p>In v1, <code class="docutils literal notranslate"><span class="pre">create_batch_task</span></code> copied the template, changed into the new task
+directory, and <code class="docutils literal notranslate"><span class="pre">exec</span></code>’d <code class="docutils literal notranslate"><span class="pre">ht.instantiate.py</span></code> with the <code class="docutils literal notranslate"><span class="pre">args</span></code> dictionary as its
+globals. The script wrote the task files and could set <code class="docutils literal notranslate"><span class="pre">finalname</span></code> in <code class="docutils literal notranslate"><span class="pre">args</span></code> to
+name the task.</p>
+<section id="the-script-only-wrote-the-structure">
+<h3>The script only wrote the structure<a class="headerlink" href="#the-script-only-wrote-the-structure" title="Link to this heading">¶</a></h3>
+<p>This is the overwhelmingly common case: every template shipped with v1 did
+exactly this. You need no code. Use a packaged template, or declare the
+input on your own Python runner:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="n">run</span> <span class="o">=</span> <span class="n">Runner</span><span class="p">(</span><span class="s2">&quot;example.structure&quot;</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;structure&quot;</span><span class="p">:</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">})</span>
+</pre></div>
+</div>
+<p>Callers pass the structure object. The scaffold writes it to <code class="docutils literal notranslate"><span class="pre">files/POSCAR</span></code>
+using the registered writer (the <em>httk-io</em> and <em>httk-atomistic</em> distributions
+provide the POSCAR writer). A path input is copied instead; for example,
+the Python API uses <code class="docutils literal notranslate"><span class="pre">new_job(ws,</span> <span class="pre">workflow,</span> <span class="pre">inputs={&quot;structure&quot;:</span> <span class="pre">obj})</span></code>,
+and a batch uses <code class="docutils literal notranslate"><span class="pre">new_jobs(...)</span></code> items such as
+<code class="docutils literal notranslate"><span class="pre">{&quot;inputs&quot;:</span> <span class="pre">{&quot;structure&quot;:</span> <span class="pre">obj}}</span></code>. The command-line spellings are
+documented in <a class="reference internal" href="workflow_cli.html"><span class="doc">Project and workflow command line</span></a>.</p>
+</section>
+<section id="the-script-produced-derived-creation-time-files">
+<h3>The script produced derived creation-time files<a class="headerlink" href="#the-script-produced-derived-creation-time-files" title="Link to this heading">¶</a></h3>
+<p>If everything the script produced was derivable from its arguments, declare a
+input for every declared object that defines workflow equivalence. Use a
+destination for values that can be staged directly and <code class="docutils literal notranslate"><span class="pre">None</span></code> for values
+consumed by a creation hook. Keep implementation knobs outside the declaration
+as job parameters. Move the remaining logic to <code class="docutils literal notranslate"><span class="pre">&#64;run.instantiate</span></code>:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">httk.workflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span>
+
+<span class="n">run</span> <span class="o">=</span> <span class="n">Runner</span><span class="p">(</span>
+    <span class="s2">&quot;example.supercell&quot;</span><span class="p">,</span>
+    <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;structure&quot;</span><span class="p">:</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">},</span>
+<span class="p">)</span>
+
+
+<span class="nd">@run</span><span class="o">.</span><span class="n">instantiate</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">instantiate</span><span class="p">(</span><span class="n">ctx</span><span class="p">):</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">httk.atomistic</span><span class="w"> </span><span class="kn">import</span> <span class="n">build_supercell</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">httk.core</span><span class="w"> </span><span class="kn">import</span> <span class="n">save</span>
+
+    <span class="n">result</span> <span class="o">=</span> <span class="n">build_supercell</span><span class="p">(</span><span class="n">ctx</span><span class="o">.</span><span class="n">inputs</span><span class="p">[</span><span class="s2">&quot;structure&quot;</span><span class="p">],</span> <span class="n">ctx</span><span class="o">.</span><span class="n">parameters</span><span class="p">[</span><span class="s2">&quot;supercell&quot;</span><span class="p">])</span>
+    <span class="n">save</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">structure</span><span class="p">,</span> <span class="n">ctx</span><span class="o">.</span><span class="n">payload</span> <span class="o">/</span> <span class="s2">&quot;files&quot;</span> <span class="o">/</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">)</span>
+    <span class="n">ctx</span><span class="o">.</span><span class="n">suggest_tag</span><span class="p">(</span><span class="s2">&quot;supercell&quot;</span><span class="p">)</span>
+</pre></div>
+</div>
+<p>For a v1 script whose <code class="docutils literal notranslate"><span class="pre">args</span></code> contained <code class="docutils literal notranslate"><span class="pre">structure</span></code> and <code class="docutils literal notranslate"><span class="pre">supercell</span></code>, the
+mapping is:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>v1</p></th>
+<th class="head"><p>v2</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">args</span></code> dictionary</p></td>
+<td><p>declared <code class="docutils literal notranslate"><span class="pre">inputs=</span></code> and opaque job <code class="docutils literal notranslate"><span class="pre">parameters=</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>script current directory</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">ctx.payload</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>writing a file</p></td>
+<td><p>a declared destination, or a write below <code class="docutils literal notranslate"><span class="pre">ctx.payload</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">finalname</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">ctx.suggest_tag(...)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>a value the runner needs later</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">ctx.inputs</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Declarative staging happens before the hook. <code class="docutils literal notranslate"><span class="pre">ctx.inputs</span></code> is read-only;
+<code class="docutils literal notranslate"><span class="pre">ctx.parameters</span></code> is mutable and becomes the job’s opaque parameter mapping. The hook runs
+in-process on the creating machine. See <a class="reference internal" href="runtime_helpers.html"><span class="doc">Native runner helpers</span></a> for the hook
+reference and <a class="reference internal" href="workflow_cli.html"><span class="doc">Project and workflow command line</span></a> for <code class="docutils literal notranslate"><span class="pre">--parameter</span> <span class="pre">NAME=VALUE</span></code> and
+<code class="docutils literal notranslate"><span class="pre">--input-from</span> <span class="pre">NAME</span> <span class="pre">SOURCE...</span></code>.</p>
+</section>
+<section id="the-work-belongs-at-run-time">
+<h3>The work belongs at run time<a class="headerlink" href="#the-work-belongs-at-run-time" title="Link to this heading">¶</a></h3>
+<p>If the script’s work is really run-time preparation — for example, deriving
+INCAR values or k-points, as v1 <code class="docutils literal notranslate"><span class="pre">ht_steps</span></code> commonly did — put it in the
+runner’s <code class="docutils literal notranslate"><span class="pre">prepare</span></code> step. Use the instantiate hook only for creation-time work
+that needs the supplied domain objects or must happen before submission.</p>
+<p>The hook is template code imported and executed at creation on the creating
+machine, with the same trust and locality implications as v1’s <code class="docutils literal notranslate"><span class="pre">exec</span></code>. The
+template’s Python file must therefore be available there. Bash runners do not
+support <code class="docutils literal notranslate"><span class="pre">&#64;run.instantiate</span></code>.</p>
+</section>
+</section>
+<section id="validate-before-switching-production-work">
+<h2>13. Validate before switching production work<a class="headerlink" href="#validate-before-switching-production-work" title="Link to this heading">¶</a></h2>
+<p>For each migrated job type:</p>
+<ol class="arabic simple">
+<li><p>Run one fixed input through the compatibility executor.</p></li>
+<li><p>Run the same fixed input through the native executor under a new UUID.</p></li>
+<li><p>Compare prepared <code class="docutils literal notranslate"><span class="pre">INCAR</span></code>, <code class="docutils literal notranslate"><span class="pre">KPOINTS</span></code>, POTCAR metadata, final energies,
+structures, and retained result files.</p></li>
+<li><p>Compare failure classification and retry limits.</p></li>
+<li><p>Stop the runner during preparation, execution, remedy application, and
+result publication; verify that restart does not duplicate work or lose the
+authoritative outcome.</p></li>
+<li><p>Exercise a failed child as well as an all-successful child set.</p></li>
+<li><p>Verify <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">workspace</span> <span class="pre">status</span> <span class="pre">workflow-workspace</span> <span class="pre">--json</span></code> and the journal
+rather than relying on directory names.</p></li>
+<li><p>Run several jobs with the intended pool, capabilities, resources, and
+worker count.</p></li>
+</ol>
+<p>Keep the original template and the known-good compatibility payload until the
+native result has passed these checks.</p>
+</section>
+<section id="cut-over-and-retire-compatibility-deliberately">
+<h2>14. Cut over and retire compatibility deliberately<a class="headerlink" href="#cut-over-and-retire-compatibility-deliberately" title="Link to this heading">¶</a></h2>
+<p>Stop instantiating new compatibility jobs first. Let submitted <em>httk</em> v1 jobs reach a
+terminal state or cancel them through recorded operator requests:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow job request workflow-workspace JOB_UUID cancel \</span>
+<span class="go">  --operator &quot;$USER&quot; \</span>
+<span class="go">  --reason &quot;replaced by validated native workflow&quot;</span>
+</pre></div>
+</div>
+<p>Then stop the <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">v1</span> <span class="pre">run</span></code> managers while leaving the
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">manager</span> <span class="pre">run</span></code> ones running.
+Retain the legacy source, its attribution, and reference results for
+reproducibility.</p>
+<p>Do not delete or reinterpret the old queue as part of cutover. Archive it
+read-only according to the project’s provenance and retention policy.</p>
+</section>
+<section id="wrap-an-existing-template-as-a-package">
+<h2>15. Wrap an existing template as a package<a class="headerlink" href="#wrap-an-existing-template-as-a-package" title="Link to this heading">¶</a></h2>
+<p>An existing template directory can become a package without first rendering it:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>silicon-relax/
+├── httk_workflow.toml
+├── ht_steps.template
+├── ht.instantiate.py
+├── INCAR.template
+└── collect.py
+</pre></div>
+</div>
+<p>Use a manifest that makes the v1 contract explicit:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[workflow]</span>
+<span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;legacy.silicon-relax&quot;</span>
+
+<span class="k">[workflow.runner]</span>
+<span class="n">language</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;httk-v1&quot;</span>
+<span class="n">taskset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;vasp&quot;</span>
+<span class="n">attempts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span>
+
+<span class="k">[workflow.inputs.structure]</span>
+<span class="n">entry_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;structures&quot;</span>
+
+<span class="k">[workflow.parameters.encut]</span>
+<span class="n">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;number&quot;</span>
+<span class="n">default</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">520</span>
+
+<span class="k">[workflow.collect]</span>
+<span class="n">file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;collect.py&quot;</span>
+</pre></div>
+</div>
+<p>Pre-rename alpha jobs carrying the <code class="docutils literal notranslate"><span class="pre">workflow_postprocess</span></code> parameter lose
+package-hook collection; re-scaffold them.</p>
+<p>Submit a one-shot job or a structure campaign:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow job new WS --workflow ./silicon-relax \</span>
+<span class="go">  --input-from structure structures/*.cif --parameter encut=520</span>
+<span class="go">httk workflow v1 run WS --taskset vasp</span>
+<span class="go">httk workflow collect WS</span>
+</pre></div>
+</div>
+<p>At preparation, the package is snapshotted and each job gets its own rendered
+payload. <code class="docutils literal notranslate"><span class="pre">ht_steps</span></code> or <code class="docutils literal notranslate"><span class="pre">ht_run</span></code> must be executable after rendering. The v1
+template engine is intentionally trusted and supports <code class="docutils literal notranslate"><span class="pre">$name</span></code>, <code class="docutils literal notranslate"><span class="pre">$(expr)</span></code>,
+<code class="docutils literal notranslate"><span class="pre">${code}</span></code>, escaped <code class="docutils literal notranslate"><span class="pre">\$</span></code>, and <code class="docutils literal notranslate"><span class="pre">.template</span></code> filenames. Its implementation is
+available as <code class="docutils literal notranslate"><span class="pre">apply_templates</span></code> in <code class="docutils literal notranslate"><span class="pre">httk.workflow.compat.v1.templates</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">ht.instantiate.py</span></code> receives declared inputs and parameters as globals. A
+path-valued input with <code class="docutils literal notranslate"><span class="pre">entry_type</span></code> is loaded through <code class="docutils literal notranslate"><span class="pre">httk.core.load</span></code> before
+that execution, which is why a CIF campaign can feed structure objects. The
+script is still v1 Python, not a compatibility promise for every old import:
+an <code class="docutils literal notranslate"><span class="pre">ht.instantiate.py</span></code> written against v1’s own Python API (for example v1
+<code class="docutils literal notranslate"><span class="pre">Structure</span></code>) works only when it receives objects compatible with that API. Port
+the script or supply compatible objects when it crosses this boundary.</p>
+</section>
+<section id="harvest-old-result-trees">
+<h2>16. Harvest old result trees<a class="headerlink" href="#harvest-old-result-trees" title="Link to this heading">¶</a></h2>
+<p>Use <code class="docutils literal notranslate"><span class="pre">finished_tasks</span></code> to inspect a tree and <code class="docutils literal notranslate"><span class="pre">collect_finished_tree</span></code> to run its
+package collector against every finished task:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">httk.workflow.compat.v1</span><span class="w"> </span><span class="kn">import</span> <span class="n">collect_finished_tree</span><span class="p">,</span> <span class="n">finished_tasks</span>
+
+<span class="k">for</span> <span class="n">task</span> <span class="ow">in</span> <span class="n">finished_tasks</span><span class="p">(</span><span class="s2">&quot;/archive/ht-results&quot;</span><span class="p">):</span>
+    <span class="nb">print</span><span class="p">(</span><span class="n">task</span><span class="o">.</span><span class="n">task_id</span><span class="p">,</span> <span class="n">task</span><span class="o">.</span><span class="n">rundir</span><span class="p">,</span> <span class="n">task</span><span class="o">.</span><span class="n">code_name</span><span class="p">,</span> <span class="n">task</span><span class="o">.</span><span class="n">code_version</span><span class="p">)</span>
+
+<span class="n">collected</span> <span class="o">=</span> <span class="n">collect_finished_tree</span><span class="p">(</span>
+    <span class="s2">&quot;/archive/ht-results&quot;</span><span class="p">,</span> <span class="n">workflow_dir</span><span class="o">=</span><span class="s2">&quot;./silicon-relax&quot;</span>
+<span class="p">)</span>
+</pre></div>
+</div>
+<p>The CLI equivalent is:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow v1 collect /archive/ht-results \</span>
+<span class="go">  --workflow-dir ./silicon-relax --into results.sqlite</span>
+</pre></div>
+</div>
+<p>The harvester selects the latest dated <code class="docutils literal notranslate"><span class="pre">ht.run.*</span></code>, reads code metadata from
+lines 2–3 of <code class="docutils literal notranslate"><span class="pre">ht_steps</span></code> or <code class="docutils literal notranslate"><span class="pre">ht_run</span></code>, and calls the authored hook using
+<code class="docutils literal notranslate"><span class="pre">run_directory</span></code>, <code class="docutils literal notranslate"><span class="pre">code_of</span></code>, and <code class="docutils literal notranslate"><span class="pre">task_file</span></code> from
+<code class="docutils literal notranslate"><span class="pre">httk.workflow.compat.v1</span></code>. A per-task hook failure degrades that task and the
+sweep continues. Manifest-backed UUIDv5 identity survives tree relocation;
+path-derived identity does not.</p>
+</section>
+<section id="what-stays-behind">
+<h2>17. What stays behind<a class="headerlink" href="#what-stays-behind" title="Link to this heading">¶</a></h2>
+<p>The compatibility layer does not recreate every v1 subsystem:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>v1 surface left behind</p></th>
+<th class="head"><p>v2 replacement</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>ssh/rsync computer templates and send/receive transport</p></td>
+<td><p>v2 remotes and transfer protocol</p></td>
+</tr>
+<tr class="row-odd"><td><p>openmaterialsdb submission and signing arc</p></td>
+<td><p>v2 project manifests, keys, and remote transfer</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">ht.parameters</span></code> resource fields</p></td>
+<td><p>declared workflow inputs, opaque parameters, and manager policy</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">--daemon</span></code></p></td>
+<td><p>explicit v2 managers and workers</p></td>
+</tr>
+<tr class="row-even"><td><p>runtime priority rewrites</p></td>
+<td><p>immutable job priority and recorded operator requests</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>These are migration boundaries, not hidden package options. Keep a v1
+installation only where the compatibility runner or a trusted template still
+needs it.</p>
+</section>
+<section id="migration-checklist">
+<h2>Migration checklist<a class="headerlink" href="#migration-checklist" title="Link to this heading">¶</a></h2>
+<ul class="contains-task-list simple">
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">An instantiated <em>httk</em> v1 task runs successfully through compatibility.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">Project/configuration/remote imports were reviewed separately.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">No live <em>httk</em> v1 queue is being treated as an <em>httk₂</em> workspace.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">Persistent scratch and committed result files are distinguished.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">The core-v2 workspace matches the native job’s data model.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">Every <code class="docutils literal notranslate"><span class="pre">HT_TASK_*</span></code> and <code class="docutils literal notranslate"><span class="pre">VASP_*</span></code> dependency has an explicit replacement.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">Automatic remedies became explicit plan-and-apply decisions.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">Child jobs use stable identities and an explicit join condition.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">Native Bash commands use quoted argv elements and no <code class="docutils literal notranslate"><span class="pre">eval</span></code>.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">Compatibility and native reference results agree.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">Restart and interruption boundaries were exercised.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">Every <code class="docutils literal notranslate"><span class="pre">ht.instantiate.py</span></code> is converted to declared parameters or <code class="docutils literal notranslate"><span class="pre">&#64;run.instantiate</span></code>.</p></li>
+<li class="task-list-item"><p><input class="task-list-item-checkbox" disabled="disabled" type="checkbox">New production submissions use native payloads and new UUIDs.</p></li>
+</ul>
+<p>For API details, continue with <a class="reference internal" href="native_bash_api.html"><span class="doc">Native Bash runner API</span></a>,
+<a class="reference internal" href="runtime_helpers.html"><span class="doc">Native runner helpers</span></a>, and <a class="reference internal" href="workflow_filesystem_api.html"><span class="doc">Workflow filesystem API</span></a>.</p>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="v1_compatibility.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title"><em>httk</em> v1 task compatibility</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="workflow_filesystem_api.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Workflow filesystem API</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a><ul>
+<li><a class="reference internal" href="#choose-a-migration-route">1. Choose a migration route</a></li>
+<li><a class="reference internal" href="#inventory-the-httk-v1-workflow">2. Inventory the <em>httk</em> v1 workflow</a></li>
+<li><a class="reference internal" href="#run-the-workflow-unchanged-in-an-httk2-workspace">3. Run the workflow unchanged in an <em>httk₂</em> workspace</a></li>
+<li><a class="reference internal" href="#migrate-project-configuration-and-remotes-separately">4. Migrate project, configuration, and remotes separately</a></li>
+<li><a class="reference internal" href="#run-compatibility-and-native-jobs-side-by-side">5. Run compatibility and native jobs side by side</a></li>
+<li><a class="reference internal" href="#replace-the-httk-v1-control-flow-with-native-bash">6. Replace the <em>httk</em> v1 control flow with native Bash</a><ul>
+<li><a class="reference internal" href="#prepare-the-native-payload">Prepare the native payload</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#translate-the-commonly-used-task-helpers">7. Translate the commonly used task helpers</a></li>
+<li><a class="reference internal" href="#replace-controlled-run-checkers">8. Replace controlled-run checkers</a></li>
+<li><a class="reference internal" href="#replace-vasp-helpers">9. Replace VASP helpers</a></li>
+<li><a class="reference internal" href="#migrate-dynamic-subtasks">10. Migrate dynamic subtasks</a></li>
+<li><a class="reference internal" href="#migrate-to-a-python-runner">11. Migrate to a Python runner</a></li>
+<li><a class="reference internal" href="#converting-your-ht-instantiate-py">12. Converting your <code class="docutils literal notranslate"><span class="pre">ht.instantiate.py</span></code></a><ul>
+<li><a class="reference internal" href="#the-script-only-wrote-the-structure">The script only wrote the structure</a></li>
+<li><a class="reference internal" href="#the-script-produced-derived-creation-time-files">The script produced derived creation-time files</a></li>
+<li><a class="reference internal" href="#the-work-belongs-at-run-time">The work belongs at run time</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#validate-before-switching-production-work">13. Validate before switching production work</a></li>
+<li><a class="reference internal" href="#cut-over-and-retire-compatibility-deliberately">14. Cut over and retire compatibility deliberately</a></li>
+<li><a class="reference internal" href="#wrap-an-existing-template-as-a-package">15. Wrap an existing template as a package</a></li>
+<li><a class="reference internal" href="#harvest-old-result-trees">16. Harvest old result trees</a></li>
+<li><a class="reference internal" href="#what-stays-behind">17. What stays behind</a></li>
+<li><a class="reference internal" href="#migration-checklist">Migration checklist</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="_static/documentation_options.js?v=fe42cd0d"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=fd10adb8"></script>
+    <script src="_static/selector.js?v=875006ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:main","versionPathDepth":2};</script>
+    </body>
+</html>

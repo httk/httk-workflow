@@ -1,0 +1,1659 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="./">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Campaigns" href="campaigns.html"><link rel="prev" title="Task-manager usage" href="taskmanager.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Project and workflow command line - httk-workflow dev:main documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:main) — content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="index.html"><div class="brand">httk-workflow dev:main documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:main documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_protocol_api.html">The filesystem protocol API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtime_helpers.html">Native runner helpers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="native_bash_api.html">Native Bash runner API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sdk_parity.html">Python and Bash authoring parity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="vasp_runners.html">Packaged VASP runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_packages.html">Workflow packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_languages.html">Workflow-language runner realizations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="taskmanager.html">Task-manager usage</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Project and workflow command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adapter_authoring.html">Writing a remote adapter</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="reference/index.html">Reference</a><input aria-label="Toggle navigation of Reference" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/index.html">httk.workflow</a><input aria-label="Toggle navigation of httk.workflow" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/adapter_protocol/index.html">httk.workflow.adapter_protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/adapters/index.html">httk.workflow.adapters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/collecting/index.html">httk.workflow.collecting</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/compat/index.html">httk.workflow.compat</a><input aria-label="Toggle navigation of httk.workflow.compat" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/compat/v1/index.html">httk.workflow.compat.v1</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/configuration/index.html">httk.workflow.configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/errors/index.html">httk.workflow.errors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/executors/index.html">httk.workflow.executors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/hygiene/index.html">httk.workflow.hygiene</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/manifests/index.html">httk.workflow.manifests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/projects/index.html">httk.workflow.projects</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/protocol/index.html">httk.workflow.protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/provenance/index.html">httk.workflow.provenance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/runtime/index.html">httk.workflow.runtime</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/runtime_utils/index.html">httk.workflow.runtime_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/scaffold/index.html">httk.workflow.scaffold</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/sdk/index.html">httk.workflow.sdk</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/shell_bridge/index.html">httk.workflow.shell_bridge</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/supervision/index.html">httk.workflow.supervision</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/transfers/index.html">httk.workflow.transfers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/vasp/index.html">httk.workflow.vasp</a></li>
+</ul>
+</li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="notebooks/examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_filesystem_api.html">Workflow filesystem API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="_sources/workflow_cli.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section class="tex2jax_ignore mathjax_ignore" id="project-and-workflow-command-line">
+<h1>Project and workflow command line<a class="headerlink" href="#project-and-workflow-command-line" title="Link to this heading">¶</a></h1>
+<p><em>For operators and campaign owners: the whole command tree, including projects, configuration, signed manifests, remotes, and work that travels to them.</em></p>
+<p>Installing <em>httk-workflow</em> registers the lazy <code class="docutils literal notranslate"><span class="pre">workflow</span></code> command with
+<em>httk-core</em>:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow --help</span>
+</pre></div>
+</div>
+<section id="three-executables-one-tree">
+<h2>Three executables, one tree<a class="headerlink" href="#three-executables-one-tree" title="Link to this heading">¶</a></h2>
+<p><strong><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">…</span></code> is the canonical spelling of every command in this
+package.</strong> It is one nested command tree: each group answers <code class="docutils literal notranslate"><span class="pre">--help</span></code>, each
+command answers <code class="docutils literal notranslate"><span class="pre">--help</span></code>, and a mistyped action is reported by the group it was
+mistyped in.</p>
+<p>Two further executables are installed, and both are thin aliases that reuse the
+canonical tree’s own parsers and handlers rather than a second implementation
+of it. They remain supported; prefer the canonical spelling in new work and in
+anything you write down.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Executable</p></th>
+<th class="head"><p>Alias of</p></th>
+<th class="head"><p>Kept for</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span></code></p></td>
+<td><p>—</p></td>
+<td><p><strong>canonical</strong></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk-taskmanager</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">workspace</span></code>/<code class="docutils literal notranslate"><span class="pre">job</span></code>/<code class="docutils literal notranslate"><span class="pre">manager</span></code> leaves</p></td>
+<td><p>operators and scripts predating <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk-v1-taskmanager</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">v1</span></code></p></td>
+<td><p><em>httk</em> v1 compatibility operators</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>httk-taskmanager init     -&gt;  httk workflow workspace init
+httk-taskmanager submit   -&gt;  httk workflow job submit
+httk-taskmanager run      -&gt;  httk workflow manager run
+httk-taskmanager status   -&gt;  httk workflow workspace status
+httk-taskmanager request  -&gt;  httk workflow job request
+
+httk-v1-taskmanager prepare  -&gt;  httk workflow v1 prepare
+httk-v1-taskmanager submit   -&gt;  httk workflow v1 submit
+httk-v1-taskmanager run      -&gt;  httk workflow v1 run
+</pre></div>
+</div>
+<p>Both aliases keep their own flags, including the <code class="docutils literal notranslate"><span class="pre">--durable</span></code>/<code class="docutils literal notranslate"><span class="pre">--no-durable</span></code>
+switch they have always accepted <em>before</em> the subcommand. The canonical tree
+carries the same switch on the leaf that acts on it, so both spellings work.</p>
+</section>
+<section id="the-complete-tree">
+<h2>The complete tree<a class="headerlink" href="#the-complete-tree" title="Link to this heading">¶</a></h2>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>httk workflow workspace  init | list | default | move | forget | delete | status | settings show | settings set | settings unset | policy show | policy set | fsck | gc | unlock
+httk workflow runner     publish | describe
+httk workflow job        new | submit | request | list | show | log | why | debug
+httk workflow describe   TARGET [--json]
+httk workflow collect
+httk workflow postprocess
+httk workflow manager    run
+httk workflow campaign   init | show | submit | collect | start-managers
+httk workflow v1         prepare | submit | run | collect
+httk workflow config     init | show | set | unset | import-v1
+httk workflow project    init | import-v1 | show | doctor | manifest create | manifest verify
+httk workflow remote     list | add | configure | install | import-v1 | show | remove
+httk workflow transfer   SRC DST      (plus the protocol spellings: receive | offer | retire)
+</pre></div>
+</div>
+<section id="workspace-selection">
+<h3>Workspace selection<a class="headerlink" href="#workspace-selection" title="Link to this heading">¶</a></h3>
+<p>A <code class="docutils literal notranslate"><span class="pre">WORKSPACE</span></code> is an optional registered local name. A project may record a
+default name with <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">default</span> <span class="pre">NAME</span></code>; otherwise commands use the per-user
+default workspace. Explicit local names are created with <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span> <span class="pre">PATH</span></code>,
+and remote names use <code class="docutils literal notranslate"><span class="pre">REMOTE:NAME</span></code> at use time.</p>
+<p>The registry is machine-owned: it stores only absolute local paths in
+<code class="docutils literal notranslate"><span class="pre">$XDG_CONFIG_HOME/httk/workspaces.json</span></code>. When a command reaches a remote
+workspace, the far side resolves the plain name in its own registry. The Python
+API keeps <code class="docutils literal notranslate"><span class="pre">Workspace(path)</span></code> for library use; the registry is what the command
+line speaks.</p>
+<p>Remote-capable workspace commands use the adapter; this includes status and
+settings. Jobs are created in the local default workspace, then <code class="docutils literal notranslate"><span class="pre">transfer</span></code> moves
+them to a remote workspace for execution.</p>
+</section>
+<section id="workspace-the-workspace-itself-not-its-jobs">
+<h3><code class="docutils literal notranslate"><span class="pre">workspace</span></code> — the workspace itself, not its jobs<a class="headerlink" href="#workspace-the-workspace-itself-not-its-jobs" title="Link to this heading">¶</a></h3>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span> <span class="pre">PATH</span></code></p></td>
+<td><p>create or adopt a workspace and register its basename</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--name</span></code>, <code class="docutils literal notranslate"><span class="pre">--setting</span></code>, <code class="docutils literal notranslate"><span class="pre">--no-durable</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">list</span> <span class="pre">[REMOTE:]</span></code></p></td>
+<td><p>list local or owning-machine workspaces</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">default</span> <span class="pre">[NAME]</span></code></p></td>
+<td><p>read or record this project’s default name</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--unset</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">move</span> <span class="pre">NAME</span> <span class="pre">DEST_DIR</span></code></p></td>
+<td><p>move a local workspace and update its registry path</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--no-durable</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">forget</span> <span class="pre">NAME</span></code></p></td>
+<td><p>deregister a name, leaving the workspace on disk</p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">delete</span> <span class="pre">NAME</span></code></p></td>
+<td><p>destroy the workspace and deregister it</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--force</span></code> (required)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">status</span> <span class="pre">NAME</span></code></p></td>
+<td><p>summarize the authoritative markers (remote: over the adapter)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">settings</span> <span class="pre">show</span> <span class="pre">NAME</span> <span class="pre">[KEY]</span></code></p></td>
+<td><p>print the application settings, or one</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">settings</span> <span class="pre">set</span> <span class="pre">NAME</span> <span class="pre">KEY</span> <span class="pre">VALUE</span></code></p></td>
+<td><p>store one application setting</p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">settings</span> <span class="pre">unset</span> <span class="pre">NAME</span> <span class="pre">KEY</span></code></p></td>
+<td><p>remove one application setting</p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">policy</span> <span class="pre">show</span> <span class="pre">NAME</span></code></p></td>
+<td><p>print the workspace policy</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">policy</span> <span class="pre">set</span> <span class="pre">NAME</span> <span class="pre">KEY</span> <span class="pre">VALUE</span></code></p></td>
+<td><p>store one policy member</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">fsck</span> <span class="pre">NAME</span></code></p></td>
+<td><p>check every marker against its journal frame (remote: over the adapter)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--repair</span></code>, <code class="docutils literal notranslate"><span class="pre">--quarantine-unrepairable</span></code>, <code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">gc</span> <span class="pre">NAME</span></code></p></td>
+<td><p>collect what the retention policy allows (remote: over the adapter)</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--dry-run</span></code>, <code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">unlock</span> <span class="pre">NAME</span></code></p></td>
+<td><p>release a maintenance lock</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--force</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span></code> creates and registers an explicit workspace. A canonical path may
+have only one registered name:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow workspace init runs/my-workspace --name my-workspace</span>
+</pre></div>
+</div>
+<p>A workspace on a cluster is addressed as <code class="docutils literal notranslate"><span class="pre">REMOTE:NAME</span></code>; its owning machine
+chooses the path supplied to <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span> <span class="pre">REMOTE:PATH</span></code>. <code class="docutils literal notranslate"><span class="pre">--setting</span> <span class="pre">KEY=VALUE</span></code>
+seeds an application setting at creation. <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">delete</span></code> destroys the
+workspace (locally, or on its remote over the adapter) and is refused without
+<code class="docutils literal notranslate"><span class="pre">--force</span></code>; <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">forget</span></code> only removes the name when there are no unretired
+outbound transfers. Fetch or retire those first, or pass <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">forget</span> <span class="pre">--force</span></code> to deregister the name anyway.</p>
+<p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">move</span> <span class="pre">NAME</span> <span class="pre">DEST_DIR</span></code> is an atomic same-filesystem rename. It refuses
+cross-filesystem moves; stop managers, copy the tree manually, forget the old
+name, and re-register it with <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span> <span class="pre">&lt;newpath&gt;</span> <span class="pre">--name</span> <span class="pre">NAME</span></code> instead.</p>
+</section>
+<section id="runner-the-shared-runners-a-workspace-publishes">
+<h3><code class="docutils literal notranslate"><span class="pre">runner</span></code> — the shared runners a workspace publishes<a class="headerlink" href="#runner-the-shared-runners-a-workspace-publishes" title="Link to this heading">¶</a></h3>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">runner</span> <span class="pre">publish</span> <span class="pre">FILE_OR_DIRECTORY</span></code></p></td>
+<td><p>publish one runner file or directory, pinned by digest</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--workspace</span></code> (required), <code class="docutils literal notranslate"><span class="pre">--name</span></code>, <code class="docutils literal notranslate"><span class="pre">--replace</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">runner</span> <span class="pre">describe</span> <span class="pre">[NAME]</span></code></p></td>
+<td><p>report the published runners and their digests</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--workspace</span></code> (required), <code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Directory rows are reported as <code class="docutils literal notranslate"><span class="pre">tree</span> <span class="pre">(inferred)</span></code> because the store format
+identifies a tree by its <code class="docutils literal notranslate"><span class="pre">run</span></code> entry. New nested file publishes named <code class="docutils literal notranslate"><span class="pre">run</span></code> are
+refused; a pre-existing store may still contain an ambiguous legacy layout, so
+the marker is an honest inference rather than provenance metadata.</p>
+</section>
+<section id="job-making-jobs-and-finding-out-about-them">
+<h3><code class="docutils literal notranslate"><span class="pre">job</span></code> — making jobs, and finding out about them<a class="headerlink" href="#job-making-jobs-and-finding-out-about-them" title="Link to this heading">¶</a></h3>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span> <span class="pre">WORKSPACE</span></code></p></td>
+<td><p>scaffold and submit jobs from a workflow</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--workflow</span></code> or <code class="docutils literal notranslate"><span class="pre">--workflow-dir</span></code> (one required), <code class="docutils literal notranslate"><span class="pre">--parameter</span></code>, <code class="docutils literal notranslate"><span class="pre">--input</span></code>, <code class="docutils literal notranslate"><span class="pre">--input-from</span></code>, <code class="docutils literal notranslate"><span class="pre">--file</span></code>, <code class="docutils literal notranslate"><span class="pre">--tag</span></code>, <code class="docutils literal notranslate"><span class="pre">--placement</span></code>, <code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">submit</span> <span class="pre">WORKSPACE</span> <span class="pre">SOURCE</span></code></p></td>
+<td><p>submit one prepared payload directory</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--placement</span></code> (required), <code class="docutils literal notranslate"><span class="pre">--move</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">request</span> <span class="pre">WORKSPACE</span> <span class="pre">JOB_ID</span> <span class="pre">ACTION</span></code></p></td>
+<td><p>publish an operator request</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--operator</span></code>, <code class="docutils literal notranslate"><span class="pre">--reason</span></code> (both required), <code class="docutils literal notranslate"><span class="pre">--priority</span></code>, <code class="docutils literal notranslate"><span class="pre">--step</span></code>, <code class="docutils literal notranslate"><span class="pre">--force</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">list</span> <span class="pre">WORKSPACE</span></code></p></td>
+<td><p>list the jobs as a cheap table</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--kind</span></code>, <code class="docutils literal notranslate"><span class="pre">--placement</span></code>, <code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">show</span> <span class="pre">WORKSPACE</span> <span class="pre">JOB</span></code></p></td>
+<td><p>describe one job from its state</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">log</span> <span class="pre">WORKSPACE</span> <span class="pre">JOB</span></code></p></td>
+<td><p>print the transition history</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--limit</span></code>, <code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">why</span> <span class="pre">WORKSPACE</span> <span class="pre">JOB</span></code></p></td>
+<td><p>explain why a job is not running</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">debug</span> <span class="pre">WORKSPACE</span> <span class="pre">JOB</span></code></p></td>
+<td><p>drive one job to a terminal state, in front of you</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--step</span></code>, <code class="docutils literal notranslate"><span class="pre">--placement</span></code>, <code class="docutils literal notranslate"><span class="pre">--follow-children</span></code>, <code class="docutils literal notranslate"><span class="pre">--timeout</span></code>, <code class="docutils literal notranslate"><span class="pre">--log-level</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">JOB</span></code> is a job UUID, a <code class="docutils literal notranslate"><span class="pre">tag--uuid</span></code> job key, or any unique prefix of either.</p>
+<p>Language documents use <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span> <span class="pre">--workflow</span> <span class="pre">DOCUMENT</span></code>; see
+<a class="reference internal" href="workflow_languages.html"><span class="doc">Workflow-language runner realizations</span></a> for PWD, CWL, and httk-v1 details.</p>
+</section>
+<section id="collect-the-finished-jobs-as-summaries">
+<h3><code class="docutils literal notranslate"><span class="pre">collect</span></code> — the finished jobs, as summaries<a class="headerlink" href="#collect-the-finished-jobs-as-summaries" title="Link to this heading">¶</a></h3>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">collect</span> <span class="pre">WORKSPACE</span></code></p></td>
+<td><p>stream one collected summary per finished job</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--state</span></code>, <code class="docutils literal notranslate"><span class="pre">--placement</span></code>, <code class="docutils literal notranslate"><span class="pre">--raw</span></code>, <code class="docutils literal notranslate"><span class="pre">--allow-job-collector</span></code>, <code class="docutils literal notranslate"><span class="pre">--into</span> <span class="pre">PATH</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">v1</span> <span class="pre">collect</span> <span class="pre">ROOT</span></code></p></td>
+<td><p>harvest a pre-existing v1 result tree</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--workflow-dir</span> <span class="pre">PKG</span></code>, <code class="docutils literal notranslate"><span class="pre">--into</span> <span class="pre">PATH</span></code>, <code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="postprocess-run-a-curated-script">
+<h3>postprocess — run a curated script<a class="headerlink" href="#postprocess-run-a-curated-script" title="Link to this heading">¶</a></h3>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>postprocess WORKSPACE</p></td>
+<td><p>run one declared script for each selected collected job</p></td>
+<td><p>–script NAME (required), –workflow-dir PKG, –state, –placement, –timeout, –json</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow postprocess WS --script relaxation-report</span>
+<span class="go">httk workflow postprocess WS --script report --workflow-dir ./my-workflow --json</span>
+</pre></div>
+</div>
+<p>With –json, each result is one JSON object in the
+httk-workflow-postprocess wire format, version 1, with workspace_id, job_id,
+job_key, script, and either returncode plus output_dir, or an error. Without
+–json, each result is tab-separated as
+job_key<TAB>script<TAB>returncode<TAB>output_dir; errors use ERROR in the
+return-code field. The command exits 0 only when every selected script ran
+and returned 0; any resolution error or nonzero script return exits 1.</p>
+</section>
+<section id="describe-inspect-a-workflow-without-publishing-it">
+<h3><code class="docutils literal notranslate"><span class="pre">describe</span></code> — inspect a workflow without publishing it<a class="headerlink" href="#describe-inspect-a-workflow-without-publishing-it" title="Link to this heading">¶</a></h3>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">describe</span> <span class="pre">TARGET</span></code></p></td>
+<td><p>describe a registered id/alias, runner file, or package directory</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Directory package authoring, manifest validation, publication, and hook trust
+tiers are documented in <a class="reference internal" href="workflow_packages.html"><span class="doc">Workflow packages</span></a>.</p>
+</section>
+<section id="manager-the-process-that-runs-the-jobs">
+<h3><code class="docutils literal notranslate"><span class="pre">manager</span></code> — the process that runs the jobs<a class="headerlink" href="#manager-the-process-that-runs-the-jobs" title="Link to this heading">¶</a></h3>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">run</span> <span class="pre">[WORKSPACE]</span></code></p></td>
+<td><p>run a manager until idle, or keep serving with <code class="docutils literal notranslate"><span class="pre">--idle</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--workers</span></code>, <code class="docutils literal notranslate"><span class="pre">--count</span></code>, <code class="docutils literal notranslate"><span class="pre">--pool</span></code>, <code class="docutils literal notranslate"><span class="pre">--idle</span></code>, <code class="docutils literal notranslate"><span class="pre">--idle-timeout</span></code>, <code class="docutils literal notranslate"><span class="pre">--adapter-timeout</span></code>, <code class="docutils literal notranslate"><span class="pre">--log-level</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">manager</span> <span class="pre">run</span> <span class="pre">WORKSPACE</span></code></p></td>
+<td><p>run a manager locally, or submit managers to a remote workspace’s scheduler</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--workers</span></code>, <code class="docutils literal notranslate"><span class="pre">--count</span></code>, <code class="docutils literal notranslate"><span class="pre">--pool</span></code>, <code class="docutils literal notranslate"><span class="pre">--capability</span></code>, <code class="docutils literal notranslate"><span class="pre">--idle</span></code>, <code class="docutils literal notranslate"><span class="pre">--idle-timeout</span></code>, <code class="docutils literal notranslate"><span class="pre">--lease-seconds</span></code>, <code class="docutils literal notranslate"><span class="pre">--drain-timeout</span></code>, <code class="docutils literal notranslate"><span class="pre">--gc-interval</span></code>, <code class="docutils literal notranslate"><span class="pre">--runner-search-path</span></code>, <code class="docutils literal notranslate"><span class="pre">--adapter-timeout</span></code>, <code class="docutils literal notranslate"><span class="pre">--log-level</span></code>, <code class="docutils literal notranslate"><span class="pre">--log-file</span></code>, <code class="docutils literal notranslate"><span class="pre">--json-logs</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">manager</span> <span class="pre">run</span></code> follows the binding: a local workspace runs the manager in this
+process as before, and a remote workspace submits managers through the remote’s
+scheduler over its adapter — <code class="docutils literal notranslate"><span class="pre">--count</span> <span class="pre">N</span></code> managers, <code class="docutils literal notranslate"><span class="pre">--workers</span> <span class="pre">N</span></code> workers each.
+Both manager commands run until idle by default; <code class="docutils literal notranslate"><span class="pre">--idle</span></code> keeps serving. This is
+the command that subsumed the old <code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">start-manager</span></code>.</p>
+</section>
+<section id="v1-httk-v1-task-templates-on-the-v2-engine">
+<h3><code class="docutils literal notranslate"><span class="pre">v1</span></code> — <em>httk</em> v1 task templates on the v2 engine<a class="headerlink" href="#v1-httk-v1-task-templates-on-the-v2-engine" title="Link to this heading">¶</a></h3>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">v1</span> <span class="pre">prepare</span> <span class="pre">SOURCE</span> <span class="pre">DESTINATION</span></code></p></td>
+<td><p>turn an instantiated v1 task into a payload</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--taskset</span></code> (default <code class="docutils literal notranslate"><span class="pre">default</span></code>), <code class="docutils literal notranslate"><span class="pre">--tag</span></code>, <code class="docutils literal notranslate"><span class="pre">--step</span></code>, <code class="docutils literal notranslate"><span class="pre">--priority</span></code>, <code class="docutils literal notranslate"><span class="pre">--attempts</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">v1</span> <span class="pre">submit</span> <span class="pre">WORKSPACE</span> <span class="pre">SOURCE</span></code></p></td>
+<td><p>prepare and submit one v1 task</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--placement</span></code> (required), <code class="docutils literal notranslate"><span class="pre">--taskset</span></code> (default <code class="docutils literal notranslate"><span class="pre">default</span></code>)</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">v1</span> <span class="pre">run</span> <span class="pre">WORKSPACE</span></code></p></td>
+<td><p>run only the httk-v1 jobs of a workspace</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--taskset</span></code> (default <code class="docutils literal notranslate"><span class="pre">any</span></code>), <code class="docutils literal notranslate"><span class="pre">--wrap</span></code>, <code class="docutils literal notranslate"><span class="pre">--task-timeout</span></code>, <code class="docutils literal notranslate"><span class="pre">--workers</span></code>, <code class="docutils literal notranslate"><span class="pre">--idle</span></code>, <code class="docutils literal notranslate"><span class="pre">--idle-timeout</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">--taskset</span></code> deliberately defaults differently between siblings, because the
+siblings mean different things by it. <code class="docutils literal notranslate"><span class="pre">prepare</span></code> and <code class="docutils literal notranslate"><span class="pre">submit</span></code> <strong>assign</strong> a task
+set to the job they create, so their default is the ordinary <code class="docutils literal notranslate"><span class="pre">default</span></code> set;
+<code class="docutils literal notranslate"><span class="pre">run</span></code> <strong>filters</strong> the jobs it will claim, so its default is <code class="docutils literal notranslate"><span class="pre">any</span></code>, which accepts
+every set. Unifying them would either strand every submitted job under a manager
+filtering for one set, or quietly file every prepared task under a set literally
+named <code class="docutils literal notranslate"><span class="pre">any</span></code>.</p>
+</section>
+<section id="config-the-per-user-configuration-and-identity">
+<h3><code class="docutils literal notranslate"><span class="pre">config</span></code> — the per-user configuration and identity<a class="headerlink" href="#config-the-per-user-configuration-and-identity" title="Link to this heading">¶</a></h3>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">config</span> <span class="pre">init</span></code></p></td>
+<td><p>write the configuration and the identity key</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--name</span></code>, <code class="docutils literal notranslate"><span class="pre">--email</span></code>, <code class="docutils literal notranslate"><span class="pre">--non-interactive</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">config</span> <span class="pre">show</span> <span class="pre">[KEY]</span></code></p></td>
+<td><p>print the configuration, or one member</p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">config</span> <span class="pre">set</span> <span class="pre">KEY</span> <span class="pre">VALUE</span></code></p></td>
+<td><p>store one member</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">machine_names</span></code> is a comma-separated list of names this machine answers to</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">config</span> <span class="pre">unset</span> <span class="pre">KEY</span></code></p></td>
+<td><p>remove one member</p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">config</span> <span class="pre">import-v1</span> <span class="pre">[SOURCE]</span></code></p></td>
+<td><p>read a legacy <code class="docutils literal notranslate"><span class="pre">~/.httk</span></code> configuration</p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="project-the-directory-a-campaign-lives-in">
+<h3><code class="docutils literal notranslate"><span class="pre">project</span></code> — the directory a campaign lives in<a class="headerlink" href="#project-the-directory-a-campaign-lives-in" title="Link to this heading">¶</a></h3>
+<p>The project <em>anchor</em> — the <code class="docutils literal notranslate"><span class="pre">httk_project</span></code> directory, discovery, keys, and pins —
+belongs to <em>httk-core</em>, which owns the umbrella <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">project</span></code> command.
+<em>httk-workflow</em> keeps its workflow-aware project commands under
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">project</span></code>; the core umbrella owns only the anchor commands.</p>
+<p>The anchor’s own leaves — <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">project</span> <span class="pre">init</span></code> and <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">project</span> <span class="pre">show</span></code> — are
+provided by <em>httk-core</em>. <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">project</span> <span class="pre">init</span></code> creates only the anchor, whereas
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">project</span> <span class="pre">init</span></code> creates the project anchor; initialize a workspace
+separately with <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span> <span class="pre">PATH</span></code>:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">project</span> <span class="pre">init</span> <span class="pre">[PATH]</span></code></p></td>
+<td><p>create a project and its key</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--name</span></code>, <code class="docutils literal notranslate"><span class="pre">--description</span></code>, <code class="docutils literal notranslate"><span class="pre">--exclude</span></code>, <code class="docutils literal notranslate"><span class="pre">--non-interactive</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">project</span> <span class="pre">import-v1</span> <span class="pre">[PATH]</span></code></p></td>
+<td><p>read a legacy <code class="docutils literal notranslate"><span class="pre">ht.project</span></code> without creating a workspace</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--source</span></code>, <code class="docutils literal notranslate"><span class="pre">--name</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">project</span> <span class="pre">show</span> <span class="pre">[PATH]</span></code></p></td>
+<td><p>describe the project, its keys, workspace default, and manifest</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--no-verify</span></code>, <code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">project</span> <span class="pre">doctor</span> <span class="pre">[PATH]</span></code></p></td>
+<td><p>check, and optionally repair, the project</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--repair</span></code>, <code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">project</span> <span class="pre">manifest</span> <span class="pre">create</span> <span class="pre">[PROJECT]</span></code></p></td>
+<td><p>write the signed manifest</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--manifest</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">project</span> <span class="pre">manifest</span> <span class="pre">verify</span> <span class="pre">[PROJECT]</span></code></p></td>
+<td><p>verify the manifest against the tree</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--manifest</span></code>, <code class="docutils literal notranslate"><span class="pre">--trusted-key</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="remote-the-adapters-that-reach-other-machines">
+<h3><code class="docutils literal notranslate"><span class="pre">remote</span></code> — the adapters that reach other machines<a class="headerlink" href="#remote-the-adapters-that-reach-other-machines" title="Link to this heading">¶</a></h3>
+<p>Named after <code class="docutils literal notranslate"><span class="pre">git</span> <span class="pre">remote</span></code>: a <em>remote</em> is one machine this project can reach, and
+the bundle of adapter operations that reaches it. The name <code class="docutils literal notranslate"><span class="pre">local</span></code> is reserved
+for the built-in remote every workspace registry resolves as “this machine”, so
+<code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">add</span> <span class="pre">local</span></code> is refused — a workspace bound to <code class="docutils literal notranslate"><span class="pre">local</span></code> must be
+unambiguous.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">list</span></code></p></td>
+<td><p>list the remotes this project can reach</p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">add</span> <span class="pre">NAME</span></code></p></td>
+<td><p>create a remote from a packaged adapter template</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--template</span></code>, <code class="docutils literal notranslate"><span class="pre">--global</span></code>, <code class="docutils literal notranslate"><span class="pre">--non-interactive</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">configure</span> <span class="pre">REMOTE</span></code></p></td>
+<td><p>run the adapter’s <code class="docutils literal notranslate"><span class="pre">configure</span></code> operation</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--set</span> <span class="pre">KEY=VALUE</span></code>, <code class="docutils literal notranslate"><span class="pre">--adapter-timeout</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">install</span> <span class="pre">REMOTE</span></code></p></td>
+<td><p>run the adapter’s <code class="docutils literal notranslate"><span class="pre">install</span></code> operation</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--set</span> <span class="pre">KEY=VALUE</span></code>, <code class="docutils literal notranslate"><span class="pre">--adapter-timeout</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">import-v1</span> <span class="pre">SOURCE</span></code></p></td>
+<td><p>map a legacy <em>httk</em> v1 computer bundle</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--name</span></code>, <code class="docutils literal notranslate"><span class="pre">--global</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">show</span> <span class="pre">NAME</span></code></p></td>
+<td><p>describe one remote and its settings</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">remove</span> <span class="pre">NAME</span></code></p></td>
+<td><p>remove one remote bundle</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--force</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">show</span></code> never prints a credential <em>value</em>: a remote setting stored in
+the manifest-excluded <code class="docutils literal notranslate"><span class="pre">credentials.json</span></code> is reported by name only, so a
+description an operator pastes into a bug report cannot carry a password.</p>
+<p><code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">remove</span></code> refuses while an unretired transfer still depends on the
+remote, because removing it would leave that transfer with no way home;
+<code class="docutils literal notranslate"><span class="pre">--force</span></code> skips the interactive confirmation and <strong>nothing else</strong> — the refusal
+stands either way. Fetch or retire the transfer first.</p>
+</section>
+<section id="transfer-moving-jobs-between-two-workspaces">
+<h3><code class="docutils literal notranslate"><span class="pre">transfer</span></code> — moving jobs between two workspaces<a class="headerlink" href="#transfer-moving-jobs-between-two-workspaces" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">transfer</span></code> is one verb that takes two registered workspace names — a source and a
+destination — and moves jobs between them, whichever way they point:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow transfer SRC DST [--job JOB_ID …] [--state STATE …] [--placement P] \</span>
+<span class="go">    [--destination-placement P] [--adapter-timeout SECONDS] [--json]</span>
+</pre></div>
+</div>
+<p>Both names resolve through the registry, so which legs run over an adapter and
+which stay in this filesystem follows entirely from where the two are bound:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Direction</p></th>
+<th class="head"><p>What happens</p></th>
+<th class="head"><p><code class="docutils literal notranslate"><span class="pre">--job</span></code></p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>local → remote</p></td>
+<td><p>each named job is detached, its sealed bundle pushed to the remote, and imported there</p></td>
+<td><p>at least one required</p></td>
+</tr>
+<tr class="row-odd"><td><p>remote → local</p></td>
+<td><p>the jobs that have finished on the remote are offered, pulled home, imported, and their sources retired</p></td>
+<td><p>optional; a <code class="docutils literal notranslate"><span class="pre">--state</span></code>/<code class="docutils literal notranslate"><span class="pre">--placement</span></code> filter selects them</p></td>
+</tr>
+<tr class="row-even"><td><p>local → local</p></td>
+<td><p>each named job is detached from the source and imported into the destination directly, in this filesystem</p></td>
+<td><p>at least one required</p></td>
+</tr>
+<tr class="row-odd"><td><p>remote → remote</p></td>
+<td><p>the client relays: it fetches from the source into local staging and pushes on to the destination (v1; a direct source-to-destination path is deferred)</p></td>
+<td><p>optional</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">--state</span></code> (repeatable, default <code class="docutils literal notranslate"><span class="pre">succeeded</span></code> and <code class="docutils literal notranslate"><span class="pre">failed</span></code>) chooses which finished
+kinds a fetch moves, <code class="docutils literal notranslate"><span class="pre">--placement</span></code> restricts it to one subtree,
+<code class="docutils literal notranslate"><span class="pre">--destination-placement</span></code> lands the jobs somewhere other than the placement they
+had, and <code class="docutils literal notranslate"><span class="pre">--adapter-timeout</span></code> bounds every adapter operation the move runs.</p>
+</section>
+<section id="the-protocol-spellings-and-what-is-gone">
+<h3>The protocol spellings, and what is gone<a class="headerlink" href="#the-protocol-spellings-and-what-is-gone" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">transfer</span></code> also carries the frozen argument vectors one machine runs on another
+over an adapter. Operator-facing vectors use workspace names; the hidden
+<code class="docutils literal notranslate"><span class="pre">--by-path</span></code> spelling is the path-only protocol form used after the client probes
+the owning machine. They are protocol rather than operator interface — a local→remote move invokes
+<code class="docutils literal notranslate"><span class="pre">receive</span></code> on the destination, a fetch invokes <code class="docutils literal notranslate"><span class="pre">offer</span></code> then <code class="docutils literal notranslate"><span class="pre">retire</span></code> on the source.
+Their spelling is frozen, because the machine that answers may run an <em>httk</em> older
+or newer than yours:</p>
+<div class="highlight-text notranslate"><div class="highlight"><pre><span></span>httk workflow transfer receive --workspace PATH --bundle BUNDLE
+httk workflow transfer offer PATH --destination-workspace-id UUID --json
+httk workflow transfer retire PATH JOB_ID … --destination-workspace-id UUID --json
+httk workflow workspace status PATH --by-path --json
+httk workflow manager run PATH --by-path
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">receive</span></code> is an import half rather than an operator command, so it is not
+advertised in <code class="docutils literal notranslate"><span class="pre">--help</span></code>, but it is its frozen, invocable spelling. The <code class="docutils literal notranslate"><span class="pre">--by-path</span></code>
+switch is likewise hidden: it makes the workspace argument a literal path with no
+registry lookup, which is exactly what one machine needs when it addresses another
+machine’s workspace.</p>
+<p>The pre-release <code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">send</span></code>, <code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">fetch</span></code>, <code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">start-manager</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">status</span></code> verbs are <strong>gone</strong> — they no longer parse. Move to the single
+<code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">SRC</span> <span class="pre">DST</span></code> verb, and to <code class="docutils literal notranslate"><span class="pre">manager</span> <span class="pre">run</span> <span class="pre">NAME</span></code> for starting managers (below)
+and <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">status</span> <span class="pre">NAME</span></code> for reading a remote workspace’s markers.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Removed</p></th>
+<th class="head"><p>Now</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">send</span> <span class="pre">REMOTE</span> <span class="pre">JOB</span> <span class="pre">…</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">LOCAL</span> <span class="pre">REMOTE</span> <span class="pre">--job</span> <span class="pre">JOB</span> <span class="pre">…</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">fetch</span> <span class="pre">--remote</span> <span class="pre">REMOTE</span> <span class="pre">--workspace</span> <span class="pre">LOCAL</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">REMOTE</span> <span class="pre">LOCAL</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">start-manager</span> <span class="pre">REMOTE</span> <span class="pre">--count</span> <span class="pre">N</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">manager</span> <span class="pre">run</span> <span class="pre">REMOTE</span> <span class="pre">--count</span> <span class="pre">N</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">status</span> <span class="pre">REMOTE</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">status</span> <span class="pre">REMOTE</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>An earlier release also renamed two whole groups: <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">computer</span> <span class="pre">…</span></code>
+became <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">remote</span> <span class="pre">…</span></code> (git’s word for the same idea), and
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">tasks</span> <span class="pre">…</span></code> (once <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">remote</span> <span class="pre">send|fetch|…</span></code>) became today’s
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">transfer</span></code>. A job whose <code class="docutils literal notranslate"><span class="pre">runner.path</span></code> pins the old
+<code class="docutils literal notranslate"><span class="pre">pkg:httk.workflow.runners/vasp_*</span></code> form breaks too: the packaged VASP runners are
+now modules of <code class="docutils literal notranslate"><span class="pre">httk.workflow.vasp.runners</span></code>, and a job pinning the old path fails
+with <code class="docutils literal notranslate"><span class="pre">runner_unavailable</span></code> naming the module it could not resolve — scaffold the
+job again, or edit the one <code class="docutils literal notranslate"><span class="pre">runner.path</span></code> member.</p>
+</section>
+<section id="campaign-partitioning-a-large-run-across-many-workspaces">
+<h3><code class="docutils literal notranslate"><span class="pre">campaign</span></code> — partitioning a large run across many workspaces<a class="headerlink" href="#campaign-partitioning-a-large-run-across-many-workspaces" title="Link to this heading">¶</a></h3>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Command</p></th>
+<th class="head"><p>What it does</p></th>
+<th class="head"><p>Notable options</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">campaign</span> <span class="pre">init</span></code></p></td>
+<td><p>define the project’s partition map and assignment policy</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--partition</span> <span class="pre">NAME=WORKSPACE</span></code>, <code class="docutils literal notranslate"><span class="pre">--assignment</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">campaign</span> <span class="pre">show</span></code></p></td>
+<td><p>show the partition map</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">campaign</span> <span class="pre">submit</span></code></p></td>
+<td><p>assign one root job to a partition and submit it there</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--workflow</span></code> (required), <code class="docutils literal notranslate"><span class="pre">--key</span></code> (required), <code class="docutils literal notranslate"><span class="pre">--index</span></code>, <code class="docutils literal notranslate"><span class="pre">--input</span></code>, <code class="docutils literal notranslate"><span class="pre">--input-from</span></code>, <code class="docutils literal notranslate"><span class="pre">--parameter</span></code>, <code class="docutils literal notranslate"><span class="pre">--file</span></code>, <code class="docutils literal notranslate"><span class="pre">--tag</span></code>, <code class="docutils literal notranslate"><span class="pre">--placement</span></code>, <code class="docutils literal notranslate"><span class="pre">--priority</span></code>, <code class="docutils literal notranslate"><span class="pre">--name</span></code>, <code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">campaign</span> <span class="pre">collect</span></code></p></td>
+<td><p>collect every partition, one workspace after another</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--partition</span></code>, <code class="docutils literal notranslate"><span class="pre">--state</span></code>, <code class="docutils literal notranslate"><span class="pre">--placement</span></code>, <code class="docutils literal notranslate"><span class="pre">--json</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">campaign</span> <span class="pre">start-managers</span></code></p></td>
+<td><p>start a manager per selected partition</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">--partition</span></code>, <code class="docutils literal notranslate"><span class="pre">--workers</span></code>, <code class="docutils literal notranslate"><span class="pre">--count</span></code>, <code class="docutils literal notranslate"><span class="pre">--adapter-timeout</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>A campaign is a thin convention over the <em>registered workspaces</em> above: a
+partition map, stored in the project, that spreads a very large body of work
+across many workspaces without a new scheduler. Each partition names one
+registered workspace, roots are assigned to partitions by policy, and spawned
+children always inherit their parent’s workspace. See <a class="reference internal" href="campaigns.html"><span class="doc">Campaigns</span></a>.</p>
+</section>
+</section>
+<section id="creating-jobs">
+<h2>Creating jobs<a class="headerlink" href="#creating-jobs" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code> scaffolds and submits jobs from a workflow — a registered workflow id,
+alias, or the path of a runner file — and needs no prepared payload:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow job new WORKSPACE --workflow vasp-relax --input structure=POSCAR --tag silicon</span>
+<span class="go">httk workflow job new WORKSPACE --workflow vasp-relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening</span>
+<span class="go">httk workflow job new WORKSPACE --workflow ./my_runner.py --step characterize --parameter sites=8</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">--parameter</span> <span class="pre">NAME=VALUE</span></code> supplies an opaque implementation knob; <code class="docutils literal notranslate"><span class="pre">--input-from</span> <span class="pre">NAME</span> <span class="pre">SOURCE...</span></code> loads a file or the readable files in a directory, realizes the
+declared payload destination, and creates one job per file for a batch. <code class="docutils literal notranslate"><span class="pre">--file</span> <span class="pre">NAME=PATH</span></code> stages anything else, <code class="docutils literal notranslate"><span class="pre">--input</span> <span class="pre">NAME=PATH</span></code> stages one declared input,
+and the command prints one
+tab-separated <code class="docutils literal notranslate"><span class="pre">job_key&lt;TAB&gt;payload</span></code> line per job, or <code class="docutils literal notranslate"><span class="pre">--json</span></code> reports. The runner
+file is published into the workspace runner store and pinned by digest unless
+<code class="docutils literal notranslate"><span class="pre">--publish</span> <span class="pre">installed</span></code> names a packaged runner where it is installed. See
+<a class="reference internal" href="quickstart.html"><span class="doc">Quickstart</span></a>.</p>
+</section>
+<section id="running-language-documents">
+<h2>Running language documents<a class="headerlink" href="#running-language-documents" title="Link to this heading">¶</a></h2>
+<p>Run a PWD or CWL document directly with <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span> <span class="pre">--workflow</span> <span class="pre">DOCUMENT</span></code>;
+the document or template directory is resolved as a language realization:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow job new WS --workflow flow.cwl --input message=echo</span>
+<span class="go">httk workflow job new WS --workflow workflow.json --parameter pwd_module_path=&#39;[&quot;.&quot;]&#39;</span>
+<span class="go">httk workflow job new WS --workflow ./v1-template --parameter encut=520</span>
+</pre></div>
+</div>
+<p>See <a class="reference internal" href="workflow_languages.html"><span class="doc">Workflow-language runner realizations</span></a> for package manifests, bare-document rules,
+the supported CWL subset, PWD security, and language collection.</p>
+<p>Harvest old v1 results without submitting them:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow v1 collect ROOT --workflow-dir PKG</span>
+<span class="go">httk workflow v1 collect ROOT --workflow-dir PKG --into results.sqlite</span>
+</pre></div>
+</div>
+</section>
+<section id="inspecting-and-debugging-jobs">
+<h2>Inspecting and debugging jobs<a class="headerlink" href="#inspecting-and-debugging-jobs" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">list</span></code>, <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">show</span></code>, <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">log</span></code>, and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">why</span></code> read one workspace without
+writing anything, and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">debug</span></code> drives a single job to a terminal state in the
+foreground:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow job list WORKSPACE --kind ready</span>
+<span class="go">httk workflow job show WORKSPACE JOB</span>
+<span class="go">httk workflow job log WORKSPACE JOB --limit 20</span>
+<span class="go">httk workflow job why WORKSPACE JOB</span>
+<span class="go">httk workflow job debug WORKSPACE PAYLOAD_OR_JOB --follow-children</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">JOB</span></code> is a job UUID, a <code class="docutils literal notranslate"><span class="pre">tag--uuid</span></code> job key, or any unique prefix of either, and
+each command takes <code class="docutils literal notranslate"><span class="pre">--json</span></code>. <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">debug</span></code> exits <code class="docutils literal notranslate"><span class="pre">0</span></code> on success, <code class="docutils literal notranslate"><span class="pre">3</span></code> on failure, and
+<code class="docutils literal notranslate"><span class="pre">4</span></code> when the job stopped without finishing. See
+<a class="reference internal" href="taskmanager.html"><span class="doc">Task-manager usage</span></a> for what each command reports.</p>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">collect</span> <span class="pre">WORKSPACE</span></code> streams one <code class="docutils literal notranslate"><span class="pre">CollectedJob</span></code> summary per finished
+job as JSON lines by default. Use <code class="docutils literal notranslate"><span class="pre">--raw</span></code> to stream <code class="docutils literal notranslate"><span class="pre">JobRecord</span></code> records for a
+data layer; see <a class="reference internal" href="collecting.html"><span class="doc">Collecting results</span></a>.</p>
+</section>
+<section id="configuration-and-projects">
+<h2>Configuration and projects<a class="headerlink" href="#configuration-and-projects" title="Link to this heading">¶</a></h2>
+<p>User configuration follows the XDG base-directory convention, and everything
+per-user this package keeps is <em>configuration</em>:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">$XDG_CONFIG_HOME/httk/config.json</span></code>;</p></li>
+<li><p>identity keys in <code class="docutils literal notranslate"><span class="pre">$XDG_CONFIG_HOME/httk/keys/</span></code>;</p></li>
+<li><p>global remote definitions in <code class="docutils literal notranslate"><span class="pre">$XDG_CONFIG_HOME/httk/remotes/</span></code>.</p></li>
+</ul>
+<p><code class="docutils literal notranslate"><span class="pre">HTTK_CONFIG_HOME</span></code> and <code class="docutils literal notranslate"><span class="pre">HTTK_DATA_HOME</span></code> can provide explicit deployment or test
+overrides. Legacy <code class="docutils literal notranslate"><span class="pre">~/.httk</span></code> data is read only through <code class="docutils literal notranslate"><span class="pre">config</span> <span class="pre">import-v1</span></code>; its
+64-byte private material is not converted.</p>
+<p>An earlier release kept the keys and the global definitions below
+<code class="docutils literal notranslate"><span class="pre">$XDG_DATA_HOME/httk/</span></code> instead, as <code class="docutils literal notranslate"><span class="pre">keys/</span></code> and <code class="docutils literal notranslate"><span class="pre">computers/</span></code>. The first command
+that needs either one moves what is there to its configuration home, preserving
+the <code class="docutils literal notranslate"><span class="pre">0600</span></code>/<code class="docutils literal notranslate"><span class="pre">0700</span></code> modes, and says so in one line on stderr. The move happens
+once and is idempotent. If both roots somehow exist, the configuration home wins
+and the stale legacy copy is reported in the log rather than merged: guessing
+which of two definitions of one remote was meant would be worse than saying
+nothing was.</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow config init --name &quot;A User&quot; --email user@example.org</span>
+<span class="go">httk workflow config set name &quot;Another User&quot;</span>
+<span class="go">httk workflow config unset email</span>
+<span class="go">httk workflow project init . --name example</span>
+</pre></div>
+</div>
+<p>The project <em>anchor</em> is owned by <em>httk-core</em>, which provides the umbrella
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">project</span></code> command. <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">project</span> <span class="pre">init</span></code> creates the anchor alone;
+<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">project</span> <span class="pre">init</span></code> creates the project anchor; initialize a workspace
+separately with <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span> <span class="pre">PATH</span></code>. The manifest, doctor, and workflow-aware <code class="docutils literal notranslate"><span class="pre">show</span></code> commands are
+provided by
+<em>httk-workflow</em> under <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">project</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">config</span> <span class="pre">set</span></code> accepts only the keys the configuration actually has — including
+<code class="docutils literal notranslate"><span class="pre">machine_names</span></code>, <code class="docutils literal notranslate"><span class="pre">name</span></code>, and <code class="docutils literal notranslate"><span class="pre">email</span></code> — and names them when it refuses another, so a typo cannot become a
+member that nothing ever reads. <code class="docutils literal notranslate"><span class="pre">format</span></code> and <code class="docutils literal notranslate"><span class="pre">format_version</span></code> describe the
+document and are written by <em>httk</em> itself. A configuration whose <code class="docutils literal notranslate"><span class="pre">format</span></code> is
+something else is refused rather than read as if its members meant what <em>httk</em>
+means by them; one with no <code class="docutils literal notranslate"><span class="pre">format_version</span></code> at all predates versioning and is
+read as version 1.</p>
+<p>A project has <code class="docutils literal notranslate"><span class="pre">httk_project/project.json</span></code> and a standard 32-byte Ed25519 seed
+stored with mode <code class="docutils literal notranslate"><span class="pre">0600</span></code>. Its default workflow workspace is recorded by name and
+may live outside the project; commands discover the nearest project in the
+working directory’s parent chain.</p>
+<section id="describing-and-checking-a-project">
+<h3>Describing and checking a project<a class="headerlink" href="#describing-and-checking-a-project" title="Link to this heading">¶</a></h3>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow project show</span>
+<span class="go">httk workflow project show --json</span>
+<span class="go">httk workflow project doctor</span>
+<span class="go">httk workflow project doctor --repair</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">project</span> <span class="pre">show</span></code> reports the project’s metadata, workspace default and job counts,
+whether it pins a key and which, and what its manifest currently verifies as;
+<code class="docutils literal notranslate"><span class="pre">--no-verify</span></code> skips the tree walk that last part needs; by design, this makes the
+command cheap when verification is not required.</p>
+<p><code class="docutils literal notranslate"><span class="pre">project</span> <span class="pre">doctor</span></code> checks the conditions that quietly break a project later — a
+stale maintenance lock, an unpinned key, staging leftovers, a legacy identity,
+an unverifiable manifest — and reports them all.
+<code class="docutils literal notranslate"><span class="pre">--repair</span></code> fixes the ones that can be fixed automatically, says exactly what it
+did, and journals it in the project’s workspace, so the repair is part of that
+workspace’s durable history. The command exits <code class="docutils literal notranslate"><span class="pre">1</span></code> only when a check is actually
+<em>broken</em>; a warning, such as a project that has no manifest yet, is something to
+know about rather than something to fail a script on.</p>
+</section>
+</section>
+<section id="signed-manifests">
+<h2>Signed manifests<a class="headerlink" href="#signed-manifests" title="Link to this heading">¶</a></h2>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow project manifest create</span>
+<span class="go">httk workflow project manifest verify</span>
+<span class="go">httk workflow project manifest verify --trusted-key keys/collaborator.pub</span>
+</pre></div>
+</div>
+<p>The <em>httk₂</em> manifest is deterministic canonical JSON-lines compressed with bzip2.
+It records sorted POSIX paths, regular-file sizes and SHA-256 hashes, empty
+directories, and symlink targets. Special files are rejected. A
+domain-separated body digest is signed with Ed25519. Creation fences manager
+launches only when a workspace is co-located with the project, and refuses
+active work there. A detached project needs no workspace to create its
+manifest. Verification also recognizes the legacy
+<code class="docutils literal notranslate"><span class="pre">ht.project/manifest.bz2</span></code> format without changing it.</p>
+<section id="what-a-verified-manifest-actually-proves">
+<h3>What a verified manifest actually proves<a class="headerlink" href="#what-a-verified-manifest-actually-proves" title="Link to this heading">¶</a></h3>
+<p>Be precise about the threat this addresses, because the signing key lives in the
+tree it signs. <code class="docutils literal notranslate"><span class="pre">httk_project/keys/project.seed</span></code> is a file of the project, mode
+<code class="docutils literal notranslate"><span class="pre">0600</span></code> and excluded from the manifest, but excluded is not absent: <strong>anybody who
+can write the project directory can re-sign it</strong>. A manifest therefore proves
+that the tree is exactly the tree somebody with the seed described — it does not
+prove that nobody changed the tree, and it is not a tamper seal against an
+attacker who had write access.</p>
+<p>What it does prove is worth having. Against accidental damage — a truncated
+copy, a partial <code class="docutils literal notranslate"><span class="pre">rsync</span></code>, bit rot on an archive volume, a stray edit in a
+directory nobody meant to touch — the digests are exact. Across a copy that
+travelled without the seed, and against a <em>replaced</em> tree signed by a different
+key, the signature is the check that catches it. That is why verification
+compares the signing key with a <strong>trust anchor that did not come from the
+manifest</strong>: the key pinned in <code class="docutils literal notranslate"><span class="pre">project.json</span></code> at <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">project</span> <span class="pre">init</span></code>,
+plus any key named with <code class="docutils literal notranslate"><span class="pre">--trusted-key</span></code>. Reading the key out of the manifest
+header and checking the manifest against itself would always say <em>valid</em>.</p>
+<p>Verification is therefore three-way, not a boolean:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Verdict</p></th>
+<th class="head"><p>Exit</p></th>
+<th class="head"><p>Meaning</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">valid_trusted</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">0</span></code></p></td>
+<td><p>the manifest describes this tree and a pinned key signed it</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">valid_unknown_key</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">3</span></code></p></td>
+<td><p>the manifest describes this tree, but nothing here pins the key that signed it</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">invalid</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">1</span></code></p></td>
+<td><p>the tree does not match the manifest, the signature does not verify, or the manifest names another project</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">invalid</span></code> also covers a manifest whose <code class="docutils literal notranslate"><span class="pre">project_id</span></code> disagrees with
+<code class="docutils literal notranslate"><span class="pre">project.json</span></code>: a manifest of a different project dropped into this tree is
+refused by name however well it verifies internally.</p>
+</section>
+<section id="pinning-and-adopting-keys">
+<h3>Pinning and adopting keys<a class="headerlink" href="#pinning-and-adopting-keys" title="Link to this heading">¶</a></h3>
+<p>A project created by <code class="docutils literal notranslate"><span class="pre">project</span> <span class="pre">init</span></code> pins its own key at creation, so its
+manifests verify as <code class="docutils literal notranslate"><span class="pre">valid_trusted</span></code> immediately. A project made before pinning
+existed has no <code class="docutils literal notranslate"><span class="pre">public_key</span></code> in <code class="docutils literal notranslate"><span class="pre">project.json</span></code>, so every manifest of it verifies
+as <code class="docutils literal notranslate"><span class="pre">valid_unknown_key</span></code> until somebody decides which key to trust. That decision
+is explicit, because it is the whole trust model in one act:</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">httk.workflow.projects</span><span class="w"> </span><span class="kn">import</span> <span class="n">pin_project_key</span><span class="p">,</span> <span class="n">trust_project_key</span>
+
+<span class="n">pin_project_key</span><span class="p">(</span><span class="s2">&quot;/path/to/project&quot;</span><span class="p">)</span>  <span class="c1"># adopt keys/project.pub</span>
+<span class="n">trust_project_key</span><span class="p">(</span><span class="s2">&quot;/path/to/project&quot;</span><span class="p">,</span> <span class="s2">&quot;ed25519:…&quot;</span><span class="p">)</span>  <span class="c1"># adopt somebody else&#39;s key</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">pin_project_key</span></code> adopts the key that is in the tree <em>right now</em> — do it only on
+a tree you have reason to believe is the one you left. <code class="docutils literal notranslate"><span class="pre">trust_project_key</span></code> adds
+a further anchor to <code class="docutils literal notranslate"><span class="pre">project.json</span></code>’s <code class="docutils literal notranslate"><span class="pre">trusted_keys</span></code>; <code class="docutils literal notranslate"><span class="pre">project</span> <span class="pre">import-v1</span></code> fills
+that list with the legacy identities of an imported <em>httk</em> v1 project, so its
+old <code class="docutils literal notranslate"><span class="pre">ht.project/manifest.bz2</span></code> verifies as trusted too. <code class="docutils literal notranslate"><span class="pre">--trusted-key</span></code> accepts
+either an <code class="docutils literal notranslate"><span class="pre">ed25519:BASE64</span></code> value or the path of a <code class="docutils literal notranslate"><span class="pre">*.pub</span></code> file and is the
+one-off equivalent that writes nothing.</p>
+<p>For attribution <em>between</em> machines — who published this request, who imported
+this transfer — see the operator identity key below, which is a different key
+with a different job.</p>
+</section>
+<section id="operator-identity">
+<h3>Operator identity<a class="headerlink" href="#operator-identity" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">config</span> <span class="pre">init</span></code> creates <code class="docutils literal notranslate"><span class="pre">identity.seed</span></code>/<code class="docutils literal notranslate"><span class="pre">identity.pub</span></code> below
+<code class="docutils literal notranslate"><span class="pre">$XDG_DATA_HOME/httk/keys/</span></code>. That key signs the small documents an operator
+publishes: an operator request (<code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">job</span> <span class="pre">request</span> <span class="pre">…</span></code>) and a transfer
+acknowledgement. The signature is detached, covers the canonical JSON of the
+whole document, and is domain-separated from every other httk signature.</p>
+<p>It is optional in both directions, deliberately. An installation with no
+identity key publishes unsigned documents, and a manager or a transfer source
+accepts them exactly as before — so a mixed deployment needs no flag day. A
+signature that <em>is</em> present must verify: a request with a broken signature is
+quarantined with the reason, and an acknowledgement with a broken signature will
+not retire a sealed bundle. A verified request records its <code class="docutils literal notranslate"><span class="pre">operator_key</span></code> in the
+journalled state frame beside the operator name and reason.</p>
+<p>The semantics are attribution, not authorization. The key says <em>which identity
+published this document</em>; it grants nothing, and no operation is permitted
+because a document is signed. Anyone who can write the workspace’s request
+directory can still publish an unsigned request.</p>
+<p>The fence is <code class="docutils literal notranslate"><span class="pre">.httk-workflow/maintenance.lock</span></code>, holding the recording process
+identifier, hostname, and creation time. A lock whose same-host process is gone,
+whose content is unreadable, or that is older than twenty-four hours is
+reclaimed automatically; any other lock is reported with its holder. Operators
+can also clear one explicitly:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow workspace unlock WORKSPACE</span>
+<span class="go">httk workflow workspace unlock WORKSPACE --force</span>
+</pre></div>
+</div>
+<p>Without <code class="docutils literal notranslate"><span class="pre">--force</span></code> only a stale lock is removed.</p>
+</section>
+</section>
+<section id="application-settings">
+<h2>Application settings<a class="headerlink" href="#application-settings" title="Link to this heading">¶</a></h2>
+<p>A workspace also carries <em>application settings</em>: a flat, dotted-name map of small
+values a runner resolves when it runs — the VASP command, a pseudopotential
+library — distinct from the engine <code class="docutils literal notranslate"><span class="pre">policy</span></code> above, which tunes scheduling. They
+are stored in the workspace and edited by name:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow workspace settings set my-workspace vasp.command &quot;srun -n 32 vasp_std&quot;</span>
+<span class="go">httk workflow workspace settings show my-workspace</span>
+<span class="go">httk workflow workspace settings unset my-workspace vasp.command</span>
+</pre></div>
+</div>
+<p>A value that parses as JSON is stored as that scalar; a bare word is stored as a
+string. Settings can also be seeded at creation: <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">init</span> <span class="pre">--setting</span> <span class="pre">KEY=VALUE</span></code> sets them explicitly, and a workspace bound to a remote is additionally
+seeded from that remote definition’s whitelisted remote settings, so a cluster’s
+<code class="docutils literal notranslate"><span class="pre">vasp_command</span></code> becomes the new workspace’s <code class="docutils literal notranslate"><span class="pre">vasp.command</span></code> without anyone restating
+it.</p>
+<p>A runner reads a setting through <code class="docutils literal notranslate"><span class="pre">a.setting(&quot;vasp.command&quot;)</span></code>, and the value is
+resolved in layers, most specific first: the job’s own parameters, a real
+<code class="docutils literal notranslate"><span class="pre">HTTK_VASP_COMMAND</span></code> deployment override, the workspace setting, then the runner’s
+default. The manager exports scalar workspace settings into each attempt
+environment (<code class="docutils literal notranslate"><span class="pre">vasp.command</span></code> becomes <code class="docutils literal notranslate"><span class="pre">HTTK_VASP_COMMAND</span></code>) and snapshots them into
+<code class="docutils literal notranslate"><span class="pre">context.json</span></code>, so a runner sees the values the workspace held when its job was
+claimed. See <a class="reference internal" href="vasp_runners.html"><span class="doc">Packaged VASP runners</span></a> and <a class="reference internal" href="sdk_parity.html"><span class="doc">Python and Bash authoring parity</span></a>.</p>
+</section>
+<section id="workspace-policy-and-integrity">
+<h2>Workspace policy and integrity<a class="headerlink" href="#workspace-policy-and-integrity" title="Link to this heading">¶</a></h2>
+<p>The tunables a workspace shares with every process attaching it — the
+visibility deadline, the default lease, the journal segment size, and the
+retention limits — are stored in <code class="docutils literal notranslate"><span class="pre">format.json</span></code> and edited in place:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow workspace policy show WORKSPACE</span>
+<span class="go">httk workflow workspace policy show WORKSPACE --json</span>
+<span class="go">httk workflow workspace policy set WORKSPACE visibility_deadline_seconds 60</span>
+<span class="go">httk workflow workspace policy set WORKSPACE retention.trash_days 14</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">fsck</span></code> verifies that every state marker still resolves to a readable
+journal frame that agrees with it, and can re-point damaged markers at the last
+good frame of their job:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow workspace fsck WORKSPACE</span>
+<span class="go">httk workflow workspace fsck WORKSPACE --repair --json</span>
+<span class="go">httk workflow workspace fsck WORKSPACE --repair --quarantine-unrepairable</span>
+</pre></div>
+</div>
+<p>It exits <code class="docutils literal notranslate"><span class="pre">1</span></code> while anything remains for an operator to deal with. See
+<a class="reference internal" href="taskmanager.html"><span class="std std-doc">the task-manager guide</span></a> for what each problem code means and
+for exactly what a repair will and will not touch.</p>
+</section>
+<section id="freeing-disk">
+<h2>Freeing disk<a class="headerlink" href="#freeing-disk" title="Link to this heading">¶</a></h2>
+<p>Nothing in the engine deletes anything on its own: neither a runner nor a
+manager is ever required to run cleanup code, so every artefact a crash could
+orphan is simply left in place. <code class="docutils literal notranslate"><span class="pre">workspace</span> <span class="pre">gc</span></code> is the separate, explicit
+collector, driven entirely by the workspace’s <code class="docutils literal notranslate"><span class="pre">policy.retention</span></code>:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow workspace gc WORKSPACE --dry-run</span>
+<span class="go">httk workflow workspace gc WORKSPACE</span>
+<span class="go">httk workflow workspace gc WORKSPACE --json</span>
+</pre></div>
+</div>
+<p>It prints one row per category with the candidates it found, what it removed,
+and an estimate of the bytes reclaimed; <code class="docutils literal notranslate"><span class="pre">--json</span></code> lists every individual entry
+as well. <code class="docutils literal notranslate"><span class="pre">--dry-run</span></code> touches nothing at all and reports what a real run would
+remove. A run that removed anything also appends one <code class="docutils literal notranslate"><span class="pre">httk-workflow-gc</span></code> frame
+to the journal summarizing the same counts, so the collection is itself part of
+the workspace’s durable history.</p>
+<p>A retention limit that is not configured means <em>keep</em>, so on a workspace whose
+policy is empty the command only prunes what cannot carry information: empty
+placement mirrors below the state kinds, staging entries abandoned for a day,
+and month-old request leftovers — those claimed by a manager that is gone and
+those a manager explicitly retired. Configure the limits to collect the rest:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow workspace policy set WORKSPACE retention.attempt_control_days 14</span>
+<span class="go">httk workflow workspace policy set WORKSPACE retention.trash_days 14</span>
+<span class="go">httk workflow workspace policy set WORKSPACE retention.journal_days 90</span>
+</pre></div>
+</div>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Category</p></th>
+<th class="head"><p>Retention limit</p></th>
+<th class="head"><p>What goes</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">attempt_control</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">attempt_control_days</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">.httk-attempt.*</span></code> directories of terminal jobs, never the newest one of a job</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">transaction_trash</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trash_days</span></code></p></td>
+<td><p>trees a replayed transaction moved aside, once the job left <code class="docutils literal notranslate"><span class="pre">committing</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">retired_bundles</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trash_days</span></code></p></td>
+<td><p>acknowledged transfer bundles below <code class="docutils literal notranslate"><span class="pre">transfers/retired/</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">transfer_records</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">trash_days</span></code></p></td>
+<td><p>per-transfer receipts below <code class="docutils literal notranslate"><span class="pre">transfers/acks/</span></code> and <code class="docutils literal notranslate"><span class="pre">transfers/imported/</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">journal_segments</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">journal_days</span></code></p></td>
+<td><p>segments no current marker references, written by a writer no live manager owns</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">manager_directories</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">journal_days</span></code></p></td>
+<td><p>directories of dead managers whose segments are gone</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">placement_directories</span></code></p></td>
+<td><p>always safe</p></td>
+<td><p>empty placement mirrors below <code class="docutils literal notranslate"><span class="pre">state/&lt;kind&gt;/</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">tmp_entries</span></code></p></td>
+<td><p>always safe</p></td>
+<td><p>staging entries older than 24 hours</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">retired_requests</span></code></p></td>
+<td><p>always safe</p></td>
+<td><p>requests claimed over 30 days ago by a manager now gone, and requests retired over 30 days ago with their <code class="docutils literal notranslate"><span class="pre">.retirement</span></code> records</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The collector never touches the quarantine, a sealed transfer bundle, a
+persistent workdir, a payload beyond its aged attempt-control directories, any
+marker, a segment a current marker references, a manager that is still
+heartbeating, or the runner store. Removal is bottom-up and rewrites no state,
+so a collection killed halfway leaves the workspace exactly as consistent as it
+was, and running it again simply finishes the job.</p>
+<p>Collecting journal segments has one honest cost. Only the segment a marker
+points into is protected, so the deep history of an old job goes with the
+segments behind it; <code class="docutils literal notranslate"><span class="pre">collect</span></code> and <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">log</span></code> then report that job’s timeline
+with <code class="docutils literal notranslate"><span class="pre">gaps</span></code> set. Its state, payload, and outcome are unaffected.</p>
+</section>
+<section id="remote-adapters">
+<h2>Remote adapters<a class="headerlink" href="#remote-adapters" title="Link to this heading">¶</a></h2>
+<p>Remote definitions are versioned directories containing <code class="docutils literal notranslate"><span class="pre">remote.json</span></code> and
+executable <code class="docutils literal notranslate"><span class="pre">configure</span></code>, <code class="docutils literal notranslate"><span class="pre">install</span></code>, <code class="docutils literal notranslate"><span class="pre">invoke</span></code>, <code class="docutils literal notranslate"><span class="pre">push</span></code>, <code class="docutils literal notranslate"><span class="pre">pull</span></code>, <code class="docutils literal notranslate"><span class="pre">start-manager</span></code>,
+and <code class="docutils literal notranslate"><span class="pre">status</span></code> operations. Each receives one versioned JSON request filename and
+prints one JSON result; diagnostics belong on stderr. Commands and remote
+commands are always argument arrays. The maintained templates implement that
+protocol through <a class="reference internal" href="reference/autoapi/httk/workflow/adapter_protocol/index.html#module-httk.workflow.adapter_protocol" title="httk.workflow.adapter_protocol"><code class="xref py py-mod docutils literal notranslate"><span class="pre">httk.workflow.adapter_protocol</span></code></a>, which is the public
+name of the packaged implementation. <a class="reference internal" href="adapter_authoring.html"><span class="doc">Writing a remote adapter</span></a> is the reference
+for writing one of your own: the bundle layout, the exact request and result
+document of each of the seven operations, and a worked skeleton for a cluster
+none of the maintained kinds covers.</p>
+<p>Maintained <code class="docutils literal notranslate"><span class="pre">local</span></code>, <code class="docutils literal notranslate"><span class="pre">local-slurm</span></code>, and <code class="docutils literal notranslate"><span class="pre">ssh-slurm</span></code> templates are packaged with
+the module. Project definitions shadow global definitions. <code class="docutils literal notranslate"><span class="pre">REMOTE:NAME</span></code> names
+a workspace on a remote. <code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">import-v1</span></code> maps recognized legacy <em>httk</em> v1 computer bundles
+by reading assignment-only configuration; legacy shell executables are never
+copied or run. Any other <code class="docutils literal notranslate"><span class="pre">kind</span></code> in a <code class="docutils literal notranslate"><span class="pre">remote.json</span></code> is refused rather than
+executed in the wrong place.</p>
+<p><code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">configure</span> <span class="pre">--set</span> <span class="pre">KEY=VALUE</span></code> persists only the machine-level keys
+<code class="docutils literal notranslate"><span class="pre">bootstrap</span></code>, <code class="docutils literal notranslate"><span class="pre">check_connectivity</span></code>, <code class="docutils literal notranslate"><span class="pre">host</span></code>, <code class="docutils literal notranslate"><span class="pre">httk_command</span></code>, <code class="docutils literal notranslate"><span class="pre">legacy_settings</span></code>,
+<code class="docutils literal notranslate"><span class="pre">port</span></code>, <code class="docutils literal notranslate"><span class="pre">username</span></code>, <code class="docutils literal notranslate"><span class="pre">vasp_command</span></code>, and <code class="docutils literal notranslate"><span class="pre">vasp_pseudo_library</span></code>
+in the shareable <code class="docutils literal notranslate"><span class="pre">remote.json</span></code>. Scheduler profile values are workspace
+settings: use <code class="docutils literal notranslate"><span class="pre">slurm.account</span></code>, <code class="docutils literal notranslate"><span class="pre">slurm.partition</span></code>, <code class="docutils literal notranslate"><span class="pre">slurm.time_limit</span></code>,
+<code class="docutils literal notranslate"><span class="pre">slurm.nodes</span></code>, <code class="docutils literal notranslate"><span class="pre">slurm.cpus_per_task</span></code>, <code class="docutils literal notranslate"><span class="pre">slurm.reservation</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">manager.workers</span></code>; those scheduler names are refused as remote settings. Other
+non-persistable keys are stored in
+the remote’s <code class="docutils literal notranslate"><span class="pre">credentials.json</span></code> with mode <code class="docutils literal notranslate"><span class="pre">0600</span></code> beside it, which project
+manifests exclude. Adapters receive both together as the request’s
+<code class="docutils literal notranslate"><span class="pre">remote_settings</span></code>. <code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">show</span> <span class="pre">NAME</span></code> reports which
+file each setting came from, and the name — never the value — of every
+credential.</p>
+<section id="what-each-kind-does">
+<h3>What each kind does<a class="headerlink" href="#what-each-kind-does" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">local</span></code> copies files in this filesystem, runs commands as child processes, and
+starts the requested <code class="docutils literal notranslate"><span class="pre">count</span></code> of managers as detached local processes.</p>
+<p><code class="docutils literal notranslate"><span class="pre">local-slurm</span></code> keeps the same local copies and local commands, but submits the
+manager with a generated batch script through the local <code class="docutils literal notranslate"><span class="pre">sbatch</span></code>. It therefore
+requires <code class="docutils literal notranslate"><span class="pre">sbatch</span></code> on the machine that defines the remote, which is checked
+when the remote is added.</p>
+<p><code class="docutils literal notranslate"><span class="pre">ssh-slurm</span></code> moves files with <code class="docutils literal notranslate"><span class="pre">rsync</span></code> over <code class="docutils literal notranslate"><span class="pre">ssh</span></code> and runs every command on the
+configured host, where the manager is submitted with <code class="docutils literal notranslate"><span class="pre">sbatch</span></code>. Only <code class="docutils literal notranslate"><span class="pre">ssh</span></code> and
+<code class="docutils literal notranslate"><span class="pre">rsync</span></code> are required locally. Operation by operation:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Operation</p></th>
+<th class="head"><p><code class="docutils literal notranslate"><span class="pre">ssh-slurm</span></code> behaviour</p></th>
+<th class="head"><p>Settings used</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">configure</span></code></p></td>
+<td><p>verifies the host answers with a cheap remote <code class="docutils literal notranslate"><span class="pre">true</span></code>, so a mistyped host fails immediately instead of at the first transfer</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">host</span></code>, <code class="docutils literal notranslate"><span class="pre">username</span></code>, <code class="docutils literal notranslate"><span class="pre">port</span></code>, <code class="docutils literal notranslate"><span class="pre">check_connectivity</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">install</span></code></p></td>
+<td><p>checks that <code class="docutils literal notranslate"><span class="pre">httk</span></code> answers on the far side and reports its version</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">host</span></code>, <code class="docutils literal notranslate"><span class="pre">username</span></code>, <code class="docutils literal notranslate"><span class="pre">port</span></code>, <code class="docutils literal notranslate"><span class="pre">httk_command</span></code>, <code class="docutils literal notranslate"><span class="pre">bootstrap</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">push</span></code> / <code class="docutils literal notranslate"><span class="pre">pull</span></code></p></td>
+<td><p>one <code class="docutils literal notranslate"><span class="pre">rsync</span> <span class="pre">--archive</span></code> transfer, creating missing destination components; a <code class="docutils literal notranslate"><span class="pre">pull</span></code> is always the whole remote directory, a <code class="docutils literal notranslate"><span class="pre">push</span></code> is the whole tree or the request’s explicit relative <code class="docutils literal notranslate"><span class="pre">files</span></code> batch</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">host</span></code>, <code class="docutils literal notranslate"><span class="pre">username</span></code>, <code class="docutils literal notranslate"><span class="pre">port</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">invoke</span></code></p></td>
+<td><p>runs the request’s argument vector on the host, optionally in the request’s directory, and returns its status, stdout and stderr</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">host</span></code>, <code class="docutils literal notranslate"><span class="pre">username</span></code>, <code class="docutils literal notranslate"><span class="pre">port</span></code>, <code class="docutils literal notranslate"><span class="pre">httk_command</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">status</span></code></p></td>
+<td><p>the same machinery running <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">workspace</span> <span class="pre">status</span> <span class="pre">NAME</span> <span class="pre">--json</span></code> remotely</p></td>
+<td><p>as <code class="docutils literal notranslate"><span class="pre">invoke</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">start-manager</span></code></p></td>
+<td><p>writes a generated batch script into <code class="docutils literal notranslate"><span class="pre">WORKSPACE/.httk-workflow/batch/</span></code>, then submits it with <code class="docutils literal notranslate"><span class="pre">sbatch</span></code> once, or the request’s <code class="docutils literal notranslate"><span class="pre">count</span></code> times</p></td>
+<td><p>workspace settings <code class="docutils literal notranslate"><span class="pre">slurm.*</span></code>, <code class="docutils literal notranslate"><span class="pre">manager.workers</span></code>, <code class="docutils literal notranslate"><span class="pre">workspace</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The generated batch script is a <code class="docutils literal notranslate"><span class="pre">#!/bin/bash</span></code> file carrying one <code class="docutils literal notranslate"><span class="pre">#SBATCH</span></code>
+directive per configured setting, <code class="docutils literal notranslate"><span class="pre">--chdir</span></code> set to the workspace, <code class="docutils literal notranslate"><span class="pre">--output</span></code>
+and <code class="docutils literal notranslate"><span class="pre">--error</span></code> beside the script, and a single <code class="docutils literal notranslate"><span class="pre">exec</span></code> line that runs the manager
+command. The workspace’s <code class="docutils literal notranslate"><span class="pre">manager.workers</span></code> count is appended only when the
+request did not already choose one, so an explicit <code class="docutils literal notranslate"><span class="pre">--workers</span></code> always wins. Both kinds report
+the submitted job identifiers.</p>
+<p>A <code class="docutils literal notranslate"><span class="pre">start-manager</span></code> request names the client-probed workspace root in its
+<code class="docutils literal notranslate"><span class="pre">workspace</span></code> field. When that field is absent the root is read back out of the
+request’s <code class="docutils literal notranslate"><span class="pre">manager</span> <span class="pre">run</span> <span class="pre">PATH</span> <span class="pre">--by-path</span></code> argument vector; argv reading is a
+documented fallback for hand-written requests, not the normal path. <code class="docutils literal notranslate"><span class="pre">local</span></code> starts <code class="docutils literal notranslate"><span class="pre">count</span></code> detached processes and
+reports their <code class="docutils literal notranslate"><span class="pre">pids</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">httk_command</span></code> overrides how <code class="docutils literal notranslate"><span class="pre">httk</span></code> is spelled on the far side, for example
+<code class="docutils literal notranslate"><span class="pre">httk_command=&quot;/proj/venv/bin/httk&quot;</span></code>; without it the plain <code class="docutils literal notranslate"><span class="pre">httk</span></code> on the remote
+<code class="docutils literal notranslate"><span class="pre">PATH</span></code> is used, and locally a <code class="docutils literal notranslate"><span class="pre">python3</span> <span class="pre">-m</span> <span class="pre">httk.core.cli</span></code> fallback applies.</p>
+</section>
+<section id="quoting">
+<h3>Quoting<a class="headerlink" href="#quoting" title="Link to this heading">¶</a></h3>
+<p>Every subprocess an adapter starts is an argument vector, so no shell ever
+parses a value that came from a request or from settings. <code class="docutils literal notranslate"><span class="pre">ssh</span></code> is the one
+exception in the protocol, because it always joins its command words and lets a
+login shell on the far side parse the result. All remote command strings, and
+the one line of the generated batch script that runs the manager, are therefore
+built by a single helper that quotes element-wise; nothing else composes a
+command string. <code class="docutils literal notranslate"><span class="pre">rsync</span></code> transfers pass <code class="docutils literal notranslate"><span class="pre">--protect-args</span></code> so that even file names
+travel in the protocol rather than through the remote shell.</p>
+</section>
+<section id="installing-httk-on-the-target">
+<h3>Installing httk on the target<a class="headerlink" href="#installing-httk-on-the-target" title="Link to this heading">¶</a></h3>
+<p><code class="docutils literal notranslate"><span class="pre">remote</span> <span class="pre">install</span></code> never installs software behind your back. It reports the
+<code class="docutils literal notranslate"><span class="pre">httk</span></code> it found and the workspace directory it ensured; when nothing answers it
+fails with a message pointing at <code class="docutils literal notranslate"><span class="pre">pipx</span> <span class="pre">install</span> <span class="pre">httk-workflow</span></code> on the target.
+Configuring the remote with <code class="docutils literal notranslate"><span class="pre">bootstrap=pip</span></code> opts into one attempt at
+<code class="docutils literal notranslate"><span class="pre">python3</span> <span class="pre">-m</span> <span class="pre">pip</span> <span class="pre">install</span> <span class="pre">--user</span> <span class="pre">httk-workflow</span></code> before that check is repeated.</p>
+</section>
+</section>
+<section id="detached-transfers">
+<h2>Detached transfers<a class="headerlink" href="#detached-transfers" title="Link to this heading">¶</a></h2>
+<p>A transfer fences an explicit quiescent marker, seals it in the payload,
+validates the payload digest at import, publishes the preserved UUID and prior
+state only at the destination, and retires the source only after an
+idempotent acknowledgement. Transfer UUID and digest checks suppress retries;
+sealed and retired bundles are retained for recovery. Repeating the same
+<code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">SRC</span> <span class="pre">DST</span></code> resumes the matching sealed transfer, including the
+copy-before-import and lost-acknowledgement boundaries.</p>
+<p>The sealed payload digest pins every path, every file’s content <em>and executable
+bit</em>, and the literal target of every symlink, so a runner that arrives without
+its executable bit, or a link retargeted in transit, is a detected mismatch
+rather than a silent corruption. A symlink is carried as its target string and
+must stay inside the payload: an absolute target, or a relative one climbing out
+with <code class="docutils literal notranslate"><span class="pre">..</span></code>, is refused by name, because it would mean something else at the
+destination.</p>
+</section>
+<section id="running-on-a-remote-and-fetching-the-results">
+<h2>Running on a remote and fetching the results<a class="headerlink" href="#running-on-a-remote-and-fetching-the-results" title="Link to this heading">¶</a></h2>
+<p>Add and configure the machine, install <em>httk-workflow</em> there, create its
+workspace, then send and run a job:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow remote add kappa --template ssh-slurm</span>
+<span class="go">httk workflow remote configure kappa \</span>
+<span class="go">    --set host=kappa.example.org --set username=rar \</span>
+<span class="go">    --set check_connectivity=yes</span>
+<span class="go">httk workflow remote install kappa</span>
+<span class="go">httk workflow workspace init kappa:/scratch/rar/httk/runs</span>
+<span class="go">httk workflow workspace settings set kappa:runs slurm.partition batch</span>
+<span class="go">httk workflow workspace settings set kappa:runs vasp.command &quot;srun -n 32 vasp_std&quot;</span>
+<span class="go">httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon</span>
+<span class="go">httk workflow transfer default kappa:runs --job JOB-ID</span>
+<span class="go">httk workflow run kappa:runs --workers 8</span>
+<span class="go">httk workflow workspace status kappa:runs</span>
+</pre></div>
+</div>
+<p>The machine that owns a workspace chooses its path; scheduler settings belong
+to the workspace instead. Remote init sends the path and registers its basename
+on the owning machine.</p>
+<p><code class="docutils literal notranslate"><span class="pre">transfer</span> <span class="pre">default</span> <span class="pre">kappa:runs</span></code> detaches each selected job from the local default
+workspace and imports it on the remote, at the placement it had here unless
+<code class="docutils literal notranslate"><span class="pre">--destination-placement</span></code> puts it elsewhere. <code class="docutils literal notranslate"><span class="pre">run</span> <span class="pre">kappa:runs</span></code> submits the
+generated manager through the remote adapter; <code class="docutils literal notranslate"><span class="pre">--workers</span></code> fixes its worker count.
+<code class="docutils literal notranslate"><span class="pre">manager</span> <span class="pre">run</span></code> is the advanced spelling for the same operation.</p>
+<p>To bring stopped jobs home, use the reverse transfer and then collect:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow transfer kappa:runs default \</span>
+<span class="go">    --state succeeded --state failed --placement project/screening --json</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">--state</span></code> accepts the kinds a stopped job can be in and defaults to <code class="docutils literal notranslate"><span class="pre">succeeded</span></code>
+and <code class="docutils literal notranslate"><span class="pre">failed</span></code>; <code class="docutils literal notranslate"><span class="pre">--placement</span></code> restricts the fetch to one subtree; <code class="docutils literal notranslate"><span class="pre">--adapter-timeout</span></code>
+bounds every adapter operation the fetch runs. A fetched job arrives as an
+ordinary job of the local default workspace, in the terminal state and at the
+placement it had on the remote, so <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">collect</span></code> then reports it
+exactly like a job that ran at home.</p>
+<p>Under the fetch leg run the two far-side protocol commands, invoked over the
+adapter but usable on their own on the remote itself. They use literal paths
+because they bypass the owning machine’s registry:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow transfer offer PATH --destination-workspace-id UUID --json</span>
+<span class="go">httk workflow transfer retire PATH JOB_ID ... --destination-workspace-id UUID</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">offer</span></code> detaches every finished job into its sealed bundle and prints one entry
+per bundle; it requires <code class="docutils literal notranslate"><span class="pre">--destination-workspace-id</span></code>, because a bundle is sealed
+for exactly one destination. <code class="docutils literal notranslate"><span class="pre">retire</span></code> moves the sealed source of an already
+imported job under <code class="docutils literal notranslate"><span class="pre">.httk-workflow/transfers/retired/</span></code> — a rename, never a
+delete, so a source is only ever whole or moved whole; its
+<code class="docutils literal notranslate"><span class="pre">--destination-workspace-id</span></code> is optional and, when given, refuses a bundle that
+was sealed for somebody else. <code class="docutils literal notranslate"><span class="pre">offer</span></code> narrows what it seals with the same
+<code class="docutils literal notranslate"><span class="pre">--state</span></code> and <code class="docutils literal notranslate"><span class="pre">--placement</span></code> <code class="docutils literal notranslate"><span class="pre">fetch</span></code> passes through; both print their report as
+JSON with <code class="docutils literal notranslate"><span class="pre">--json</span></code> and as tab-separated lines otherwise.</p>
+<p>Every step is idempotent and the whole pipeline is resumable: <code class="docutils literal notranslate"><span class="pre">offer</span></code> reports an
+already sealed bundle from its ledger instead of sealing it again, a <code class="docutils literal notranslate"><span class="pre">pull</span></code> onto
+a matching staged bundle is a no-op, <code class="docutils literal notranslate"><span class="pre">import</span></code> returns the acknowledgement it
+already wrote, and a retired source is never offered again. An interrupted fetch
+is finished by running the same command again, and a fetch that has nothing to
+collect does nothing.</p>
+<p>Because <code class="docutils literal notranslate"><span class="pre">fetch</span></code> reads these two commands’ answers back over the adapter’s
+<code class="docutils literal notranslate"><span class="pre">invoke</span></code>, their standard output has to be nothing but the JSON document: a login
+banner or a profile’s greeting printed on the far side’s stdout makes the fetch
+stop with <em>remote offer did not return a transfer offer document</em> before
+anything is pulled or imported. Put such greetings on stderr, or behind a
+non-interactive-shell test, on any host a remote adapter reaches.</p>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="campaigns.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Campaigns</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="taskmanager.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Task-manager usage</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Project and workflow command line</a><ul>
+<li><a class="reference internal" href="#three-executables-one-tree">Three executables, one tree</a></li>
+<li><a class="reference internal" href="#the-complete-tree">The complete tree</a><ul>
+<li><a class="reference internal" href="#workspace-selection">Workspace selection</a></li>
+<li><a class="reference internal" href="#workspace-the-workspace-itself-not-its-jobs"><code class="docutils literal notranslate"><span class="pre">workspace</span></code> — the workspace itself, not its jobs</a></li>
+<li><a class="reference internal" href="#runner-the-shared-runners-a-workspace-publishes"><code class="docutils literal notranslate"><span class="pre">runner</span></code> — the shared runners a workspace publishes</a></li>
+<li><a class="reference internal" href="#job-making-jobs-and-finding-out-about-them"><code class="docutils literal notranslate"><span class="pre">job</span></code> — making jobs, and finding out about them</a></li>
+<li><a class="reference internal" href="#collect-the-finished-jobs-as-summaries"><code class="docutils literal notranslate"><span class="pre">collect</span></code> — the finished jobs, as summaries</a></li>
+<li><a class="reference internal" href="#postprocess-run-a-curated-script">postprocess — run a curated script</a></li>
+<li><a class="reference internal" href="#describe-inspect-a-workflow-without-publishing-it"><code class="docutils literal notranslate"><span class="pre">describe</span></code> — inspect a workflow without publishing it</a></li>
+<li><a class="reference internal" href="#manager-the-process-that-runs-the-jobs"><code class="docutils literal notranslate"><span class="pre">manager</span></code> — the process that runs the jobs</a></li>
+<li><a class="reference internal" href="#v1-httk-v1-task-templates-on-the-v2-engine"><code class="docutils literal notranslate"><span class="pre">v1</span></code> — <em>httk</em> v1 task templates on the v2 engine</a></li>
+<li><a class="reference internal" href="#config-the-per-user-configuration-and-identity"><code class="docutils literal notranslate"><span class="pre">config</span></code> — the per-user configuration and identity</a></li>
+<li><a class="reference internal" href="#project-the-directory-a-campaign-lives-in"><code class="docutils literal notranslate"><span class="pre">project</span></code> — the directory a campaign lives in</a></li>
+<li><a class="reference internal" href="#remote-the-adapters-that-reach-other-machines"><code class="docutils literal notranslate"><span class="pre">remote</span></code> — the adapters that reach other machines</a></li>
+<li><a class="reference internal" href="#transfer-moving-jobs-between-two-workspaces"><code class="docutils literal notranslate"><span class="pre">transfer</span></code> — moving jobs between two workspaces</a></li>
+<li><a class="reference internal" href="#the-protocol-spellings-and-what-is-gone">The protocol spellings, and what is gone</a></li>
+<li><a class="reference internal" href="#campaign-partitioning-a-large-run-across-many-workspaces"><code class="docutils literal notranslate"><span class="pre">campaign</span></code> — partitioning a large run across many workspaces</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#creating-jobs">Creating jobs</a></li>
+<li><a class="reference internal" href="#running-language-documents">Running language documents</a></li>
+<li><a class="reference internal" href="#inspecting-and-debugging-jobs">Inspecting and debugging jobs</a></li>
+<li><a class="reference internal" href="#configuration-and-projects">Configuration and projects</a><ul>
+<li><a class="reference internal" href="#describing-and-checking-a-project">Describing and checking a project</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#signed-manifests">Signed manifests</a><ul>
+<li><a class="reference internal" href="#what-a-verified-manifest-actually-proves">What a verified manifest actually proves</a></li>
+<li><a class="reference internal" href="#pinning-and-adopting-keys">Pinning and adopting keys</a></li>
+<li><a class="reference internal" href="#operator-identity">Operator identity</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#application-settings">Application settings</a></li>
+<li><a class="reference internal" href="#workspace-policy-and-integrity">Workspace policy and integrity</a></li>
+<li><a class="reference internal" href="#freeing-disk">Freeing disk</a></li>
+<li><a class="reference internal" href="#remote-adapters">Remote adapters</a><ul>
+<li><a class="reference internal" href="#what-each-kind-does">What each kind does</a></li>
+<li><a class="reference internal" href="#quoting">Quoting</a></li>
+<li><a class="reference internal" href="#installing-httk-on-the-target">Installing httk on the target</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#detached-transfers">Detached transfers</a></li>
+<li><a class="reference internal" href="#running-on-a-remote-and-fetching-the-results">Running on a remote and fetching the results</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="_static/documentation_options.js?v=fe42cd0d"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=fd10adb8"></script>
+    <script src="_static/selector.js?v=875006ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:main","versionPathDepth":2};</script>
+    </body>
+</html>

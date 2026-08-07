@@ -1,0 +1,403 @@
+httk.workflow.supervision
+=========================
+
+.. py:module:: httk.workflow.supervision
+
+.. autoapi-nested-parse::
+
+   Structured, argv-only process supervision for native runners.
+
+   Every event is dispatched to the in-process monitors and to the executable
+   checkers under one supervisor-wide lock, so a monitor is never entered
+   concurrently with itself or with another monitor, and a checker never receives
+   an interleaved line on its stdin. A monitor therefore does not have to be
+   thread-safe, but it must return quickly: it delays the whole event stream.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.supervision.DEFAULT_TICK_INTERVAL
+   httk.workflow.supervision.DEFAULT_FOLLOW_INTERVAL
+   httk.workflow.supervision.DEFAULT_CAPTURE_LIMIT
+   httk.workflow.supervision.DEFAULT_TAIL_LIMIT
+   httk.workflow.supervision.DEFAULT_DIAGNOSTIC_LIMIT
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.supervision.SourceEvent
+   httk.workflow.supervision.Diagnostic
+   httk.workflow.supervision.FollowSource
+   httk.workflow.supervision.CheckerSpec
+   httk.workflow.supervision.ProcessReport
+   httk.workflow.supervision.ProcessSupervisor
+
+
+Module Contents
+---------------
+
+.. py:data:: DEFAULT_TICK_INTERVAL
+   :value: 1.0
+
+
+   Seconds between the ``tick`` events delivered to monitors and checkers.
+
+.. py:data:: DEFAULT_FOLLOW_INTERVAL
+   :value: 0.25
+
+
+   Seconds between polls of a followed file that produced no new data.
+
+.. py:data:: DEFAULT_CAPTURE_LIMIT
+   :value: 4194304
+
+
+   Bytes of a stream retained in the report when no output path is given.
+
+.. py:data:: DEFAULT_TAIL_LIMIT
+   :value: 65536
+
+
+   Bytes of a stream retained in the report when an output path is given.
+
+.. py:data:: DEFAULT_DIAGNOSTIC_LIMIT
+   :value: 512
+
+
+   Diagnostics retained in one report before the middle is dropped.
+
+.. py:class:: SourceEvent
+
+   Describe one event delivered to a checker.
+
+   :param event: Identify the event kind.
+   :param source: Identify the stream or process that produced it.
+   :param line: Preserve the event line when one exists.
+   :param timestamp: Preserve the event timestamp, or generate one when absent.
+
+
+   .. py:attribute:: event
+      :type:  Literal['start', 'line', 'tick', 'source-eof', 'process-exit']
+
+
+   .. py:attribute:: source
+      :type:  str
+
+
+   .. py:attribute:: line
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: timestamp
+      :type:  str
+      :value: ''
+
+
+
+   .. py:method:: as_mapping()
+
+      Return the checker protocol mapping for this event.
+
+      :return: The serialized event mapping.
+
+
+
+.. py:class:: Diagnostic
+
+   Describe a structured observation made while supervising a program.
+
+   :param code: Name the stable diagnostic code.
+   :param severity: Classify the diagnostic severity.
+   :param summary: Summarize the observation.
+   :param source: Identify the source that produced it.
+   :param evidence: Preserve supporting evidence when present.
+   :param stop: Request termination of the supervised command.
+
+
+   .. py:attribute:: code
+      :type:  str
+
+
+   .. py:attribute:: severity
+      :type:  DiagnosticSeverity
+
+
+   .. py:attribute:: summary
+      :type:  str
+
+
+   .. py:attribute:: source
+      :type:  str
+
+
+   .. py:attribute:: evidence
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: stop
+      :type:  bool
+      :value: False
+
+
+
+   .. py:method:: as_mapping()
+
+      Return the serialized diagnostic mapping.
+
+      :return: The diagnostic mapping.
+
+
+
+.. py:class:: FollowSource
+
+   Describe a file to follow while the child process is running.
+
+   :param path: Locate the file to follow.
+   :param name: Identify the source in emitted events.
+   :param inactivity_timeout: Stop when no data arrives for this interval.
+
+
+   .. py:attribute:: path
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: name
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: inactivity_timeout
+      :type:  float | None
+      :value: None
+
+
+
+.. py:class:: CheckerSpec
+
+   Describe a versioned executable checker.
+
+   :param argv: Supply the checker command and arguments.
+   :param required: Require the checker to remain available for the run.
+   :param sources: Select files the checker follows.
+
+
+   .. py:attribute:: argv
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: required
+      :type:  bool
+      :value: True
+
+
+
+   .. py:attribute:: sources
+      :type:  tuple[FollowSource, Ellipsis]
+      :value: ()
+
+
+
+   .. py:method:: from_mapping(value)
+      :classmethod:
+
+
+      Validate and build a checker specification from a mapping.
+
+      :param value: Supply the serialized checker specification.
+      :return: The validated checker specification.
+      :raises ValueError: If the mapping has an invalid checker format or source.
+
+
+
+.. py:class:: ProcessReport
+
+   The complete result of one supervised command.
+
+   ``stdout`` and ``stderr`` are bounded: when an output path was given they
+   hold at most the run's tail limit and the file named by ``stdout_path`` or
+   ``stderr_path`` is authoritative; otherwise they hold at most the run's
+   capture limit. ``stdout_bytes`` and ``stderr_bytes`` always count every byte
+   the program produced, and ``stdout_truncated`` and ``stderr_truncated`` say
+   whether anything was dropped from the retained tail.
+
+   :param argv: Preserve the executed command.
+   :param started_at: Record when execution began.
+   :param finished_at: Record when execution ended.
+   :param returncode: Record the process return code.
+   :param termination: Record why execution ended.
+   :param stdout: Preserve the captured stdout tail.
+   :param stderr: Preserve the captured stderr tail.
+   :param diagnostics: Preserve emitted diagnostics.
+   :param stdout_path: Locate the authoritative stdout file when configured.
+   :param stderr_path: Locate the authoritative stderr file when configured.
+   :param stdout_bytes: Count all stdout bytes produced.
+   :param stderr_bytes: Count all stderr bytes produced.
+   :param stdout_truncated: Indicate that stdout was truncated.
+   :param stderr_truncated: Indicate that stderr was truncated.
+   :param dropped_diagnostics: Count diagnostics dropped from the middle.
+
+
+   .. py:attribute:: argv
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: started_at
+      :type:  str
+
+
+   .. py:attribute:: finished_at
+      :type:  str
+
+
+   .. py:attribute:: returncode
+      :type:  int
+
+
+   .. py:attribute:: termination
+      :type:  str
+
+
+   .. py:attribute:: stdout
+      :type:  bytes
+
+
+   .. py:attribute:: stderr
+      :type:  bytes
+
+
+   .. py:attribute:: diagnostics
+      :type:  tuple[Diagnostic, Ellipsis]
+
+
+   .. py:attribute:: stdout_path
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: stderr_path
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: stdout_bytes
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: stderr_bytes
+      :type:  int
+      :value: 0
+
+
+
+   .. py:attribute:: stdout_truncated
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: stderr_truncated
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: dropped_diagnostics
+      :type:  int
+      :value: 0
+
+
+
+   .. py:property:: timed_out
+      :type: bool
+
+
+      Report whether the process ended because of a timeout.
+
+      :return: Whether the termination reason starts with ``timeout``.
+
+
+   .. py:method:: as_mapping()
+
+      Return the serialized process report.
+
+      :return: The report mapping.
+
+
+
+   .. py:method:: write(path)
+
+      Write the serialized report atomically.
+
+      :param path: Locate the report file to write.
+      :return: The report path.
+
+
+
+.. py:class:: ProcessSupervisor(*, monitors = (), checkers = (), follow = ())
+
+   Run one command, stream its output, and terminate its process group safely.
+
+   Monitors and checkers observe the same event stream under one lock, so an
+   in-process monitor does not have to be thread-safe. Whatever happens during
+   a run - including an exception raised by the caller's monitor - the signal
+   handlers are restored, the child's process group is terminated and reaped,
+   the reader threads are joined, and the output handles are closed before
+   :meth:`run` returns or propagates.
+
+   :param monitors: Supply in-process event monitors.
+   :param checkers: Supply executable checker specifications.
+   :param follow: Supply files to follow during the run.
+
+
+   .. py:attribute:: monitors
+      :value: ()
+
+
+
+   .. py:attribute:: checker_specs
+      :value: ()
+
+
+
+   .. py:attribute:: follow
+      :value: ()
+
+
+
+   .. py:method:: run(argv, *, timeout = None, cwd = None, environment = None, termination_grace = 10.0, stdout_path = None, stderr_path = None, tick_interval = DEFAULT_TICK_INTERVAL, follow_interval = DEFAULT_FOLLOW_INTERVAL, capture_limit = DEFAULT_CAPTURE_LIMIT, tail_limit = DEFAULT_TAIL_LIMIT, diagnostic_limit = DEFAULT_DIAGNOSTIC_LIMIT)
+
+      Run one command to completion and return its structured report.
+
+      :param argv: Supply the command and arguments.
+      :param timeout: Stop the command after this interval.
+      :param cwd: Select the command working directory.
+      :param environment: Supply the command environment.
+      :param termination_grace: Wait this long after requesting termination.
+      :param stdout_path: Write stdout to this authoritative file.
+      :param stderr_path: Write stderr to this authoritative file.
+      :param tick_interval: Set the interval between tick events.
+      :param follow_interval: Set the interval between followed-file polls.
+      :param capture_limit: Bound retained output without an output file.
+      :param tail_limit: Bound retained output with an output file.
+      :param diagnostic_limit: Bound retained diagnostics.
+      :return: The structured process report.
+      :raises ValueError: If command or supervision limits are invalid.
+
+
+

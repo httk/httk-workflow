@@ -1,0 +1,1676 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>httk.workflow.sdk - httk-workflow dev:main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:main) — content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../index.html"><div class="brand">httk-workflow dev:main documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:main documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_protocol_api.html">The filesystem protocol API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../runtime_helpers.html">Native runner helpers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../native_bash_api.html">Native Bash runner API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../sdk_parity.html">Python and Bash authoring parity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../vasp_runners.html">Packaged VASP runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_packages.html">Workflow packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_languages.html">Workflow-language runner realizations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../taskmanager.html">Task-manager usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_cli.html">Project and workflow command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../adapter_authoring.html">Writing a remote adapter</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../reference/index.html">Reference</a><input aria-label="Toggle navigation of Reference" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/index.html">httk.workflow</a><input aria-label="Toggle navigation of httk.workflow" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/adapter_protocol/index.html">httk.workflow.adapter_protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/adapters/index.html">httk.workflow.adapters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/collecting/index.html">httk.workflow.collecting</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/compat/index.html">httk.workflow.compat</a><input aria-label="Toggle navigation of httk.workflow.compat" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/compat/v1/index.html">httk.workflow.compat.v1</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/configuration/index.html">httk.workflow.configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/errors/index.html">httk.workflow.errors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/executors/index.html">httk.workflow.executors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/hygiene/index.html">httk.workflow.hygiene</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/manifests/index.html">httk.workflow.manifests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/projects/index.html">httk.workflow.projects</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/protocol/index.html">httk.workflow.protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/provenance/index.html">httk.workflow.provenance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/runtime/index.html">httk.workflow.runtime</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/runtime_utils/index.html">httk.workflow.runtime_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/scaffold/index.html">httk.workflow.scaffold</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/sdk/index.html">httk.workflow.sdk</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/shell_bridge/index.html">httk.workflow.shell_bridge</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/supervision/index.html">httk.workflow.supervision</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/transfers/index.html">httk.workflow.transfers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/vasp/index.html">httk.workflow.vasp</a></li>
+</ul>
+</li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../notebooks/examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_filesystem_api.html">Workflow filesystem API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for httk.workflow.sdk</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;The Python authoring SDK for native *httk₂* workflow runners.</span>
+
+<span class="sd">One runner is one program that implements the steps of one workflow. Steps are</span>
+<span class="sd">registered on a :class:`Runner`, and :meth:`Runner.main` dispatches the step the</span>
+<span class="sd">manager asked for to the handler that implements it, giving it one</span>
+<span class="sd">:class:`Attempt` object:</span>
+
+<span class="sd">.. code-block:: python</span>
+
+<span class="sd">    from httk.workflow import ChildSpec, Runner</span>
+
+<span class="sd">    run = Runner(&quot;defects&quot;)</span>
+
+
+<span class="sd">    @run.step</span>
+<span class="sd">    def characterize(a):</span>
+<span class="sd">        for site in range(a.parameter(&quot;sites&quot;)):</span>
+<span class="sd">            a.spawn(ChildSpec(step=&quot;relax&quot;, parameters={&quot;site&quot;: site}), label=f&quot;site-{site}&quot;)</span>
+<span class="sd">        a.gather(&quot;aggregate&quot;, on_impossible=&quot;triage&quot;)</span>
+
+
+<span class="sd">    if __name__ == &quot;__main__&quot;:</span>
+<span class="sd">        raise SystemExit(run.main())</span>
+
+<span class="sd">Nothing declares the shape of the workflow up front: a step decides at run time</span>
+<span class="sd">which children to spawn and which step runs next, so the graph of a job is</span>
+<span class="sd">whatever its steps published. Exactly one outcome is published per attempt, and</span>
+<span class="sd">the handler that returns without publishing one, or raises, is reported as such</span>
+<span class="sd">instead of leaving the attempt ambiguous.</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">shutil</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">traceback</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">Iterator</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">,</span> <span class="n">Sequence</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span><span class="p">,</span> <span class="n">PurePosixPath</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">types</span><span class="w"> </span><span class="kn">import</span> <span class="n">MappingProxyType</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span><span class="p">,</span> <span class="n">Literal</span><span class="p">,</span> <span class="n">Self</span><span class="p">,</span> <span class="n">cast</span><span class="p">,</span> <span class="n">overload</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">._util</span><span class="w"> </span><span class="kn">import</span> <span class="n">read_json</span><span class="p">,</span> <span class="n">require_string</span><span class="p">,</span> <span class="n">validate_inputs</span><span class="p">,</span> <span class="n">write_json_atomic</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.errors</span><span class="w"> </span><span class="kn">import</span> <span class="n">FormatError</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.models</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">JOB_STATE_DIRECTORY</span><span class="p">,</span>
+    <span class="n">Failure</span><span class="p">,</span>
+    <span class="n">JobDefinition</span><span class="p">,</span>
+    <span class="n">validate_declaration_name</span><span class="p">,</span>
+    <span class="n">validate_declarations</span><span class="p">,</span>
+    <span class="n">validate_failure</span><span class="p">,</span>
+    <span class="n">validate_label</span><span class="p">,</span>
+    <span class="n">validate_sha256</span><span class="p">,</span>
+    <span class="n">validate_step</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.runtime</span><span class="w"> </span><span class="kn">import</span> <span class="n">AttemptContext</span><span class="p">,</span> <span class="n">CommandResult</span><span class="p">,</span> <span class="n">_read_environment</span><span class="p">,</span> <span class="n">run_command</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.runtime_builders</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">ChildReference</span><span class="p">,</span>
+    <span class="n">JobSpec</span><span class="p">,</span>
+    <span class="n">JobState</span><span class="p">,</span>
+    <span class="n">JoinCondition</span><span class="p">,</span>
+    <span class="n">OutcomeAction</span><span class="p">,</span>
+    <span class="n">OutcomeDraft</span><span class="p">,</span>
+    <span class="n">ReplayableWorkdirBatch</span><span class="p">,</span>
+    <span class="n">RunLog</span><span class="p">,</span>
+    <span class="n">TransactionBuilder</span><span class="p">,</span>
+    <span class="n">join_mapping</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">_LOGGER</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+<span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="s2">&quot;RUNNER_DESCRIPTION_FORMAT&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;RUNNER_ERROR_FORMAT&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;Attempt&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;ChildResult&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;ChildSpec&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;ChildrenView&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;InstantiateHandler&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;Runner&quot;</span><span class="p">,</span>
+    <span class="s2">&quot;RunnerRef&quot;</span><span class="p">,</span>
+<span class="p">]</span>
+
+<div class="viewcode-block" id="RUNNER_DESCRIPTION_FORMAT">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.RUNNER_DESCRIPTION_FORMAT">[docs]</a>
+<span class="n">RUNNER_DESCRIPTION_FORMAT</span> <span class="o">=</span> <span class="s2">&quot;httk-workflow-runner-description&quot;</span></div>
+
+<div class="viewcode-block" id="RUNNER_ERROR_FORMAT">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.RUNNER_ERROR_FORMAT">[docs]</a>
+<span class="n">RUNNER_ERROR_FORMAT</span> <span class="o">=</span> <span class="s2">&quot;httk-workflow-runner-error&quot;</span></div>
+
+<span class="n">_DESCRIBE_VARIABLE</span> <span class="o">=</span> <span class="s2">&quot;HTTK_WORKFLOW_DESCRIBE&quot;</span>
+<span class="n">_DESCRIBE_FLAG</span> <span class="o">=</span> <span class="s2">&quot;--describe&quot;</span>
+<span class="n">_RUNNER_STEPS_FILE</span> <span class="o">=</span> <span class="s2">&quot;runner-steps.json&quot;</span>
+
+<span class="nb">type</span> <span class="n">StepHandler</span> <span class="o">=</span> <span class="n">Callable</span><span class="p">[[</span><span class="s2">&quot;Attempt&quot;</span><span class="p">],</span> <span class="nb">object</span><span class="p">]</span>
+<div class="viewcode-block" id="InstantiateHandler">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.InstantiateHandler">[docs]</a>
+<span class="nb">type</span> <span class="n">InstantiateHandler</span> <span class="o">=</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">Any</span><span class="p">],</span> <span class="nb">object</span><span class="p">]</span></div>
+
+<span class="nb">type</span> <span class="n">RunnerSource</span> <span class="o">=</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">&quot;payload&quot;</span><span class="p">,</span> <span class="s2">&quot;workspace&quot;</span><span class="p">,</span> <span class="s2">&quot;installed&quot;</span><span class="p">]</span>
+
+
+<span class="k">class</span><span class="w"> </span><span class="nc">_Missing</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;The sentinel telling a missing parameter from a parameter that is null.&quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__repr__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>  <span class="c1"># pragma: no cover - diagnostics only</span>
+        <span class="k">return</span> <span class="s2">&quot;&lt;missing&gt;&quot;</span>
+
+
+<span class="n">_MISSING</span> <span class="o">=</span> <span class="n">_Missing</span><span class="p">()</span>
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<div class="viewcode-block" id="RunnerRef">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.RunnerRef">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">RunnerRef</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Which runner executes a child job synthesized by :class:`ChildSpec`.</span>
+
+<span class="sd">    A synthesized child has no payload of its own, so its runner must be one that</span>
+<span class="sd">    lives outside a payload: an entry of the workspace runner store, or an</span>
+<span class="sd">    installed runner on the machine that runs it. :meth:`inherit` copies the</span>
+<span class="sd">    reference of the spawning job itself, which is what a campaign whose steps all</span>
+<span class="sd">    live in one published runner wants.</span>
+
+<span class="sd">    :param source: The location from which the child runner is loaded.</span>
+<span class="sd">    :param path: The workspace or installed runner path when one is selected.</span>
+<span class="sd">    :param sha256: The digest pin for a workspace or installed runner.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+<div class="viewcode-block" id="RunnerRef.source">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.RunnerRef.source">[docs]</a>
+    <span class="n">source</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">&quot;inherit&quot;</span><span class="p">,</span> <span class="s2">&quot;workspace&quot;</span><span class="p">,</span> <span class="s2">&quot;installed&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;inherit&quot;</span></div>
+
+<div class="viewcode-block" id="RunnerRef.path">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.RunnerRef.path">[docs]</a>
+    <span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="RunnerRef.sha256">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.RunnerRef.sha256">[docs]</a>
+    <span class="n">sha256</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+
+    <span class="nd">@classmethod</span>
+<div class="viewcode-block" id="RunnerRef.inherit">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.RunnerRef.inherit">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">inherit</span><span class="p">(</span><span class="bp">cls</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">&quot;RunnerRef&quot;</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Reference exactly the runner of the spawning job.</span>
+
+<span class="sd">        :return: The inherited runner reference.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span><span class="s2">&quot;inherit&quot;</span><span class="p">)</span></div>
+
+
+    <span class="nd">@classmethod</span>
+<div class="viewcode-block" id="RunnerRef.workspace">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.RunnerRef.workspace">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">workspace</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">PurePosixPath</span><span class="p">,</span> <span class="n">sha256</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">&quot;RunnerRef&quot;</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Reference one runner published in the workspace runner store.</span>
+
+<span class="sd">        :param path: The path within the workspace runner store.</span>
+<span class="sd">        :param sha256: The runner digest.</span>
+<span class="sd">        :return: The workspace runner reference.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span><span class="s2">&quot;workspace&quot;</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">PurePosixPath</span><span class="p">(</span><span class="n">path</span><span class="p">)),</span> <span class="n">validate_sha256</span><span class="p">(</span><span class="n">sha256</span><span class="p">,</span> <span class="s2">&quot;runner sha256&quot;</span><span class="p">))</span></div>
+
+
+    <span class="nd">@classmethod</span>
+<div class="viewcode-block" id="RunnerRef.installed">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.RunnerRef.installed">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">installed</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">PurePosixPath</span><span class="p">,</span> <span class="n">sha256</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">&quot;RunnerRef&quot;</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Reference one runner installed on the machine that runs the child.</span>
+
+<span class="sd">        :param path: The installed runner path.</span>
+<span class="sd">        :param sha256: The runner digest.</span>
+<span class="sd">        :return: The installed runner reference.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span><span class="s2">&quot;installed&quot;</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">PurePosixPath</span><span class="p">(</span><span class="n">path</span><span class="p">)),</span> <span class="n">validate_sha256</span><span class="p">(</span><span class="n">sha256</span><span class="p">,</span> <span class="s2">&quot;runner sha256&quot;</span><span class="p">))</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_resolve</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">:</span> <span class="n">JobDefinition</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">RunnerSource</span><span class="p">,</span> <span class="nb">str</span><span class="p">,</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return ``(executor, source, path, sha256, arguments)`` for a child.&quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">source</span> <span class="o">!=</span> <span class="s2">&quot;inherit&quot;</span><span class="p">:</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">path</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">sha256</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;a workspace or installed runner reference needs a path and a digest&quot;</span><span class="p">)</span>
+            <span class="k">return</span> <span class="s2">&quot;path&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">source</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">path</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">sha256</span><span class="p">,</span> <span class="p">()</span>
+        <span class="k">if</span> <span class="n">parent</span><span class="o">.</span><span class="n">runner_source</span> <span class="o">==</span> <span class="s2">&quot;payload&quot;</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;RunnerRef.inherit() needs a runner that lives outside the payload, but this job runs the &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;payload runner </span><span class="si">{</span><span class="n">parent</span><span class="o">.</span><span class="n">runner_path</span><span class="o">.</span><span class="n">as_posix</span><span class="p">()</span><span class="si">!r}</span><span class="s2">; publish it with &quot;</span>
+                <span class="s2">&quot;Workspace.publish_runner and reference it with RunnerRef.workspace(path, sha256), &quot;</span>
+                <span class="s2">&quot;or spawn a prepared payload directory instead of a ChildSpec&quot;</span>
+            <span class="p">)</span>
+        <span class="k">return</span> <span class="p">(</span>
+            <span class="n">parent</span><span class="o">.</span><span class="n">runner_executor</span><span class="p">,</span>
+            <span class="c1"># Validated against the protocol&#39;s runner sources when the job was read.</span>
+            <span class="n">cast</span><span class="p">(</span><span class="n">RunnerSource</span><span class="p">,</span> <span class="n">parent</span><span class="o">.</span><span class="n">runner_source</span><span class="p">),</span>
+            <span class="n">parent</span><span class="o">.</span><span class="n">runner_path</span><span class="o">.</span><span class="n">as_posix</span><span class="p">(),</span>
+            <span class="n">parent</span><span class="o">.</span><span class="n">runner_sha256</span><span class="p">,</span>
+            <span class="n">parent</span><span class="o">.</span><span class="n">runner_arguments</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<div class="viewcode-block" id="ChildSpec">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">ChildSpec</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;A complete child job described by the step and parameters it starts with.</span>
+
+<span class="sd">    Everything not given follows the spawning job: its workflow, its claim pool,</span>
+<span class="sd">    its priority, its resources, and its runner. The child therefore differs from</span>
+<span class="sd">    its parent in exactly what the campaign varies, which is normally only *step*</span>
+<span class="sd">    and *parameters*.</span>
+
+<span class="sd">    :param step: The first step the child runs.</span>
+<span class="sd">    :param parameters: The opaque implementation knobs given to the child.</span>
+<span class="sd">    :param declarations: The workflow declarations carried by the child.</span>
+<span class="sd">    :param runner: The runner reference used to execute the child.</span>
+<span class="sd">    :param name: The child job name, or a generated name when omitted.</span>
+<span class="sd">    :param workflow: The child&#39;s workflow identifier, or the parent&#39;s when omitted.</span>
+<span class="sd">    :param tag: The child&#39;s optional job tag, or the spawn label when omitted.</span>
+<span class="sd">    :param workdir_mode: Whether the child&#39;s workdir persists or is isolated.</span>
+<span class="sd">    :param workdir_path: The child&#39;s relative workdir path.</span>
+<span class="sd">    :param data_mode: Whether the child has transactional data.</span>
+<span class="sd">    :param priority: The child&#39;s priority, or the parent&#39;s when omitted.</span>
+<span class="sd">    :param claim_pool: The child&#39;s claim pool, or the parent&#39;s when omitted.</span>
+<span class="sd">    :param required_capabilities: Capabilities required by the child.</span>
+<span class="sd">    :param resources: Resources requested by the child, or the parent&#39;s when omitted.</span>
+<span class="sd">    :param maximum_attempts_per_activation: The child&#39;s per-activation attempt budget.</span>
+<span class="sd">    :param maximum_total_attempts: The child&#39;s total attempt budget.</span>
+<span class="sd">    :param maximum_activations: The child&#39;s activation budget.</span>
+<span class="sd">    :param retry_on: Failure codes eligible for manager-detected retry.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+<div class="viewcode-block" id="ChildSpec.step">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.step">[docs]</a>
+    <span class="n">step</span><span class="p">:</span> <span class="nb">str</span></div>
+
+<div class="viewcode-block" id="ChildSpec.parameters">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.parameters">[docs]</a>
+    <span class="n">parameters</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">dict</span><span class="p">)</span></div>
+
+    <span class="c1">#: The child&#39;s own workflow declarations. A declaration describes the job it</span>
+    <span class="c1">#: belongs to, so nothing is inherited: a child that declares carries what it</span>
+    <span class="c1">#: was given here, and a child that declares nothing carries nothing.</span>
+<div class="viewcode-block" id="ChildSpec.declarations">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.declarations">[docs]</a>
+    <span class="n">declarations</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">dict</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="ChildSpec.runner">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.runner">[docs]</a>
+    <span class="n">runner</span><span class="p">:</span> <span class="n">RunnerRef</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="n">RunnerRef</span><span class="o">.</span><span class="n">inherit</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="ChildSpec.name">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.name">[docs]</a>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildSpec.workflow">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.workflow">[docs]</a>
+    <span class="n">workflow</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildSpec.tag">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.tag">[docs]</a>
+    <span class="n">tag</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildSpec.workdir_mode">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.workdir_mode">[docs]</a>
+    <span class="n">workdir_mode</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">&quot;persistent&quot;</span><span class="p">,</span> <span class="s2">&quot;isolated&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;persistent&quot;</span></div>
+
+<div class="viewcode-block" id="ChildSpec.workdir_path">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.workdir_path">[docs]</a>
+    <span class="n">workdir_path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">&quot;run&quot;</span></div>
+
+<div class="viewcode-block" id="ChildSpec.data_mode">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.data_mode">[docs]</a>
+    <span class="n">data_mode</span><span class="p">:</span> <span class="n">Literal</span><span class="p">[</span><span class="s2">&quot;none&quot;</span><span class="p">,</span> <span class="s2">&quot;transactional&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;none&quot;</span></div>
+
+<div class="viewcode-block" id="ChildSpec.priority">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.priority">[docs]</a>
+    <span class="n">priority</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildSpec.claim_pool">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.claim_pool">[docs]</a>
+    <span class="n">claim_pool</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildSpec.required_capabilities">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.required_capabilities">[docs]</a>
+    <span class="n">required_capabilities</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">()</span></div>
+
+<div class="viewcode-block" id="ChildSpec.resources">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.resources">[docs]</a>
+    <span class="n">resources</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildSpec.maximum_attempts_per_activation">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.maximum_attempts_per_activation">[docs]</a>
+    <span class="n">maximum_attempts_per_activation</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildSpec.maximum_total_attempts">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.maximum_total_attempts">[docs]</a>
+    <span class="n">maximum_total_attempts</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildSpec.maximum_activations">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.maximum_activations">[docs]</a>
+    <span class="n">maximum_activations</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildSpec.retry_on">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildSpec.retry_on">[docs]</a>
+    <span class="n">retry_on</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">()</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_job_spec</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">parent</span><span class="p">:</span> <span class="n">JobDefinition</span><span class="p">,</span> <span class="n">label</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">JobSpec</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the job specification of this child under *parent*.&quot;&quot;&quot;</span>
+
+        <span class="n">executor</span><span class="p">,</span> <span class="n">source</span><span class="p">,</span> <span class="n">path</span><span class="p">,</span> <span class="n">sha256</span><span class="p">,</span> <span class="n">arguments</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">runner</span><span class="o">.</span><span class="n">_resolve</span><span class="p">(</span><span class="n">parent</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">JobSpec</span><span class="p">(</span>
+            <span class="n">name</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">name</span> <span class="ow">or</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">parent</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">step</span><span class="si">}</span><span class="s2"> (</span><span class="si">{</span><span class="n">label</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">,</span>
+            <span class="n">workflow</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">workflow</span> <span class="ow">or</span> <span class="n">parent</span><span class="o">.</span><span class="n">workflow</span><span class="p">,</span>
+            <span class="n">runner_path</span><span class="o">=</span><span class="n">path</span><span class="p">,</span>
+            <span class="n">initial_step</span><span class="o">=</span><span class="n">validate_step</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">step</span><span class="p">,</span> <span class="s2">&quot;child step&quot;</span><span class="p">),</span>
+            <span class="n">tag</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">tag</span> <span class="ow">or</span> <span class="n">label</span><span class="p">,</span>
+            <span class="n">runner_executor</span><span class="o">=</span><span class="n">executor</span><span class="p">,</span>
+            <span class="n">runner_source</span><span class="o">=</span><span class="n">source</span><span class="p">,</span>
+            <span class="n">runner_sha256</span><span class="o">=</span><span class="n">sha256</span><span class="p">,</span>
+            <span class="n">runner_arguments</span><span class="o">=</span><span class="n">arguments</span><span class="p">,</span>
+            <span class="n">workdir_mode</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">workdir_mode</span><span class="p">,</span>
+            <span class="n">workdir_path</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">workdir_path</span><span class="p">,</span>
+            <span class="n">data_mode</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">data_mode</span><span class="p">,</span>
+            <span class="n">priority</span><span class="o">=</span><span class="n">parent</span><span class="o">.</span><span class="n">priority</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">priority</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">priority</span><span class="p">,</span>
+            <span class="n">claim_pool</span><span class="o">=</span><span class="n">parent</span><span class="o">.</span><span class="n">claim_pool</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">claim_pool</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">claim_pool</span><span class="p">,</span>
+            <span class="n">required_capabilities</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">required_capabilities</span><span class="p">,</span>
+            <span class="n">maximum_attempts_per_activation</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">maximum_attempts_per_activation</span><span class="p">,</span>
+            <span class="n">maximum_total_attempts</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">maximum_total_attempts</span><span class="p">,</span>
+            <span class="n">maximum_activations</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">maximum_activations</span><span class="p">,</span>
+            <span class="n">retry_on</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">retry_on</span><span class="p">,</span>
+            <span class="n">resources</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">parent</span><span class="o">.</span><span class="n">resources</span><span class="p">)</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">resources</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">dict</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">resources</span><span class="p">),</span>
+            <span class="n">parameters</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">parameters</span><span class="p">),</span>
+            <span class="n">declarations</span><span class="o">=</span><span class="n">validate_declarations</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">declarations</span><span class="p">,</span> <span class="s2">&quot;child declarations&quot;</span><span class="p">),</span>
+        <span class="p">)</span></div>
+
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<div class="viewcode-block" id="ChildResult">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">ChildResult</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;What one gathering step may know about one child it spawned.</span>
+
+<span class="sd">    Every member is derived from authoritative state by the manager before the</span>
+<span class="sd">    gathering activation starts, so reading a child is a pure read of the</span>
+<span class="sd">    attempt context and never a scan of the workspace. Paths are absolute.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+<div class="viewcode-block" id="ChildResult.label">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.label">[docs]</a>
+    <span class="n">label</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildResult.job_id">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.job_id">[docs]</a>
+    <span class="n">job_id</span><span class="p">:</span> <span class="nb">str</span></div>
+
+<div class="viewcode-block" id="ChildResult.job_key">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.job_key">[docs]</a>
+    <span class="n">job_key</span><span class="p">:</span> <span class="nb">str</span></div>
+
+<div class="viewcode-block" id="ChildResult.kind">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.kind">[docs]</a>
+    <span class="n">kind</span><span class="p">:</span> <span class="nb">str</span></div>
+
+<div class="viewcode-block" id="ChildResult.failure">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.failure">[docs]</a>
+    <span class="n">failure</span><span class="p">:</span> <span class="n">Failure</span> <span class="o">|</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildResult.placement">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.placement">[docs]</a>
+    <span class="n">placement</span><span class="p">:</span> <span class="n">PurePosixPath</span></div>
+
+<div class="viewcode-block" id="ChildResult.payload">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.payload">[docs]</a>
+    <span class="n">payload</span><span class="p">:</span> <span class="n">Path</span></div>
+
+<div class="viewcode-block" id="ChildResult.workdir">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.workdir">[docs]</a>
+    <span class="n">workdir</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildResult.data">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.data">[docs]</a>
+    <span class="n">data</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildResult.data_generation">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.data_generation">[docs]</a>
+    <span class="n">data_generation</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span></div>
+
+<div class="viewcode-block" id="ChildResult.raw">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.raw">[docs]</a>
+    <span class="n">raw</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span></div>
+
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="ChildResult.succeeded">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.succeeded">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">succeeded</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Report whether this child ended successfully.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">kind</span> <span class="o">==</span> <span class="s2">&quot;succeeded&quot;</span></div>
+
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="ChildResult.failed">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildResult.failed">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">failed</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Report whether this child ended badly.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">kind</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;failed&quot;</span><span class="p">,</span> <span class="s2">&quot;cancelled&quot;</span><span class="p">}</span></div>
+
+
+    <span class="nd">@classmethod</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">_observed</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">raw</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">],</span> <span class="n">workspace</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">&quot;ChildResult&quot;</span><span class="p">:</span>
+        <span class="n">label</span> <span class="o">=</span> <span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;label&quot;</span><span class="p">)</span>
+        <span class="n">payload_path</span> <span class="o">=</span> <span class="n">PurePosixPath</span><span class="p">(</span><span class="n">require_string</span><span class="p">(</span><span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;payload_path&quot;</span><span class="p">),</span> <span class="s2">&quot;child payload_path&quot;</span><span class="p">))</span>
+        <span class="n">workdir_raw</span> <span class="o">=</span> <span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;workdir_path&quot;</span><span class="p">)</span>
+        <span class="n">failure_raw</span> <span class="o">=</span> <span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;failure&quot;</span><span class="p">)</span>
+        <span class="n">generation</span> <span class="o">=</span> <span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;data_generation&quot;</span><span class="p">)</span>
+        <span class="n">payload</span> <span class="o">=</span> <span class="n">workspace</span><span class="o">.</span><span class="n">joinpath</span><span class="p">(</span><span class="o">*</span><span class="n">payload_path</span><span class="o">.</span><span class="n">parts</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span>
+            <span class="n">label</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">label</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">validate_label</span><span class="p">(</span><span class="n">label</span><span class="p">,</span> <span class="s2">&quot;child label&quot;</span><span class="p">),</span>
+            <span class="n">job_id</span><span class="o">=</span><span class="n">require_string</span><span class="p">(</span><span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;job_id&quot;</span><span class="p">),</span> <span class="s2">&quot;child job_id&quot;</span><span class="p">),</span>
+            <span class="n">job_key</span><span class="o">=</span><span class="n">require_string</span><span class="p">(</span><span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;job_key&quot;</span><span class="p">),</span> <span class="s2">&quot;child job_key&quot;</span><span class="p">),</span>
+            <span class="n">kind</span><span class="o">=</span><span class="n">require_string</span><span class="p">(</span><span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;kind&quot;</span><span class="p">),</span> <span class="s2">&quot;child kind&quot;</span><span class="p">),</span>
+            <span class="n">failure</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">failure_raw</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">)</span> <span class="k">else</span> <span class="n">validate_failure</span><span class="p">(</span><span class="n">failure_raw</span><span class="p">,</span> <span class="s2">&quot;child failure&quot;</span><span class="p">),</span>
+            <span class="n">placement</span><span class="o">=</span><span class="n">PurePosixPath</span><span class="p">(</span><span class="n">require_string</span><span class="p">(</span><span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;placement&quot;</span><span class="p">),</span> <span class="s2">&quot;child placement&quot;</span><span class="p">)),</span>
+            <span class="n">payload</span><span class="o">=</span><span class="n">payload</span><span class="p">,</span>
+            <span class="n">workdir</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">workdir_raw</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="k">else</span> <span class="n">workspace</span><span class="o">.</span><span class="n">joinpath</span><span class="p">(</span><span class="o">*</span><span class="n">PurePosixPath</span><span class="p">(</span><span class="n">workdir_raw</span><span class="p">)</span><span class="o">.</span><span class="n">parts</span><span class="p">),</span>
+            <span class="n">data</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="n">generation</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">payload</span> <span class="o">/</span> <span class="s2">&quot;data&quot;</span><span class="p">,</span>
+            <span class="n">data_generation</span><span class="o">=</span><span class="kc">None</span> <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">generation</span><span class="p">,</span> <span class="nb">int</span><span class="p">)</span> <span class="ow">or</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">generation</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span> <span class="k">else</span> <span class="n">generation</span><span class="p">,</span>
+            <span class="n">raw</span><span class="o">=</span><span class="nb">dict</span><span class="p">(</span><span class="n">raw</span><span class="p">),</span>
+        <span class="p">)</span></div>
+
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<div class="viewcode-block" id="ChildrenView">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildrenView">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">ChildrenView</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;The children observed by the join that started this activation.</span>
+
+<span class="sd">    The view is empty for an activation that follows no join, so a step can read</span>
+<span class="sd">    it unconditionally.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+<div class="viewcode-block" id="ChildrenView.all">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildrenView.all">[docs]</a>
+    <span class="nb">all</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ChildResult</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span> <span class="o">=</span> <span class="p">()</span></div>
+
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="ChildrenView.succeeded">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildrenView.succeeded">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">succeeded</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ChildResult</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The children that ended successfully, in spawn order.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">child</span> <span class="k">for</span> <span class="n">child</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">all</span> <span class="k">if</span> <span class="n">child</span><span class="o">.</span><span class="n">succeeded</span><span class="p">)</span></div>
+
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="ChildrenView.failed">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildrenView.failed">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">failed</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ChildResult</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The children that ended badly, in spawn order.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">child</span> <span class="k">for</span> <span class="n">child</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">all</span> <span class="k">if</span> <span class="n">child</span><span class="o">.</span><span class="n">failed</span><span class="p">)</span></div>
+
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="ChildrenView.labels">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildrenView.labels">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">labels</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The labels of every observed child, in spawn order.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">child</span><span class="o">.</span><span class="n">label</span> <span class="k">for</span> <span class="n">child</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">all</span> <span class="k">if</span> <span class="n">child</span><span class="o">.</span><span class="n">label</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="ChildrenView.get">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.ChildrenView.get">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">get</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">label</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">default</span><span class="p">:</span> <span class="n">ChildResult</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ChildResult</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the child spawned under *label*, or *default*.</span>
+
+<span class="sd">        :param label: The unique spawn label to find.</span>
+<span class="sd">        :param default: The value to return when no child has that label.</span>
+<span class="sd">        :return: The matching child, or the default value.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">for</span> <span class="n">child</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">all</span><span class="p">:</span>
+            <span class="k">if</span> <span class="n">child</span><span class="o">.</span><span class="n">label</span> <span class="o">==</span> <span class="n">label</span><span class="p">:</span>
+                <span class="k">return</span> <span class="n">child</span>
+        <span class="k">return</span> <span class="n">default</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__getitem__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">label</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ChildResult</span><span class="p">:</span>
+        <span class="n">child</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">label</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">child</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">KeyError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;no child was spawned under label </span><span class="si">{</span><span class="n">label</span><span class="si">!r}</span><span class="s2">; observed labels: </span><span class="si">{</span><span class="s1">&#39;, &#39;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">labels</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">child</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__contains__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">label</span><span class="p">:</span> <span class="nb">object</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">any</span><span class="p">(</span><span class="n">child</span><span class="o">.</span><span class="n">label</span> <span class="o">==</span> <span class="n">label</span> <span class="k">for</span> <span class="n">child</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">all</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__iter__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Iterator</span><span class="p">[</span><span class="n">ChildResult</span><span class="p">]:</span>
+        <span class="k">return</span> <span class="nb">iter</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">all</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__len__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+        <span class="k">return</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">all</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="Attempt">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Attempt</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Everything one attempt of one step may read, do, and publish.</span>
+
+<span class="sd">    An attempt owns exactly one implicit outcome draft. The draft is created by</span>
+<span class="sd">    the first :meth:`spawn`, :meth:`put`, or :meth:`remove`, and it is published</span>
+<span class="sd">    by exactly one of :meth:`advance`, :meth:`gather`, :meth:`succeed`,</span>
+<span class="sd">    :meth:`retry`, :meth:`pause`, or :meth:`fail`. Publication is the single</span>
+<span class="sd">    atomic rename the manager observes, so nothing a step did takes effect until</span>
+<span class="sd">    the step says how it ended.</span>
+
+<span class="sd">    :param context: The manager-written identity and restart context.</span>
+<span class="sd">    :param control: The attempt control directory.</span>
+<span class="sd">    :param payload: The immutable job payload directory.</span>
+<span class="sd">    :param workdir: The directory in which the step works.</span>
+<span class="sd">    :param workspace: The workspace root containing the job.</span>
+<span class="sd">    :param data: The job&#39;s transactional data directory, when enabled.</span>
+<span class="sd">    :param step: The step this attempt runs, or the context step when omitted.</span>
+<span class="sd">    :param runner: The runner dispatching this attempt, when available.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">context</span><span class="p">:</span> <span class="n">AttemptContext</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">control</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span>
+        <span class="n">payload</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span>
+        <span class="n">workdir</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span>
+        <span class="n">workspace</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span>
+        <span class="n">data</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">step</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">runner</span><span class="p">:</span> <span class="s2">&quot;Runner | None&quot;</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<div class="viewcode-block" id="Attempt.context">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.context">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">context</span> <span class="o">=</span> <span class="n">context</span></div>
+
+<div class="viewcode-block" id="Attempt.control">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.control">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">control</span> <span class="o">=</span> <span class="n">control</span></div>
+
+<div class="viewcode-block" id="Attempt.payload">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.payload">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">payload</span> <span class="o">=</span> <span class="n">payload</span></div>
+
+<div class="viewcode-block" id="Attempt.workdir">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.workdir">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">workdir</span> <span class="o">=</span> <span class="n">workdir</span></div>
+
+<div class="viewcode-block" id="Attempt.workspace">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.workspace">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">workspace</span> <span class="o">=</span> <span class="n">workspace</span></div>
+
+<div class="viewcode-block" id="Attempt.data">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.data">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">data</span> <span class="o">=</span> <span class="n">data</span></div>
+
+<div class="viewcode-block" id="Attempt.step">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.step">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">step</span> <span class="o">=</span> <span class="n">step</span> <span class="ow">or</span> <span class="n">context</span><span class="o">.</span><span class="n">step</span></div>
+
+        <span class="c1"># Every artifact this attempt publishes inherits the workspace&#39;s</span>
+        <span class="c1"># durability from the manager-written context, so a durable workspace</span>
+        <span class="c1"># synchronizes an outcome, a transaction, or a spawned child before it</span>
+        <span class="c1"># is renamed authoritative without the step asking.</span>
+<div class="viewcode-block" id="Attempt.state">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.state">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">state</span> <span class="o">=</span> <span class="n">JobState</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span> <span class="n">durable</span><span class="o">=</span><span class="n">context</span><span class="o">.</span><span class="n">durable</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="Attempt.log">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.log">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">log</span> <span class="o">=</span> <span class="n">RunLog</span><span class="p">(</span><span class="n">workdir</span><span class="p">)</span></div>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_runner</span> <span class="o">=</span> <span class="n">runner</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_draft</span><span class="p">:</span> <span class="n">OutcomeDraft</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_transaction</span><span class="p">:</span> <span class="n">TransactionBuilder</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_operations</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_published</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_action</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_job</span><span class="p">:</span> <span class="n">JobDefinition</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_children</span><span class="p">:</span> <span class="n">ChildrenView</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="nd">@classmethod</span>
+<div class="viewcode-block" id="Attempt.initialize">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.initialize">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">initialize</span><span class="p">(</span>
+        <span class="bp">cls</span><span class="p">,</span>
+        <span class="n">environment</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">runner</span><span class="p">:</span> <span class="s2">&quot;Runner | None&quot;</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Self</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Bind this process to its attempt and recover an interrupted one.</span>
+
+<span class="sd">        Recovery replays every workdir batch an earlier attempt sealed but did not</span>
+<span class="sd">        get to apply, so a handler always starts from a workdir whose sealed</span>
+<span class="sd">        changes are complete. This is the only constructor a runner needs.</span>
+
+<span class="sd">        :param environment: The process environment, or the current environment when omitted.</span>
+<span class="sd">        :param runner: The runner dispatching this attempt, when called by :meth:`Runner.main`.</span>
+<span class="sd">        :return: The initialized attempt.</span>
+<span class="sd">        :raises ValueError: If the manager-written attempt environment or context is invalid.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">bound</span> <span class="o">=</span> <span class="n">_read_environment</span><span class="p">(</span><span class="n">environment</span><span class="p">)</span>
+        <span class="n">ReplayableWorkdirBatch</span><span class="o">.</span><span class="n">recover</span><span class="p">(</span><span class="n">bound</span><span class="o">.</span><span class="n">workdir</span><span class="p">,</span> <span class="n">durable</span><span class="o">=</span><span class="n">bound</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">durable</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span>
+            <span class="n">bound</span><span class="o">.</span><span class="n">context</span><span class="p">,</span>
+            <span class="n">control</span><span class="o">=</span><span class="n">bound</span><span class="o">.</span><span class="n">control</span><span class="p">,</span>
+            <span class="n">payload</span><span class="o">=</span><span class="n">bound</span><span class="o">.</span><span class="n">payload</span><span class="p">,</span>
+            <span class="n">workdir</span><span class="o">=</span><span class="n">bound</span><span class="o">.</span><span class="n">workdir</span><span class="p">,</span>
+            <span class="n">workspace</span><span class="o">=</span><span class="n">bound</span><span class="o">.</span><span class="n">workspace</span><span class="p">,</span>
+            <span class="n">data</span><span class="o">=</span><span class="n">bound</span><span class="o">.</span><span class="n">data</span><span class="p">,</span>
+            <span class="n">step</span><span class="o">=</span><span class="n">bound</span><span class="o">.</span><span class="n">step</span><span class="p">,</span>
+            <span class="n">runner</span><span class="o">=</span><span class="n">runner</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="Attempt.job">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.job">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">job</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">JobDefinition</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The immutable definition of the job this attempt belongs to.&quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_job</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_job</span> <span class="o">=</span> <span class="n">JobDefinition</span><span class="o">.</span><span class="n">from_path</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">payload</span> <span class="o">/</span> <span class="s2">&quot;job.json&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_job</span></div>
+
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="Attempt.parameters">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.parameters">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">parameters</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The application-defined ``parameters`` object of this job.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">job</span><span class="o">.</span><span class="n">parameters</span></div>
+
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="Attempt.children">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.children">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">children</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ChildrenView</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The children observed by the join that started this activation.&quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_children</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">observations</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">raw</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;children&quot;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">observations</span><span class="p">,</span> <span class="n">Sequence</span><span class="p">)</span> <span class="ow">or</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">observations</span><span class="p">,</span> <span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="nb">bytes</span><span class="p">)):</span>
+                <span class="n">observations</span> <span class="o">=</span> <span class="p">()</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_children</span> <span class="o">=</span> <span class="n">ChildrenView</span><span class="p">(</span>
+                <span class="nb">tuple</span><span class="p">(</span><span class="n">ChildResult</span><span class="o">.</span><span class="n">_observed</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">workspace</span><span class="p">)</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">observations</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">))</span>
+            <span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_children</span></div>
+
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="Attempt.published">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.published">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">published</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Report whether this attempt already published its outcome.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_published</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span></div>
+
+
+<div class="viewcode-block" id="Attempt.parameter">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.parameter">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">parameter</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">default</span><span class="p">:</span> <span class="nb">object</span> <span class="o">=</span> <span class="n">_MISSING</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">object</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return one member of the job&#39;s ``parameters`` object.</span>
+
+<span class="sd">        Without a *default*, a missing parameter is a :exc:`KeyError`: a step that</span>
+<span class="sd">        needs a parameter cannot run without it, and saying so immediately is better</span>
+<span class="sd">        than failing later on a value that was never there.</span>
+
+<span class="sd">        :param name: The parameter name to look up.</span>
+<span class="sd">        :param default: The value to return when the parameter is absent.</span>
+<span class="sd">        :return: The parameter value or the supplied default.</span>
+<span class="sd">        :raises KeyError: If the parameter is absent and no default was supplied.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">parameters</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">job</span><span class="o">.</span><span class="n">parameters</span>
+        <span class="k">if</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">parameters</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">parameters</span><span class="p">[</span><span class="n">name</span><span class="p">]</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">default</span><span class="p">,</span> <span class="n">_Missing</span><span class="p">):</span>
+            <span class="n">available</span> <span class="o">=</span> <span class="s2">&quot;, &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="n">parameters</span><span class="p">))</span> <span class="ow">or</span> <span class="s2">&quot;none&quot;</span>
+            <span class="k">raise</span> <span class="ne">KeyError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;job parameter </span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2"> is not defined; defined parameters: </span><span class="si">{</span><span class="n">available</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">default</span></div>
+
+
+<div class="viewcode-block" id="Attempt.setting">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.setting">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">setting</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">default</span><span class="p">:</span> <span class="nb">object</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">object</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Resolve one application setting through its layers.</span>
+
+<span class="sd">        The layers are consulted most-specific first, and the first that has the</span>
+<span class="sd">        name wins: this job&#39;s ``parameters`` object, then the environment variable</span>
+<span class="sd">        ``HTTK_`` + the name upper-cased with dots as underscores (so</span>
+<span class="sd">        ``vasp.command`` reads ``HTTK_VASP_COMMAND``), then the workspace&#39;s</span>
+<span class="sd">        application settings, then *default*. This is how a step reads the VASP</span>
+<span class="sd">        command a workspace was configured with without the operator exporting it</span>
+<span class="sd">        for every job, while still letting one job or one shell override it.</span>
+
+<span class="sd">        :param name: The dotted application setting name to resolve.</span>
+<span class="sd">        :param default: The value to return when no layer defines the setting.</span>
+<span class="sd">        :return: The first value found in the resolution layers, or the default.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">parameters</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">job</span><span class="o">.</span><span class="n">parameters</span>
+        <span class="k">if</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">parameters</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">parameters</span><span class="p">[</span><span class="n">name</span><span class="p">]</span>
+        <span class="n">variable</span> <span class="o">=</span> <span class="s2">&quot;HTTK_&quot;</span> <span class="o">+</span> <span class="n">name</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="s2">&quot;.&quot;</span><span class="p">,</span> <span class="s2">&quot;_&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">variable</span> <span class="ow">in</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="p">[</span><span class="n">variable</span><span class="p">]</span>
+        <span class="n">settings</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">settings</span>
+        <span class="k">if</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">settings</span><span class="p">:</span>
+            <span class="k">return</span> <span class="n">settings</span><span class="p">[</span><span class="n">name</span><span class="p">]</span>
+        <span class="k">return</span> <span class="n">default</span></div>
+
+
+<div class="viewcode-block" id="Attempt.declare">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.declare">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">declare</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">document</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Record the observed workflow declaration *name* of this job.</span>
+
+<span class="sd">        The static declarations of a job are the ones ``job.json`` carried at</span>
+<span class="sd">        submission, and they cannot change. A dynamic campaign nevertheless only</span>
+<span class="sd">        learns at run time what it actually consumed and produced, so a step</span>
+<span class="sd">        writes the refined document here and it is stored beside the job state as</span>
+<span class="sd">        ``.httk-job/declarations/&lt;name&gt;.json``, atomically. The bytes are carried</span>
+<span class="sd">        verbatim: nothing here interprets the document, whose own members say</span>
+<span class="sd">        which vocabulary and version it follows.</span>
+
+<span class="sd">        The write is runner-private, so it never disturbs the payload digest, and</span>
+<span class="sd">        repeating it overwrites: what a job observed is whatever its last word on</span>
+<span class="sd">        the subject was. A collect reports the observed document beside the</span>
+<span class="sd">        declared one and never merges the two.</span>
+
+<span class="sd">        :param name: The declaration name to record.</span>
+<span class="sd">        :param document: The declaration document to store verbatim.</span>
+<span class="sd">        :return: The path of the stored observed declaration.</span>
+<span class="sd">        :raises httk.workflow.errors.FormatError: If the declaration name or document is invalid.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">declaration</span> <span class="o">=</span> <span class="n">validate_declaration_name</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="s2">&quot;declaration name&quot;</span><span class="p">)</span>
+        <span class="n">validated</span> <span class="o">=</span> <span class="n">validate_declarations</span><span class="p">({</span><span class="n">declaration</span><span class="p">:</span> <span class="n">document</span><span class="p">},</span> <span class="s2">&quot;declaration&quot;</span><span class="p">)[</span><span class="n">declaration</span><span class="p">]</span>
+        <span class="n">path</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_declaration_path</span><span class="p">(</span><span class="n">declaration</span><span class="p">)</span>
+        <span class="n">write_json_atomic</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">validated</span><span class="p">,</span> <span class="n">durable</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">durable</span><span class="p">)</span>
+        <span class="n">_LOGGER</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="s2">&quot;declared </span><span class="si">%s</span><span class="s2"> for job </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">declaration</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">job_key</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">path</span></div>
+
+
+<div class="viewcode-block" id="Attempt.declaration">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.declaration">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">declaration</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the workflow declaration *name*, observed first.</span>
+
+<span class="sd">        The document this job observed is returned when one was written,</span>
+<span class="sd">        otherwise the one ``job.json`` declared, otherwise ``None``.</span>
+
+<span class="sd">        :param name: The declaration name to read.</span>
+<span class="sd">        :return: The observed or declared document, or ``None`` when absent.</span>
+<span class="sd">        :raises httk.workflow.errors.FormatError: If the declaration name is invalid or its document is malformed.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">declaration</span> <span class="o">=</span> <span class="n">validate_declaration_name</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="s2">&quot;declaration name&quot;</span><span class="p">)</span>
+        <span class="n">path</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_declaration_path</span><span class="p">(</span><span class="n">declaration</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+            <span class="k">return</span> <span class="n">read_json</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">job</span><span class="o">.</span><span class="n">declarations</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">declaration</span><span class="p">)</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_declaration_path</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">declaration</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return where the observed document of one declaration is stored.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">payload</span> <span class="o">/</span> <span class="n">JOB_STATE_DIRECTORY</span> <span class="o">/</span> <span class="s2">&quot;declarations&quot;</span> <span class="o">/</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">declaration</span><span class="si">}</span><span class="s2">.json&quot;</span>
+
+<div class="viewcode-block" id="Attempt.run">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.run">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">run</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">argv</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">timeout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">cwd</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">environment</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">termination_grace</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">10.0</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">CommandResult</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Run an argv array in the workdir and reap its process group.</span>
+
+<span class="sd">        :param argv: The command and its arguments.</span>
+<span class="sd">        :param timeout: The maximum runtime before terminating the process group.</span>
+<span class="sd">        :param cwd: The working directory, or this attempt&#39;s workdir when omitted.</span>
+<span class="sd">        :param environment: The complete child environment, or the process environment when omitted.</span>
+<span class="sd">        :param termination_grace: The grace period after a timeout before forceful termination.</span>
+<span class="sd">        :return: The completed command result.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="n">run_command</span><span class="p">(</span>
+            <span class="n">argv</span><span class="p">,</span>
+            <span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">,</span>
+            <span class="n">cwd</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">workdir</span> <span class="k">if</span> <span class="n">cwd</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">cwd</span><span class="p">,</span>
+            <span class="n">environment</span><span class="o">=</span><span class="n">environment</span><span class="p">,</span>
+            <span class="n">termination_grace</span><span class="o">=</span><span class="n">termination_grace</span><span class="p">,</span>
+        <span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Attempt.workdir_batch">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.workdir_batch">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">workdir_batch</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ReplayableWorkdirBatch</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Start a replayable group of workdir changes.</span>
+
+<span class="sd">        :return: A batch that seals changes for replay after interruption.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="n">ReplayableWorkdirBatch</span><span class="o">.</span><span class="n">create</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">workdir</span><span class="p">,</span> <span class="n">durable</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">durable</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Attempt.put">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.put">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">put</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">source</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="n">destination</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Stage one file or directory for the job&#39;s transactional data.</span>
+
+<span class="sd">        The operation is applied by the manager when the outcome is committed,</span>
+<span class="sd">        exactly once, whatever happens to this process in between. Operation</span>
+<span class="sd">        identifiers are generated in call order, so replaying the same step</span>
+<span class="sd">        produces the same manifest.</span>
+
+<span class="sd">        :param source: The file or directory to stage.</span>
+<span class="sd">        :param destination: The destination path in transactional data.</span>
+<span class="sd">        :return: The generated transaction operation identifier.</span>
+<span class="sd">        :raises ValueError: If this job has no transactional data.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">transaction</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_data_transaction</span><span class="p">()</span>
+        <span class="n">operation_id</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_next_operation</span><span class="p">()</span>
+        <span class="n">path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">source</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">is_dir</span><span class="p">()</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">path</span><span class="o">.</span><span class="n">is_symlink</span><span class="p">():</span>
+            <span class="n">transaction</span><span class="o">.</span><span class="n">put_tree</span><span class="p">(</span><span class="n">operation_id</span><span class="p">,</span> <span class="n">path</span><span class="p">,</span> <span class="n">destination</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">transaction</span><span class="o">.</span><span class="n">put_file</span><span class="p">(</span><span class="n">operation_id</span><span class="p">,</span> <span class="n">path</span><span class="p">,</span> <span class="n">destination</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">operation_id</span></div>
+
+
+<div class="viewcode-block" id="Attempt.remove">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.remove">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">remove</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">destination</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span> <span class="o">*</span><span class="p">,</span> <span class="n">missing_ok</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Remove one path from the job&#39;s transactional data.</span>
+
+<span class="sd">        :param destination: The path to remove from transactional data.</span>
+<span class="sd">        :param missing_ok: Whether an absent destination is acceptable.</span>
+<span class="sd">        :return: The generated transaction operation identifier.</span>
+<span class="sd">        :raises ValueError: If this job has no transactional data.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">transaction</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_data_transaction</span><span class="p">()</span>
+        <span class="n">operation_id</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_next_operation</span><span class="p">()</span>
+        <span class="n">transaction</span><span class="o">.</span><span class="n">remove</span><span class="p">(</span><span class="n">operation_id</span><span class="p">,</span> <span class="n">destination</span><span class="p">,</span> <span class="n">missing_ok</span><span class="o">=</span><span class="n">missing_ok</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">operation_id</span></div>
+
+
+<div class="viewcode-block" id="Attempt.spawn">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.spawn">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">spawn</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">child</span><span class="p">:</span> <span class="s2">&quot;ChildSpec | str | os.PathLike[str]&quot;</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">label</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+        <span class="n">placement</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">PurePosixPath</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ChildReference</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Register one child job under *label*, to be created on publication.</span>
+
+<span class="sd">        *child* is either a :class:`ChildSpec`, which needs no payload at all, or</span>
+<span class="sd">        the path of a prepared payload directory. The label is mandatory and must</span>
+<span class="sd">        be unique within one attempt: it is how :meth:`gather` and</span>
+<span class="sd">        :attr:`children` name this child later.</span>
+
+<span class="sd">        :param child: The child specification or prepared payload directory.</span>
+<span class="sd">        :param label: The unique label used to observe the child later.</span>
+<span class="sd">        :param placement: The workspace placement for the child, or this attempt&#39;s placement when omitted.</span>
+<span class="sd">        :return: The reference to the registered child.</span>
+<span class="sd">        :raises ValueError: If the child or label is invalid, or the label is reused.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_reject_published</span><span class="p">()</span>
+        <span class="n">entry_label</span> <span class="o">=</span> <span class="n">validate_label</span><span class="p">(</span><span class="n">label</span><span class="p">,</span> <span class="s2">&quot;child label&quot;</span><span class="p">)</span>
+        <span class="n">target</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">placement</span> <span class="k">if</span> <span class="n">placement</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">placement</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">child</span><span class="p">,</span> <span class="n">ChildSpec</span><span class="p">):</span>
+            <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_require_draft</span><span class="p">()</span><span class="o">.</span><span class="n">add_child</span><span class="p">(</span><span class="n">child</span><span class="p">,</span> <span class="n">target</span><span class="p">,</span> <span class="n">label</span><span class="o">=</span><span class="n">entry_label</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">child</span><span class="o">.</span><span class="n">runner</span><span class="o">.</span><span class="n">source</span> <span class="o">==</span> <span class="s2">&quot;inherit&quot;</span><span class="p">:</span>
+            <span class="c1"># An inherited runner is this very program, so the child&#39;s initial</span>
+            <span class="c1"># step is a step of this runner and a typo in it is catchable here.</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_check_step</span><span class="p">(</span><span class="n">child</span><span class="o">.</span><span class="n">step</span><span class="p">,</span> <span class="s2">&quot;spawned child step&quot;</span><span class="p">)</span>
+        <span class="c1"># Everything this child needs is validated before the draft exists, so a</span>
+        <span class="c1"># refused spawn leaves the attempt exactly as it found it.</span>
+        <span class="n">spec</span> <span class="o">=</span> <span class="n">child</span><span class="o">.</span><span class="n">_job_spec</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">job</span><span class="p">,</span> <span class="n">entry_label</span><span class="p">)</span>
+        <span class="n">reference</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_require_draft</span><span class="p">()</span><span class="o">.</span><span class="n">add_child_job</span><span class="p">(</span><span class="n">spec</span><span class="o">.</span><span class="n">as_mapping</span><span class="p">(),</span> <span class="n">target</span><span class="p">,</span> <span class="n">label</span><span class="o">=</span><span class="n">entry_label</span><span class="p">)</span>
+        <span class="n">_LOGGER</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="s2">&quot;spawned </span><span class="si">%s</span><span class="s2"> at step </span><span class="si">%s</span><span class="s2"> as </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span> <span class="n">reference</span><span class="o">.</span><span class="n">job_key</span><span class="p">,</span> <span class="n">child</span><span class="o">.</span><span class="n">step</span><span class="p">,</span> <span class="n">entry_label</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">reference</span></div>
+
+
+<div class="viewcode-block" id="Attempt.advance">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.advance">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">advance</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">step</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">state</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">priority</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Publish a new activation of this job at *step*.</span>
+
+<span class="sd">        *state* is written to :attr:`state` before the outcome is published, so</span>
+<span class="sd">        the step that runs next always finds the state that decided to run it.</span>
+
+<span class="sd">        :param step: The next registered step.</span>
+<span class="sd">        :param state: State members to merge before publication.</span>
+<span class="sd">        :param priority: The priority of the new activation, when changed.</span>
+<span class="sd">        :return: The path of the published outcome.</span>
+<span class="sd">        :raises RuntimeError: If this attempt already published an outcome.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_reject_published</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_check_step</span><span class="p">(</span><span class="n">step</span><span class="p">,</span> <span class="s2">&quot;advance target&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">state</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">state</span><span class="o">.</span><span class="n">merge</span><span class="p">(</span><span class="n">state</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_publish</span><span class="p">(</span><span class="s2">&quot;advance&quot;</span><span class="p">,</span> <span class="n">next_step</span><span class="o">=</span><span class="n">step</span><span class="p">,</span> <span class="n">priority</span><span class="o">=</span><span class="n">priority</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Attempt.gather">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.gather">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">gather</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">step</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">when</span><span class="p">:</span> <span class="n">JoinCondition</span> <span class="o">=</span> <span class="s2">&quot;all_succeeded&quot;</span><span class="p">,</span>
+        <span class="n">count</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">on_impossible</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Wait for the children spawned on this attempt, then run *step*.</span>
+
+<span class="sd">        The join names exactly the children :meth:`spawn` registered on this</span>
+<span class="sd">        attempt, which is also the bundle that creates them, so the manager can</span>
+<span class="sd">        always resolve it. *when* is one of ``all_succeeded``, ``all_terminal``,</span>
+<span class="sd">        ``any_succeeded``, or ``at_least`` with *count*. When the condition can no</span>
+<span class="sd">        longer be met, the job advances to *on_impossible* if one is named and</span>
+<span class="sd">        fails with ``dependency_failure`` otherwise.</span>
+
+<span class="sd">        :param step: The step to run when the join condition is met.</span>
+<span class="sd">        :param when: The child completion condition.</span>
+<span class="sd">        :param count: The required count when ``when`` is ``at_least``.</span>
+<span class="sd">        :param on_impossible: The step to run when the condition cannot be met.</span>
+<span class="sd">        :return: The path of the published wait outcome.</span>
+<span class="sd">        :raises ValueError: If no children were spawned or a named step is invalid.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_reject_published</span><span class="p">()</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_check_step</span><span class="p">(</span><span class="n">step</span><span class="p">,</span> <span class="s2">&quot;gather target&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">on_impossible</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_check_step</span><span class="p">(</span><span class="n">on_impossible</span><span class="p">,</span> <span class="s2">&quot;on_impossible target&quot;</span><span class="p">)</span>
+        <span class="n">draft</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_draft</span>
+        <span class="k">if</span> <span class="n">draft</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">draft</span><span class="o">.</span><span class="n">children</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;gather joins the children spawned on this attempt, and none were spawned&quot;</span><span class="p">)</span>
+        <span class="n">join</span> <span class="o">=</span> <span class="n">join_mapping</span><span class="p">(</span><span class="n">draft</span><span class="o">.</span><span class="n">children</span><span class="p">,</span> <span class="n">when</span><span class="p">,</span> <span class="n">count</span><span class="p">,</span> <span class="n">on_impossible</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_publish</span><span class="p">(</span><span class="s2">&quot;wait&quot;</span><span class="p">,</span> <span class="n">next_step</span><span class="o">=</span><span class="n">step</span><span class="p">,</span> <span class="n">join</span><span class="o">=</span><span class="n">join</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Attempt.succeed">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.succeed">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">succeed</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Publish the successful completion of this job.</span>
+
+<span class="sd">        :return: The path of the published outcome.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_publish</span><span class="p">(</span><span class="s2">&quot;succeed&quot;</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="Attempt.retry">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.retry">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">retry</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">reason</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Ask for another attempt of this same activation.</span>
+
+<span class="sd">        :param reason: The reason recorded with the retry request.</span>
+<span class="sd">        :return: The path of the published outcome.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_publish</span><span class="p">(</span><span class="s2">&quot;retry&quot;</span><span class="p">,</span> <span class="n">retry</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;reason&quot;</span><span class="p">:</span> <span class="n">reason</span><span class="p">})</span></div>
+
+
+<div class="viewcode-block" id="Attempt.pause">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.pause">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">pause</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">reason</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Pause this job until an operator resumes it.</span>
+
+<span class="sd">        :param reason: The reason recorded with the pause request.</span>
+<span class="sd">        :return: The path of the published outcome.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_publish</span><span class="p">(</span><span class="s2">&quot;pause&quot;</span><span class="p">,</span> <span class="n">pause</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;reason&quot;</span><span class="p">:</span> <span class="n">reason</span><span class="p">})</span></div>
+
+
+<div class="viewcode-block" id="Attempt.fail">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Attempt.fail">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">fail</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">code</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+        <span class="n">message</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">details</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">retryable</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Publish a structured terminal failure.</span>
+
+<span class="sd">        ``code`` is the token a job lists in ``retry_on``. ``retryable`` declares</span>
+<span class="sd">        that repeating this attempt could help, which the manager honours within</span>
+<span class="sd">        the attempt budgets of the job.</span>
+
+<span class="sd">        :param code: The stable failure code.</span>
+<span class="sd">        :param message: The human-readable failure message.</span>
+<span class="sd">        :param details: Optional structured failure details.</span>
+<span class="sd">        :param retryable: Whether repeating this attempt could help.</span>
+<span class="sd">        :return: The path of the published outcome.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">failure</span> <span class="o">=</span> <span class="n">Failure</span><span class="p">(</span><span class="n">code</span><span class="p">,</span> <span class="n">message</span><span class="p">,</span> <span class="n">details</span><span class="o">=</span><span class="n">details</span><span class="p">,</span> <span class="n">retryable</span><span class="o">=</span><span class="n">retryable</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_publish</span><span class="p">(</span><span class="s2">&quot;fail&quot;</span><span class="p">,</span> <span class="n">failure</span><span class="o">=</span><span class="n">failure</span><span class="o">.</span><span class="n">as_mapping</span><span class="p">())</span></div>
+
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_reject_published</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Refuse a second outcome, before anything of the first is disturbed.&quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_published</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;this attempt already published its </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_action</span><span class="si">}</span><span class="s2"> outcome&quot;</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_require_draft</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">OutcomeDraft</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return this attempt&#39;s outcome draft, creating it on first use.&quot;&quot;&quot;</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_reject_published</span><span class="p">()</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_draft</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_draft</span> <span class="o">=</span> <span class="n">OutcomeDraft</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">control</span><span class="p">,</span> <span class="n">durable</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">durable</span><span class="p">)</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_draft</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_data_transaction</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">TransactionBuilder</span><span class="p">:</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">data_generation</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+                <span class="s2">&quot;this job has data.mode none, so it has no data transaction; &quot;</span>
+                <span class="s2">&quot;create the job with data_mode=&#39;transactional&#39; to publish data operations&quot;</span>
+            <span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_transaction</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_transaction</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_require_draft</span><span class="p">()</span><span class="o">.</span><span class="n">transaction</span><span class="p">()</span>
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_transaction</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_next_operation</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_operations</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="k">return</span> <span class="sa">f</span><span class="s2">&quot;op-</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_operations</span><span class="si">:</span><span class="s2">04d</span><span class="si">}</span><span class="s2">&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_check_step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">step</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Reject a step this runner does not implement, at the call that names it.&quot;&quot;&quot;</span>
+
+        <span class="n">validate_step</span><span class="p">(</span><span class="n">step</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_runner</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">step</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_runner</span><span class="o">.</span><span class="n">steps</span><span class="p">:</span>
+            <span class="k">return</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">step</span><span class="si">!r}</span><span class="s2"> is not a step of the </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_runner</span><span class="o">.</span><span class="n">workflow</span><span class="si">}</span><span class="s2"> runner; &quot;</span>
+            <span class="sa">f</span><span class="s2">&quot;registered steps: </span><span class="si">{</span><span class="s1">&#39;, &#39;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_runner</span><span class="o">.</span><span class="n">steps</span><span class="p">))</span><span class="w"> </span><span class="ow">or</span><span class="w"> </span><span class="s1">&#39;none&#39;</span><span class="si">}</span><span class="s2">&quot;</span>
+        <span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_publish</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">action</span><span class="p">:</span> <span class="n">OutcomeAction</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">next_step</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">priority</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">failure</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">retry</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">join</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="n">pause</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+        <span class="n">draft</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_require_draft</span><span class="p">()</span>
+        <span class="n">declared</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_undeclared_steps</span><span class="p">()</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">published</span> <span class="o">=</span> <span class="n">draft</span><span class="o">.</span><span class="n">publish</span><span class="p">(</span>
+                <span class="n">action</span><span class="p">,</span>
+                <span class="n">next_step</span><span class="o">=</span><span class="n">next_step</span><span class="p">,</span>
+                <span class="n">priority</span><span class="o">=</span><span class="n">priority</span><span class="p">,</span>
+                <span class="n">failure</span><span class="o">=</span><span class="n">failure</span><span class="p">,</span>
+                <span class="n">retry</span><span class="o">=</span><span class="n">retry</span><span class="p">,</span>
+                <span class="n">join</span><span class="o">=</span><span class="n">join</span><span class="p">,</span>
+                <span class="n">pause</span><span class="o">=</span><span class="n">pause</span><span class="p">,</span>
+                <span class="n">runner_steps</span><span class="o">=</span><span class="n">declared</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="k">except</span> <span class="ne">Exception</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_discard_draft</span><span class="p">()</span>
+            <span class="k">raise</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_published</span> <span class="o">=</span> <span class="n">published</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_action</span> <span class="o">=</span> <span class="n">action</span>
+        <span class="k">if</span> <span class="n">declared</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_record_steps</span><span class="p">(</span><span class="n">declared</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">published</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_undeclared_steps</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the runner&#39;s step set when this job has not recorded it yet.&quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_runner</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span> <span class="kc">None</span>
+        <span class="n">steps</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_runner</span><span class="o">.</span><span class="n">steps</span><span class="p">)</span>
+        <span class="n">path</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">payload</span> <span class="o">/</span> <span class="n">JOB_STATE_DIRECTORY</span> <span class="o">/</span> <span class="n">_RUNNER_STEPS_FILE</span>
+        <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="k">if</span> <span class="n">read_json</span><span class="p">(</span><span class="n">path</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;steps&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="n">steps</span><span class="p">:</span>
+                    <span class="k">return</span> <span class="kc">None</span>
+            <span class="k">except</span> <span class="n">FormatError</span><span class="p">:</span>
+                <span class="k">pass</span>
+        <span class="k">return</span> <span class="n">steps</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_record_steps</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">steps</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">path</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">payload</span> <span class="o">/</span> <span class="n">JOB_STATE_DIRECTORY</span> <span class="o">/</span> <span class="n">_RUNNER_STEPS_FILE</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">write_json_atomic</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;steps&quot;</span><span class="p">:</span> <span class="nb">list</span><span class="p">(</span><span class="n">steps</span><span class="p">)},</span> <span class="n">durable</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">durable</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">OSError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>  <span class="c1"># pragma: no cover - only an optimization</span>
+            <span class="n">_LOGGER</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="s2">&quot;cannot record the declared steps of </span><span class="si">%s</span><span class="s2">: </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">job_key</span><span class="p">,</span> <span class="n">exc</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_discard_draft</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Remove an unpublished draft so no half-outcome survives this attempt.&quot;&quot;&quot;</span>
+
+        <span class="n">draft</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_draft</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_draft</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_transaction</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="k">if</span> <span class="n">draft</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="bp">self</span><span class="o">.</span><span class="n">_published</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">return</span>
+        <span class="n">shutil</span><span class="o">.</span><span class="n">rmtree</span><span class="p">(</span><span class="n">draft</span><span class="o">.</span><span class="n">root</span><span class="p">,</span> <span class="n">ignore_errors</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">_abort</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">exception</span><span class="p">:</span> <span class="ne">BaseException</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Discard the draft and record why this attempt ended abruptly.&quot;&quot;&quot;</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_discard_draft</span><span class="p">()</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">write_json_atomic</span><span class="p">(</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">control</span> <span class="o">/</span> <span class="s2">&quot;error.json&quot;</span><span class="p">,</span>
+                <span class="p">{</span>
+                    <span class="s2">&quot;format&quot;</span><span class="p">:</span> <span class="n">RUNNER_ERROR_FORMAT</span><span class="p">,</span>
+                    <span class="s2">&quot;format_version&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+                    <span class="s2">&quot;step&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">step</span><span class="p">,</span>
+                    <span class="s2">&quot;exception&quot;</span><span class="p">:</span> <span class="nb">type</span><span class="p">(</span><span class="n">exception</span><span class="p">)</span><span class="o">.</span><span class="vm">__name__</span><span class="p">,</span>
+                    <span class="s2">&quot;message&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">exception</span><span class="p">),</span>
+                    <span class="s2">&quot;traceback&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">traceback</span><span class="o">.</span><span class="n">format_exception</span><span class="p">(</span><span class="n">exception</span><span class="p">)),</span>
+                <span class="p">},</span>
+                <span class="n">durable</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">durable</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="k">except</span> <span class="ne">OSError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>  <span class="c1"># pragma: no cover - the original exception wins</span>
+            <span class="n">_LOGGER</span><span class="o">.</span><span class="n">debug</span><span class="p">(</span><span class="s2">&quot;cannot write the error breadcrumb of </span><span class="si">%s</span><span class="s2">: </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">context</span><span class="o">.</span><span class="n">attempt_id</span><span class="p">,</span> <span class="n">exc</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="Runner">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Runner">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">Runner</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;The registered steps of one workflow and the dispatch into them.</span>
+
+<span class="sd">    A runner is created once at module level, its steps are registered with</span>
+<span class="sd">    :meth:`step` before any work happens, and :meth:`main` is what the manager</span>
+<span class="sd">    invokes. Registration is therefore complete before the first step runs, which</span>
+<span class="sd">    is what lets every step name in a published outcome be checked against the</span>
+<span class="sd">    steps that really exist.</span>
+
+<span class="sd">    :param workflow: The workflow identifier and registry key implemented by this runner.</span>
+<span class="sd">    :param inputs: The immutable creation-time staged-input declarations.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">workflow</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">inputs</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<div class="viewcode-block" id="Runner.workflow">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Runner.workflow">[docs]</a>
+        <span class="bp">self</span><span class="o">.</span><span class="n">workflow</span> <span class="o">=</span> <span class="n">require_string</span><span class="p">(</span><span class="n">workflow</span><span class="p">,</span> <span class="s2">&quot;workflow&quot;</span><span class="p">)</span></div>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_inputs</span> <span class="o">=</span> <span class="n">MappingProxyType</span><span class="p">(</span><span class="n">validate_inputs</span><span class="p">(</span><span class="n">inputs</span> <span class="ow">or</span> <span class="p">{}))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_steps</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">StepHandler</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_instantiate</span><span class="p">:</span> <span class="n">InstantiateHandler</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="Runner.inputs">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Runner.inputs">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">inputs</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The immutable declared-input staging map.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_inputs</span></div>
+
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="Runner.steps">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Runner.steps">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">steps</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">frozenset</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;The names of every registered step.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="nb">frozenset</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_steps</span><span class="p">)</span></div>
+
+
+    <span class="nd">@property</span>
+<div class="viewcode-block" id="Runner.has_instantiate">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Runner.has_instantiate">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">has_instantiate</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bool</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Whether this runner has a creation-time instantiate hook.&quot;&quot;&quot;</span>
+
+        <span class="k">return</span> <span class="bp">self</span><span class="o">.</span><span class="n">_instantiate</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span></div>
+
+
+    <span class="nd">@overload</span>
+<div class="viewcode-block" id="Runner.step">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Runner.step">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">function</span><span class="p">:</span> <span class="n">StepHandler</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StepHandler</span><span class="p">:</span> <span class="o">...</span></div>
+
+
+    <span class="nd">@overload</span>
+    <span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">StepHandler</span><span class="p">],</span> <span class="n">StepHandler</span><span class="p">]:</span> <span class="o">...</span>
+
+    <span class="k">def</span><span class="w"> </span><span class="nf">step</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">function</span><span class="p">:</span> <span class="n">StepHandler</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+        <span class="o">*</span><span class="p">,</span>
+        <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StepHandler</span> <span class="o">|</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">StepHandler</span><span class="p">],</span> <span class="n">StepHandler</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Register one step handler, named after the function unless *name* is given.</span>
+
+<span class="sd">        :param function: The step handler, or ``None`` when used as a decorator factory.</span>
+<span class="sd">        :param name: The registered step name, or the handler name when omitted.</span>
+<span class="sd">        :return: The handler or a decorator that registers it.</span>
+<span class="sd">        :raises ValueError: If the step name is invalid or already registered.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">def</span><span class="w"> </span><span class="nf">register</span><span class="p">(</span><span class="n">handler</span><span class="p">:</span> <span class="n">StepHandler</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">StepHandler</span><span class="p">:</span>
+            <span class="n">step</span> <span class="o">=</span> <span class="n">validate_step</span><span class="p">(</span><span class="n">handler</span><span class="o">.</span><span class="vm">__name__</span> <span class="k">if</span> <span class="n">name</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">name</span><span class="p">,</span> <span class="s2">&quot;step&quot;</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">step</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">_steps</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;step </span><span class="si">{</span><span class="n">step</span><span class="si">!r}</span><span class="s2"> is already registered on the </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">workflow</span><span class="si">}</span><span class="s2"> runner&quot;</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_steps</span><span class="p">[</span><span class="n">step</span><span class="p">]</span> <span class="o">=</span> <span class="n">handler</span>
+            <span class="k">return</span> <span class="n">handler</span>
+
+        <span class="k">return</span> <span class="n">register</span> <span class="k">if</span> <span class="n">function</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">register</span><span class="p">(</span><span class="n">function</span><span class="p">)</span>
+
+<div class="viewcode-block" id="Runner.instantiate">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Runner.instantiate">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">instantiate</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">function</span><span class="p">:</span> <span class="n">InstantiateHandler</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">InstantiateHandler</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Register the hook receiving ``httk.workflow.scaffold.InstantiateContext``.</span>
+
+<span class="sd">        :param function: The creation-time instantiate handler.</span>
+<span class="sd">        :return: The handler, unchanged.</span>
+<span class="sd">        :raises ValueError: If an instantiate handler is already registered.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_instantiate</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;an instantiate hook is already registered on the </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">workflow</span><span class="si">}</span><span class="s2"> runner&quot;</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_instantiate</span> <span class="o">=</span> <span class="n">function</span>
+        <span class="k">return</span> <span class="n">function</span></div>
+
+
+<div class="viewcode-block" id="Runner.description">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Runner.description">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">description</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Return the machine-readable description of this runner.</span>
+
+<span class="sd">        :return: The runner description document.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">description</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s2">&quot;format&quot;</span><span class="p">:</span> <span class="n">RUNNER_DESCRIPTION_FORMAT</span><span class="p">,</span>
+            <span class="s2">&quot;format_version&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+            <span class="s2">&quot;workflow&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">workflow</span><span class="p">,</span>
+            <span class="s2">&quot;steps&quot;</span><span class="p">:</span> <span class="nb">sorted</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_steps</span><span class="p">),</span>
+        <span class="p">}</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">inputs</span><span class="p">:</span>
+            <span class="n">description</span><span class="p">[</span><span class="s2">&quot;inputs&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">inputs</span><span class="p">)</span>
+        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">has_instantiate</span><span class="p">:</span>
+            <span class="n">description</span><span class="p">[</span><span class="s2">&quot;instantiate&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="kc">True</span>
+        <span class="k">return</span> <span class="n">description</span></div>
+
+
+<div class="viewcode-block" id="Runner.main">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/sdk/index.html#httk.workflow.Runner.main">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">main</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">argv</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Run the step this process was launched for and publish its outcome.</span>
+
+<span class="sd">        Asked to describe itself — through ``HTTK_WORKFLOW_DESCRIBE=1`` or</span>
+<span class="sd">        ``--describe`` — the runner prints its description and exits without</span>
+<span class="sd">        touching anything, so a tool can enumerate the steps of a runner it is</span>
+<span class="sd">        not running.</span>
+
+<span class="sd">        Every ending is an outcome: a step that publishes none is reported as</span>
+<span class="sd">        ``no_outcome``, an unimplemented step as ``unknown_step``, and a step that</span>
+<span class="sd">        raises leaves an ``error.json`` breadcrumb and lets the exception reach the</span>
+<span class="sd">        manager, whose retry policy owns what happens next.</span>
+
+<span class="sd">        :param argv: Command-line arguments, or the process arguments when omitted.</span>
+<span class="sd">        :return: Zero after dispatching or describing the runner.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+
+        <span class="n">arguments</span> <span class="o">=</span> <span class="n">sys</span><span class="o">.</span><span class="n">argv</span><span class="p">[</span><span class="mi">1</span><span class="p">:]</span> <span class="k">if</span> <span class="n">argv</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="nb">list</span><span class="p">(</span><span class="n">argv</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">_DESCRIBE_FLAG</span> <span class="ow">in</span> <span class="n">arguments</span> <span class="ow">or</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">_DESCRIBE_VARIABLE</span><span class="p">)</span> <span class="o">==</span> <span class="s2">&quot;1&quot;</span><span class="p">:</span>
+            <span class="nb">print</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">description</span><span class="p">(),</span> <span class="n">sort_keys</span><span class="o">=</span><span class="kc">True</span><span class="p">))</span>
+            <span class="k">return</span> <span class="mi">0</span>
+        <span class="n">attempt</span> <span class="o">=</span> <span class="n">Attempt</span><span class="o">.</span><span class="n">initialize</span><span class="p">(</span><span class="n">runner</span><span class="o">=</span><span class="bp">self</span><span class="p">)</span>
+        <span class="n">handler</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_steps</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">attempt</span><span class="o">.</span><span class="n">step</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">handler</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="n">registered</span> <span class="o">=</span> <span class="s2">&quot;, &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_steps</span><span class="p">))</span> <span class="ow">or</span> <span class="s2">&quot;none&quot;</span>
+            <span class="n">_LOGGER</span><span class="o">.</span><span class="n">error</span><span class="p">(</span><span class="s2">&quot;step </span><span class="si">%s</span><span class="s2"> is not implemented by the </span><span class="si">%s</span><span class="s2"> runner&quot;</span><span class="p">,</span> <span class="n">attempt</span><span class="o">.</span><span class="n">step</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">workflow</span><span class="p">)</span>
+            <span class="n">attempt</span><span class="o">.</span><span class="n">fail</span><span class="p">(</span>
+                <span class="s2">&quot;unknown_step&quot;</span><span class="p">,</span>
+                <span class="sa">f</span><span class="s2">&quot;step </span><span class="si">{</span><span class="n">attempt</span><span class="o">.</span><span class="n">step</span><span class="si">!r}</span><span class="s2"> is not implemented by the </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">workflow</span><span class="si">}</span><span class="s2"> runner; &quot;</span>
+                <span class="sa">f</span><span class="s2">&quot;registered steps: </span><span class="si">{</span><span class="n">registered</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+            <span class="p">)</span>
+            <span class="k">return</span> <span class="mi">0</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">handler</span><span class="p">(</span><span class="n">attempt</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">BaseException</span> <span class="k">as</span> <span class="n">exception</span><span class="p">:</span>
+            <span class="n">attempt</span><span class="o">.</span><span class="n">_abort</span><span class="p">(</span><span class="n">exception</span><span class="p">)</span>
+            <span class="k">raise</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">attempt</span><span class="o">.</span><span class="n">published</span><span class="p">:</span>
+            <span class="n">attempt</span><span class="o">.</span><span class="n">fail</span><span class="p">(</span><span class="s2">&quot;no_outcome&quot;</span><span class="p">,</span> <span class="sa">f</span><span class="s2">&quot;step </span><span class="si">{</span><span class="n">attempt</span><span class="o">.</span><span class="n">step</span><span class="si">!r}</span><span class="s2"> finished without publishing an outcome&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="mi">0</span></div>
+</div>
+
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../_static/documentation_options.js?v=fe42cd0d"></script>
+    <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../../../_static/selector.js?v=875006ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:main","versionPathDepth":2};</script>
+    </body>
+</html>

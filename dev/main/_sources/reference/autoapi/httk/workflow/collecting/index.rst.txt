@@ -1,0 +1,443 @@
+httk.workflow.collecting
+========================
+
+.. py:module:: httk.workflow.collecting
+
+.. autoapi-nested-parse::
+
+   The results-collect contract: everything a data layer needs about one job.
+
+   Collecting is the read-only counterpart of running work. A manager decides what
+   happens next; a job_records reports what already happened, once, per job that
+   stopped, in a shape a data layer can store without knowing anything about
+   markers, journals, or leases.
+
+   That shape — :class:`~httk.workflow.collecting.JobRecord` — is the layering boundary of *httk₂*.
+   *httk-workflow* has no database dependency and never will: it produces records,
+   and something else consumes them. A consumer therefore reads results like this,
+   and nothing in this module knows what ``store`` or ``load_vasp`` are:
+
+   .. code-block:: python
+
+       for record in job_records(workspace):
+           store.save(load_vasp(record))
+
+   Every member of a record is derived from exactly the authoritative state a
+   manager reads — the marker below ``state/``, the journal frames that marker's
+   chain names, and the immutable ``job.json`` — so a record never says anything the
+   workspace does not. Two properties follow from that and are the reason this
+   module exists at all:
+
+   * **The executed code is pinned.** A record carries the immutable job digest and
+     the complete runner identity: executor, source, path, and the SHA-256 the job
+     pinned for every runner that lives outside its payload. For a runner named by
+     the reserved ``pkg:`` form the installed distribution and its version are
+     reported as well, so a stored result names the software that produced it.
+   * **Damage is reported, never guessed.** A job whose journal chain is broken is
+     still collected, with whatever remains readable and ``gaps`` set, because a
+     result that exists must not become invisible just because part of its history
+     did not survive.
+
+   :func:`job_records` is lazily evaluated over one scan of the workspace. By design it
+   iterates jobs without materializing the workspace, and building one record reads
+   only that job's own payload and journal chain.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.collecting.COLLECT_FORMAT
+   httk.workflow.collecting.COLLECT_FORMAT_VERSION
+   httk.workflow.collecting.COLLECTABLE_KINDS
+   httk.workflow.collecting.DEFAULT_COLLECT_STATES
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.collecting.CollectedJob
+   httk.workflow.collecting.JobRecord
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.collecting.module_distribution
+   httk.workflow.collecting.runner_provenance
+   httk.workflow.collecting.timeline
+   httk.workflow.collecting.children_of
+   httk.workflow.collecting.declarations_of
+   httk.workflow.collecting.record_of
+   httk.workflow.collecting.collect_kinds
+   httk.workflow.collecting.job_records
+   httk.workflow.collecting.collect
+
+
+Module Contents
+---------------
+
+.. py:data:: COLLECT_FORMAT
+   :value: 'httk-workflow-collect'
+
+
+.. py:data:: COLLECT_FORMAT_VERSION
+   :value: 1
+
+
+.. py:data:: COLLECTABLE_KINDS
+
+.. py:data:: DEFAULT_COLLECT_STATES
+   :value: ('succeeded',)
+
+
+.. py:class:: CollectedJob
+
+   Represent one job after workflow collecting and provenance assembly.
+
+   :param workflow_id: Identify the workflow that produced the job.
+   :param outputs: Map declared output roles to collector results.
+   :param unfulfilled: Name declared output roles omitted after a collector
+       ran; leave empty for degraded jobs.
+   :param run: Carry the framework-assembled run provenance.
+   :param products: Carry the framework-assembled product links.
+   :param record: Preserve the mechanical job readout behind the collection.
+   :param missing_collector: Explain why collecting was unavailable,
+       or leave it unset when collection completed.
+
+
+   .. py:attribute:: workflow_id
+      :type:  str
+
+
+   .. py:attribute:: outputs
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: unfulfilled
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: run
+      :type:  httk.core.Run
+
+
+   .. py:attribute:: products
+      :type:  tuple[httk.core.ProductLink, Ellipsis]
+
+
+   .. py:attribute:: record
+      :type:  JobRecord
+
+
+   .. py:attribute:: missing_collector
+      :type:  str | None
+      :value: None
+
+
+
+.. py:function:: module_distribution(module)
+
+   Return the ``(name, version)`` of the distribution installing *module*.
+
+   The answer is read from installation metadata alone and never by importing
+   anything: a module name comes out of an untrusted ``job.json``, and importing
+   it to ask which package it belongs to would execute code during a read-only
+   job_records. A wheel installation is recognized by the module path recorded in
+   its file list, and an editable installation by the source tree its
+   ``direct_url.json`` names. Anything else — a module on ``PYTHONPATH`` that no
+   installed distribution owns — is reported as unknown rather than guessed.
+
+   :param module: Name the module whose installed distribution to locate.
+   :return: The distribution name and version, or ``None`` when ownership is
+       unknown.
+
+
+.. py:function:: runner_provenance(job)
+
+   Return what installation provenance exists for one job's runner.
+
+   Only the reserved ``pkg:<module>/<resource>`` form of an installed runner
+   resolves to a Python distribution, so every other runner reports ``None``: a
+   payload runner is pinned by the job digest, and a workspace or plain
+   installed runner is pinned by ``runner.sha256`` and nothing else is known
+   about where it came from.
+
+   :param job: Supply the validated job definition and runner identity.
+   :return: Installation metadata for a reserved package runner, or ``None``.
+
+
+.. py:function:: timeline(frames)
+
+   Return the activation and attempt timeline of one job, oldest first.
+
+   The frames are exactly the ones the workspace's ``job_frames`` reader
+   walked, so this is a pure regrouping of recorded history: an activation is
+   every consecutive frame sharing one ``activation_id``, and an attempt is
+   opened by the ``claimed`` frame that consumed a budget and closed by the
+   first frame that reported how it ended. A frame the journal could not return
+   sets ``gaps`` and is skipped, which keeps a job with a damaged history
+   collectable instead of silent.
+
+   :param frames: Supply the journal frames read for one job.
+   :return: The oldest-first activation and attempt timeline with its damage
+       flag.
+
+
+.. py:function:: children_of(frames)
+
+   Return the labeled children one job registered, keyed by spawn label.
+
+   A campaign therefore collects as a tree: every record names the children it
+   spawned, and each of those is a job a consumer collects in its own right. A
+   label is mandatory in ``core-v2``, so an unlabeled child reference — only
+   possible in a workspace written by an older profile — is left out rather than
+   given an invented name. A label reused by a later activation names the child
+   of the most recent spawn under it.
+
+   :param frames: Supply the state and journal frames for one job.
+   :return: Child records keyed by their spawn labels.
+
+
+.. py:class:: JobRecord
+
+   Everything a data layer needs about one job that stopped.
+
+   Paths appear twice on purpose. The members ``payload_path``,
+   ``workdir_path``, and ``data_path`` are workspace relative, which is what a
+   stored record must hold so it survives moving the workspace; the properties
+   :attr:`payload`, :attr:`workdir`, and :attr:`data` resolve them against the
+   workspace this record was collected from, which is what code reading result
+   files wants.
+
+   :param workspace_root: Identify the absolute workspace root.
+   :param workspace_id: Identify the workspace.
+   :param job_id: Identify the job.
+   :param job_key: Preserve the complete job key.
+   :param job: Preserve the validated immutable job definition.
+   :param runner_provenance: Preserve installed package provenance, when known.
+   :param state: Record the terminal state in which the job stopped.
+   :param failure: Record the terminal failure, when one exists.
+   :param placement: Locate the job within the workspace hierarchy.
+   :param payload_path: Locate the workspace-relative job payload.
+   :param workdir_path: Locate the last workspace-relative workdir, when known.
+   :param data_path: Locate transactional data, when the job has it.
+   :param data_generation: Record the committed data generation, when present.
+   :param provenance: Preserve the journal-derived timeline and damage flag.
+   :param runner_steps: Preserve the runner steps, when recorded.
+   :param children: Preserve labeled child references.
+   :param declarations: Preserve declared and observed workflow documents.
+   :param runner_description: Preserve the reserved runner description, when
+       available.
+
+
+   .. py:attribute:: workspace_root
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: workspace_id
+      :type:  str
+
+
+   .. py:attribute:: job_id
+      :type:  str
+
+
+   .. py:attribute:: job_key
+      :type:  str
+
+
+   .. py:attribute:: job
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: runner_provenance
+      :type:  collections.abc.Mapping[str, object] | None
+
+
+   .. py:attribute:: state
+      :type:  str
+
+
+   .. py:attribute:: failure
+      :type:  httk.workflow.models.Failure | None
+
+
+   .. py:attribute:: placement
+      :type:  pathlib.PurePosixPath
+
+
+   .. py:attribute:: payload_path
+      :type:  pathlib.PurePosixPath
+
+
+   .. py:attribute:: workdir_path
+      :type:  pathlib.PurePosixPath | None
+
+
+   .. py:attribute:: data_path
+      :type:  pathlib.PurePosixPath | None
+
+
+   .. py:attribute:: data_generation
+      :type:  int | None
+
+
+   .. py:attribute:: provenance
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: runner_steps
+      :type:  tuple[str, Ellipsis] | None
+
+
+   .. py:attribute:: children
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: declarations
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, collections.abc.Mapping[str, object] | None]]
+
+
+   .. py:attribute:: runner_description
+      :type:  collections.abc.Mapping[str, object] | None
+      :value: None
+
+
+
+   .. py:property:: payload
+      :type: pathlib.Path
+
+
+      The absolute payload directory of this job.
+
+
+   .. py:property:: workdir
+      :type: pathlib.Path | None
+
+
+      The absolute workdir of this job's last attempt, when one is known.
+
+
+   .. py:property:: data
+      :type: pathlib.Path | None
+
+
+      The absolute transactional data directory, for a job that has one.
+
+
+   .. py:property:: gaps
+      :type: bool
+
+
+      Whether part of this job's recorded history could not be read.
+
+
+   .. py:method:: as_mapping()
+
+      Return the JSON representation of this record.
+
+
+
+   .. py:method:: from_mapping(value)
+      :classmethod:
+
+
+      Rebuild one record from a serialized record mapping.
+
+      :param value: Supply the mapping produced by :meth:`as_mapping`.
+      :return: The reconstructed job record.
+      :raises httk.workflow.errors.FormatError: If the mapping has the wrong format or invalid
+          record members.
+
+
+
+.. py:function:: declarations_of(job, payload)
+
+   Return the declarations of one job and whether any observed one is lost.
+
+   Every name either source knows appears exactly once. ``declared`` is the
+   document ``job.json`` carried, and ``observed`` is the runtime-refined one
+   the job wrote below ``.httk-job/declarations/``; both are carried verbatim
+   and reported side by side, because merging them would require understanding
+   a vocabulary this module deliberately does not implement. An observed
+   document that cannot be read is reported as ``None`` with the damage flag
+   set, exactly like every other unreadable evidence a job_records still reports.
+
+   :param job: Supply the validated job whose declared documents are available.
+   :param payload: Locate the payload containing observed documents.
+   :return: The side-by-side declarations and whether reading observed data
+       found damage.
+
+
+.. py:function:: record_of(workspace, marker)
+
+   Return the job_records record of the one job *marker* names.
+
+   ``None`` means this job has no readable ``job.json`` and therefore no
+   definition to report: the whole contract of a record is the *validated* job
+   behind a result, so an unusable payload is reported through the module logger
+   and left to a workspace tool instead of being described by guesswork.
+
+   :param workspace: Read the workspace containing the marked job.
+   :param marker: Identify the stopped job to read.
+   :return: The validated job record, or ``None`` when its payload is unreadable.
+
+
+.. py:function:: collect_kinds(states)
+
+   Validate the requested state kinds against what collect may read.
+
+   :param states: Select the stopped state kinds to collect.
+   :return: The distinct validated state kinds in request order.
+   :raises ValueError: If no state or an uncollectable state is requested.
+
+
+.. py:function:: job_records(workspace, *, states = DEFAULT_COLLECT_STATES, placement = None)
+
+   Yield one :class:`~httk.workflow.collecting.JobRecord` per finished job of *workspace*.
+
+   *states* selects which stopped jobs are reported and defaults to the
+   successful ones; every requested kind is validated against
+   ``COLLECTABLE_KINDS`` before anything is read. *placement* restricts the
+   job_records to the jobs at or below one placement, exactly as
+   ``httk workflow job list --placement`` does.
+
+   The result is a lazy iterator over one scan of the requested state
+   directories. Nothing is materialized, and building a record reads only that
+   job's own ``job.json`` and journal chain, so collecting is a single pass over
+   a workspace of any size. Attach read-only — ``Workspace(root,
+   mutable=False)`` — when nothing else in the process needs to write.
+
+   :param workspace: Read jobs from this workspace.
+   :param states: Select the stopped state kinds to report.
+   :param placement: Restrict results to this placement and its descendants.
+   :yields: Mechanical job records, one for each readable selected job.
+   :raises ValueError: If ``states`` contains no collectable state.
+
+
+.. py:function:: collect(workspace, *, states = DEFAULT_COLLECT_STATES, placement = None, allow_job_collector = False)
+
+   Collect records through registered or explicitly allowed job collectors.
+
+   A fallback reads and verifies the package manifest from the pinned runner
+   tree itself. A changed pinned tree raises ``_PinnedTreeError``, which degrades
+   that job and does not stop the rest of the sweep; other hook-loading errors
+   propagate and stop iteration.
+
+   :param workspace: Read jobs from this workspace.
+   :param states: Select the stopped state kinds to report.
+   :param placement: Restrict results to this placement and its descendants.
+   :param allow_job_collector: Permit digest-verified collectors from
+       job-pinned workspace package trees.
+   :yields: Framework-assembled collected jobs, including degraded jobs.
+   :raises ValueError: If a registered collector fails to resolve or
+       returns invalid output roles.
+
+

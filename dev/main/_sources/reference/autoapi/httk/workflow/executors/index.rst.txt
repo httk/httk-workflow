@@ -1,0 +1,217 @@
+httk.workflow.executors
+=======================
+
+.. py:module:: httk.workflow.executors
+
+.. autoapi-nested-parse::
+
+   Define runner-executor contracts used by the workflow manager.
+
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.executors.AttemptLaunch
+   httk.workflow.executors.OutcomeCommit
+   httk.workflow.executors.RunnerExecutor
+   httk.workflow.executors.PathRunnerExecutor
+
+
+Module Contents
+---------------
+
+.. py:class:: AttemptLaunch
+
+   Paths and context needed to construct an attempt command.
+
+   ``runner`` is the executable the manager resolved for this attempt. A
+   payload runner is the file inside ``payload``; a shared runner is the
+   verified copy the manager staged below ``control``, never the original.
+
+   :param job: Immutable job definition being attempted.
+   :param marker: Authoritative marker for the attempt.
+   :param payload: Immutable job payload directory.
+   :param workdir: Directory in which the runner executes.
+   :param control: Attempt-control directory.
+   :param context_path: Path of the serialized runner context.
+   :param context: Runner context members.
+   :param runner: Resolved executable, or no value to use the payload runner.
+
+
+   .. py:attribute:: job
+      :type:  httk.workflow.models.JobDefinition
+
+
+   .. py:attribute:: marker
+      :type:  httk.workflow.models.Marker
+
+
+   .. py:attribute:: payload
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: workdir
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: control
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: context_path
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: context
+      :type:  collections.abc.Mapping[str, Any]
+
+
+   .. py:attribute:: runner
+      :type:  pathlib.Path | None
+      :value: None
+
+
+
+   .. py:property:: runner_command
+      :type: pathlib.Path
+
+
+      Return the executable to run, defaulting to the payload runner.
+
+
+.. py:class:: OutcomeCommit
+
+   Describe a published outcome being committed by the authoritative manager.
+
+   :param job: Immutable job definition producing the outcome.
+   :param marker: Authoritative marker being committed.
+   :param payload: Immutable job payload directory.
+   :param outcome_path: Path of the published outcome.
+   :param outcome: Outcome members.
+
+
+   .. py:attribute:: job
+      :type:  httk.workflow.models.JobDefinition
+
+
+   .. py:attribute:: marker
+      :type:  httk.workflow.models.Marker
+
+
+   .. py:attribute:: payload
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: outcome_path
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: outcome
+      :type:  collections.abc.Mapping[str, Any]
+
+
+.. py:class:: RunnerExecutor
+
+   Bases: :py:obj:`Protocol`
+
+
+   Execution behavior selected by ``runner.executor`` in ``job.json``.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:method:: validate(job, payload)
+
+      Validate executor-specific immutable payload requirements.
+
+
+
+   .. py:method:: command(launch)
+      :abstractmethod:
+
+
+      Return the command argument vector for one attempt.
+
+
+
+   .. py:method:: commit_outcome(commit)
+
+      Complete executor-specific idempotent work before the marker advances.
+
+
+
+   .. py:method:: reconcile(workspace)
+
+      Repair executor-specific derived views; never alter authoritative state.
+
+
+
+   .. py:method:: marker_changed(workspace, marker)
+
+      Refresh derived views after an authoritative marker transition.
+
+
+
+.. py:class:: PathRunnerExecutor
+
+   Execute the runner path directly from the payload or staged copy.
+
+
+   .. py:attribute:: name
+      :value: 'path'
+
+
+
+   .. py:method:: validate(job, payload)
+
+      Validate the payload runner when the job runs one.
+
+      :param job: Job definition whose runner is checked.
+      :param payload: Immutable job payload directory.
+      :return: ``None``.
+      :raises httk.workflow.errors.FormatError: If a payload runner is missing or not a file.
+
+
+
+   .. py:method:: command(launch)
+
+      Build the command for one path-runner attempt.
+
+      :param launch: Attempt paths and runner context.
+      :return: Argument vector for the runner process.
+
+
+
+   .. py:method:: commit_outcome(commit)
+
+      Complete path-executor outcome work before the marker advances.
+
+      :param commit: Published outcome and its job context.
+      :return: ``None``.
+
+
+
+   .. py:method:: reconcile(workspace)
+
+      Reconcile path-executor derived state.
+
+      :param workspace: Workspace whose derived state is reconciled.
+      :return: ``None``.
+
+
+
+   .. py:method:: marker_changed(workspace, marker)
+
+      Refresh path-executor state after a marker transition.
+
+      :param workspace: Workspace containing the changed marker.
+      :param marker: Newly authoritative marker.
+      :return: ``None``.
+
+
+

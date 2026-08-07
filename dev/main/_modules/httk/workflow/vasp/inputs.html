@@ -1,0 +1,1199 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../../genindex.html"><link rel="search" title="Search" href="../../../../search.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>httk.workflow.vasp.inputs - httk-workflow dev:main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:main) — content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../../index.html"><div class="brand">httk-workflow dev:main documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:main documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../workflow_protocol_api.html">The filesystem protocol API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../runtime_helpers.html">Native runner helpers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../native_bash_api.html">Native Bash runner API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../sdk_parity.html">Python and Bash authoring parity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../vasp_runners.html">Packaged VASP runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../workflow_packages.html">Workflow packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../workflow_languages.html">Workflow-language runner realizations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../taskmanager.html">Task-manager usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../workflow_cli.html">Project and workflow command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../adapter_authoring.html">Writing a remote adapter</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../../reference/index.html">Reference</a><input aria-label="Toggle navigation of Reference" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/index.html">httk.workflow</a><input aria-label="Toggle navigation of httk.workflow" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/adapter_protocol/index.html">httk.workflow.adapter_protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/adapters/index.html">httk.workflow.adapters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/collecting/index.html">httk.workflow.collecting</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/compat/index.html">httk.workflow.compat</a><input aria-label="Toggle navigation of httk.workflow.compat" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/compat/v1/index.html">httk.workflow.compat.v1</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/configuration/index.html">httk.workflow.configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/errors/index.html">httk.workflow.errors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/executors/index.html">httk.workflow.executors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/hygiene/index.html">httk.workflow.hygiene</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/manifests/index.html">httk.workflow.manifests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/projects/index.html">httk.workflow.projects</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/protocol/index.html">httk.workflow.protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/provenance/index.html">httk.workflow.provenance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/runtime/index.html">httk.workflow.runtime</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/runtime_utils/index.html">httk.workflow.runtime_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/scaffold/index.html">httk.workflow.scaffold</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/sdk/index.html">httk.workflow.sdk</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/shell_bridge/index.html">httk.workflow.shell_bridge</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/supervision/index.html">httk.workflow.supervision</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/transfers/index.html">httk.workflow.transfers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/vasp/index.html">httk.workflow.vasp</a></li>
+</ul>
+</li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../notebooks/examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../workflow_filesystem_api.html">Workflow filesystem API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for httk.workflow.vasp.inputs</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;POSCAR/INCAR/KPOINTS/POTCAR preparation and provenance helpers.</span>
+
+<span class="sd">This is the input-side of the dependency-free VASP interface: reading and</span>
+<span class="sd">rewriting the four VASP input files, assembling a POTCAR with recorded</span>
+<span class="sd">provenance, and the :func:`prepare_vasp_inputs` entry point that ties them</span>
+<span class="sd">together. Historical authorship is documented in ``v1_runtime/NOTICE``.</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">bz2</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">gzip</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">hashlib</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">lzma</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">random</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">shutil</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">subprocess</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">tempfile</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Iterable</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">,</span> <span class="n">Sequence</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span><span class="p">,</span> <span class="n">field</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">.._util</span><span class="w"> </span><span class="kn">import</span> <span class="n">sha256_file</span><span class="p">,</span> <span class="n">utc_now</span><span class="p">,</span> <span class="n">write_json_atomic</span>
+
+<span class="n">_LOGGER</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+<span class="c1">#: The k-point centering every entry point starts from. Monkhorst-Pack is the</span>
+<span class="c1">#: starting point rather than Gamma because the reviewed remedy ladder promotes</span>
+<span class="c1">#: ``(&quot;centering&quot;, &quot;Gamma&quot;)`` as the *fix* for the ``kpoints_class`` and</span>
+<span class="c1">#: ``kpoint_shifts`` failure classes: a workflow that already starts at Gamma has</span>
+<span class="c1">#: no such remedy left to apply.</span>
+<span class="n">DEFAULT_KPOINT_CENTERING</span> <span class="o">=</span> <span class="s2">&quot;Monkhorst-Pack&quot;</span>
+<span class="n">KPOINT_CENTERINGS</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;Gamma&quot;</span><span class="p">,</span> <span class="s2">&quot;Monkhorst-Pack&quot;</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="PoscarHeader">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.PoscarHeader">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">PoscarHeader</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;The VASP-5 header information needed by execution helpers.</span>
+
+<span class="sd">    :param comment: Preserve the POSCAR comment line.</span>
+<span class="sd">    :param scale: Preserve the universal POSCAR scale.</span>
+<span class="sd">    :param lattice: Preserve the three lattice vectors.</span>
+<span class="sd">    :param species: Preserve the VASP-5 species names.</span>
+<span class="sd">    :param counts: Preserve the atom count for each species.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">comment</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">scale</span><span class="p">:</span> <span class="nb">float</span>
+    <span class="n">lattice</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">],</span> <span class="o">...</span><span class="p">]</span>
+    <span class="n">species</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+    <span class="n">counts</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span></div>
+
+
+
+<div class="viewcode-block" id="read_poscar_header">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.read_poscar_header">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">read_poscar_header</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PoscarHeader</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Read a VASP-5 POSCAR header without interpreting site coordinates.</span>
+
+<span class="sd">    :param path: Read the POSCAR file at this path.</span>
+<span class="sd">    :return: The parsed POSCAR header.</span>
+<span class="sd">    :raises ValueError: If the header is too short or malformed.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">lines</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">path</span><span class="p">)</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">splitlines</span><span class="p">()</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">lines</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">7</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;POSCAR has fewer than seven header lines&quot;</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">scale</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">lines</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">()[</span><span class="mi">0</span><span class="p">])</span>
+        <span class="n">raw_lattice</span> <span class="o">=</span> <span class="p">[</span><span class="nb">tuple</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">item</span><span class="p">)</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">lines</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">())</span> <span class="k">for</span> <span class="n">index</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">5</span><span class="p">)]</span>
+        <span class="n">counts</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">item</span><span class="p">)</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">lines</span><span class="p">[</span><span class="mi">6</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">())</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">IndexError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">)</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;POSCAR contains an invalid scale, lattice, or count line&quot;</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">raw_lattice</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">3</span> <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="nb">len</span><span class="p">(</span><span class="n">row</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">3</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">raw_lattice</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;POSCAR lattice must contain three three-component rows&quot;</span><span class="p">)</span>
+    <span class="n">lattice</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="p">(</span><span class="n">raw_lattice</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">0</span><span class="p">],</span> <span class="n">raw_lattice</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">1</span><span class="p">],</span> <span class="n">raw_lattice</span><span class="p">[</span><span class="mi">0</span><span class="p">][</span><span class="mi">2</span><span class="p">]),</span>
+        <span class="p">(</span><span class="n">raw_lattice</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="mi">0</span><span class="p">],</span> <span class="n">raw_lattice</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="mi">1</span><span class="p">],</span> <span class="n">raw_lattice</span><span class="p">[</span><span class="mi">1</span><span class="p">][</span><span class="mi">2</span><span class="p">]),</span>
+        <span class="p">(</span><span class="n">raw_lattice</span><span class="p">[</span><span class="mi">2</span><span class="p">][</span><span class="mi">0</span><span class="p">],</span> <span class="n">raw_lattice</span><span class="p">[</span><span class="mi">2</span><span class="p">][</span><span class="mi">1</span><span class="p">],</span> <span class="n">raw_lattice</span><span class="p">[</span><span class="mi">2</span><span class="p">][</span><span class="mi">2</span><span class="p">]),</span>
+    <span class="p">)</span>
+    <span class="n">species</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">lines</span><span class="p">[</span><span class="mi">5</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">())</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">species</span> <span class="ow">or</span> <span class="nb">len</span><span class="p">(</span><span class="n">species</span><span class="p">)</span> <span class="o">!=</span> <span class="nb">len</span><span class="p">(</span><span class="n">counts</span><span class="p">)</span> <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="n">value</span> <span class="o">&lt;</span> <span class="mi">0</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">counts</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;POSCAR requires matching VASP-5 species and nonnegative counts&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">PoscarHeader</span><span class="p">(</span><span class="n">lines</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">scale</span><span class="p">,</span> <span class="n">lattice</span><span class="p">,</span> <span class="n">species</span><span class="p">,</span> <span class="n">counts</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="suggested_magnetic_moments">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.suggested_magnetic_moments">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">suggested_magnetic_moments</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return the explicit comment override or a five-per-atom default.</span>
+
+<span class="sd">    The five Bohr magnetons per atom are a heuristic starting guess, not a</span>
+<span class="sd">    physical prediction: a deliberately high initial moment lets a spin-polarized</span>
+<span class="sd">    relaxation fall into a low-spin solution, whereas starting too low tends to keep</span>
+<span class="sd">    it there, so overestimating is the safer direction. The value of five is the</span>
+<span class="sd">    empirical default carried over from *httk* v1. Encode a per-structure choice in</span>
+<span class="sd">    the POSCAR comment as ``[MAGMOM=...]``.</span>
+
+<span class="sd">    :param path: Read the POSCAR comment and species counts from this path.</span>
+<span class="sd">    :return: The explicit or generated MAGMOM value.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">header</span> <span class="o">=</span> <span class="n">read_poscar_header</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+    <span class="n">override</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;\[MAGMOM=([^\]]+)\]&quot;</span><span class="p">,</span> <span class="n">header</span><span class="o">.</span><span class="n">comment</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">override</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">override</span><span class="o">.</span><span class="n">group</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>
+    <span class="k">return</span> <span class="s2">&quot; &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">count</span><span class="si">}</span><span class="s2">*5&quot;</span> <span class="k">for</span> <span class="n">count</span> <span class="ow">in</span> <span class="n">header</span><span class="o">.</span><span class="n">counts</span><span class="p">)</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_cross</span><span class="p">(</span><span class="n">left</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">],</span> <span class="n">right</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">,</span> <span class="nb">float</span><span class="p">]:</span>
+    <span class="k">return</span> <span class="p">(</span>
+        <span class="n">left</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">*</span> <span class="n">right</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">-</span> <span class="n">left</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">*</span> <span class="n">right</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span>
+        <span class="n">left</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="o">*</span> <span class="n">right</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">-</span> <span class="n">left</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="n">right</span><span class="p">[</span><span class="mi">2</span><span class="p">],</span>
+        <span class="n">left</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">*</span> <span class="n">right</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">-</span> <span class="n">left</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">*</span> <span class="n">right</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span>
+    <span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_dot</span><span class="p">(</span><span class="n">left</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">],</span> <span class="n">right</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">float</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+    <span class="k">return</span> <span class="nb">sum</span><span class="p">(</span><span class="n">a</span> <span class="o">*</span> <span class="n">b</span> <span class="k">for</span> <span class="n">a</span><span class="p">,</span> <span class="n">b</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">left</span><span class="p">,</span> <span class="n">right</span><span class="p">,</span> <span class="n">strict</span><span class="o">=</span><span class="kc">True</span><span class="p">))</span>
+
+
+<div class="viewcode-block" id="automatic_kpoint_grid">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.automatic_kpoint_grid">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">automatic_kpoint_grid</span><span class="p">(</span>
+    <span class="n">density</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">poscar</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">,</span>
+    <span class="n">minimum</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">3</span><span class="p">,</span>
+    <span class="n">equal</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">bump</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">,</span> <span class="nb">int</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Calculate a reciprocal-length automatic grid.</span>
+
+<span class="sd">    :param density: Scale reciprocal lengths by this positive density.</span>
+<span class="sd">    :param poscar: Read lattice vectors from this POSCAR.</span>
+<span class="sd">    :param minimum: Enforce this minimum value in each grid direction.</span>
+<span class="sd">    :param equal: Use the largest direction value for all directions.</span>
+<span class="sd">    :param bump: Add this nonnegative amount to each calculated direction.</span>
+<span class="sd">    :return: The three automatic grid dimensions.</span>
+<span class="sd">    :raises ValueError: If an argument is invalid or the lattice is singular.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="n">density</span> <span class="o">&lt;=</span> <span class="mi">0</span> <span class="ow">or</span> <span class="n">minimum</span> <span class="o">&lt;</span> <span class="mi">1</span> <span class="ow">or</span> <span class="n">bump</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;density must be positive; minimum must be positive; bump cannot be negative&quot;</span><span class="p">)</span>
+    <span class="n">header</span> <span class="o">=</span> <span class="n">read_poscar_header</span><span class="p">(</span><span class="n">poscar</span><span class="p">)</span>
+    <span class="n">first</span><span class="p">,</span> <span class="n">second</span><span class="p">,</span> <span class="n">third</span> <span class="o">=</span> <span class="n">header</span><span class="o">.</span><span class="n">lattice</span>
+    <span class="n">determinant</span> <span class="o">=</span> <span class="n">_dot</span><span class="p">(</span><span class="n">first</span><span class="p">,</span> <span class="n">_cross</span><span class="p">(</span><span class="n">second</span><span class="p">,</span> <span class="n">third</span><span class="p">))</span>
+    <span class="k">if</span> <span class="nb">abs</span><span class="p">(</span><span class="n">determinant</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mf">1e-12</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;POSCAR lattice is singular&quot;</span><span class="p">)</span>
+    <span class="n">scale</span> <span class="o">=</span> <span class="n">header</span><span class="o">.</span><span class="n">scale</span>
+    <span class="k">if</span> <span class="n">scale</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">scale</span> <span class="o">=</span> <span class="p">(</span><span class="o">-</span><span class="n">scale</span> <span class="o">/</span> <span class="nb">abs</span><span class="p">(</span><span class="n">determinant</span><span class="p">))</span> <span class="o">**</span> <span class="p">(</span><span class="mf">1.0</span> <span class="o">/</span> <span class="mf">3.0</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">scale</span> <span class="o">==</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;POSCAR scale cannot be zero&quot;</span><span class="p">)</span>
+    <span class="n">reciprocal</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="n">_cross</span><span class="p">(</span><span class="n">second</span><span class="p">,</span> <span class="n">third</span><span class="p">),</span>
+        <span class="n">_cross</span><span class="p">(</span><span class="n">third</span><span class="p">,</span> <span class="n">first</span><span class="p">),</span>
+        <span class="n">_cross</span><span class="p">(</span><span class="n">first</span><span class="p">,</span> <span class="n">second</span><span class="p">),</span>
+    <span class="p">)</span>
+    <span class="n">lengths</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">sqrt</span><span class="p">(</span><span class="n">_dot</span><span class="p">(</span><span class="n">row</span><span class="p">,</span> <span class="n">row</span><span class="p">))</span> <span class="o">/</span> <span class="nb">abs</span><span class="p">(</span><span class="n">determinant</span> <span class="o">*</span> <span class="n">scale</span><span class="p">)</span> <span class="k">for</span> <span class="n">row</span> <span class="ow">in</span> <span class="n">reciprocal</span><span class="p">)</span>
+    <span class="n">values</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="nb">max</span><span class="p">(</span><span class="n">minimum</span><span class="p">,</span> <span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="n">density</span> <span class="o">*</span> <span class="n">length</span> <span class="o">+</span> <span class="mf">0.5</span><span class="p">)</span> <span class="o">+</span> <span class="n">bump</span><span class="p">)</span> <span class="k">for</span> <span class="n">length</span> <span class="ow">in</span> <span class="n">lengths</span><span class="p">)</span>
+    <span class="n">grid</span> <span class="o">=</span> <span class="p">(</span><span class="n">values</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">values</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">values</span><span class="p">[</span><span class="mi">2</span><span class="p">])</span>
+    <span class="k">if</span> <span class="n">equal</span><span class="p">:</span>
+        <span class="n">largest</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">grid</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">largest</span><span class="p">,</span> <span class="n">largest</span><span class="p">,</span> <span class="n">largest</span>
+    <span class="k">return</span> <span class="n">grid</span></div>
+
+
+
+<div class="viewcode-block" id="write_automatic_kpoints">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.write_automatic_kpoints">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">write_automatic_kpoints</span><span class="p">(</span>
+    <span class="n">grid</span><span class="p">:</span> <span class="n">Sequence</span><span class="p">[</span><span class="nb">int</span><span class="p">],</span>
+    <span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;KPOINTS&quot;</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">centering</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">DEFAULT_KPOINT_CENTERING</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Write a standard automatic KPOINTS file.</span>
+
+<span class="sd">    The centering defaults to :data:`DEFAULT_KPOINT_CENTERING` here, in</span>
+<span class="sd">    :class:`~httk.workflow.vasp.inputs.VaspPreparationOptions`, and in the Bash bridge, so a workflow that</span>
+<span class="sd">    hits a k-point failure class still has the ``Gamma`` remedy available.</span>
+
+<span class="sd">    :param grid: Write these three positive grid dimensions.</span>
+<span class="sd">    :param path: Write the KPOINTS file to this path.</span>
+<span class="sd">    :param centering: Use this supported k-point centering.</span>
+<span class="sd">    :return: The written KPOINTS path.</span>
+<span class="sd">    :raises ValueError: If the grid or centering is unsupported.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">values</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">grid</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">values</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">3</span> <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span> <span class="ow">or</span> <span class="n">value</span> <span class="o">&lt;</span> <span class="mi">1</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;grid must contain three positive integers&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">centering</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">KPOINT_CENTERINGS</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;centering must be &#39;Gamma&#39; or &#39;Monkhorst-Pack&#39;&quot;</span><span class="p">)</span>
+    <span class="n">destination</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+    <span class="n">destination</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span>
+        <span class="sa">f</span><span class="s2">&quot;Automatic mesh generated by httk</span><span class="se">\n</span><span class="s2">0</span><span class="se">\n</span><span class="si">{</span><span class="n">centering</span><span class="si">}</span><span class="se">\n</span><span class="si">{</span><span class="n">values</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">values</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">values</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span><span class="si">}</span><span class="se">\n</span><span class="s2">0 0 0</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">destination</span></div>
+
+
+
+<div class="viewcode-block" id="read_incar">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.read_incar">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">read_incar</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;INCAR&quot;</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Read the last value of each simple INCAR assignment.</span>
+
+<span class="sd">    :param path: Read the INCAR file at this path.</span>
+<span class="sd">    :return: Upper-case INCAR tags mapped to their last values.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">result</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">Path</span><span class="p">(</span><span class="n">path</span><span class="p">)</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">splitlines</span><span class="p">():</span>
+        <span class="n">content</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;[#!]&quot;</span><span class="p">,</span> <span class="n">line</span><span class="p">,</span> <span class="n">maxsplit</span><span class="o">=</span><span class="mi">1</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">for</span> <span class="n">statement</span> <span class="ow">in</span> <span class="n">content</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;;&quot;</span><span class="p">):</span>
+            <span class="n">name</span><span class="p">,</span> <span class="n">separator</span><span class="p">,</span> <span class="n">value</span> <span class="o">=</span> <span class="n">statement</span><span class="o">.</span><span class="n">partition</span><span class="p">(</span><span class="s2">&quot;=&quot;</span><span class="p">)</span>
+            <span class="n">key</span> <span class="o">=</span> <span class="n">name</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+            <span class="k">if</span> <span class="n">separator</span> <span class="ow">and</span> <span class="n">key</span><span class="p">:</span>
+                <span class="n">result</span><span class="p">[</span><span class="n">key</span><span class="p">]</span> <span class="o">=</span> <span class="n">value</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">result</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_incar_statement_tag</span><span class="p">(</span><span class="n">statement</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return the tag one ``NAME = VALUE`` statement assigns, if it assigns one.&quot;&quot;&quot;</span>
+
+    <span class="n">name</span><span class="p">,</span> <span class="n">separator</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">statement</span><span class="o">.</span><span class="n">partition</span><span class="p">(</span><span class="s2">&quot;=&quot;</span><span class="p">)</span>
+    <span class="n">key</span> <span class="o">=</span> <span class="n">name</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">()</span>
+    <span class="k">return</span> <span class="n">key</span> <span class="k">if</span> <span class="n">separator</span> <span class="ow">and</span> <span class="n">key</span> <span class="k">else</span> <span class="kc">None</span>
+
+
+<div class="viewcode-block" id="update_incar">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.update_incar">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">update_incar</span><span class="p">(</span>
+    <span class="n">values</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">],</span>
+    <span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;INCAR&quot;</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Atomically replace selected INCAR tags while preserving other lines.</span>
+
+<span class="sd">    VASP allows several ``;``-separated assignments per line, and</span>
+<span class="sd">    :func:`read_incar` reads them all, so an update has to rewrite the individual</span>
+<span class="sd">    statements of a line rather than drop or keep the whole line: updating</span>
+<span class="sd">    ``ISYM`` in ``ISPIN = 2 ; ISYM = 2`` leaves ``ISPIN = 2`` and appends the new</span>
+<span class="sd">    ``ISYM``, instead of leaving a line that still assigns the old value.</span>
+
+<span class="sd">    :param values: Replace these INCAR tag assignments.</span>
+<span class="sd">    :param path: Update the INCAR file at this path.</span>
+<span class="sd">    :return: The updated INCAR path.</span>
+<span class="sd">    :raises ValueError: If a tag name is empty or invalid.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">destination</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+    <span class="n">normalized</span> <span class="o">=</span> <span class="p">{</span><span class="nb">str</span><span class="p">(</span><span class="n">name</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">():</span> <span class="nb">str</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">normalized</span> <span class="ow">or</span> <span class="nb">any</span><span class="p">(</span><span class="ow">not</span> <span class="n">name</span> <span class="ow">or</span> <span class="n">re</span><span class="o">.</span><span class="n">fullmatch</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;[A-Z][A-Z0-9_]*&quot;</span><span class="p">,</span> <span class="n">name</span><span class="p">)</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">normalized</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;INCAR updates require valid nonempty tag names&quot;</span><span class="p">)</span>
+    <span class="n">kept</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">destination</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">splitlines</span><span class="p">():</span>
+        <span class="n">comment_match</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;[#!]&quot;</span><span class="p">,</span> <span class="n">line</span><span class="p">)</span>
+        <span class="n">content</span> <span class="o">=</span> <span class="n">line</span> <span class="k">if</span> <span class="n">comment_match</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">line</span><span class="p">[:</span> <span class="n">comment_match</span><span class="o">.</span><span class="n">start</span><span class="p">()]</span>
+        <span class="n">comment</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span> <span class="k">if</span> <span class="n">comment_match</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">line</span><span class="p">[</span><span class="n">comment_match</span><span class="o">.</span><span class="n">start</span><span class="p">()</span> <span class="p">:]</span>
+        <span class="n">statements</span> <span class="o">=</span> <span class="n">content</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;;&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">any</span><span class="p">(</span><span class="n">_incar_statement_tag</span><span class="p">(</span><span class="n">item</span><span class="p">)</span> <span class="ow">in</span> <span class="n">normalized</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">statements</span><span class="p">):</span>
+            <span class="c1"># Nothing on this line is replaced, so it survives byte for byte.</span>
+            <span class="n">kept</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">line</span><span class="p">)</span>
+            <span class="k">continue</span>
+        <span class="n">surviving</span> <span class="o">=</span> <span class="p">[</span><span class="n">item</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">statements</span> <span class="k">if</span> <span class="n">_incar_statement_tag</span><span class="p">(</span><span class="n">item</span><span class="p">)</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">normalized</span><span class="p">]</span>
+        <span class="n">remainder</span> <span class="o">=</span> <span class="s2">&quot; ; &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">item</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">surviving</span> <span class="k">if</span> <span class="n">item</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">remainder</span> <span class="ow">and</span> <span class="n">comment</span><span class="p">:</span>
+            <span class="n">kept</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">remainder</span><span class="si">}</span><span class="s2"> </span><span class="si">{</span><span class="n">comment</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">elif</span> <span class="n">remainder</span> <span class="ow">or</span> <span class="n">comment</span><span class="p">:</span>
+            <span class="n">kept</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">remainder</span> <span class="ow">or</span> <span class="n">comment</span><span class="p">)</span>
+    <span class="c1"># Appended in tag order: the same set of updates then always produces the same</span>
+    <span class="c1"># file, whatever order the caller&#39;s mapping happened to have.</span>
+    <span class="n">kept</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2"> = </span><span class="si">{</span><span class="n">value</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">normalized</span><span class="o">.</span><span class="n">items</span><span class="p">()))</span>
+    <span class="n">descriptor</span><span class="p">,</span> <span class="n">temporary_name</span> <span class="o">=</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">mkstemp</span><span class="p">(</span><span class="n">prefix</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;.</span><span class="si">{</span><span class="n">destination</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">.&quot;</span><span class="p">,</span> <span class="nb">dir</span><span class="o">=</span><span class="n">destination</span><span class="o">.</span><span class="n">parent</span><span class="p">)</span>
+    <span class="n">temporary</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">temporary_name</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">with</span> <span class="n">os</span><span class="o">.</span><span class="n">fdopen</span><span class="p">(</span><span class="n">descriptor</span><span class="p">,</span> <span class="s2">&quot;w&quot;</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">stream</span><span class="p">:</span>
+            <span class="n">stream</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">kept</span><span class="p">)</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="n">temporary</span><span class="p">,</span> <span class="n">destination</span><span class="p">)</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">temporary</span><span class="o">.</span><span class="n">unlink</span><span class="p">(</span><span class="n">missing_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">destination</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_read_potential</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">bytes</span><span class="p">:</span>
+    <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;POTCAR&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">path</span><span class="o">.</span><span class="n">read_bytes</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;POTCAR.gz&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">gzip</span><span class="o">.</span><span class="n">decompress</span><span class="p">(</span><span class="n">path</span><span class="o">.</span><span class="n">read_bytes</span><span class="p">())</span>
+    <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;POTCAR.bz2&quot;</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">bz2</span><span class="o">.</span><span class="n">decompress</span><span class="p">(</span><span class="n">path</span><span class="o">.</span><span class="n">read_bytes</span><span class="p">())</span>
+    <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">name</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;POTCAR.xz&quot;</span><span class="p">,</span> <span class="s2">&quot;POTCAR.lzma&quot;</span><span class="p">}:</span>
+        <span class="k">return</span> <span class="n">lzma</span><span class="o">.</span><span class="n">decompress</span><span class="p">(</span><span class="n">path</span><span class="o">.</span><span class="n">read_bytes</span><span class="p">())</span>
+    <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">name</span> <span class="o">==</span> <span class="s2">&quot;POTCAR.Z&quot;</span><span class="p">:</span>
+        <span class="n">executable</span> <span class="o">=</span> <span class="n">shutil</span><span class="o">.</span><span class="n">which</span><span class="p">(</span><span class="s2">&quot;gzip&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">shutil</span><span class="o">.</span><span class="n">which</span><span class="p">(</span><span class="s2">&quot;uncompress&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">executable</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">&quot;reading legacy POTCAR.Z requires gzip or uncompress&quot;</span><span class="p">)</span>
+        <span class="n">completed</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+            <span class="p">[</span><span class="n">executable</span><span class="p">,</span> <span class="s2">&quot;-cd&quot;</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">path</span><span class="p">)],</span>
+            <span class="n">check</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+            <span class="n">capture_output</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+        <span class="p">)</span>
+        <span class="k">if</span> <span class="n">completed</span><span class="o">.</span><span class="n">returncode</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;cannot decompress </span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">completed</span><span class="o">.</span><span class="n">stderr</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="n">errors</span><span class="o">=</span><span class="s1">&#39;replace&#39;</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">completed</span><span class="o">.</span><span class="n">stdout</span>
+    <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;unsupported pseudopotential compression: </span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="PotcarChoice">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.PotcarChoice">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">PotcarChoice</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Which pseudopotential of a library one species was given.</span>
+
+<span class="sd">    The suffix policy of :func:`assemble_potcar` silently prefers one PAW variant</span>
+<span class="sd">    over another, and the choice changes the numbers a calculation produces, so</span>
+<span class="sd">    every choice is recorded: the variant directory, the suffix that selected it,</span>
+<span class="sd">    the full source path, its digest, and the ``TITEL`` the potential names</span>
+<span class="sd">    itself with.</span>
+
+<span class="sd">    :param species: Record the POSCAR species name.</span>
+<span class="sd">    :param variant: Record the selected pseudopotential directory name.</span>
+<span class="sd">    :param suffix: Record the suffix selected for the species.</span>
+<span class="sd">    :param source: Record the source potential path.</span>
+<span class="sd">    :param sha256: Record the source file digest.</span>
+<span class="sd">    :param titel: Record the potential&#39;s ``TITEL`` value, when present.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">species</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">variant</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">suffix</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">source</span><span class="p">:</span> <span class="n">Path</span>
+    <span class="n">sha256</span><span class="p">:</span> <span class="nb">str</span>
+    <span class="n">titel</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span>
+
+<div class="viewcode-block" id="PotcarChoice.as_mapping">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.PotcarChoice.as_mapping">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">as_mapping</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Serialize the potential choice.</span>
+
+<span class="sd">        :return: The JSON-compatible choice mapping.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">&quot;species&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">species</span><span class="p">,</span>
+            <span class="s2">&quot;variant&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">variant</span><span class="p">,</span>
+            <span class="s2">&quot;suffix&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">suffix</span><span class="p">,</span>
+            <span class="s2">&quot;source&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">source</span><span class="p">),</span>
+            <span class="s2">&quot;sha256&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">sha256</span><span class="p">,</span>
+            <span class="s2">&quot;titel&quot;</span><span class="p">:</span> <span class="bp">self</span><span class="o">.</span><span class="n">titel</span><span class="p">,</span>
+        <span class="p">}</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="PotcarAssembly">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.PotcarAssembly">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">PotcarAssembly</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;One assembled POTCAR and the provenance of every piece in it.</span>
+
+<span class="sd">    :param path: Record the assembled POTCAR path.</span>
+<span class="sd">    :param library: Record the pseudopotential library root.</span>
+<span class="sd">    :param choices: Record the selected potential for each species.</span>
+<span class="sd">    :param provenance: Record the provenance output path.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">path</span><span class="p">:</span> <span class="n">Path</span>
+    <span class="n">library</span><span class="p">:</span> <span class="n">Path</span>
+    <span class="n">choices</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">PotcarChoice</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+    <span class="n">provenance</span><span class="p">:</span> <span class="n">Path</span>
+
+<div class="viewcode-block" id="PotcarAssembly.as_mapping">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.PotcarAssembly.as_mapping">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">as_mapping</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">        </span><span class="sd">&quot;&quot;&quot;Serialize the assembly provenance.</span>
+
+<span class="sd">        :return: The JSON-compatible provenance mapping.</span>
+<span class="sd">        &quot;&quot;&quot;</span>
+        <span class="k">return</span> <span class="p">{</span>
+            <span class="s2">&quot;format&quot;</span><span class="p">:</span> <span class="s2">&quot;httk-vasp-potcar-provenance&quot;</span><span class="p">,</span>
+            <span class="s2">&quot;format_version&quot;</span><span class="p">:</span> <span class="mi">1</span><span class="p">,</span>
+            <span class="s2">&quot;potcar&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">path</span><span class="p">),</span>
+            <span class="s2">&quot;library&quot;</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">library</span><span class="p">),</span>
+            <span class="s2">&quot;assembled_at&quot;</span><span class="p">:</span> <span class="n">utc_now</span><span class="p">(),</span>
+            <span class="s2">&quot;potentials&quot;</span><span class="p">:</span> <span class="p">[</span><span class="n">item</span><span class="o">.</span><span class="n">as_mapping</span><span class="p">()</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">choices</span><span class="p">],</span>
+        <span class="p">}</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="assemble_potcar">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.assemble_potcar">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">assemble_potcar</span><span class="p">(</span>
+    <span class="n">library</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">poscar</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">,</span>
+    <span class="n">output</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POTCAR&quot;</span><span class="p">,</span>
+    <span class="n">suffix_preference</span><span class="p">:</span> <span class="n">Iterable</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="s2">&quot;_3&quot;</span><span class="p">,</span> <span class="s2">&quot;_2&quot;</span><span class="p">,</span> <span class="s2">&quot;_d&quot;</span><span class="p">,</span> <span class="s2">&quot;_sv&quot;</span><span class="p">,</span> <span class="s2">&quot;_pv&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="s2">&quot;_h&quot;</span><span class="p">,</span> <span class="s2">&quot;_s&quot;</span><span class="p">),</span>
+    <span class="n">provenance</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">PotcarAssembly</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Assemble POTCAR from explicit species and a configurable suffix policy.</span>
+
+<span class="sd">    The suffix policy decides which PAW variant each species gets, so the result</span>
+<span class="sd">    describes what it chose: the returned :class:`PotcarAssembly` names every</span>
+<span class="sd">    potential, and the same record is written next to the POTCAR as</span>
+<span class="sd">    ``&lt;POTCAR&gt;.provenance.json`` unless *provenance* names another file.</span>
+
+<span class="sd">    :param library: Search this pseudopotential library root.</span>
+<span class="sd">    :param poscar: Read species names from this POSCAR.</span>
+<span class="sd">    :param output: Write the assembled POTCAR to this path.</span>
+<span class="sd">    :param suffix_preference: Try these species suffixes in order.</span>
+<span class="sd">    :param provenance: Write provenance to this path, or beside the POTCAR when unset.</span>
+<span class="sd">    :return: The assembled POTCAR and its provenance.</span>
+<span class="sd">    :raises FileNotFoundError: If a species has no matching potential.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">library</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="n">header</span> <span class="o">=</span> <span class="n">read_poscar_header</span><span class="p">(</span><span class="n">poscar</span><span class="p">)</span>
+    <span class="n">suffixes</span> <span class="o">=</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">suffix_preference</span><span class="p">)</span>
+    <span class="n">pieces</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">bytes</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="n">choices</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">PotcarChoice</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">species</span> <span class="ow">in</span> <span class="n">header</span><span class="o">.</span><span class="n">species</span><span class="p">:</span>
+        <span class="n">found</span><span class="p">:</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="n">variant</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+        <span class="k">for</span> <span class="n">suffix</span> <span class="ow">in</span> <span class="n">suffixes</span><span class="p">:</span>
+            <span class="n">directory</span> <span class="o">=</span> <span class="n">root</span> <span class="o">/</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">species</span><span class="si">}{</span><span class="n">suffix</span><span class="si">}</span><span class="s2">&quot;</span>
+            <span class="k">for</span> <span class="n">filename</span> <span class="ow">in</span> <span class="p">(</span><span class="s2">&quot;POTCAR&quot;</span><span class="p">,</span> <span class="s2">&quot;POTCAR.gz&quot;</span><span class="p">,</span> <span class="s2">&quot;POTCAR.bz2&quot;</span><span class="p">,</span> <span class="s2">&quot;POTCAR.xz&quot;</span><span class="p">,</span> <span class="s2">&quot;POTCAR.lzma&quot;</span><span class="p">,</span> <span class="s2">&quot;POTCAR.Z&quot;</span><span class="p">):</span>
+                <span class="n">candidate</span> <span class="o">=</span> <span class="n">directory</span> <span class="o">/</span> <span class="n">filename</span>
+                <span class="k">if</span> <span class="n">candidate</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+                    <span class="n">found</span> <span class="o">=</span> <span class="n">candidate</span>
+                    <span class="n">variant</span> <span class="o">=</span> <span class="n">suffix</span>
+                    <span class="k">break</span>
+            <span class="k">if</span> <span class="n">found</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+                <span class="k">break</span>
+        <span class="k">if</span> <span class="n">found</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">FileNotFoundError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;no pseudopotential found for species </span><span class="si">{</span><span class="n">species</span><span class="si">!r}</span><span class="s2"> below </span><span class="si">{</span><span class="n">root</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="n">content</span> <span class="o">=</span> <span class="n">_read_potential</span><span class="p">(</span><span class="n">found</span><span class="p">)</span>
+        <span class="n">pieces</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">content</span><span class="p">)</span>
+        <span class="n">titel</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;^\s*TITEL\s*=\s*(.+)$&quot;</span><span class="p">,</span> <span class="n">content</span><span class="o">.</span><span class="n">decode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">,</span> <span class="n">errors</span><span class="o">=</span><span class="s2">&quot;replace&quot;</span><span class="p">),</span> <span class="n">re</span><span class="o">.</span><span class="n">MULTILINE</span><span class="p">)</span>
+        <span class="n">choices</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+            <span class="n">PotcarChoice</span><span class="p">(</span>
+                <span class="n">species</span><span class="p">,</span>
+                <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">species</span><span class="si">}{</span><span class="n">variant</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+                <span class="n">variant</span><span class="p">,</span>
+                <span class="n">found</span><span class="p">,</span>
+                <span class="n">sha256_file</span><span class="p">(</span><span class="n">found</span><span class="p">),</span>
+                <span class="kc">None</span> <span class="k">if</span> <span class="n">titel</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">titel</span><span class="o">.</span><span class="n">group</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">(),</span>
+            <span class="p">)</span>
+        <span class="p">)</span>
+    <span class="n">destination</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">output</span><span class="p">)</span>
+    <span class="n">destination</span><span class="o">.</span><span class="n">write_bytes</span><span class="p">(</span><span class="sa">b</span><span class="s2">&quot;&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">pieces</span><span class="p">))</span>
+    <span class="n">record</span> <span class="o">=</span> <span class="p">(</span>
+        <span class="n">Path</span><span class="p">(</span><span class="n">provenance</span><span class="p">)</span> <span class="k">if</span> <span class="n">provenance</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">destination</span><span class="o">.</span><span class="n">with_name</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">destination</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">.provenance.json&quot;</span><span class="p">)</span>
+    <span class="p">)</span>
+    <span class="n">assembly</span> <span class="o">=</span> <span class="n">PotcarAssembly</span><span class="p">(</span><span class="n">destination</span><span class="p">,</span> <span class="n">root</span><span class="p">,</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">choices</span><span class="p">),</span> <span class="n">record</span><span class="p">)</span>
+    <span class="n">write_json_atomic</span><span class="p">(</span><span class="n">record</span><span class="p">,</span> <span class="n">assembly</span><span class="o">.</span><span class="n">as_mapping</span><span class="p">())</span>
+    <span class="n">_LOGGER</span><span class="o">.</span><span class="n">info</span><span class="p">(</span>
+        <span class="s2">&quot;assembled </span><span class="si">%s</span><span class="s2"> from </span><span class="si">%s</span><span class="s2">: </span><span class="si">%s</span><span class="s2">&quot;</span><span class="p">,</span>
+        <span class="n">destination</span><span class="p">,</span>
+        <span class="n">root</span><span class="p">,</span>
+        <span class="s2">&quot;, &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">item</span><span class="o">.</span><span class="n">species</span><span class="si">}</span><span class="s2">-&gt;</span><span class="si">{</span><span class="n">item</span><span class="o">.</span><span class="n">variant</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">choices</span><span class="p">),</span>
+    <span class="p">)</span>
+    <span class="k">return</span> <span class="n">assembly</span></div>
+
+
+
+<div class="viewcode-block" id="contcar_to_poscar">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.contcar_to_poscar">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">contcar_to_poscar</span><span class="p">(</span>
+    <span class="n">contcar</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;CONTCAR&quot;</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">reference</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">,</span>
+    <span class="n">output</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Replace CONTCAR&#39;s comment with the reference POSCAR comment.</span>
+
+<span class="sd">    :param contcar: Read the relaxed structure from this CONTCAR path.</span>
+<span class="sd">    :param reference: Read the replacement comment from this POSCAR path.</span>
+<span class="sd">    :param output: Write the resulting POSCAR to this path.</span>
+<span class="sd">    :return: The written POSCAR path.</span>
+<span class="sd">    :raises ValueError: If either input file is empty.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">reference_lines</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">reference</span><span class="p">)</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">splitlines</span><span class="p">(</span><span class="n">keepends</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">lines</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">contcar</span><span class="p">)</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">splitlines</span><span class="p">(</span><span class="n">keepends</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">reference_lines</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">lines</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;CONTCAR and reference POSCAR must both be nonempty&quot;</span><span class="p">)</span>
+    <span class="n">destination</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">output</span><span class="p">)</span>
+    <span class="n">destination</span><span class="o">.</span><span class="n">write_text</span><span class="p">(</span><span class="n">reference_lines</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">rstrip</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\r\n</span><span class="s2">&quot;</span><span class="p">)</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span> <span class="o">+</span> <span class="s2">&quot;&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">lines</span><span class="p">[</span><span class="mi">1</span><span class="p">:]),</span> <span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">destination</span></div>
+
+
+
+<div class="viewcode-block" id="normalize_poscar_handedness">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.normalize_poscar_handedness">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">normalize_poscar_handedness</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Make a left-handed POSCAR lattice right-handed without moving sites.</span>
+
+<span class="sd">    :param path: Normalize the POSCAR file at this path.</span>
+<span class="sd">    :return: The normalized POSCAR path.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">destination</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+    <span class="n">lines</span> <span class="o">=</span> <span class="n">destination</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">splitlines</span><span class="p">()</span>
+    <span class="n">header</span> <span class="o">=</span> <span class="n">read_poscar_header</span><span class="p">(</span><span class="n">destination</span><span class="p">)</span>
+    <span class="n">determinant</span> <span class="o">=</span> <span class="n">_dot</span><span class="p">(</span><span class="n">header</span><span class="o">.</span><span class="n">lattice</span><span class="p">[</span><span class="mi">0</span><span class="p">],</span> <span class="n">_cross</span><span class="p">(</span><span class="n">header</span><span class="o">.</span><span class="n">lattice</span><span class="p">[</span><span class="mi">1</span><span class="p">],</span> <span class="n">header</span><span class="o">.</span><span class="n">lattice</span><span class="p">[</span><span class="mi">2</span><span class="p">]))</span>
+    <span class="k">if</span> <span class="n">determinant</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">destination</span>
+    <span class="k">for</span> <span class="n">index</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">5</span><span class="p">):</span>
+        <span class="n">values</span> <span class="o">=</span> <span class="p">[</span><span class="o">-</span><span class="nb">float</span><span class="p">(</span><span class="n">item</span><span class="p">)</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">lines</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">()]</span>
+        <span class="n">lines</span><span class="p">[</span><span class="n">index</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot; &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">value</span><span class="si">:</span><span class="s2">.16g</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="p">)</span>
+    <span class="n">_write_text_atomic</span><span class="p">(</span><span class="n">destination</span><span class="p">,</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">lines</span><span class="p">)</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">destination</span></div>
+
+
+
+<div class="viewcode-block" id="scale_poscar_lattice">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.scale_poscar_lattice">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">scale_poscar_lattice</span><span class="p">(</span>
+    <span class="n">factor</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+    <span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Multiply POSCAR&#39;s universal linear scale by a positive factor.</span>
+
+<span class="sd">    :param factor: Multiply the current scale by this positive finite value.</span>
+<span class="sd">    :param path: Update the POSCAR file at this path.</span>
+<span class="sd">    :return: The updated POSCAR path.</span>
+<span class="sd">    :raises ValueError: If the factor or POSCAR scale line is invalid.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">math</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">factor</span><span class="p">)</span> <span class="ow">or</span> <span class="n">factor</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;lattice scale factor must be positive and finite&quot;</span><span class="p">)</span>
+    <span class="n">destination</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+    <span class="n">lines</span> <span class="o">=</span> <span class="n">destination</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">splitlines</span><span class="p">()</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">lines</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;POSCAR has no scale line&quot;</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">scale</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">lines</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">()[</span><span class="mi">0</span><span class="p">])</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">IndexError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">)</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;POSCAR has an invalid scale line&quot;</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="n">lines</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">scale</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">factor</span><span class="si">:</span><span class="s2">.16g</span><span class="si">}</span><span class="s2">&quot;</span>
+    <span class="n">_write_text_atomic</span><span class="p">(</span><span class="n">destination</span><span class="p">,</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">lines</span><span class="p">)</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">destination</span></div>
+
+
+
+<div class="viewcode-block" id="derive_seed">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.derive_seed">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">derive_seed</span><span class="p">(</span><span class="n">entropy</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Derive one reproducible 63-bit seed from a caller-supplied string.</span>
+
+<span class="sd">    The string is the caller&#39;s own identity of the perturbation — an attempt</span>
+<span class="sd">    ordinal, a job key, a remedy step — so the same attempt always derives the</span>
+<span class="sd">    same seed and two different attempts derive different ones, without anything</span>
+<span class="sd">    reading a clock or a global random state.</span>
+
+<span class="sd">    :param entropy: Identify the perturbation with this nonempty string.</span>
+<span class="sd">    :return: The reproducible seed.</span>
+<span class="sd">    :raises ValueError: If entropy is not a nonempty string.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">entropy</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">entropy</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;seed entropy must be a nonempty string&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="nb">int</span><span class="o">.</span><span class="n">from_bytes</span><span class="p">(</span><span class="n">hashlib</span><span class="o">.</span><span class="n">sha256</span><span class="p">(</span><span class="n">entropy</span><span class="o">.</span><span class="n">encode</span><span class="p">(</span><span class="s2">&quot;utf-8&quot;</span><span class="p">))</span><span class="o">.</span><span class="n">digest</span><span class="p">()[:</span><span class="mi">8</span><span class="p">],</span> <span class="s2">&quot;big&quot;</span><span class="p">)</span> <span class="o">&gt;&gt;</span> <span class="mi">1</span></div>
+
+
+
+<div class="viewcode-block" id="rattle_poscar">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.rattle_poscar">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">rattle_poscar</span><span class="p">(</span>
+    <span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">amplitude</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">0.01</span><span class="p">,</span>
+    <span class="n">seed</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">entropy</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Apply a deterministic bounded perturbation to POSCAR site coordinates.</span>
+
+<span class="sd">    A perturbation has to be reproducible *and* different between two attempts of</span>
+<span class="sd">    the same calculation, so this function never invents entropy of its own:</span>
+<span class="sd">    either *seed* names the stream explicitly, or *entropy* is a string</span>
+<span class="sd">    :func:`derive_seed` turns into one — typically something attempt-derived, such</span>
+<span class="sd">    as ``f&quot;{job_key}:{attempt_ordinal}&quot;``. Giving neither is refused rather than</span>
+<span class="sd">    silently repeated, because two retries that rattle identically are two</span>
+<span class="sd">    identical calculations.</span>
+
+<span class="sd">    :param path: Update site coordinates in this POSCAR.</span>
+<span class="sd">    :param amplitude: Bound each coordinate perturbation by this value.</span>
+<span class="sd">    :param seed: Use this random seed when supplied.</span>
+<span class="sd">    :param entropy: Derive a seed from this string when supplied.</span>
+<span class="sd">    :return: The updated POSCAR path.</span>
+<span class="sd">    :raises ValueError: If the perturbation settings or coordinate rows are invalid.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">math</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">amplitude</span><span class="p">)</span> <span class="ow">or</span> <span class="n">amplitude</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;rattle amplitude must be finite and nonnegative&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">seed</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">entropy</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+            <span class="s2">&quot;rattle_poscar needs an explicit seed or an entropy string to derive one from; &quot;</span>
+            <span class="s2">&quot;pass entropy=f&#39;</span><span class="si">{job_key}</span><span class="s2">:</span><span class="si">{attempt_ordinal}</span><span class="s2">&#39; to make every retry differ reproducibly&quot;</span>
+        <span class="p">)</span>
+    <span class="k">if</span> <span class="n">entropy</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">seed</span> <span class="o">=</span> <span class="n">derive_seed</span><span class="p">(</span><span class="n">entropy</span> <span class="k">if</span> <span class="n">seed</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">seed</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="n">entropy</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="n">destination</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">path</span><span class="p">)</span>
+    <span class="n">lines</span> <span class="o">=</span> <span class="n">destination</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">splitlines</span><span class="p">()</span>
+    <span class="n">header</span> <span class="o">=</span> <span class="n">read_poscar_header</span><span class="p">(</span><span class="n">destination</span><span class="p">)</span>
+    <span class="n">coordinate_start</span> <span class="o">=</span> <span class="mi">7</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">lines</span><span class="p">)</span> <span class="o">&gt;</span> <span class="n">coordinate_start</span> <span class="ow">and</span> <span class="n">lines</span><span class="p">[</span><span class="n">coordinate_start</span><span class="p">]</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;s&quot;</span><span class="p">):</span>
+        <span class="n">coordinate_start</span> <span class="o">+=</span> <span class="mi">1</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">lines</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="n">coordinate_start</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;POSCAR has no coordinate mode&quot;</span><span class="p">)</span>
+    <span class="n">coordinate_start</span> <span class="o">+=</span> <span class="mi">1</span>
+    <span class="n">total</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="n">header</span><span class="o">.</span><span class="n">counts</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">lines</span><span class="p">)</span> <span class="o">&lt;</span> <span class="n">coordinate_start</span> <span class="o">+</span> <span class="n">total</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;POSCAR has fewer coordinate rows than declared atoms&quot;</span><span class="p">)</span>
+    <span class="n">generator</span> <span class="o">=</span> <span class="n">random</span><span class="o">.</span><span class="n">Random</span><span class="p">(</span><span class="n">seed</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">index</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="n">coordinate_start</span><span class="p">,</span> <span class="n">coordinate_start</span> <span class="o">+</span> <span class="n">total</span><span class="p">):</span>
+        <span class="n">fields</span> <span class="o">=</span> <span class="n">lines</span><span class="p">[</span><span class="n">index</span><span class="p">]</span><span class="o">.</span><span class="n">split</span><span class="p">()</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">fields</span><span class="p">)</span> <span class="o">&lt;</span> <span class="mi">3</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;invalid POSCAR coordinate row </span><span class="si">{</span><span class="n">index</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="n">values</span> <span class="o">=</span> <span class="p">[</span><span class="nb">float</span><span class="p">(</span><span class="n">fields</span><span class="p">[</span><span class="n">column</span><span class="p">])</span> <span class="o">+</span> <span class="n">generator</span><span class="o">.</span><span class="n">uniform</span><span class="p">(</span><span class="o">-</span><span class="n">amplitude</span><span class="p">,</span> <span class="n">amplitude</span><span class="p">)</span> <span class="k">for</span> <span class="n">column</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">3</span><span class="p">)]</span>
+        <span class="n">lines</span><span class="p">[</span><span class="n">index</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot; &quot;</span><span class="o">.</span><span class="n">join</span><span class="p">([</span><span class="o">*</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="n">value</span><span class="si">:</span><span class="s2">.14f</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">values</span><span class="p">),</span> <span class="o">*</span><span class="n">fields</span><span class="p">[</span><span class="mi">3</span><span class="p">:]])</span>
+    <span class="n">_write_text_atomic</span><span class="p">(</span><span class="n">destination</span><span class="p">,</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">lines</span><span class="p">)</span> <span class="o">+</span> <span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">destination</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_write_text_atomic</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="n">Path</span><span class="p">,</span> <span class="n">value</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="n">descriptor</span><span class="p">,</span> <span class="n">temporary_name</span> <span class="o">=</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">mkstemp</span><span class="p">(</span><span class="n">prefix</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;.</span><span class="si">{</span><span class="n">path</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">.&quot;</span><span class="p">,</span> <span class="nb">dir</span><span class="o">=</span><span class="n">path</span><span class="o">.</span><span class="n">parent</span><span class="p">)</span>
+    <span class="n">temporary</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">temporary_name</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">with</span> <span class="n">os</span><span class="o">.</span><span class="n">fdopen</span><span class="p">(</span><span class="n">descriptor</span><span class="p">,</span> <span class="s2">&quot;w&quot;</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">stream</span><span class="p">:</span>
+            <span class="n">stream</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="n">temporary</span><span class="p">,</span> <span class="n">path</span><span class="p">)</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">temporary</span><span class="o">.</span><span class="n">unlink</span><span class="p">(</span><span class="n">missing_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+
+<div class="viewcode-block" id="calculate_nbands">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.calculate_nbands">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">calculate_nbands</span><span class="p">(</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">poscar</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POSCAR&quot;</span><span class="p">,</span>
+    <span class="n">potcar</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POTCAR&quot;</span><span class="p">,</span>
+    <span class="n">incar</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;INCAR&quot;</span><span class="p">,</span>
+    <span class="n">divisor</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Calculate a conservative VASP band count from input metadata.</span>
+
+<span class="sd">    The count is a heuristic, deliberately generous margin over VASP&#39;s own</span>
+<span class="sd">    default of roughly half the valence electrons plus half the atom count: too</span>
+<span class="sd">    few bands is a run that stops with ``TOO FEW BANDS`` or converges to the wrong</span>
+<span class="sd">    state, while a handful of extra empty bands costs only time. The spin-polarized</span>
+<span class="sd">    branch adds ``0.6 * electrons`` plus a magnetization- or atom-count-derived</span>
+<span class="sd">    margin, and the maximum of the candidate formulas wins; the numbers themselves</span>
+<span class="sd">    are empirical defaults carried over from *httk* v1. The result is rounded up to</span>
+<span class="sd">    an even number, and to a multiple of *divisor* when a parallel band divisor</span>
+<span class="sd">    (``NPAR``) is in play, because VASP would otherwise round NBANDS up itself and</span>
+<span class="sd">    report a changed value.</span>
+
+<span class="sd">    :param poscar: Read species and atom counts from this POSCAR.</span>
+<span class="sd">    :param potcar: Read valence counts from this POTCAR.</span>
+<span class="sd">    :param incar: Read spin and magnetization tags from this INCAR.</span>
+<span class="sd">    :param divisor: Round the result up to a multiple of this positive divisor.</span>
+<span class="sd">    :return: The conservative even band count.</span>
+<span class="sd">    :raises ValueError: If the divisor or required input metadata is invalid.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="n">divisor</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="p">(</span><span class="nb">isinstance</span><span class="p">(</span><span class="n">divisor</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span> <span class="ow">or</span> <span class="n">divisor</span> <span class="o">&lt;</span> <span class="mi">1</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;NBANDS divisor must be a positive integer&quot;</span><span class="p">)</span>
+    <span class="n">header</span> <span class="o">=</span> <span class="n">read_poscar_header</span><span class="p">(</span><span class="n">poscar</span><span class="p">)</span>
+    <span class="n">text</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">potcar</span><span class="p">)</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">,</span> <span class="n">errors</span><span class="o">=</span><span class="s2">&quot;replace&quot;</span><span class="p">)</span>
+    <span class="n">zvals</span> <span class="o">=</span> <span class="p">[</span><span class="nb">float</span><span class="p">(</span><span class="n">value</span><span class="p">)</span> <span class="k">for</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">re</span><span class="o">.</span><span class="n">findall</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;\bZVAL\s*=\s*([-+0-9.Ee]+)&quot;</span><span class="p">,</span> <span class="n">text</span><span class="p">)]</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">zvals</span><span class="p">)</span> <span class="o">&lt;</span> <span class="nb">len</span><span class="p">(</span><span class="n">header</span><span class="o">.</span><span class="n">counts</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;POTCAR contains fewer ZVAL entries than POSCAR species&quot;</span><span class="p">)</span>
+    <span class="n">electrons</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="n">count</span> <span class="o">*</span> <span class="n">zval</span> <span class="k">for</span> <span class="n">count</span><span class="p">,</span> <span class="n">zval</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">header</span><span class="o">.</span><span class="n">counts</span><span class="p">,</span> <span class="n">zvals</span><span class="p">,</span> <span class="n">strict</span><span class="o">=</span><span class="kc">False</span><span class="p">))</span>
+    <span class="n">tags</span> <span class="o">=</span> <span class="n">read_incar</span><span class="p">(</span><span class="n">incar</span><span class="p">)</span>
+    <span class="n">ispin</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">tags</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;ISPIN&quot;</span><span class="p">,</span> <span class="s2">&quot;1&quot;</span><span class="p">)))</span>
+    <span class="n">natoms</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="mi">6</span><span class="p">,</span> <span class="nb">sum</span><span class="p">(</span><span class="n">header</span><span class="o">.</span><span class="n">counts</span><span class="p">))</span>
+    <span class="n">candidates</span><span class="p">:</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">int</span><span class="p">,</span> <span class="o">...</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">ispin</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="n">magnetic</span> <span class="o">=</span> <span class="n">_expanded_sum</span><span class="p">(</span><span class="n">tags</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MAGMOM&quot;</span><span class="p">,</span> <span class="n">suggested_magnetic_moments</span><span class="p">(</span><span class="n">poscar</span><span class="p">)))</span>
+        <span class="n">candidates</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="n">math</span><span class="o">.</span><span class="n">floor</span><span class="p">(</span><span class="mf">0.6</span> <span class="o">*</span> <span class="n">electrons</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">+</span> <span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="n">natoms</span> <span class="o">/</span> <span class="mi">2</span><span class="p">),</span>
+            <span class="n">math</span><span class="o">.</span><span class="n">floor</span><span class="p">(</span><span class="mf">0.6</span> <span class="o">*</span> <span class="n">electrons</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">+</span> <span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="nb">abs</span><span class="p">(</span><span class="n">magnetic</span><span class="p">)</span> <span class="o">/</span> <span class="mi">2</span><span class="p">),</span>
+            <span class="n">math</span><span class="o">.</span><span class="n">floor</span><span class="p">(</span><span class="mf">0.6</span> <span class="o">*</span> <span class="n">electrons</span> <span class="o">+</span> <span class="mi">1</span><span class="p">)</span> <span class="o">+</span> <span class="mi">20</span><span class="p">,</span>
+        <span class="p">)</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">candidates</span> <span class="o">=</span> <span class="p">(</span>
+            <span class="n">math</span><span class="o">.</span><span class="n">floor</span><span class="p">(</span><span class="n">electrons</span> <span class="o">/</span> <span class="mi">2</span> <span class="o">+</span> <span class="mi">2</span><span class="p">)</span> <span class="o">+</span> <span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="n">natoms</span> <span class="o">/</span> <span class="mi">2</span><span class="p">),</span>
+            <span class="n">math</span><span class="o">.</span><span class="n">ceil</span><span class="p">(</span><span class="n">electrons</span> <span class="o">/</span> <span class="mi">2</span><span class="p">)</span> <span class="o">+</span> <span class="mi">20</span><span class="p">,</span>
+        <span class="p">)</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">candidates</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">result</span> <span class="o">%</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="n">result</span> <span class="o">+=</span> <span class="mi">1</span>
+    <span class="k">if</span> <span class="n">divisor</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">result</span> <span class="o">%</span> <span class="n">divisor</span><span class="p">:</span>
+        <span class="n">result</span> <span class="o">+=</span> <span class="n">divisor</span> <span class="o">-</span> <span class="n">result</span> <span class="o">%</span> <span class="n">divisor</span>
+    <span class="k">return</span> <span class="n">result</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_expanded_sum</span><span class="p">(</span><span class="n">value</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span>
+    <span class="n">total</span> <span class="o">=</span> <span class="mf">0.0</span>
+    <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">value</span><span class="o">.</span><span class="n">split</span><span class="p">():</span>
+        <span class="k">if</span> <span class="s2">&quot;*&quot;</span> <span class="ow">in</span> <span class="n">item</span><span class="p">:</span>
+            <span class="n">count</span><span class="p">,</span> <span class="n">number</span> <span class="o">=</span> <span class="n">item</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;*&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">)</span>
+            <span class="n">total</span> <span class="o">+=</span> <span class="nb">int</span><span class="p">(</span><span class="n">count</span><span class="p">)</span> <span class="o">*</span> <span class="nb">float</span><span class="p">(</span><span class="n">number</span><span class="p">)</span>
+        <span class="k">else</span><span class="p">:</span>
+            <span class="n">total</span> <span class="o">+=</span> <span class="nb">float</span><span class="p">(</span><span class="n">item</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">total</span>
+
+
+<div class="viewcode-block" id="potcar_summary">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.potcar_summary">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">potcar_summary</span><span class="p">(</span>
+    <span class="n">path</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POTCAR&quot;</span><span class="p">,</span>
+    <span class="n">output</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;POTCAR.summary&quot;</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Write a non-potential metadata summary suitable for logs.</span>
+
+<span class="sd">    :param path: Read POTCAR metadata from this path.</span>
+<span class="sd">    :param output: Write the summary to this path.</span>
+<span class="sd">    :return: The written summary path.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">text</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">path</span><span class="p">)</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">&quot;utf-8&quot;</span><span class="p">,</span> <span class="n">errors</span><span class="o">=</span><span class="s2">&quot;replace&quot;</span><span class="p">)</span>
+    <span class="n">blocks</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">for</span> <span class="n">block</span> <span class="ow">in</span> <span class="n">re</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;(?=^\s*TITEL\s*=)&quot;</span><span class="p">,</span> <span class="n">text</span><span class="p">,</span> <span class="n">flags</span><span class="o">=</span><span class="n">re</span><span class="o">.</span><span class="n">MULTILINE</span><span class="p">):</span>
+        <span class="k">if</span> <span class="s2">&quot;TITEL&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">block</span><span class="p">:</span>
+            <span class="k">continue</span>
+        <span class="n">keep</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="k">for</span> <span class="n">line</span> <span class="ow">in</span> <span class="n">block</span><span class="o">.</span><span class="n">splitlines</span><span class="p">():</span>
+            <span class="k">if</span> <span class="n">re</span><span class="o">.</span><span class="n">match</span><span class="p">(</span><span class="sa">r</span><span class="s2">&quot;^\s*(TITEL|POMASS|ZVAL|ENMAX|ENMIN|LEXCH|EATOM)\b&quot;</span><span class="p">,</span> <span class="n">line</span><span class="p">):</span>
+                <span class="n">keep</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">line</span><span class="o">.</span><span class="n">rstrip</span><span class="p">())</span>
+        <span class="k">if</span> <span class="n">keep</span><span class="p">:</span>
+            <span class="n">blocks</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">keep</span><span class="p">))</span>
+    <span class="n">destination</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">output</span><span class="p">)</span>
+    <span class="n">_write_text_atomic</span><span class="p">(</span><span class="n">destination</span><span class="p">,</span> <span class="s2">&quot;</span><span class="se">\n\n</span><span class="s2">&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">blocks</span><span class="p">)</span> <span class="o">+</span> <span class="p">(</span><span class="s2">&quot;</span><span class="se">\n</span><span class="s2">&quot;</span> <span class="k">if</span> <span class="n">blocks</span> <span class="k">else</span> <span class="s2">&quot;&quot;</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">destination</span></div>
+
+
+
+<div class="viewcode-block" id="VaspPreparationOptions">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.VaspPreparationOptions">[docs]</a>
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="k">class</span><span class="w"> </span><span class="nc">VaspPreparationOptions</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Options for dependency-free VASP input preparation.</span>
+
+<span class="sd">    ``accuracy_per_atom`` is the target total-energy accuracy in eV per atom:</span>
+<span class="sd">    ``EDIFFG`` is set to that budget for the whole cell and ``EDIFF`` to the same</span>
+<span class="sd">    budget divided by ``ediff_margin``, so the electronic loop converges roughly</span>
+<span class="sd">    one and a half orders of magnitude tighter than the ionic loop it feeds. The</span>
+<span class="sd">    margin of ``33`` is a heuristic, empirical default carried over from *httk*</span>
+<span class="sd">    v1, not a derived quantity.</span>
+
+<span class="sd">    :param kpoint_density: Set the reciprocal-length k-point density.</span>
+<span class="sd">    :param centering: Select the automatic k-point centering.</span>
+<span class="sd">    :param accuracy_per_atom: Set the target total-energy accuracy, or disable derived accuracy tags when unset.</span>
+<span class="sd">    :param ediff_margin: Divide the cell accuracy by this margin for ``EDIFF``.</span>
+<span class="sd">    :param pseudopotential_library: Assemble POTCAR from this library when set.</span>
+<span class="sd">    :param parallel_tag: Set the selected parallel INCAR tag when set.</span>
+<span class="sd">    :param parallel_value: Set the value for the selected parallel tag.</span>
+<span class="sd">    :param normalize_handedness: Normalize a left-handed POSCAR before preparation.</span>
+<span class="sd">    :param incar_tags: Apply these explicit INCAR tags before derived defaults.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="n">kpoint_density</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">20.0</span>
+    <span class="n">centering</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="n">DEFAULT_KPOINT_CENTERING</span>
+    <span class="n">accuracy_per_atom</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="mf">0.001</span>
+    <span class="n">ediff_margin</span><span class="p">:</span> <span class="nb">float</span> <span class="o">=</span> <span class="mf">33.0</span>
+    <span class="n">pseudopotential_library</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">parallel_tag</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">parallel_value</span><span class="p">:</span> <span class="nb">int</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="n">normalize_handedness</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span>
+    <span class="n">incar_tags</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">=</span> <span class="n">field</span><span class="p">(</span><span class="n">default_factory</span><span class="o">=</span><span class="nb">dict</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="prepare_vasp_inputs">
+<a class="viewcode-back" href="../../../../reference/autoapi/httk/workflow/vasp/index.html#httk.workflow.vasp.prepare_vasp_inputs">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">prepare_vasp_inputs</span><span class="p">(</span>
+    <span class="n">options</span><span class="p">:</span> <span class="n">VaspPreparationOptions</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">directory</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;.&quot;</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Prepare POSCAR, POTCAR, KPOINTS, and INCAR with recorded choices.</span>
+
+<span class="sd">    ``incar_tags`` is applied to the INCAR first and wins over everything derived</span>
+<span class="sd">    afterwards: the derived values are defaults for what the caller did not say,</span>
+<span class="sd">    so an explicit ``EDIFF``, ``MAGMOM``, or ``NBANDS`` survives preparation, and</span>
+<span class="sd">    an explicit ``ISPIN`` is what the band-count heuristic reads.</span>
+
+<span class="sd">    :param options: Use these preparation options, or their defaults when unset.</span>
+<span class="sd">    :param directory: Prepare the VASP inputs in this directory.</span>
+<span class="sd">    :return: A record of prepared files and selected input choices.</span>
+<span class="sd">    :raises ValueError: If the workdir, options, or input metadata is invalid.</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+
+    <span class="k">if</span> <span class="n">options</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">options</span> <span class="o">=</span> <span class="n">VaspPreparationOptions</span><span class="p">()</span>
+
+    <span class="c1"># Imported lazily to keep the input helpers a leaf module: ``diagnostics``</span>
+    <span class="c1"># imports :func:`_write_text_atomic` from here, so importing it at module</span>
+    <span class="c1"># scope would close a cycle.</span>
+    <span class="kn">from</span><span class="w"> </span><span class="nn">.diagnostics</span><span class="w"> </span><span class="kn">import</span> <span class="n">validate_vasp_workdir</span>
+
+    <span class="n">root</span> <span class="o">=</span> <span class="n">validate_vasp_workdir</span><span class="p">(</span><span class="n">directory</span><span class="p">)</span>
+    <span class="n">poscar</span> <span class="o">=</span> <span class="n">root</span> <span class="o">/</span> <span class="s2">&quot;POSCAR&quot;</span>
+    <span class="n">incar</span> <span class="o">=</span> <span class="n">root</span> <span class="o">/</span> <span class="s2">&quot;INCAR&quot;</span>
+    <span class="k">if</span> <span class="n">options</span><span class="o">.</span><span class="n">normalize_handedness</span><span class="p">:</span>
+        <span class="n">normalize_poscar_handedness</span><span class="p">(</span><span class="n">poscar</span><span class="p">)</span>
+    <span class="n">explicit</span> <span class="o">=</span> <span class="p">{</span><span class="nb">str</span><span class="p">(</span><span class="n">name</span><span class="p">)</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span><span class="o">.</span><span class="n">upper</span><span class="p">():</span> <span class="n">value</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">options</span><span class="o">.</span><span class="n">incar_tags</span><span class="o">.</span><span class="n">items</span><span class="p">()}</span>
+    <span class="k">if</span> <span class="n">explicit</span><span class="p">:</span>
+        <span class="n">update_incar</span><span class="p">(</span><span class="n">explicit</span><span class="p">,</span> <span class="n">incar</span><span class="p">)</span>
+    <span class="n">potcar</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+    <span class="k">if</span> <span class="n">options</span><span class="o">.</span><span class="n">pseudopotential_library</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">potcar</span> <span class="o">=</span> <span class="n">assemble_potcar</span><span class="p">(</span>
+            <span class="n">options</span><span class="o">.</span><span class="n">pseudopotential_library</span><span class="p">,</span>
+            <span class="n">poscar</span><span class="o">=</span><span class="n">poscar</span><span class="p">,</span>
+            <span class="n">output</span><span class="o">=</span><span class="n">root</span> <span class="o">/</span> <span class="s2">&quot;POTCAR&quot;</span><span class="p">,</span>
+        <span class="p">)</span><span class="o">.</span><span class="n">as_mapping</span><span class="p">()</span>
+    <span class="n">grid</span> <span class="o">=</span> <span class="n">automatic_kpoint_grid</span><span class="p">(</span><span class="n">options</span><span class="o">.</span><span class="n">kpoint_density</span><span class="p">,</span> <span class="n">poscar</span><span class="o">=</span><span class="n">poscar</span><span class="p">)</span>
+    <span class="n">write_automatic_kpoints</span><span class="p">(</span><span class="n">grid</span><span class="p">,</span> <span class="n">root</span> <span class="o">/</span> <span class="s2">&quot;KPOINTS&quot;</span><span class="p">,</span> <span class="n">centering</span><span class="o">=</span><span class="n">options</span><span class="o">.</span><span class="n">centering</span><span class="p">)</span>
+    <span class="n">updates</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="n">header</span> <span class="o">=</span> <span class="n">read_poscar_header</span><span class="p">(</span><span class="n">poscar</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">options</span><span class="o">.</span><span class="n">accuracy_per_atom</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">atoms</span> <span class="o">=</span> <span class="nb">sum</span><span class="p">(</span><span class="n">header</span><span class="o">.</span><span class="n">counts</span><span class="p">)</span>
+        <span class="n">updates</span><span class="p">[</span><span class="s2">&quot;EDIFF&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">options</span><span class="o">.</span><span class="n">accuracy_per_atom</span> <span class="o">*</span> <span class="n">atoms</span> <span class="o">/</span> <span class="n">options</span><span class="o">.</span><span class="n">ediff_margin</span><span class="p">,</span> <span class="mf">1e-6</span><span class="p">)</span>
+        <span class="n">updates</span><span class="p">[</span><span class="s2">&quot;EDIFFG&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">options</span><span class="o">.</span><span class="n">accuracy_per_atom</span> <span class="o">*</span> <span class="n">atoms</span><span class="p">,</span> <span class="mf">1e-4</span><span class="p">)</span>
+    <span class="n">current</span> <span class="o">=</span> <span class="n">read_incar</span><span class="p">(</span><span class="n">incar</span><span class="p">)</span>
+    <span class="k">if</span> <span class="s2">&quot;MAGMOM&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">current</span><span class="p">:</span>
+        <span class="n">updates</span><span class="p">[</span><span class="s2">&quot;MAGMOM&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">suggested_magnetic_moments</span><span class="p">(</span><span class="n">poscar</span><span class="p">)</span>
+    <span class="k">if</span> <span class="s2">&quot;NBANDS&quot;</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">current</span> <span class="ow">and</span> <span class="p">(</span><span class="n">root</span> <span class="o">/</span> <span class="s2">&quot;POTCAR&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+        <span class="n">divisor</span> <span class="o">=</span> <span class="n">options</span><span class="o">.</span><span class="n">parallel_value</span> <span class="k">if</span> <span class="n">options</span><span class="o">.</span><span class="n">parallel_tag</span> <span class="o">==</span> <span class="s2">&quot;NPAR&quot;</span> <span class="k">else</span> <span class="kc">None</span>
+        <span class="n">updates</span><span class="p">[</span><span class="s2">&quot;NBANDS&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">calculate_nbands</span><span class="p">(</span><span class="n">poscar</span><span class="o">=</span><span class="n">poscar</span><span class="p">,</span> <span class="n">potcar</span><span class="o">=</span><span class="n">root</span> <span class="o">/</span> <span class="s2">&quot;POTCAR&quot;</span><span class="p">,</span> <span class="n">incar</span><span class="o">=</span><span class="n">incar</span><span class="p">,</span> <span class="n">divisor</span><span class="o">=</span><span class="n">divisor</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">options</span><span class="o">.</span><span class="n">parallel_tag</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">options</span><span class="o">.</span><span class="n">parallel_tag</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;NPAR&quot;</span><span class="p">,</span> <span class="s2">&quot;NCORE&quot;</span><span class="p">,</span> <span class="s2">&quot;KPAR&quot;</span><span class="p">}:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;parallel_tag must be NPAR, NCORE, or KPAR&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">options</span><span class="o">.</span><span class="n">parallel_value</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">or</span> <span class="n">options</span><span class="o">.</span><span class="n">parallel_value</span> <span class="o">&lt;</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;parallel_value must be a positive integer&quot;</span><span class="p">)</span>
+        <span class="n">updates</span><span class="p">[</span><span class="n">options</span><span class="o">.</span><span class="n">parallel_tag</span><span class="p">]</span> <span class="o">=</span> <span class="n">options</span><span class="o">.</span><span class="n">parallel_value</span>
+    <span class="n">updates</span> <span class="o">=</span> <span class="p">{</span><span class="n">name</span><span class="p">:</span> <span class="n">value</span> <span class="k">for</span> <span class="n">name</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">updates</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">name</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">explicit</span><span class="p">}</span>
+    <span class="k">if</span> <span class="n">updates</span><span class="p">:</span>
+        <span class="n">update_incar</span><span class="p">(</span><span class="n">updates</span><span class="p">,</span> <span class="n">incar</span><span class="p">)</span>
+    <span class="n">result</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;kpoint_grid&quot;</span><span class="p">:</span> <span class="n">grid</span><span class="p">,</span> <span class="s2">&quot;incar_updates&quot;</span><span class="p">:</span> <span class="n">updates</span><span class="p">,</span> <span class="s2">&quot;incar_tags&quot;</span><span class="p">:</span> <span class="n">explicit</span><span class="p">}</span>
+    <span class="k">if</span> <span class="n">potcar</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">result</span><span class="p">[</span><span class="s2">&quot;potcar&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">potcar</span>
+    <span class="k">return</span> <span class="n">result</span></div>
+
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../../_static/documentation_options.js?v=fe42cd0d"></script>
+    <script src="../../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../../../../_static/selector.js?v=875006ce"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:main","versionPathDepth":2};</script>
+    </body>
+</html>

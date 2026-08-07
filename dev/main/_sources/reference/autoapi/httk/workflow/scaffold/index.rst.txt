@@ -1,0 +1,814 @@
+httk.workflow.scaffold
+======================
+
+.. py:module:: httk.workflow.scaffold
+
+.. autoapi-nested-parse::
+
+   Scaffolding submitted jobs from a workflow, some files, and some inputs.
+
+   A job is a payload directory plus a ``job.json`` that names the runner to execute,
+   and building one by hand means knowing the runner's workflow name, its initial
+   step, its digest, and where its inputs live in the payload. This module is the
+   short way: :func:`new_job` takes a *workflow* — a packaged runner a domain
+   registered by name, or the path of a runner file of your own — stages the files
+   the runner reads, writes the ``job.json``, and submits the result, all in one
+   call.
+
+   Packaged workflows are not known to this module. A domain or compat engine
+   registers each one it ships with :func:`~httk.workflow.scaffold.register_workflow`, supplying only the
+   generic description of a starting point — its name, the runner it starts from,
+   the workflow and steps that runner declares, the modes a job of it defaults to,
+   and what it does — so the scaffold resolves and pins a workflow without ever
+   importing the science that owns it.
+
+   .. code-block:: python
+
+       from httk.workflow import Workspace
+       from httk.workflow.scaffold import new_job
+
+       workspace = Workspace.initialize("workflow-workspace")
+       job = new_job(workspace, "some-workflow", files={"input": "input"}, tag="example")
+       print(job.job_key, job.payload)
+
+   By default the runner file is *published into the workspace runner store*, and the
+   job references it there by digest. That is what makes a scaffolded job durable:
+   the bytes that will run are pinned in the workspace, so upgrading the installed
+   *httk-workflow* underneath a queued campaign cannot change what its jobs execute.
+   Publication is content addressed — the store name carries the digest of the
+   bytes — so scaffolding the same workflow twice publishes nothing the second time,
+   and a later, different version of a packaged runner lands beside the old one
+   instead of replacing it. ``publish="installed"`` instead references a packaged
+   workflow through the reserved ``pkg:`` form, which copies nothing at all.
+
+   :func:`new_jobs` is the same operation for a campaign: one workflow resolution and
+   one publication amortized over every job, and a lazy iterator over the results. By
+   design, generating a partitioned campaign costs one payload and one marker per
+   job and never materializes a list of them.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.scaffold.JOB_SCAFFOLD_FORMAT
+   httk.workflow.scaffold.DEFAULT_PLACEMENT
+   httk.workflow.scaffold.FILES_DIRECTORY
+   httk.workflow.scaffold.STRUCTURE_PATTERNS
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.scaffold.WorkflowProvider
+   httk.workflow.scaffold.JobItem
+   httk.workflow.scaffold.ResolvedWorkflow
+   httk.workflow.scaffold.ScaffoldedJob
+   httk.workflow.scaffold.InstantiateContext
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.scaffold.register_workflow
+   httk.workflow.scaffold.registered_workflows
+   httk.workflow.scaffold.workflow_provider
+   httk.workflow.scaffold.describe_runner
+   httk.workflow.scaffold.registered_workflow
+   httk.workflow.scaffold.resolve_workflow
+   httk.workflow.scaffold.structure_files
+   httk.workflow.scaffold.structure_tag
+   httk.workflow.scaffold.new_job
+   httk.workflow.scaffold.new_jobs
+   httk.workflow.scaffold.payload_relative
+
+
+Module Contents
+---------------
+
+.. py:data:: JOB_SCAFFOLD_FORMAT
+   :value: 'httk-workflow-job-scaffold'
+
+
+.. py:data:: DEFAULT_PLACEMENT
+   :value: 'jobs'
+
+
+.. py:data:: FILES_DIRECTORY
+   :value: 'files'
+
+
+.. py:data:: STRUCTURE_PATTERNS
+   :value: ('POSCAR*', '*.vasp')
+
+
+.. py:class:: WorkflowProvider
+
+   One packaged workflow a domain or compat engine offers by name.
+
+   A provider is the generic description of a starting point. It names the
+   packaged runner it starts from by the package the runner file is a module of
+   and the file beside that module — so the reserved ``pkg:`` form and the
+   digest are resolved from the provider alone — and it declares the runner's
+   workflow, its steps, the modes a job of it defaults to, and what it does.
+   Declaring the steps here rather than running the runner to ask keeps
+   scaffolding cheap; the owning domain's tests hold the declaration to what the
+   runner really describes.
+
+   :param workflow_id: Name the workflow in registrations and job definitions.
+   :param runner_package: Name the package containing a packaged runner.
+   :param runner_file: Name the runner file beside the package module.
+   :param language: Name the language runner realization, when applicable.
+   :param document: Name the language document package member.
+   :param runner_options: Supply language-specific runner options.
+   :param initial_step: Select the default starting step.
+   :param alias: Provide an alternate registered name.
+   :param steps: Declare the steps the runner provides.
+   :param data_mode: Declare the workflow's default data mode.
+   :param workdir_mode: Declare the workflow's default workdir mode.
+   :param summary: Describe the workflow for callers.
+   :param inputs: Map input names to payload destinations or hook handling.
+   :param instantiate: Indicate that the workflow has an instantiate hook.
+   :param declarations: Declare workflow declaration documents.
+   :param collector: Identify the optional result collector.
+   :param directory: Locate a directory-sourced workflow package.
+   :param entry: Name the directory package's runner entry.
+   :param instantiate_file: Name the directory package's instantiate hook.
+   :param collect_file: Name the directory package's collector.
+   :param postprocess_scripts: Map curated postprocess script names to package members and descriptions.
+   :param parameters: Declare the workflow's parameter metadata.
+   :param outputs: Declare the workflow's output metadata.
+   :param declaration_uri: Identify the source declaration URI.
+   :param declaration_file: Name the source declaration file.
+
+
+   .. py:attribute:: workflow_id
+      :type:  str
+
+
+   .. py:attribute:: runner_package
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: runner_file
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: language
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: document
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: runner_options
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: initial_step
+      :type:  str
+      :value: 'start'
+
+
+
+   .. py:attribute:: alias
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: steps
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: data_mode
+      :type:  DataMode
+      :value: 'none'
+
+
+
+   .. py:attribute:: workdir_mode
+      :type:  WorkdirMode
+      :value: 'persistent'
+
+
+
+   .. py:attribute:: summary
+      :type:  str
+      :value: ''
+
+
+
+   .. py:attribute:: inputs
+      :type:  collections.abc.Mapping[str, str | None]
+
+
+   .. py:attribute:: instantiate
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: declarations
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: collector
+      :type:  collections.abc.Callable[[httk.workflow.collecting.JobRecord], collections.abc.Mapping[str, object]] | str | None
+      :value: None
+
+
+
+   .. py:attribute:: directory
+      :type:  pathlib.Path | None
+      :value: None
+
+
+
+   .. py:attribute:: entry
+      :type:  str
+      :value: 'run'
+
+
+
+   .. py:attribute:: instantiate_file
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: collect_file
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: postprocess_scripts
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: outputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: declaration_uri
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: declaration_file
+      :type:  str | None
+      :value: None
+
+
+
+.. py:function:: register_workflow(provider)
+
+   Register one packaged workflow, replacing any registered under its name.
+
+   A domain calls this once per workflow it ships when its package is imported,
+   which is how ``httk workflow job new --workflow NAME`` resolves a packaged
+   runner the generic scaffold never names.
+
+   :param provider: Supply the workflow provider to register.
+   :raises ValueError: If the provider's id or alias collides with another registration.
+
+
+.. py:function:: registered_workflows()
+
+   Return the name of every registered workflow, in registration order.
+
+   :return: The registered workflow ids.
+
+
+.. py:function:: workflow_provider(name)
+
+   Return the provider selected by canonical id or alias.
+
+   :param name: Select a workflow by id or alias.
+   :return: The selected provider, or ``None`` when no provider matches.
+
+
+.. py:class:: JobItem
+
+   Bases: :py:obj:`TypedDict`
+
+
+   What one job of a :func:`new_jobs` campaign varies from the shared values.
+
+   Every member is optional, and a member that is absent takes the value
+   :func:`new_jobs` was called with. ``inputs`` and ``files`` are merged over the
+   shared mappings key by key; everything else replaces the shared value.
+
+
+   .. py:attribute:: inputs
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: files
+      :type:  collections.abc.Mapping[str, str | os.PathLike[str]]
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: tag
+      :type:  str | None
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: placement
+      :type:  str | pathlib.PurePosixPath
+
+
+   .. py:attribute:: priority
+      :type:  int | None
+
+
+.. py:class:: ResolvedWorkflow
+
+   One resolved starting point for a job: a runner file and how to run it.
+
+   A workflow is either one of the runners a domain registered by name — see
+   :func:`~httk.workflow.scaffold.registered_workflows` — or a runner file of your own, which is
+   described by running it — every native runner answers ``--describe`` with its
+   workflow and its steps — so a scaffolded job never guesses either.
+
+   :param source: Locate the runner file or workflow package directory.
+   :param workflow_id: Name the resolved workflow.
+   :param language: Name the language runner realization, when applicable.
+   :param document: Name the language document package member.
+   :param runner_options: Preserve language-specific runner options.
+   :param document_path: Locate the absolute language document.
+   :param initial_step: Select the step a job starts at.
+   :param alias: Preserve the registered workflow alias.
+   :param steps: Preserve the steps the runner provides.
+   :param data_mode: Preserve the workflow data mode.
+   :param workdir_mode: Preserve the workflow workdir mode.
+   :param packaged: Preserve the packaged runner file name when applicable.
+   :param runner_package: Preserve the package containing packaged members.
+   :param registration_id: Preserve the registration id when applicable.
+   :param summary: Describe the resolved workflow.
+   :param inputs: Map input names to payload destinations or hook handling.
+   :param instantiate: Indicate that the workflow has an instantiate hook.
+   :param declarations: Preserve workflow declaration documents.
+   :param collector: Preserve the optional result collector.
+   :param directory: Locate a directory-sourced workflow package.
+   :param entry: Name the directory package's runner entry.
+   :param instantiate_file: Name the directory package's instantiate hook.
+   :param collect_file: Name the directory package's collector.
+   :param postprocess_scripts: Preserve curated postprocess script metadata.
+   :param parameters: Preserve the workflow's parameter metadata.
+   :param outputs: Preserve the workflow's output metadata.
+   :param declaration_uri: Identify the source declaration URI.
+   :param declaration_file: Name the source declaration file.
+
+
+   .. py:attribute:: source
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: workflow_id
+      :type:  str
+
+
+   .. py:attribute:: initial_step
+      :type:  str
+
+
+   .. py:attribute:: language
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: document
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: runner_options
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: document_path
+      :type:  pathlib.Path | None
+      :value: None
+
+
+
+   .. py:attribute:: alias
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: steps
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: data_mode
+      :type:  DataMode
+      :value: 'none'
+
+
+
+   .. py:attribute:: workdir_mode
+      :type:  WorkdirMode
+      :value: 'persistent'
+
+
+
+   .. py:attribute:: packaged
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: runner_package
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: registration_id
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: summary
+      :type:  str
+      :value: ''
+
+
+
+   .. py:attribute:: inputs
+      :type:  collections.abc.Mapping[str, str | None]
+
+
+   .. py:attribute:: instantiate
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: declarations
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: collector
+      :type:  collections.abc.Callable[[httk.workflow.collecting.JobRecord], collections.abc.Mapping[str, object]] | str | None
+      :value: None
+
+
+
+   .. py:attribute:: directory
+      :type:  pathlib.Path | None
+      :value: None
+
+
+
+   .. py:attribute:: entry
+      :type:  str
+      :value: 'run'
+
+
+
+   .. py:attribute:: instantiate_file
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: collect_file
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: postprocess_scripts
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: outputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: declaration_uri
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: declaration_file
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:property:: store_name
+      :type: str
+
+
+      Return the content-addressed name this workflow takes in a runner store.
+
+      The digest of the bytes is part of the name, so publishing is idempotent
+      for identical bytes and never overwrites a name a submitted job pinned:
+      an upgraded packaged runner is published beside the version its queued
+      jobs still reference.
+
+      :return: The digest-pinned runner-store name.
+
+
+.. py:class:: ScaffoldedJob
+
+   Describe one job this module submitted.
+
+   :param job_id: Identify the submitted job.
+   :param job_key: Identify the job payload and state markers.
+   :param tag: Preserve the optional job tag.
+   :param placement: Locate the job within the workspace.
+   :param payload: Locate the submitted payload.
+   :param marker: Locate the submitted state marker.
+   :param workflow: Name the workflow the job runs.
+   :param initial_step: Name the step the job starts at.
+   :param runner: Describe the pinned runner.
+
+
+   .. py:attribute:: job_id
+      :type:  str
+
+
+   .. py:attribute:: job_key
+      :type:  str
+
+
+   .. py:attribute:: tag
+      :type:  str | None
+
+
+   .. py:attribute:: placement
+      :type:  pathlib.PurePosixPath
+
+
+   .. py:attribute:: payload
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: marker
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: workflow
+      :type:  str
+
+
+   .. py:attribute:: initial_step
+      :type:  str
+
+
+   .. py:attribute:: runner
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:method:: as_mapping()
+
+      Return the machine-readable report of this job.
+
+      :return: The serialized job report.
+
+
+
+.. py:class:: InstantiateContext
+
+   The mutable creation-time view passed to a runner's instantiate hook.
+
+   ``payload`` is the staging root, ``inputs`` contains every supplied staged
+   input, ``parameters`` is the merged opaque knob mapping, and ``tag`` is the
+   caller's tag. The hook may write below ``payload`` and update
+   ``parameters``; use :meth:`suggest_tag` to provide a tag without overriding one
+   the caller supplied.
+
+   :param payload: Locate the payload being staged.
+   :param inputs: Provide the supplied workflow inputs.
+   :param parameters: Provide the merged job parameters.
+   :param tag: Preserve or suggest the job tag.
+
+
+   .. py:attribute:: payload
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: inputs
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: parameters
+      :type:  dict[str, object]
+
+
+   .. py:attribute:: tag
+      :type:  str | None
+
+
+   .. py:method:: suggest_tag(tag)
+
+      Set a tag only when the caller did not supply one.
+
+
+
+.. py:function:: describe_runner(runner)
+
+   Return the self-description one runner file prints, by running it.
+
+   Every native runner — Python or Bash — answers ``HTTK_WORKFLOW_DESCRIBE=1``
+   with its workflow name and its registered steps and exits without touching
+   anything, which is how a runner nobody wrote a workflow for is still
+   scaffolded without being told what it implements.
+
+   :param runner: Locate the runner file to describe.
+   :return: The validated runner description.
+   :raises ValueError: If the runner is missing, cannot run, or emits an invalid description.
+
+
+.. py:function:: registered_workflow(name)
+
+   Return the registered workflow selected by *name*, or ``None``.
+
+   :param name: Select a workflow by id or alias.
+   :return: The resolved workflow, or ``None`` when no provider matches.
+
+
+.. py:function:: resolve_workflow(workflow, *, workflow_id = None, step = None, data_mode = None)
+
+   Return the :class:`ResolvedWorkflow` *workflow* names.
+
+   *workflow* is the name of a packaged workflow, the file name of a packaged
+   runner, or the path of a runner file. A runner file is described by running
+   it, so its workflow name and its steps come from the runner itself; *workflow*
+   and *step* override what it said, and *step* is required when a runner
+   registers several steps and none of them is ``start``.
+
+   :param workflow: Select a registered workflow, package directory, or runner file.
+   :param workflow_id: Override the resolved workflow id.
+   :param step: Override the resolved initial step.
+   :param data_mode: Override the resolved data mode.
+   :return: The resolved workflow description.
+   :raises ValueError: If the workflow cannot be found or its description is invalid.
+
+
+.. py:function:: structure_files(directory)
+
+   Return every structure file of one directory, in a stable order.
+
+   A structure is a file matching one of :data:`STRUCTURE_PATTERNS` — the VASP
+   conventions ``POSCAR``, ``POSCAR.something``, and ``something.vasp`` — which is
+   what makes a directory of structures one campaign.
+
+   :param directory: Locate the directory to scan.
+   :return: Matching regular structure files in stable order.
+   :raises ValueError: If *directory* is not a directory.
+
+
+.. py:function:: structure_tag(path)
+
+   Return the job tag one structure file name suggests, or ``None``.
+
+   The tag is the part of the name that identifies the structure — ``Si2O`` of
+   ``POSCAR.Si2O``, ``fcc-al`` of ``fcc-al.vasp`` — reduced to the tag syntax the
+   protocol allows. A name that says nothing beyond ``POSCAR`` suggests no tag.
+
+   :param path: Name the structure file whose tag to derive.
+   :return: The sanitized suggested tag, or ``None`` when no tag is present.
+
+
+.. py:function:: new_job(workspace, workflow, *, inputs = None, files = None, parameters = None, tag = None, placement = DEFAULT_PLACEMENT, priority = None, workdir_mode = 'persistent', data_mode = None, publish = 'workspace', step = None, workflow_id = None, name = None)
+
+   Scaffold, submit, and describe one job of *workflow*.
+
+   *workflow* is a registered workflow name — see :func:`~httk.workflow.scaffold.registered_workflows` —
+   or the path of a runner file. *files* maps payload names to the files to stage
+   there: a bare name lands in the payload's :data:`~httk.workflow.scaffold.FILES_DIRECTORY`, which is
+   where a packaged runner reads its inputs, and a name with a directory in
+   it is used verbatim. *inputs* stages the workflow's declared objects into
+   the payload; *parameters* is the job's opaque implementation mapping.
+
+   *data_mode* defaults to what the workflow needs — ``transactional`` for a
+   workflow whose runner publishes collected results, and ``none`` for a runner
+   that said nothing. *publish* ``workspace`` publishes the runner
+   file into the workspace runner store and pins its digest; ``installed``
+   references a packaged runner through the reserved ``pkg:`` form instead and
+   copies nothing. It is ignored for language workflows, whose realization
+   chooses the runner itself.
+
+   :param workspace: Provide the workspace receiving the job.
+   :param workflow: Select the workflow or runner file.
+   :param inputs: Supply declared workflow inputs.
+   :param files: Map payload names to files to stage.
+   :param parameters: Supply opaque job parameters.
+   :param tag: Set the job tag.
+   :param placement: Place the job within the workspace.
+   :param priority: Set the scheduling priority.
+   :param workdir_mode: Select the job workdir mode.
+   :param data_mode: Override the workflow data mode.
+   :param publish: Select workspace publication or installed reference.
+   :param step: Override the workflow's initial step.
+   :param workflow_id: Override the workflow id in the job definition.
+   :param name: Set the job's display name.
+   :return: The submitted job description.
+   :raises ValueError: If workflow, inputs, placement, or job settings are invalid.
+
+
+.. py:function:: new_jobs(workspace, workflow, items, *, inputs = None, files = None, parameters = None, tag = None, placement = DEFAULT_PLACEMENT, priority = None, workdir_mode = 'persistent', data_mode = None, publish = 'workspace', step = None, workflow_id = None, name = None)
+
+   Scaffold and submit one job per member of *items*, lazily.
+
+   Every keyword is the shared value of the whole campaign, and every member of
+   one :class:`~httk.workflow.scaffold.JobItem` is what that job varies: ``inputs`` and ``files`` are
+   merged over the shared mappings, and ``tag``, ``name``, ``placement``, and
+   ``priority`` replace the shared value.
+
+   This is the pattern for a campaign of any size. The workflow is resolved once
+   and its runner published once, however many jobs follow, so every job costs
+   exactly one payload directory and one state marker; *items* is consumed as an
+   iterator and the results are yielded as they are submitted, so a structure
+   generator can be turned into jobs without either side of the loop ever being
+   materialized.
+
+   :param workspace: Provide the workspace receiving the jobs.
+   :param workflow: Select the workflow or runner file.
+   :param items: Yield per-job overrides.
+   :param inputs: Supply shared declared workflow inputs.
+   :param files: Supply shared payload files.
+   :param parameters: Supply shared opaque job parameters.
+   :param tag: Set the shared job tag.
+   :param placement: Set the shared workspace placement.
+   :param priority: Set the shared scheduling priority.
+   :param workdir_mode: Select the shared workdir mode.
+   :param data_mode: Override the workflow data mode.
+   :param publish: Select workspace publication or installed reference.
+   :param step: Override the workflow's initial step.
+   :param workflow_id: Override the workflow id in each job definition.
+   :param name: Set the shared display name.
+   :return: An iterator yielding each submitted job description.
+   :yield: Each submitted job description.
+   :raises ValueError: If workflow, inputs, placement, or job settings are invalid.
+
+   .. code-block:: python
+
+       def structures():
+           for path in sorted(Path("structures").glob("POSCAR.*")):
+               yield {"files": {"POSCAR": path}, "tag": structure_tag(path)}
+
+       for job in new_jobs(workspace, "some-workflow", structures(), parameters={"kpoint_density": 30.0}):
+           print(job.job_key)
+
+
+.. py:function:: payload_relative(name)
+
+   Return where one staged file lands inside a payload.
+
+   A bare name lands in :data:`~httk.workflow.scaffold.FILES_DIRECTORY`, so ``POSCAR`` becomes
+   ``files/POSCAR`` — where the packaged runners read it — and a name that
+   carries a directory of its own is used exactly as it is written.
+
+   :param name: Name the staged file within the payload.
+   :return: The validated payload-relative destination.
+   :raises httk.workflow.errors.FormatError: If the name uses a reserved payload member.
+   :raises ValueError: If the name is empty or absolute.
+
+

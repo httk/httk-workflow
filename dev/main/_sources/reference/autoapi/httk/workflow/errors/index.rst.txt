@@ -1,0 +1,113 @@
+httk.workflow.errors
+====================
+
+.. py:module:: httk.workflow.errors
+
+.. autoapi-nested-parse::
+
+   Define exceptions raised by :mod:`httk.workflow`.
+
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.workflow.errors.WorkflowError
+   httk.workflow.errors.ResolutionMiss
+   httk.workflow.errors.FormatError
+   httk.workflow.errors.WorkspaceUnavailableError
+   httk.workflow.errors.WorkspaceCorruptionError
+   httk.workflow.errors.TransitionLostError
+   httk.workflow.errors.UnsupportedExtensionError
+   httk.workflow.errors.TransactionError
+   httk.workflow.errors.RunnerResolutionError
+
+
+Module Contents
+---------------
+
+.. py:exception:: WorkflowError
+
+   Bases: :py:obj:`Exception`
+
+
+   Base class for workflow protocol failures.
+
+
+.. py:exception:: ResolutionMiss
+
+   Bases: :py:obj:`ValueError`
+
+
+   A name did not resolve, without indicating malformed configuration.
+
+
+.. py:exception:: FormatError
+
+   Bases: :py:obj:`WorkflowError`, :py:obj:`ValueError`
+
+
+   A workspace, job, journal frame, outcome, or request is malformed.
+
+
+.. py:exception:: WorkspaceUnavailableError
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   The workspace cannot currently provide a coherent protocol view.
+
+
+.. py:exception:: WorkspaceCorruptionError
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   The authoritative filesystem state is internally inconsistent.
+
+
+.. py:exception:: TransitionLostError
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   Another actor committed a transition from the expected marker.
+
+
+.. py:exception:: UnsupportedExtensionError
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   A workspace requires an extension this implementation does not support.
+
+
+.. py:exception:: TransactionError
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   A transactional-data manifest cannot be safely replayed.
+
+
+.. py:exception:: RunnerResolutionError(code, message)
+
+   Bases: :py:obj:`WorkflowError`
+
+
+   A shared runner cannot be resolved, staged, or verified.
+
+   The failure carries the exact protocol failure ``code`` the manager records,
+   so an unresolvable runner (``runner_unavailable``) and a runner whose staged
+   bytes disagree with the digest the job pinned (``runner_mismatch``) stay
+   distinguishable to an operator.
+
+   :param code: Protocol failure code recorded by the manager.
+   :param message: Human-readable failure description.
+
+
+   .. py:attribute:: code
+
+

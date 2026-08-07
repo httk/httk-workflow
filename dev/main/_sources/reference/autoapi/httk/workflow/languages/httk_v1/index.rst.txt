@@ -1,0 +1,66 @@
+httk.workflow.languages.httk_v1
+===============================
+
+.. py:module:: httk.workflow.languages.httk_v1
+
+.. autoapi-nested-parse::
+
+   Realize legacy httk v1 template directories as workflow jobs.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.languages.httk_v1.PROGRAMS
+   httk.workflow.languages.httk_v1.LANGUAGE
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.languages.httk_v1.matches
+   httk.workflow.languages.httk_v1.ports
+   httk.workflow.languages.httk_v1.validate_runner
+   httk.workflow.languages.httk_v1.prepare
+   httk.workflow.languages.httk_v1.collect
+
+
+Module Contents
+---------------
+
+.. py:data:: PROGRAMS
+   :value: ('ht_steps', 'ht_run')
+
+
+.. py:function:: matches(path)
+
+   Return whether *path* is a bare v1 task directory.
+
+
+.. py:function:: ports(path)
+
+   Return the port shape of a v1 task, which has no document ports.
+
+
+.. py:function:: validate_runner(options, root)
+
+   Validate v1 taskset and retry options.
+
+
+.. py:function:: prepare(request)
+
+   Prepare one v1 package realization.
+
+
+.. py:function:: collect(record)
+
+   Reject use as a default collector for v1 packages.
+
+
+.. py:data:: LANGUAGE
+
