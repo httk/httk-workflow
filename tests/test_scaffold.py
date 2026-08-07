@@ -23,6 +23,7 @@ from httk.workflow import FormatError, TaskManager, Workspace, scaffold
 from httk.workflow._util import sha256_file
 from httk.workflow.models import JobDefinition, validate_label
 from httk.workflow.runners import RUNNERS, runner_path
+from httk.workflow.runtime_builders import JobSpec
 from httk.workflow.scaffold import (
     JOB_SCAFFOLD_FORMAT,
     JobItem,
@@ -61,10 +62,67 @@ def test_job_definition_uses_runner_executor_wire_key() -> None:
     definition = JobDefinition.from_bytes(json.dumps(job).encode())
     assert definition.runner_executor == "path"
     assert definition.raw["runner"] == job["runner"]
-
     job["runner"]["executor"] = ""
     with pytest.raises(FormatError, match=r"runner\.executor"):
         JobDefinition.from_mapping(job)
+
+
+def test_a_bare_pwd_document_is_synthesized_with_a_declaration(tmp_path: Path) -> None:
+    document = tmp_path / "flow.json"
+    document.write_text(
+        json.dumps(
+            {
+                "version": "0.1.0",
+                "nodes": [
+                    {"id": 0, "type": "function", "value": "module.run"},
+                    {"id": 1, "type": "input", "name": "value"},
+                    {"id": 2, "type": "output", "name": "result"},
+                ],
+                "edges": [
+                    {"target": 0, "targetPort": "value", "source": 1, "sourcePort": None},
+                    {"target": 2, "targetPort": None, "source": 0, "sourcePort": None},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolved = resolve_workflow(document)
+
+    assert resolved.language == "pwd"
+    assert resolved.workflow_id == "pwd.flow"
+    assert resolved.document_path == document.resolve()
+    assert resolved.directory is None
+    assert resolved.inputs == {"value": None}
+    assert resolved.outputs == {"result": {"entry_type": "records", "role": "result"}}
+    assert resolved.declarations["workflow"] == {
+        "description": "the pwd document flow.json",
+        "inputs": [],
+        "outputs": [{"name": "result", "entry_type": "records"}],
+    }
+
+
+def test_a_non_workflow_json_file_does_not_match_a_language(tmp_path: Path) -> None:
+    document = tmp_path / "not-a-workflow.json"
+    document.write_text('{"hello": "world"}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not executable|suffix"):
+        resolve_workflow(document)
+
+
+def test_job_spec_compatibility_is_optional_and_round_trips() -> None:
+    base = JobSpec(name="test", workflow="tests.example", runner_path="files/runner")
+    assert "compatibility" not in base.as_mapping()
+
+    compatibility = {"profile": "test-v1", "nested": {"value": 1}}
+    mapping = JobSpec(
+        name="test",
+        workflow="tests.example",
+        runner_path="files/runner",
+        compatibility=compatibility,
+    ).as_mapping()
+    assert mapping["compatibility"] == compatibility
+    assert JobDefinition.from_mapping(mapping).raw["compatibility"] == compatibility
 
 
 @pytest.mark.parametrize(
@@ -267,6 +325,7 @@ def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, 
     assert (job.payload / "files" / "POSCAR").read_text(encoding="utf-8") == _POSCAR
     definition = JobDefinition.from_path(job.payload / "job.json")
     assert definition.workflow == "httk.vasp.relax" and definition.initial_step == "prepare"
+    assert json.loads((job.payload / "job.json").read_text(encoding="utf-8"))["runner"]["executor"] == "path"
     assert definition.data_mode == "transactional" and definition.workdir_mode == "persistent"
     assert definition.parameters == {"kpoint_density": 30.0}
     assert workspace.find_marker_by_id(job.job_id) is not None

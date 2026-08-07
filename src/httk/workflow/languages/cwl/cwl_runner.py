@@ -2,7 +2,7 @@
 """Execute one imported CWL workflow natively on *httk₂*.
 
 The job this runner executes carries the normalized plan
-:mod:`httk.workflow.compat.cwl` produced: one self-contained JSON document
+:mod:`httk.workflow.languages.cwl` produced: one self-contained JSON document
 with every ``run:`` reference inlined, every type reduced to the supported set,
 and every expression already refused or accepted at import time. Nothing here
 imports a CWL library — the plan is plain JSON — and **cwltool is never
@@ -142,7 +142,7 @@ def plan_of(a: Attempt) -> dict[str, object]:
 
     :param a: Read the plan from this attempt's payload.
     :return: The normalized CWL plan.
-    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If the plan is missing or is not an object.
+    :raises httk.workflow.languages.cwl.cwl_runner.ToolError: If the plan is missing or is not an object.
     """
 
     root = plan_root(a)
@@ -162,7 +162,7 @@ def process_at(plan: Mapping[str, object], target: Sequence[str]) -> Mapping[str
     :param plan: Search this normalized CWL plan.
     :param target: Follow this nested sequence of step names.
     :return: The process at the target path.
-    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If the target path does not identify a process.
+    :raises httk.workflow.languages.cwl.cwl_runner.ToolError: If the target path does not identify a process.
     """
 
     process: Mapping[str, object] = plan
@@ -335,7 +335,7 @@ def stage_value(value: object, directory: Path, counter: list[int]) -> object:
     :param directory: Place staged values below this directory.
     :param counter: Use and update this deterministic staging counter.
     :return: The value rewritten with execution-local paths.
-    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If a staged source is missing or invalid.
+    :raises httk.workflow.languages.cwl.cwl_runner.ToolError: If a staged source is missing or invalid.
     """
 
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and not isinstance(value, Mapping):
@@ -540,7 +540,7 @@ def run_tool(a: Attempt, tool: Mapping[str, object], bindings: Mapping[str, obje
     :param bindings: Supply bindings for the tool inputs.
     :param name: Name the execution directory.
     :return: The collected tool outputs.
-    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If the tool fails or its outputs cannot be collected.
+    :raises httk.workflow.languages.cwl.cwl_runner.ToolError: If the tool fails or its outputs cannot be collected.
     """
 
     base = a.workdir / "cwl"
@@ -684,7 +684,7 @@ def shard_bindings(step: Mapping[str, object], bindings: Mapping[str, object]) -
     :param step: Read scatter declarations from this step.
     :param bindings: Supply resolved step bindings.
     :return: One binding mapping per scatter shard.
-    :raises httk.workflow.compat.cwl.cwl_runner.ToolError: If scattered inputs are not arrays of equal length.
+    :raises httk.workflow.languages.cwl.cwl_runner.ToolError: If scattered inputs are not arrays of equal length.
     """
 
     ports = [str(port) for port in as_list(step.get("scatter"))]

@@ -74,7 +74,7 @@ from pathlib import Path
 
 try:
     from httk.workflow import Attempt, Runner
-    from httk.workflow.compat.pwd import PwdDocument, validate_pwd_document
+    from httk.workflow.languages.pwd import PwdDocument, validate_pwd_document
 except ModuleNotFoundError:  # pragma: no cover - interpreter bootstrap
     # The manager launches this file directly, so the interpreter is whatever the
     # shebang found on PATH, which on a cluster is not necessarily the one httk is
@@ -177,7 +177,7 @@ def resolve_callable(reference: str, allowlist: Sequence[str], node: int) -> obj
     :param allowlist: Restrict the module to these prefixes when nonempty.
     :param node: Identify the graph node requesting the callable.
     :return: The imported callable.
-    :raises httk.workflow.compat.pwd.pwd_runner.NodeError: If the reference is malformed, disallowed, unavailable, or not callable.
+    :raises httk.workflow.languages.pwd.pwd_runner.NodeError: If the reference is malformed, disallowed, unavailable, or not callable.
     """
 
     module_name, _, attribute = reference.rpartition(".")
@@ -212,7 +212,7 @@ def port_value(value: object, port: str | None, node: int, source: int) -> objec
     :param node: Identify the receiving node in errors.
     :param source: Identify the producing node in errors.
     :return: The value carried by the edge.
-    :raises httk.workflow.compat.pwd.pwd_runner.NodeError: If the requested output port does not exist.
+    :raises httk.workflow.languages.pwd.pwd_runner.NodeError: If the requested output port does not exist.
     """
 
     if port is None:
@@ -293,7 +293,7 @@ def execute_node(
     :param overrides: Override input node values by name.
     :param allowlist: Restrict imported function modules to these prefixes.
     :return: The node result.
-    :raises httk.workflow.compat.pwd.pwd_runner.NodeError: If the node callable fails or cannot be resolved.
+    :raises httk.workflow.languages.pwd.pwd_runner.NodeError: If the node callable fails or cannot be resolved.
     """
 
     definition = document.nodes[node]

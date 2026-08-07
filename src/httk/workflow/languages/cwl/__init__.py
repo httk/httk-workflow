@@ -1,4 +1,4 @@
-"""Importing one CWL document as one *httk₂* job.
+"""Run one CWL document as one *httk₂* job.
 
 The `Common Workflow Language <https://www.commonwl.org/>`_ is supported here as
 a workflow **language**, not as an execution engine. A document is parsed and
@@ -11,12 +11,11 @@ never invoked.**
 
 .. code-block:: python
 
-    from httk.workflow import Workspace
-    from httk.workflow.compat.cwl import import_cwl
+    from httk.workflow import Workspace, new_job
 
     workspace = Workspace.initialize("workflow-workspace")
-    imported = import_cwl(workspace, "flow.cwl", "job.yml", tag="echo")
-    print(imported.job.job_key, imported.warnings)
+    job = new_job(workspace, "flow.cwl", inputs={"message": "hello"})
+    print(job.job_key)
 
 Parsing needs the optional extra::
 
@@ -63,30 +62,33 @@ import json
 import logging
 import os
 import re
+import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from importlib import import_module
 from importlib.util import find_spec
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote, urlparse
 
-from httk.workflow import Workspace
-
-from .._integration import (
-    DEFAULT_PLACEMENT,
-    FILES_DIRECTORY,
-    ScaffoldedJob,
-    submit_integration_job,
+from httk.workflow._util import sha256_file
+from httk.workflow.languages import (
+    LanguageOutputsMissingError,
+    LanguagePorts,
+    LanguageRequest,
+    LanguageScaffold,
+    WorkflowLanguage,
+    _data_record,
+    _load_outputs,
+    _output_roles,
+    _parameter,
+    runner_reference,
 )
+from httk.workflow.scaffold import FILES_DIRECTORY, payload_relative
 
 _LOGGER = logging.getLogger(__name__)
 
-#: The workflow name every imported CWL job carries.
-WORKFLOW = "cwl.workflow"
-#: The step an imported CWL job starts at.
-INITIAL_STEP = "start"
 #: The package the packaged runner is resolved and digest-pinned within.
 PACKAGE = __name__
 #: The packaged runner an imported CWL job runs.
@@ -147,6 +149,9 @@ _PLAIN_REFERENCE = re.compile(r"\$\((inputs|runtime)\.[A-Za-z_][A-Za-z0-9_]*(\.[
 #: Anything at all that CWL would evaluate.
 _ANY_EXPRESSION = re.compile(r"\$[({]")
 
+if TYPE_CHECKING:
+    from httk.workflow.collecting import JobRecord
+
 
 class UnsupportedCwlError(ValueError):
     """One CWL feature outside the subset *httk₂* executes."""
@@ -173,26 +178,6 @@ class CwlNotes:
     warnings: list[str] = field(default_factory=list)
     #: The capabilities the imported job must require of a manager.
     capabilities: set[str] = field(default_factory=set)
-
-
-@dataclass(frozen=True)
-class ImportedCwl:
-    """One imported CWL document: the job, the plan, and what was noted.
-
-    :param job: Preserve the submitted job.
-    :param document: Preserve the normalized staged plan.
-    :param inputs: Preserve the staged input object.
-    :param warnings: Preserve accepted caveats for the operator.
-    """
-
-    #: The submitted job.
-    job: ScaffoldedJob
-    #: The normalized plan staged in its payload.
-    document: Mapping[str, object]
-    #: The input object staged in its payload.
-    inputs: Mapping[str, object]
-    #: Everything the import accepted but wants an operator to know about.
-    warnings: tuple[str, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -719,10 +704,10 @@ def load_cwl_plan(workflow_path: str | os.PathLike[str]) -> tuple[dict[str, obje
 
     :param workflow_path: Read the CWL document at this path.
     :return: The normalized plan and accepted import notes.
-    :raises httk.workflow.compat.cwl.CwlImportError: If the document cannot be read or parsed.
+    :raises httk.workflow.languages.cwl.CwlImportError: If the document cannot be read or parsed.
     :raises OSError: If accessing the workflow path fails while reading its declared version.
     :raises UnicodeError: If the workflow path is not valid UTF-8 while reading its declared version.
-    :raises httk.workflow.compat.cwl.UnsupportedCwlError: If the document uses an unsupported CWL feature.
+    :raises httk.workflow.languages.cwl.UnsupportedCwlError: If the document uses an unsupported CWL feature.
     """
 
     path = Path(workflow_path).expanduser()
@@ -744,6 +729,193 @@ def load_cwl_plan(workflow_path: str | os.PathLike[str]) -> tuple[dict[str, obje
     plan["cwlVersion"] = str(saved.get("cwlVersion") or version or "v1.2")
     plan["source"] = path.name
     return plan, context
+
+
+def _matches(path: Path) -> bool:
+    return path.is_file() and path.suffix == ".cwl"
+
+
+def _ports(path: Path) -> LanguagePorts:
+    plan, _ = load_cwl_plan(path)
+    inputs = cast(Mapping[str, object], plan["inputs"])
+    outputs = cast(Mapping[str, object], plan["outputs"])
+    return LanguagePorts(inputs=tuple(inputs), outputs=tuple(outputs))
+
+
+def _validate_runner(options: Mapping[str, object], root: Path) -> None:
+    del root
+    if options:
+        raise ValueError(f"unknown runner option {next(iter(options))!r} for cwl")
+
+
+def _prepare(request: LanguageRequest) -> LanguageScaffold:
+    document = request.document
+    if document is None:
+        raise CwlImportError("a cwl language workflow requires a document")
+    plan, notes = load_cwl_plan(document)
+    documents = {DOCUMENT_FILE: json.dumps(plan, indent=1, sort_keys=True)}
+    plan_inputs = cast(Mapping[str, object], plan.get("inputs", {}))
+    output_roles = {
+        str(metadata.get("port", name)): str(metadata.get("role", name)) for name, metadata in request.outputs.items()
+    }
+
+    def wrap_paths(value: object, schema: object) -> object:
+        if isinstance(value, Mapping):
+            return value
+        if isinstance(schema, Mapping) and schema.get("type") == "array":
+            items = schema.get("items")
+            if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+                return [wrap_paths(item, items) for item in value]
+        if isinstance(value, (str, os.PathLike)) and isinstance(schema, Mapping):
+            kind = schema.get("type")
+            if kind in {"File", "Directory"}:
+                return {"class": kind, "path": str(value)}
+        return value
+
+    def instantiate(ctx: object) -> object:
+        from httk.workflow.scaffold import InstantiateContext
+
+        assert isinstance(ctx, InstantiateContext)
+        values: dict[str, object] = {}
+        for name, value in ctx.inputs.items():
+            metadata = request.inputs.get(name, {})
+            port = str(metadata.get("port", name))
+            declaration = plan_inputs.get(port)
+            schema = declaration.get("type") if isinstance(declaration, Mapping) else declaration
+            values[port] = wrap_paths(value, schema)
+        staged_documents: dict[str, str] = {}
+        staged_files: dict[str, str | os.PathLike[str]] = {}
+        staged = stage_cwl_inputs(
+            values,
+            (request.directory or document.parent).resolve(),
+            staged_documents,
+            staged_files,
+        )
+
+        def destination_for(member: str) -> Path:
+            relative = payload_relative(member)
+            destination = ctx.payload.joinpath(*relative.parts)
+            if destination.exists():
+                raise ValueError(f"generated member {member!r} collides with an existing payload member")
+            return destination
+
+        for member, text in staged_documents.items():
+            destination = destination_for(member)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(text, encoding="utf-8")
+        for member, source in staged_files.items():
+            destination = destination_for(member)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+        destination = destination_for(INPUTS_FILE)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(staged, indent=1, sort_keys=True), encoding="utf-8")
+        ctx.parameters["cwl_inputs"] = INPUTS_FILE
+        return None
+
+    for warning in notes.warnings:
+        _LOGGER.warning("%s", warning)
+    return LanguageScaffold(
+        documents=documents,
+        files={},
+        parameters={
+            "cwl_document": DOCUMENT_FILE,
+            "workflow_language": "cwl",
+            "cwl_output_roles": output_roles,
+        },
+        runner=runner_reference(PACKAGE, RUNNER),
+        required_capabilities=tuple(sorted(notes.capabilities)),
+        reserved_parameters=("cwl_inputs",),
+        warnings=tuple(notes.warnings),
+        instantiate=instantiate,
+    )
+
+
+def _file_descriptor(
+    record: "JobRecord", value: Mapping[str, object], prefix: str, port: str, index: int
+) -> dict[str, object]:
+    recorded = value.get("path")
+    if not isinstance(recorded, str):
+        raise ValueError(f"{record.workspace_id}:{record.job_id}: CWL File output {port!r} has no string path")
+    root = record.workspace_root.resolve()
+    recorded_path = Path(recorded)
+    actual: Path | None = None
+    invalid_absolute = False
+    try:
+        if recorded_path.is_absolute():
+            resolved = recorded_path.resolve()
+            if not resolved.is_relative_to(root):
+                invalid_absolute = True
+            elif resolved.is_file():
+                actual = resolved
+        else:
+            if record.workdir is not None:
+                workdir = record.workdir.resolve()
+                candidate = (workdir / recorded_path).resolve()
+                if candidate.is_relative_to(workdir) and candidate.is_relative_to(root) and candidate.is_file():
+                    actual = candidate
+        if actual is None and not invalid_absolute and record.data is not None:
+            data_root = record.data.resolve()
+            published = (data_root / prefix / port).resolve()
+            if published.is_relative_to(data_root) and published.is_relative_to(root) and published.is_dir():
+                candidate = (published / f"{index:04d}-{recorded_path.name}").resolve()
+                if candidate.is_relative_to(published) and candidate.is_relative_to(root) and candidate.is_file():
+                    actual = candidate
+    except (OSError, RuntimeError):
+        actual = None
+    if actual is None:
+        raise LanguageOutputsMissingError(
+            f"{record.workspace_id}:{record.job_id}: CWL File output {port!r} path {recorded!r} "
+            "is missing or outside the workspace/workdir/data roots"
+        )
+    descriptor_path = actual.relative_to(root).as_posix()
+    basename = value.get("basename")
+    descriptor: dict[str, object] = {
+        "kind": "File",
+        "path": descriptor_path,
+        "basename": basename if isinstance(basename, str) else recorded_path.name,
+    }
+    if actual is not None:
+        descriptor["sha256"] = sha256_file(actual)
+        descriptor["size"] = actual.stat().st_size
+    elif isinstance(value.get("size"), int) and not isinstance(value.get("size"), bool):
+        descriptor["size"] = value["size"]
+    return descriptor
+
+
+def _file_value(record: "JobRecord", value: object, prefix: str, port: str, index: int = 0) -> object:
+    if isinstance(value, Mapping) and value.get("class") == "File":
+        return _file_descriptor(record, value, prefix, port, index)
+    if isinstance(value, list) and any(isinstance(item, Mapping) and item.get("class") == "File" for item in value):
+        return [_file_value(record, item, prefix, port, offset) for offset, item in enumerate(value)]
+    return value
+
+
+def postprocess(record: "JobRecord") -> Mapping[str, object]:
+    """Convert one CWL runner output document into provenance-capable records."""
+
+    prefix = _parameter(record, "cwl_data_prefix", "cwl")
+    raw_outputs = _load_outputs(record, "cwl-outputs.json", prefix)
+    roles = _output_roles(record, "cwl_output_roles", raw_outputs)
+    return {
+        role: _data_record(role, _file_value(record, value, prefix, port))
+        for port, value in raw_outputs.items()
+        for role in (str(roles[port]),)
+    }
+
+
+LANGUAGE = WorkflowLanguage(
+    name="cwl",
+    steps=("start", "enter", "advance", "collect"),
+    initial_step="start",
+    requires_document=True,
+    has_default_postprocessor=True,
+    matches=_matches,
+    ports=_ports,
+    validate_runner=_validate_runner,
+    prepare=_prepare,
+    postprocess=postprocess,
+)
 
 
 def _declared_version(path: Path) -> str | None:
@@ -768,7 +940,7 @@ def load_cwl_inputs(inputs_path: str | os.PathLike[str]) -> dict[str, object]:
 
     :param inputs_path: Read the CWL input object at this path.
     :return: The input values keyed by CWL input name.
-    :raises httk.workflow.compat.cwl.CwlImportError: If the input object cannot be read or is not a mapping.
+    :raises httk.workflow.languages.cwl.CwlImportError: If the input object cannot be read or is not a mapping.
     :raises OSError: If the input path cannot be read.
     :raises UnicodeError: If the input path is not valid UTF-8.
     :raises json.JSONDecodeError: If a JSON input object is malformed.
@@ -815,9 +987,22 @@ def stage_cwl_inputs(
     :param documents: Add literal files and normalized documents to this mapping.
     :param files: Add source files to this mapping for payload staging.
     :return: The input values rewritten with payload-relative paths.
-    :raises httk.workflow.compat.cwl.CwlImportError: If a local input path is missing or invalid.
-    :raises httk.workflow.compat.cwl.UnsupportedCwlError: If an input uses an unsupported CWL feature.
+    :raises httk.workflow.languages.cwl.CwlImportError: If a local input path is missing or invalid.
+    :raises httk.workflow.languages.cwl.UnsupportedCwlError: If an input uses an unsupported CWL feature.
     """
+
+    generated_members: dict[str, tuple[str, str]] = {
+        payload_relative(member).as_posix(): (member, "existing member") for member in (*documents, *files)
+    }
+
+    def reserve(member: str, where: str) -> None:
+        normalized = payload_relative(member).as_posix()
+        previous = generated_members.get(normalized)
+        if previous is not None:
+            raise ValueError(
+                f"generated member {member!r} for input {where!r} duplicates {previous[0]!r} from {previous[1]!r}"
+            )
+        generated_members[normalized] = (member, where)
 
     def stage(value: object, where: str) -> object:
         if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and not isinstance(value, Mapping):
@@ -835,6 +1020,7 @@ def stage_cwl_inputs(
             # A literal file: it has no source on disk, so it is written out.
             name = str(value.get("basename") or f"{where}.txt")
             entry = f"{STAGED_DIRECTORY}/{where}/{name}"
+            reserve(entry, where)
             documents[entry] = str(value.get("contents"))
             return {"class": "File", "payload": entry, "basename": name}
         source = _local_path(value, base, where)
@@ -842,8 +1028,11 @@ def stage_cwl_inputs(
         if kind == "Directory":
             for item in sorted(source.rglob("*")):
                 if item.is_file():
-                    files[f"{entry}/{item.relative_to(source).as_posix()}"] = item
+                    member = f"{entry}/{item.relative_to(source).as_posix()}"
+                    reserve(member, where)
+                    files[member] = item
             return {"class": "Directory", "payload": entry, "basename": source.name}
+        reserve(entry, where)
         files[entry] = source
         return {"class": "File", "payload": entry, "basename": source.name}
 
@@ -873,77 +1062,3 @@ def _local_path(value: Mapping[str, object], base: Path, where: str) -> Path:
 # ---------------------------------------------------------------------------
 # The import itself
 # ---------------------------------------------------------------------------
-
-
-def import_cwl(
-    workspace: Workspace,
-    workflow_path: str | os.PathLike[str],
-    inputs_path: str | os.PathLike[str],
-    *,
-    placement: str | PurePosixPath = DEFAULT_PLACEMENT,
-    tag: str | None = None,
-    name: str | None = None,
-    priority: int | None = None,
-    data_mode: Literal["none", "transactional"] = "none",
-    maximum_attempts: int | None = 3,
-    timeout: float | None = None,
-) -> ImportedCwl:
-    """Import one CWL document and its input object as one submitted job.
-
-    The document is parsed with *cwl-utils*, checked against the supported
-    subset, normalized into one self-contained JSON plan with every ``run:``
-    reference inlined, and staged in the payload together with the input object
-    and every local file it names. The job runs the packaged ``cwl_runner.py``
-    through the reserved installed form, so no runner file is written per
-    workflow.
-
-    Anything outside the subset raises :exc:`~httk.workflow.compat.cwl.UnsupportedCwlError` naming the
-    feature and where it was found; anything accepted with a caveat — a
-    ``DockerRequirement``, an ignored hint — is reported in
-    :attr:`~httk.workflow.compat.cwl.ImportedCwl.warnings`.
-
-    :param workspace: Submit the imported job to this workspace.
-    :param workflow_path: Read the CWL workflow at this path.
-    :param inputs_path: Read the CWL inputs at this path.
-    :param placement: Submit the job at this workspace placement.
-    :param tag: Set the optional job tag.
-    :param name: Set the optional job display name.
-    :param priority: Set the optional job priority.
-    :param data_mode: Select whether outputs use transactional data.
-    :param maximum_attempts: Set the maximum attempts per activation.
-    :param timeout: Set the per-tool timeout override when supplied.
-    :return: The submitted job, normalized plan, staged inputs, and warnings.
-    :raises httk.workflow.compat.cwl.CwlImportError: If the workflow or inputs cannot be imported.
-    :raises httk.workflow.compat.cwl.UnsupportedCwlError: If the document uses an unsupported CWL feature.
-    """
-
-    plan, context = load_cwl_plan(workflow_path)
-    values = load_cwl_inputs(inputs_path)
-    documents: dict[str, str] = {}
-    files: dict[str, str | os.PathLike[str]] = {}
-    staged = stage_cwl_inputs(values, Path(os.fspath(inputs_path)).expanduser().resolve().parent, documents, files)
-    documents[DOCUMENT_FILE] = json.dumps(plan, indent=1, sort_keys=True)
-    documents[INPUTS_FILE] = json.dumps(staged, indent=1, sort_keys=True)
-    inputs: dict[str, object] = {"cwl_document": DOCUMENT_FILE, "cwl_inputs": INPUTS_FILE}
-    if timeout is not None:
-        inputs["cwl_timeout"] = float(timeout)
-    job = submit_integration_job(
-        workspace,
-        runner_package=PACKAGE,
-        runner=RUNNER,
-        workflow=WORKFLOW,
-        initial_step=INITIAL_STEP,
-        name=name or f"cwl: {tag or Path(os.fspath(workflow_path)).name}",
-        parameters=inputs,
-        documents=documents,
-        files=files,
-        tag=tag,
-        placement=placement,
-        priority=priority,
-        data_mode=data_mode,
-        required_capabilities=tuple(sorted(context.capabilities)),
-        maximum_attempts_per_activation=maximum_attempts,
-    )
-    for warning in context.warnings:
-        _LOGGER.warning("%s", warning)
-    return ImportedCwl(job=job, document=plan, inputs=staged, warnings=tuple(context.warnings))

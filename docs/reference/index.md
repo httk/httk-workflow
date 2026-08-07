@@ -17,11 +17,15 @@ in its `__all__` — rather than every source object. The three layers are:
   `httk.workflow.adapter_protocol`, `httk.workflow.configuration`, and
   `httk.workflow.projects`, plus the domain and compatibility consumers
   `httk.workflow.vasp` and the `httk.workflow.compat` engines
-  (`httk.workflow.compat.v1`, `httk.workflow.compat.cwl`,
-  `httk.workflow.compat.pwd`).
+  (`httk.workflow.compat.v1`, `httk.workflow.languages.cwl`,
+  `httk.workflow.languages.pwd`, and `httk.workflow.languages.httk_v1`).
 
 ```{toctree}
 :maxdepth: 2
 
 autoapi/httk/workflow/index
+autoapi/httk/workflow/languages/index
+autoapi/httk/workflow/languages/cwl/index
+autoapi/httk/workflow/languages/pwd/index
+autoapi/httk/workflow/languages/httk_v1/index
 ```

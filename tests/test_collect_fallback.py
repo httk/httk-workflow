@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -10,6 +11,7 @@ from httk.core.cli import CLIContext
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace, collect, job_records
+from httk.workflow import collecting as collecting_module
 from httk.workflow import scaffold as scaffold_module
 from httk.workflow._util import tree_digest
 from httk.workflow.collecting import JobRecord
@@ -103,7 +105,7 @@ role = "total_energy"
 '''
     )
     workspace, _ = _finished(tmp_path, manifest=manifest, postprocess=_CHAIN_POSTPROCESS)
-    monkeypatch.delitem(scaffold_module._WORKFLOW_PROVIDERS, "tests.fallback.package", raising=False)
+    scaffold_module._WORKFLOW_PROVIDERS.pop("tests.fallback.package", None)
 
     item = next(collect(workspace, allow_job_postprocessor=True))
 
@@ -172,6 +174,50 @@ if __name__ == "__main__":
     item = next(collect(workspace, allow_job_postprocessor=True))
     assert item.missing_postprocessor is not None
     assert "requires a directory runner tree" in item.missing_postprocessor
+
+
+def test_collect_degrades_an_unknown_language_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace, _ = _finished(tmp_path)
+    record = next(job_records(workspace))
+    scaffold_module._WORKFLOW_PROVIDERS.pop(str(record.job["workflow"]), None)
+    parameters = record.job["parameters"]
+    assert isinstance(parameters, Mapping)
+    record = replace(
+        record,
+        job={
+            **record.job,
+            "parameters": {**parameters, "workflow_language": "missing", "workflow_realization": "language"},
+        },
+    )
+    monkeypatch.setattr(collecting_module, "job_records", lambda *_args, **_kwargs: iter((record,)))
+
+    item = next(collecting_module.collect(workspace))
+    assert item.outputs == {}
+    assert item.missing_postprocessor is not None
+    assert "missing" in item.missing_postprocessor
+
+
+@pytest.mark.parametrize("parameter", ("workflow_language", "workflow_postprocess"))
+def test_native_parameters_do_not_trigger_language_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parameter: str
+) -> None:
+    workspace, _ = _finished(tmp_path)
+    record = next(job_records(workspace))
+    workflow_id = str(record.job["workflow"])
+    monkeypatch.delitem(scaffold_module._WORKFLOW_PROVIDERS, workflow_id, raising=False)
+    parameters = record.job["parameters"]
+    assert isinstance(parameters, Mapping)
+    record = replace(record, job={**record.job, "parameters": {parameter: "cwl"}})
+    monkeypatch.setattr(collecting_module, "job_records", lambda *_args, **_kwargs: iter((record,)))
+
+    without = next(collecting_module.collect(workspace))
+    assert without.outputs == {}
+    assert without.missing_postprocessor is not None
+    assert "no provider" in without.missing_postprocessor
+
+    with_fallback = next(collecting_module.collect(workspace, allow_job_postprocessor=True))
+    assert with_fallback.missing_postprocessor is None
+    assert set(with_fallback.outputs) == {"relaxed_structure"}
 
 
 def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_path: Path, capsys) -> None:

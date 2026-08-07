@@ -1,4 +1,4 @@
-"""Importing one Python Workflow Definition document as one *httk₂* job.
+"""Running one Python Workflow Definition document as one *httk₂* job.
 
 The `Python Workflow Definition <https://github.com/pythonworkflow/python-workflow-definition>`_
 (PWD) is a small JSON exchange format: a list of ``nodes`` and a list of
@@ -9,11 +9,10 @@ engines read and write it — and this module is *httk₂* reading it.
 
 .. code-block:: python
 
-    from httk.workflow import Workspace
-    from httk.workflow.compat.pwd import import_pwd
+    from httk.workflow import Workspace, new_job
 
     workspace = Workspace.initialize("workflow-workspace")
-    job = import_pwd(workspace, "workflow.json", modules=["workflow.py"], tag="arithmetic")
+    job = new_job(workspace, "workflow.json", parameters={"pwd_module_path": ["."]})
 
 The import is one way and produces exactly one job. The whole graph runs inside
 that job, sequentially, in topological order, by the packaged
@@ -44,24 +43,24 @@ from dataclasses import dataclass
 from importlib import import_module
 from importlib.util import find_spec
 from pathlib import Path, PurePosixPath
-from typing import Literal
+from typing import TYPE_CHECKING, cast
 
-from httk.workflow import Workspace
-from httk.workflow.models import MAXIMUM_PARAMETERS_BYTES
-
-from .._integration import (
-    DEFAULT_PLACEMENT,
-    FILES_DIRECTORY,
-    ScaffoldedJob,
-    submit_integration_job,
+from httk.workflow.languages import (
+    LanguagePorts,
+    LanguageRequest,
+    LanguageScaffold,
+    WorkflowLanguage,
+    _data_record,
+    _load_outputs,
+    _output_roles,
+    _parameter,
+    runner_reference,
 )
+from httk.workflow.models import MAXIMUM_PARAMETERS_BYTES
+from httk.workflow.scaffold import FILES_DIRECTORY
 
 _LOGGER = logging.getLogger(__name__)
 
-#: The workflow name every imported PWD job carries.
-WORKFLOW = "pwd.workflow"
-#: The one step the packaged PWD runner registers.
-INITIAL_STEP = "execute"
 #: The package the packaged runner is resolved and digest-pinned within.
 PACKAGE = __name__
 #: The packaged runner an imported PWD job runs.
@@ -75,6 +74,9 @@ DOCUMENT_FILE = f"{FILES_DIRECTORY}/pwd.json"
 DEFAULT_MAXIMUM_EMBEDDED_BYTES = MAXIMUM_PARAMETERS_BYTES // 2
 
 _NODE_TYPES = ("function", "input", "output")
+
+if TYPE_CHECKING:
+    from httk.workflow.collecting import JobRecord
 
 
 class PwdFormatError(ValueError):
@@ -133,7 +135,7 @@ def load_pwd_document(path: str | os.PathLike[str], *, allow_unknown_version: bo
     :param path: Read the PWD JSON document at this path.
     :param allow_unknown_version: Try versions outside the supported set.
     :return: The validated PWD document.
-    :raises httk.workflow.compat.pwd.PwdFormatError: If the file cannot be read, parsed, or validated.
+    :raises httk.workflow.languages.pwd.PwdFormatError: If the file cannot be read, parsed, or validated.
     """
 
     document = Path(path).expanduser()
@@ -165,7 +167,7 @@ def validate_pwd_document(
     :param source: Identify the document in validation errors.
     :param allow_unknown_version: Try versions outside the supported set.
     :return: The validated PWD document.
-    :raises httk.workflow.compat.pwd.PwdFormatError: If the document shape, graph, or version is invalid.
+    :raises httk.workflow.languages.pwd.PwdFormatError: If the document shape, graph, or version is invalid.
     """
 
     if not isinstance(raw, Mapping):
@@ -199,6 +201,138 @@ def validate_pwd_document(
     order = _topological_order(nodes, edges, source)
     _validate_with_package(raw, source)
     return PwdDocument(raw=dict(raw), nodes=nodes, edges=edges, order=order)
+
+
+def _matches(path: Path) -> bool:
+    try:
+        if not path.is_file() or path.suffix != ".json":
+            return False
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(raw, dict) and isinstance(raw.get("nodes"), list) and isinstance(raw.get("edges"), list)
+
+
+def _ports(path: Path) -> LanguagePorts:
+    document = load_pwd_document(path)
+    return LanguagePorts(document.input_names, document.output_names)
+
+
+def _member(root: Path, value: object) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError("module member must be a relative .py file")
+    relative = PurePosixPath(value)
+    if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+        raise ValueError(f"module member must be relative and contain no '..': {value!r}")
+    candidate = root.joinpath(*relative.parts)
+    resolved_root = root.resolve()
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValueError(f"module member does not exist: {value!r}") from exc
+    if (
+        relative.suffix != ".py"
+        or not resolved.is_relative_to(resolved_root)
+        or candidate.is_symlink()
+        or not candidate.is_file()
+    ):
+        raise ValueError(f"module member must be a regular .py member below the package: {value!r}")
+    for index in range(1, len(relative.parts)):
+        if root.joinpath(*relative.parts[:index]).is_symlink():
+            raise ValueError(f"module member must not traverse a symlink: {value!r}")
+
+
+def _validate_runner(options: Mapping[str, object], root: Path) -> None:
+    for key, value in options.items():
+        if key not in {"modules", "module_path", "allowed_modules"}:
+            raise ValueError(f"unknown runner option {key!r} for pwd")
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"runner option {key!r} must be a list of strings")
+        if key == "modules":
+            for member in value:
+                try:
+                    _member(root, member)
+                except ValueError as exc:
+                    raise ValueError(f"modules: {exc}") from exc
+
+
+def _prepare(request: LanguageRequest) -> LanguageScaffold:
+    document = request.document
+    if document is None:
+        raise PwdFormatError("a pwd language workflow requires a document")
+    loaded = load_pwd_document(document)
+    serialized = json.dumps(loaded.raw, sort_keys=True)
+    documents: dict[str, str | bytes] = {}
+    parameters: dict[str, object] = {"workflow_language": "pwd"}
+    if len(serialized.encode()) <= DEFAULT_MAXIMUM_EMBEDDED_BYTES:
+        parameters["pwd_document"] = loaded.raw
+    else:
+        documents[DOCUMENT_FILE] = serialized
+        parameters["pwd_document_path"] = DOCUMENT_FILE
+
+    options = request.runner_options
+    modules = cast(Sequence[str], options.get("modules", ()))
+    root = (request.directory or document.parent).resolve()
+    for member in modules:
+        source = root.joinpath(*PurePosixPath(member).parts)
+        documents[f"{FILES_DIRECTORY}/{Path(member).name}"] = source.read_bytes()
+    if "module_path" in options:
+        parameters["pwd_module_path"] = list(cast(Sequence[str], options["module_path"]))
+    if "allowed_modules" in options:
+        parameters["pwd_allowed_modules"] = list(cast(Sequence[str], options["allowed_modules"]))
+    parameters["pwd_output_roles"] = {
+        str(metadata.get("port", name)): str(metadata.get("role", name)) for name, metadata in request.outputs.items()
+    }
+
+    def instantiate(ctx: object) -> object:
+        """Apply supplied inputs as literal JSON values for PWD input nodes."""
+
+        from httk.workflow.scaffold import InstantiateContext
+
+        assert isinstance(ctx, InstantiateContext)
+        overrides: dict[str, object] = {}
+        for name, value in ctx.inputs.items():
+            try:
+                json.dumps(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"workflow input {name!r} must be JSON-serializable") from exc
+            metadata = request.inputs.get(name, {})
+            overrides[str(metadata.get("port", name))] = value
+        if overrides:
+            ctx.parameters["pwd_inputs"] = overrides
+        return None
+
+    return LanguageScaffold(
+        documents=documents,
+        files={},
+        parameters=parameters,
+        runner=runner_reference(PACKAGE, RUNNER),
+        reserved_parameters=("pwd_inputs",),
+        instantiate=instantiate,
+    )
+
+
+def postprocess(record: "JobRecord") -> Mapping[str, object]:
+    """Convert one PWD runner output document into provenance-capable records."""
+
+    prefix = _parameter(record, "pwd_data_prefix", "pwd")
+    raw_outputs = _load_outputs(record, "pwd-outputs.json", prefix)
+    roles = _output_roles(record, "pwd_output_roles", raw_outputs)
+    return {str(roles[port]): _data_record(str(roles[port]), value) for port, value in raw_outputs.items()}
+
+
+LANGUAGE = WorkflowLanguage(
+    name="pwd",
+    steps=("execute",),
+    initial_step="execute",
+    requires_document=True,
+    has_default_postprocessor=True,
+    matches=_matches,
+    ports=_ports,
+    validate_runner=_validate_runner,
+    prepare=_prepare,
+    postprocess=postprocess,
+)
 
 
 def _validate_node(entry: object, source: str) -> Mapping[str, object]:
@@ -324,97 +458,3 @@ def _validate_with_package(raw: Mapping[str, object], source: str) -> None:
         workflow.model_validate(dict(raw))
     except Exception as exc:
         raise PwdFormatError(f"the installed python-workflow-definition package refuses {source}: {exc}") from exc
-
-
-def import_pwd(
-    workspace: Workspace,
-    document_path: str | os.PathLike[str],
-    *,
-    placement: str | PurePosixPath = DEFAULT_PLACEMENT,
-    tag: str | None = None,
-    name: str | None = None,
-    priority: int | None = None,
-    modules: Sequence[str | os.PathLike[str]] = (),
-    module_path: Sequence[str] = (),
-    workflow_inputs: Mapping[str, object] | None = None,
-    allowed_modules: Sequence[str] = (),
-    data_mode: Literal["none", "transactional"] = "none",
-    maximum_attempts: int | None = 3,
-    maximum_embedded_bytes: int = DEFAULT_MAXIMUM_EMBEDDED_BYTES,
-    allow_unknown_version: bool = False,
-) -> ScaffoldedJob:
-    """Import one PWD document as one submitted job, and describe it.
-
-    *modules* are Python files staged into the payload's ``files/`` directory,
-    which the runner puts first on ``sys.path``: a document naming
-    ``workflow.get_sum`` is self-contained once ``workflow.py`` is staged that
-    way. *module_path* adds further import roots by absolute path, for functions
-    that live in an installed package on the machine that will run the job.
-
-    *workflow_inputs* overrides the value of input nodes by name, so one imported
-    document runs with values the document itself does not carry.
-    *allowed_modules* records a prefix allowlist the runner refuses to import
-    outside of; the default is no allowlist, which means the document may import
-    anything the interpreter can, exactly like running its module by hand.
-
-    The graph is validated, ordered and refused here rather than at run time: a
-    document with a cycle, a dangling edge or a node that is not a callable
-    reference never reaches a queue.
-
-    :param workspace: Submit the imported job to this workspace.
-    :param document_path: Read the PWD document at this path.
-    :param placement: Submit the job at this workspace placement.
-    :param tag: Set the optional job tag.
-    :param name: Set the optional job display name.
-    :param priority: Set the optional job priority.
-    :param modules: Stage these Python modules into the job payload.
-    :param module_path: Add these import roots for execution.
-    :param workflow_inputs: Override input node values by name.
-    :param allowed_modules: Restrict imports to these module prefixes.
-    :param data_mode: Select whether outputs use transactional data.
-    :param maximum_attempts: Set the maximum attempts per activation.
-    :param maximum_embedded_bytes: Embed documents up to this serialized size.
-    :param allow_unknown_version: Try versions outside the supported set.
-    :return: The submitted job description.
-    :raises httk.workflow.compat.pwd.PwdFormatError: If the document is invalid.
-    """
-
-    document = load_pwd_document(document_path, allow_unknown_version=allow_unknown_version)
-    staged_modules: dict[str, str | os.PathLike[str]] = {}
-    for entry in modules:
-        path = Path(entry).expanduser()
-        if path.suffix != ".py":
-            raise ValueError(f"a staged PWD module must be a Python file: {path}")
-        staged_modules[path.name] = path
-    inputs: dict[str, object] = {}
-    documents: dict[str, str] = {}
-    serialized = json.dumps(document.raw, sort_keys=True)
-    if len(serialized.encode("utf-8")) <= maximum_embedded_bytes:
-        inputs["pwd_document"] = document.raw
-    else:
-        # Too large for job.json, so the payload carries it and the job points at
-        # it. The runner reads either spelling, so nothing downstream cares which.
-        documents[DOCUMENT_FILE] = serialized
-        inputs["pwd_document_path"] = DOCUMENT_FILE
-    if module_path:
-        inputs["pwd_module_path"] = [str(item) for item in module_path]
-    if workflow_inputs:
-        inputs["pwd_inputs"] = dict(workflow_inputs)
-    if allowed_modules:
-        inputs["pwd_allowed_modules"] = [str(item) for item in allowed_modules]
-    return submit_integration_job(
-        workspace,
-        runner_package=PACKAGE,
-        runner=RUNNER,
-        workflow=WORKFLOW,
-        initial_step=INITIAL_STEP,
-        name=name or f"pwd: {tag or Path(os.fspath(document_path)).name}",
-        parameters=inputs,
-        documents=documents,
-        files=staged_modules,
-        tag=tag,
-        placement=placement,
-        priority=priority,
-        data_mode=data_mode,
-        maximum_attempts_per_activation=maximum_attempts,
-    )

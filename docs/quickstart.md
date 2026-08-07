@@ -152,9 +152,9 @@ marker.
 - {doc}`workflow_packages` — authoring a directory workflow with hooks and a
   manifest.
 - {doc}`native_bash_api` — the same runner protocol from Bash.
-- {doc}`importing_workflows` — a Python Workflow Definition or CWL workflow you
-  already have becomes one job with `httk workflow import pwd` or
-  `httk workflow import cwl`, without being rewritten and without a runner file.
+- {doc}`workflow_languages` — a Python Workflow Definition, CWL workflow, or
+  httk-v1 template becomes one job with `httk workflow job new --workflow
+  DOCUMENT`, without being rewritten and without a runner file.
 - {doc}`collecting` — turning finished jobs into stored results.
 - Running on a cluster — add and configure a remote, initialize `R:NAME`, then
   `transfer LOCAL R:NAME --job JOB` puts jobs there and `run R:NAME` submits a

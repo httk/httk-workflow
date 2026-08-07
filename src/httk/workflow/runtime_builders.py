@@ -9,6 +9,7 @@ classes here are the protocol-level building blocks that both the Python
 authoring SDK and the Bash bridge publish with.
 """
 
+import copy
 import json
 import os
 import shutil
@@ -160,6 +161,7 @@ class JobSpec:
     :param resources: Supply resource requirements.
     :param parameters: Supply opaque job parameters.
     :param declarations: Supply workflow declarations.
+    :param compatibility: Supply an optional compatibility profile.
     """
 
     name: str
@@ -186,6 +188,7 @@ class JobSpec:
     parameters: Mapping[str, object] = field(default_factory=dict)
     #: Workflow declarations carried verbatim into ``job.json``, keyed by name.
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    compatibility: Mapping[str, object] | None = None
 
     def as_mapping(self, *, parent: Mapping[str, object] | None = None) -> dict[str, object]:
         """Return the validated job-definition mapping.
@@ -238,6 +241,8 @@ class JobSpec:
             result["parameters"] = validate_parameters(self.parameters)
         if self.declarations:
             result["declarations"] = validate_declarations(self.declarations)
+        if self.compatibility is not None:
+            result["compatibility"] = copy.deepcopy(dict(self.compatibility))
         return result
 
 

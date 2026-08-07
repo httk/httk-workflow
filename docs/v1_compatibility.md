@@ -177,6 +177,74 @@ inspection (`running`, `waitsubtasks`, `finished`, `broken`, and so on), but
 that link is a derived compatibility view. It may be recreated safely and must
 never be used as the source of truth.
 
+## Template packages
+
+An uninstantiated v1 task template can be used as a workflow package. The
+`httk-v1` language realization supplies built-in instantiation and runs the
+result with the v1 executor:
+
+```toml
+[workflow]
+id = "legacy.silicon"
+
+[workflow.runner]
+language = "httk-v1"
+taskset = "vasp"
+attempts = 10
+
+[workflow.inputs.structure]
+entry_type = "structures"
+
+[workflow.postprocess]
+file = "postprocess.py"
+```
+
+The package may contain `ht_steps`, `ht_run`, their `.template` forms, ordinary
+support files, and `ht.instantiate.py`. Preparation snapshots the package;
+then built-in instantiation renders every `*.template` member and executes
+`ht.instantiate.py` with declared inputs and parameters as globals. Path-valued
+entry inputs are loaded with `httk.core.load`, so `--input-from structures/*.cif`
+campaigns supply real structure objects rather than path strings. The trusted
+template engine preserves v1 syntax: `$name`, `$(expr)`, `${code}`, `\$`, and
+`.template` rendering. Public helpers include `apply_templates`,
+`run_directory`, `code_of`, and `task_file`.
+
+These jobs require `V1TaskManager`, invoked as `httk workflow v1 run`. The
+default `TaskManager` deliberately skips jobs using the v1 executor. Collection
+is performed by the package's authored `[workflow.postprocess]` hook; v1 has no
+default language postprocessor.
+
+## Finished-tree harvest
+
+Existing v1 result trees can be inspected without first submitting jobs:
+
+```python
+from httk.workflow.compat.v1 import collect_finished_tree, finished_tasks
+
+tasks = list(finished_tasks("old-results"))
+items = collect_finished_tree("old-results", workflow_dir="./legacy-package")
+```
+
+`finished_tasks(root)` yields `V1FinishedTask` values for each
+`ht.task.*.finished` directory, using its newest dated `ht.run.*` directory.
+`code_of` reads code name and version from lines 2 and 3 of `ht_steps` (or
+`ht_run`), and `task_file` locates plain or `.bz2` task members.
+`collect_finished_tree(root, workflow_dir=PKG)` calls the package hook once per
+task; `extract=` may be supplied instead for a direct extractor, but exactly
+one of `workflow_dir` and `extract` is required. A hook failure degrades that
+task and the sweep continues.
+
+```console
+httk workflow v1 collect ROOT --workflow-dir PKG
+httk workflow v1 collect ROOT --workflow-dir PKG --into results.sqlite
+httk workflow v1 collect ROOT --workflow-dir PKG --json
+```
+
+Manifest-backed identity survives moving the tree. Without a manifest, the
+UUIDv5 job identity is derived from the task path and dated run path and does
+not survive relocation. The latest dated run is used; `ht.run.current` is not
+a finished result.
+
 ## Deliberate limitations
 
 - Existing *httk* v1 queue trees are not migrated or claimed.

@@ -2,12 +2,12 @@
 
 *httk-workflow* has one common execution implementation — the Attempt layer, the
 manager, and the modules that own the filesystem protocol — and several
-consumers that publish through it: the VASP domain package and the ``v1``,
-``cwl`` and ``pwd`` compatibility engines. The binding rule is directional. A
-consumer may use the common execution API (the root package and
+consumers that publish through it: the VASP domain package, the ``v1``
+compatibility engine, and the CWL and PWD language engines. The binding rule is
+directional. A consumer may use the common execution API (the root package and
 :mod:`httk.workflow.protocol`); the common execution API must never learn which
-compat format or scientific domain uses it, and one consumer must never reach
-into the manager, the introspection or CLI internals, or another consumer.
+language or scientific domain uses it, and one consumer must never reach into
+the manager, the introspection or CLI internals, or another consumer.
 
 These tests read the import statements of both sides with :mod:`ast` and assert
 the edges that would break that rule are absent. They are a static check, not a
@@ -36,14 +36,21 @@ COMMON_LAYER = (
     "packages",
 )
 
-#: The consumer packages. Each is a domain or a compat language; none may import
-#: another, and only VASP-through-common is the sanctioned cross edge.
+#: The consumer packages. None may import another. The future ``httk_v1``
+#: language module is owned by the v1 consumer and may import it one-way.
 CONSUMER_ENGINES = (
     "httk.workflow.vasp",
     "httk.workflow.compat.v1",
-    "httk.workflow.compat.cwl",
-    "httk.workflow.compat.pwd",
+    "httk.workflow.languages.cwl",
+    "httk.workflow.languages.pwd",
 )
+
+CONSUMER_OWNERS = {
+    "httk.workflow.vasp": ("httk.workflow.vasp",),
+    "httk.workflow.compat.v1": ("httk.workflow.compat.v1", "httk.workflow.languages.httk_v1"),
+    "httk.workflow.languages.cwl": ("httk.workflow.languages.cwl",),
+    "httk.workflow.languages.pwd": ("httk.workflow.languages.pwd",),
+}
 
 #: Generic machinery a consumer must never reach up into: the manager sees only
 #: ordinary jobs, and introspection and the CLI sit above execution.
@@ -117,16 +124,31 @@ def _names(module: str, imported: str) -> bool:
 
 
 def test_common_layer_never_imports_a_consumer() -> None:
-    """No common-layer module may name VASP or any compat engine."""
+    """No common-layer module may name a consumer."""
 
-    for name in COMMON_LAYER:
-        path = WORKFLOW / f"{name}.py"
+    paths = [WORKFLOW / f"{name}.py" for name in COMMON_LAYER]
+    paths.append(WORKFLOW / "languages" / "__init__.py")
+    for path in paths:
         offending = sorted(
             imported
             for imported in _imported_modules(path)
-            if _names("httk.workflow.vasp", imported) or _names("httk.workflow.compat", imported)
+            if any(_names(engine, imported) for engine in CONSUMER_ENGINES)
         )
-        assert offending == [], f"{name} imports a consumer: {offending}"
+        assert offending == [], f"{_module_name(path)} imports a consumer: {offending}"
+
+
+def test_languages_registry_is_common_and_lazy() -> None:
+    """The registry root does not import any language package at import time."""
+
+    path = WORKFLOW / "languages" / "__init__.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+    imported = set(_imported_modules(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module == "httk.workflow.languages":
+            imported.update(f"{node.module}.{alias.name}" for alias in node.names)
+    assert not any(_names(f"httk.workflow.languages.{name}", item) for name in ("cwl", "pwd") for item in imported)
 
 
 def _consumer_modules() -> list[Path]:
@@ -143,7 +165,23 @@ def _consumer_modules() -> list[Path]:
         if path.name == "cli.py":
             continue
         paths.append(path)
+    for name in ("cwl", "pwd", "httk_v1"):
+        package = WORKFLOW / "languages" / name
+        if package.is_dir():
+            paths.extend(sorted(package.rglob("*.py")))
+    future_module = WORKFLOW / "languages" / "httk_v1.py"
+    if future_module.is_file():
+        paths.append(future_module)
     return paths
+
+
+def _consumer_owner(module: str) -> str | None:
+    """Return the consumer owning *module*, including the future v1 module."""
+
+    return next(
+        (owner for owner, members in CONSUMER_OWNERS.items() if any(_names(member, module) for member in members)),
+        None,
+    )
 
 
 def test_consumers_do_not_reach_into_generic_or_each_other() -> None:
@@ -151,7 +189,7 @@ def test_consumers_do_not_reach_into_generic_or_each_other() -> None:
 
     for path in _consumer_modules():
         module = _module_name(path)
-        own = next((engine for engine in CONSUMER_ENGINES if _names(engine, module)), None)
+        own = _consumer_owner(module)
         imported = _imported_modules(path)
         for target in sorted(imported):
             for generic in FORBIDDEN_GENERIC:
