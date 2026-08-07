@@ -143,6 +143,10 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
         workflow_target: str | os.PathLike[str] = workflow_dir.resolve()
     else:
         workflow_target = arguments.workflow
+    environment = {
+        name: _json_value(text, f"workflow environment {name!r}")
+        for name, text in _pairs(arguments.environment, "a workflow environment override")
+    }
     parameters = {
         name: _json_value(text, f"job parameter {name!r}")
         for name, text in _pairs(arguments.parameters, "a job parameter")
@@ -153,12 +157,14 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
         "inputs": inputs,
         "files": files,
         "parameters": parameters,
+        "environment": environment,
         "placement": arguments.placement,
         "priority": arguments.priority,
         "workdir_mode": arguments.workdir_mode,
         "data_mode": arguments.data_mode,
         "publish": arguments.publish,
         "step": arguments.step,
+        "format": arguments.format,
         "name": arguments.name,
     }
     if items:
@@ -402,6 +408,19 @@ def build_job_parser(
         metavar="NAME=VALUE",
         help="one implementation parameter; VALUE is JSON when it parses as JSON and a string otherwise, "
         "and NAME=@FILE reads a JSON file (repeatable)",
+    )
+    new.add_argument(
+        "--environment",
+        action="append",
+        default=[],
+        dest="environment",
+        metavar="NAME=VALUE",
+        help="override one declared workflow environment value; VALUE is JSON when it parses as JSON (repeatable)",
+    )
+    new.add_argument(
+        "--format",
+        metavar="LANG",
+        help="force LANG for a bare workflow document or directory (not a registered or manifest workflow)",
     )
     new.add_argument(
         "--file",

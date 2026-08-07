@@ -73,7 +73,6 @@ from ..campaigns import (
     write_campaign,
 )
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, collect, job_records
-from ..compat.v1 import V1TaskManager, prepare_v1_payload, submit_v1_task
 from ..configuration import (
     import_v1_configuration,
     initialize_config,
@@ -168,13 +167,6 @@ TASKMANAGER_EPILOG = (
     "  run      ->  httk workflow manager run\n"
     "  status   ->  httk workflow workspace status\n"
     "  request  ->  httk workflow job request\n"
-)
-
-V1_TASKMANAGER_EPILOG = (
-    f"{ALIAS_EPILOG}\n\n"
-    "  prepare  ->  httk workflow v1 prepare\n"
-    "  submit   ->  httk workflow v1 submit\n"
-    "  run      ->  httk workflow v1 run\n"
 )
 
 Handler = Callable[[argparse.Namespace, CLIContext], int]

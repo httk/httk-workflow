@@ -157,19 +157,10 @@ def test_languages_registry_is_common_and_lazy() -> None:
 
 
 def _consumer_modules() -> list[Path]:
-    """Return every consumer module whose imports the rule constrains.
-
-    The ``httk-v1-taskmanager`` alias (``compat/v1/cli.py``) is deliberately
-    excluded: it is not an execution engine but a thin console entry point of the
-    CLI layer, and building the canonical ``httk workflow v1`` subcommands out of
-    the very declarations the canonical tree uses is exactly its job.
-    """
+    """Return every consumer module whose imports the rule constrains."""
 
     paths: list[Path] = sorted((WORKFLOW / "vasp").rglob("*.py"))
-    for path in sorted((WORKFLOW / "compat").rglob("*.py")):
-        if path.name == "cli.py":
-            continue
-        paths.append(path)
+    paths.extend(sorted((WORKFLOW / "compat").rglob("*.py")))
     for name in ("cwl", "pwd", "jobflow", "httk_v1"):
         package = WORKFLOW / "languages" / name
         if package.is_dir():

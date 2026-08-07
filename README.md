@@ -8,10 +8,9 @@ filesystem protocol (`httk.workflow.protocol`), the execution and authoring
 surface (`httk.workflow` — `Runner`, `Attempt`), and orchestration and management
 (`Workspace`, `TaskManager`, `collect`, and named submodules) — and registers
 `httk workflow`, the canonical command tree for everything below. The
-`httk-taskmanager` and
-`httk-v1-taskmanager` executables remain installed as aliases of that tree; the
-second one prepares and executes legacy `ht_steps`/`ht_run` task templates
-through the same *httk₂* workspace. Jobs communicate through atomically
+`httk-taskmanager` remains installed as an alias of that tree. Legacy
+`ht_steps`/`ht_run` workflows are converted to packages and execute through
+the normal manager in the same *httk₂* workspace. Jobs communicate through atomically
 published filesystem state, so interrupted managers and calculations can be
 recovered without cleanup hooks.
 
@@ -81,8 +80,8 @@ stay serial within their group while the rest of the suite runs in parallel.
   [`docs/workflow_cli.md`](docs/workflow_cli.md).
 - **Hands results to a data layer.** [`collect`](docs/collecting.md) yields one
   collected result per stopped job; *httk-workflow* itself has no database dependency.
-- **Keeps *httk* v1 workflows running.** `ht_steps`/`ht_run` task directories
-  execute unchanged on this engine — see
+- **Keeps *httk* v1 workflows running.** Converted `ht_steps`/`ht_run` packages
+  execute unchanged on the normal engine — see
   [`docs/v1_compatibility.md`](docs/v1_compatibility.md) and the
   [migration guide](docs/httk_v1_migration_guide.md).
 

@@ -1,12 +1,13 @@
 """Directory workflow package manifests and scaffold integration."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
-from httk.workflow import Workspace, scaffold
+from httk.workflow import Workspace, languages, scaffold
 from httk.workflow._util import tree_digest
 from httk.workflow.models import MAXIMUM_DECLARATIONS_BYTES, JobDefinition
 from httk.workflow.packages import (
@@ -269,6 +270,105 @@ def test_jobflow_manifest_preserves_declared_maker_parameters(tmp_path: Path) ->
     provider = parse_workflow_manifest(package)
 
     assert provider.parameters == {"relax_steps": {"type": "integer", "default": 300}}
+
+
+def test_language_environment_declarations_are_under_manifest_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = languages.language
+
+    def language_with_environment(name: str):
+        return replace(
+            original(name),
+            environment={
+                "auto": {"type": "string", "default": "language"},
+                "shared": {"type": "string", "default": "language"},
+            },
+        )
+
+    monkeypatch.setattr(languages, "language", language_with_environment)
+    package = _language_package(
+        tmp_path / "language-environment",
+        manifest_extra='''
+
+[workflow.environment.shared]
+type = "string"
+default = "manifest"
+
+[workflow.environment.manifest]
+type = "integer"
+default = 1
+''',
+    )
+    provider = parse_workflow_manifest(package)
+    assert provider.environment == {
+        "auto": {"type": "string", "default": "language"},
+        "shared": {"type": "string", "default": "manifest"},
+        "manifest": {"type": "integer", "default": 1},
+    }
+
+
+def test_environment_manifest_is_typed_and_round_trips_in_job_json(tmp_path: Path) -> None:
+    manifest = (
+        _MANIFEST
+        + '''
+[workflow.environment.command]
+type = "string"
+description = "The command to run."
+setting = "tool.command"
+
+[workflow.environment.retries]
+type = "integer"
+default = 2
+'''
+    )
+    package = _package(tmp_path / "environment", manifest)
+    provider = load_workflow_package(package, register=False)
+    assert provider.environment == {
+        "command": {"type": "string", "description": "The command to run.", "setting": "tool.command"},
+        "retries": {"type": "integer", "default": 2},
+    }
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package, environment={"command": "echo"})
+    definition = JobDefinition.from_path(job.payload / "job.json")
+    assert definition.environment == {
+        "declared": provider.environment,
+        "overrides": {"command": "echo"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("table", "message"),
+    [
+        ('type = "integer"\ndefault = "bad"', "default does not match type"),
+        ('setting = "bad-name"', "setting must be a nonempty dotted identifier"),
+        ('unknown = true', "unknown key"),
+    ],
+)
+def test_environment_manifest_rejects_bad_declarations(tmp_path: Path, table: str, message: str) -> None:
+    package = _package(tmp_path / "invalid", _MANIFEST + f"\n[workflow.environment.value]\n{table}\n")
+    with pytest.raises(ValueError, match=message):
+        load_workflow_package(package, register=False)
+
+
+def test_environment_overrides_are_validated_at_submission(tmp_path: Path) -> None:
+    package = _package(
+        tmp_path / "submission-environment",
+        _MANIFEST + '\n[workflow.environment.retries]\ntype = "integer"\n',
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(ValueError, match="declared names: retries"):
+        new_job(workspace, package, environment={"missing": 1})
+    with pytest.raises(ValueError, match="does not match type 'integer'"):
+        new_job(workspace, package, environment={"retries": "bad"})
+    job = new_job(workspace, package, environment={"retries": 3})
+    assert JobDefinition.from_path(job.payload / "job.json").environment["overrides"] == {"retries": 3}
+
+
+def test_format_rejects_manifest_package_directory(tmp_path: Path) -> None:
+    package = _package(tmp_path / "format-package")
+    with pytest.raises(ValueError, match="language comes from the manifest"):
+        resolve_workflow(package, format="cwl")
 
 
 @pytest.mark.parametrize(

@@ -3,9 +3,9 @@
 *For maintainers of an httk v1 workflow, moving it to httk₂ at whatever pace suits.*
 
 This guide takes an existing `ht_steps` or `ht_run` workflow from *httk* v1 to
-*httk-workflow*. You can keep the workflow unchanged behind the compatibility
-runner, migrate one job type at a time, or replace the legacy API completely
-with the native *httk₂* Bash or Python API.
+*httk-workflow*. You can keep the workflow unchanged in a converted package,
+migrate one job type at a time, or replace the legacy API completely with the
+native *httk₂* Bash or Python API.
 
 The central rule is:
 
@@ -22,14 +22,14 @@ You do not need to migrate every workflow at once.
 
 | Route | Workflow changes | Manager | Best use |
 | --- | --- | --- | --- |
-| Compatibility | None, normally | `httk workflow v1 run` | Establish an *httk₂* operational baseline quickly |
-| Mixed | Per job type | Both managers on one workspace | Incremental migration with a direct fallback |
+| Converted package | None, normally | normal `httk workflow run --pool POOL` | Establish an *httk₂* operational baseline quickly |
+| Mixed | Per job type | the normal manager on one workspace | Incremental migration with a direct fallback |
 | Native Bash | Replace `HT_TASK_*` and `VASP_*` calls | `httk workflow manager run` | Preserve a shell-oriented workflow |
 | Native Python | Replace the runner with Python calls | `httk workflow manager run` | New development and more structured logic |
 
-Start with compatibility unless you already have tests that describe the
+Start with a converted package unless you already have tests that describe the
 workflow's inputs, outputs, restart behavior, and child-task behavior. A
-compatibility run gives you a useful reference result before semantics change.
+package run gives you a useful reference result before semantics change.
 
 ## 2. Inventory the *httk* v1 workflow
 
@@ -61,46 +61,18 @@ Initialize an *httk₂* workspace:
 httk workflow workspace init workflow-workspace
 ```
 
-The standalone alias is equivalent:
+The standalone workspace alias is equivalent:
 
 ```console
 httk-taskmanager init workflow-workspace
 ```
 
-Prepare an already instantiated *httk* v1 task without consuming the source:
+Wrap the task in a converted package and submit it through the normal path:
 
 ```console
-httk workflow v1 prepare legacy-task prepared-v1 \
-  --tag silicon-relax \
-  --taskset vasp \
-  --priority 4 \
-  --attempts 10
-```
-
-Submit the prepared payload:
-
-```console
-httk workflow job submit workflow-workspace prepared-v1 \
+httk workflow job new workflow-workspace --workflow-dir ./legacy-package \
   --placement migration/reference/silicon-relax
-```
-
-Preparation and submission can also be combined:
-
-```console
-httk workflow v1 submit workflow-workspace legacy-task \
-  --placement migration/reference/silicon-relax \
-  --tag silicon-relax \
-  --taskset vasp \
-  --priority 4 \
-  --attempts 10
-```
-
-Run only *httk* v1 compatibility jobs:
-
-```console
-httk workflow v1 run workflow-workspace \
-  --taskset any \
-  --workers 4 \
+httk workflow run workflow-workspace --pool vasp --workers 4
 ```
 
 The exact old source paths remain available below the compatibility
@@ -117,9 +89,9 @@ Inspect the result through the *httk₂* source of truth:
 httk workflow workspace status workflow-workspace --json
 ```
 
-The compatibility runner preserves the persistent `ht.run.current/`
-workdir, translates *httk* v1 decisions and dynamic subtasks, and completes
-published *httk* v1 atomic sections after interruption. See
+The packaged v1 runner preserves the persistent `ht.run.current/` workdir,
+translates *httk* v1 decisions and dynamic subtasks, and completes published
+*httk* v1 atomic sections after interruption. See
 [*httk* v1 task compatibility](v1_compatibility.md) for the precise
 compatibility boundary.
 
@@ -171,17 +143,15 @@ does not create a workspace: it preserves the legacy Runs hint in the remote's
 Review every generated adapter before installation. Legacy shell executables
 and credentials are not copied or executed by the importer.
 
-## 5. Run compatibility and native jobs side by side
+## 5. Run converted and native jobs side by side
 
-The *httk* v1 and native managers select different runner executors, so they can share
-one *httk₂* workspace:
+Converted v1 packages and native workflows are both ordinary jobs, so one
+normal manager can serve them from the same *httk₂* workspace. Select the
+converted package's `taskset` with the manager pool:
 
 ```console
-# Terminal or service 1: compatibility jobs
-httk workflow v1 run workflow-workspace --taskset any --workers 2
-
-# Terminal or service 2: native jobs
-httk workflow manager run workflow-workspace --pool vasp-native --workers 2
+httk workflow run workflow-workspace --pool vasp --workers 2
+httk workflow run workflow-workspace --pool vasp-native --workers 2
 ```
 
 The shared core-v2 workspace already provides transactional data and detached
@@ -768,8 +738,8 @@ support `@run.instantiate`.
 
 For each migrated job type:
 
-1. Run one fixed input through the compatibility executor.
-2. Run the same fixed input through the native executor under a new UUID.
+1. Run one fixed input through the converted package's normal path runner.
+2. Run the same fixed input through the native runner under a new UUID.
 3. Compare prepared `INCAR`, `KPOINTS`, POTCAR metadata, final energies,
    structures, and retained result files.
 4. Compare failure classification and retry limits.
@@ -782,12 +752,12 @@ For each migrated job type:
 8. Run several jobs with the intended pool, capabilities, resources, and
    worker count.
 
-Keep the original template and the known-good compatibility payload until the
+Keep the original template and the known-good converted payload until the
 native result has passed these checks.
 
 ## 14. Cut over and retire compatibility deliberately
 
-Stop instantiating new compatibility jobs first. Let submitted *httk* v1 jobs reach a
+Stop instantiating new converted jobs first. Let submitted *httk* v1 jobs reach a
 terminal state or cancel them through recorded operator requests:
 
 ```console
@@ -796,8 +766,8 @@ httk workflow job request workflow-workspace JOB_UUID cancel \
   --reason "replaced by validated native workflow"
 ```
 
-Then stop the `httk workflow v1 run` managers while leaving the
-`httk workflow manager run` ones running.
+Then stop the normal manager serving the converted package's pool while leaving
+the native pool's manager running.
 Retain the legacy source, its attribution, and reference results for
 reproducibility.
 
@@ -846,8 +816,8 @@ Submit a one-shot job or a structure campaign:
 
 ```console
 httk workflow job new WS --workflow ./silicon-relax \
-  --input-from structure structures/*.cif --parameter encut=520
-httk workflow v1 run WS --taskset vasp
+  --format httk-v1 --input-from structure structures/*.cif --parameter encut=520
+httk workflow run WS --pool vasp
 httk workflow collect WS
 ```
 
@@ -908,12 +878,12 @@ The compatibility layer does not recreate every v1 subsystem:
 | runtime priority rewrites | immutable job priority and recorded operator requests |
 
 These are migration boundaries, not hidden package options. Keep a v1
-installation only where the compatibility runner or a trusted template still
-needs it.
+installation only where the packaged runner's trusted runtime or a template
+still needs it.
 
 ## Migration checklist
 
-- [ ] An instantiated *httk* v1 task runs successfully through compatibility.
+- [ ] An instantiated *httk* v1 task runs successfully through its converted package.
 - [ ] Project/configuration/remote imports were reviewed separately.
 - [ ] No live *httk* v1 queue is being treated as an *httk₂* workspace.
 - [ ] Persistent scratch and committed result files are distinguished.

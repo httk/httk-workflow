@@ -54,7 +54,7 @@ default collection to the registered language realization.
 | executable entry | no `language` | `entry`, `steps`, `initial_step`, `data_mode`, `workdir_mode` | package `run` plus the declared step set |
 | document language | `language = "cwl"` or `"pwd"` and `document` | language keys only; `port` is allowed on document inputs/outputs | installed `cwl_runner.py` or `pwd_runner.py` |
 | jobflow | `language = "jobflow"` and `maker` or `document` | `maker` or `document` (exactly one); `port` is allowed on inputs/outputs; no mode keys | installed `jobflow_runner.py` |
-| httk-v1 | `language = "httk-v1"` and no `document` | `taskset`, `attempts`; no mode keys | package snapshot under executor `httk-v1`, with `ht_steps` or `ht_run` |
+| httk-v1 | `language = "httk-v1"` and no `document` | `taskset`, `attempts`; no mode keys | package snapshot plus `pkg:httk.workflow.languages.httk_v1/v1_runner.py` through the ordinary `path` runner |
 
 For language forms, `entry`, `steps`, and `initial_step` are forbidden because
 the language supplies built-in steps. `[workflow.instantiate]` is forbidden
@@ -226,6 +226,47 @@ default = 30.0
 description = "Sampling density."
 ```
 
+### `[workflow.environment.<NAME>]`
+
+Environment entries are declared, typed workflow settings consumed by a
+runner. Each table accepts `type`, `description`, `default`, and `setting`.
+Language realizations may contribute entries automatically; manifest entries
+override entries with the same name. The `httk-v1` realization contributes its
+four `httk_v1.*` entries.
+`type` may be `string`, `number`, `integer`, `boolean`, `array`, or `object`;
+when present, defaults and job overrides must have that JSON/TOML type.
+`setting` names the dotted workspace setting and therefore the environment
+variable used for lookup; when omitted, the environment name is used.
+
+```toml
+[workflow.environment.command]
+type = "string"
+description = "Executable used by the runner."
+setting = "tool.command"
+default = "echo"
+```
+
+Resolution is most-specific first:
+
+1. the job override;
+2. the declared setting's `HTTK_` environment variable, upper-cased with dots
+   replaced by underscores;
+3. the workspace application setting;
+4. the declaration's `default`.
+
+`Attempt.environment(name, default=...)` reads this resolved value. The name
+must be declared; an unresolved name raises `KeyError` unless the call supplies
+its own default. `Attempt.setting` is the separate, untyped application-setting
+lookup and follows its own parameter → `HTTK_*` → workspace → call-default
+order.
+
+The CLI supplies per-job overrides with repeatable
+`--environment NAME=VALUE`; JSON values are decoded when possible. Python
+`new_job(environment={...})` supplies shared overrides, and each `JobItem` in
+`new_jobs` may supply its own `environment` mapping. `workflow describe`
+renders the declared environment entries, including type, setting, default, and
+description.
+
 ### `[workflow.outputs.<NAME>]`
 
 `entry_type` is required. The other accepted keys are `ref`, `description`,
@@ -353,8 +394,8 @@ and records the full digest in `job.json`. Republish of identical content is an
 idempotent no-op; changed content cannot replace an existing name without an
 explicit replacement. The manager verifies the same digest before execution.
 
-`publish=` is ignored for language workflows: CWL/PWD/jobflow use their installed
-runner and httk-v1 uses its payload runner and executor. `new_jobs` and CLI
+`publish=` is ignored for language workflows: CWL/PWD/jobflow and httk-v1 use
+their installed language runners. `new_jobs` and CLI
 `--input-from` campaigns prepare a language package once and instantiate it per
 job. Language-produced parameter names are reserved and collisions fail
 loudly. httk-v1 snapshots the complete package at preparation, so edits made

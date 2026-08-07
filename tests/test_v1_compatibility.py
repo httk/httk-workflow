@@ -1,24 +1,46 @@
-import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
-from httk.workflow import TaskManager, Workspace, collect, new_job, new_jobs
-from httk.workflow.compat.v1 import V1RunnerExecutor, V1TaskManager, submit_v1_task
-from httk.workflow.compat.v1._runner import replay_v1_atomic
+from httk.workflow import Attempt, TaskManager, Workspace, collect, new_job, new_jobs
+from httk.workflow.languages.httk_v1 import v1_runner
+from httk.workflow.languages.httk_v1.v1_runner import _continue_with_children, _task_directories, replay_v1_atomic
 from httk.workflow.packages import load_workflow_package
 from httk.workflow.protocol import JobDefinition
+from httk.workflow.runtime_builders import JobState
 from httk.workflow.scaffold import resolve_workflow
 
 
 def _legacy_source(root: Path, source: str, *, program: str = "ht_steps") -> Path:
     payload = root / "legacy-source"
     payload.mkdir()
+    (payload / "httk_workflow.toml").write_text(
+        """[workflow]
+id = "tests.v1.legacy"
+[workflow.runner]
+language = "httk-v1"
+attempts = 10
+[workflow.environment."httk_v1.log_compression"]
+default = "none"
+""",
+        encoding="utf-8",
+    )
     runner = payload / program
     runner.write_text(source, encoding="utf-8")
     runner.chmod(0o755)
     return payload
+
+
+def _new_v1_job(workspace: Workspace, source: Path, placement: str, *, attempts: int = 10):
+    """Submit the legacy fixture through its packaged language realization."""
+
+    manifest = source / "httk_workflow.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace("attempts = 10", f"attempts = {attempts}"), encoding="utf-8"
+    )
+    return new_job(workspace, source, placement=placement)
 
 
 def test_v1_multistep_atomic_job_and_priority(tmp_path: Path) -> None:
@@ -41,9 +63,9 @@ exit 1
 """,
     )
     workspace = Workspace.initialize(tmp_path / "workspace")
-    submitted = submit_v1_task(workspace, source, "project/00")
+    submitted = _new_v1_job(workspace, source, "project/00")
 
-    with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=10)
 
     marker = workspace.find_marker_by_id(submitted.job_id)
@@ -55,7 +77,7 @@ exit 1
     assert (workdir / "restart.txt").read_text(encoding="utf-8") == "0:0\n"
 
 
-def test_native_manager_leaves_v1_submission_for_v1_manager(tmp_path: Path) -> None:
+def test_native_manager_runs_v1_package(tmp_path: Path) -> None:
     source = _legacy_source(
         tmp_path,
         """#!/usr/bin/env bash
@@ -65,14 +87,9 @@ HT_TASK_FINISHED
 """,
     )
     workspace = Workspace.initialize(tmp_path / "workspace")
-    submitted = submit_v1_task(workspace, source, "combined/project")
+    submitted = _new_v1_job(workspace, source, "combined/project")
 
     with TaskManager(workspace) as manager:
-        manager.run_until_idle(timeout=2)
-    untouched = workspace.find_marker_by_id(submitted.job_id)
-    assert untouched is not None and untouched.kind == "submitted"
-
-    with V1TaskManager(workspace, log_compression="none") as manager:
         manager.run_until_idle(timeout=10)
     finished = workspace.find_marker_by_id(submitted.job_id)
     assert finished is not None and finished.kind == "succeeded"
@@ -94,9 +111,9 @@ HT_TASK_FINISHED
 """,
     )
     workspace = Workspace.initialize(tmp_path / "workspace")
-    submitted = submit_v1_task(workspace, source, "project/restart", attempts=2)
+    submitted = _new_v1_job(workspace, source, "project/restart", attempts=2)
 
-    with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=10)
 
     marker = workspace.find_marker_by_id(submitted.job_id)
@@ -123,9 +140,9 @@ exit 1
     (atomic / "ht.nextstep").write_text("finish\n", encoding="utf-8")
     (atomic / "committed-result").write_text("complete\n", encoding="utf-8")
     workspace = Workspace.initialize(tmp_path / "workspace")
-    submitted = submit_v1_task(workspace, source, "project/atomic-recovery")
+    submitted = _new_v1_job(workspace, source, "project/atomic-recovery")
 
-    with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=10)
 
     marker = workspace.find_marker_by_id(submitted.job_id)
@@ -169,9 +186,9 @@ HT_TASK_FINISHED
     )
     child.chmod(0o755)
     workspace = Workspace.initialize(tmp_path / "workspace")
-    parent = submit_v1_task(workspace, source, "project/tree")
+    parent = _new_v1_job(workspace, source, "project/tree")
 
-    with V1TaskManager(workspace, maximum_workers=2, heartbeat_interval=0.01, log_compression="none") as manager:
+    with TaskManager(workspace, maximum_workers=2, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=15)
 
     parent_marker = workspace.find_marker_by_id(parent.job_id)
@@ -183,17 +200,140 @@ HT_TASK_FINISHED
     parent_payload = workspace.payload_path(parent_marker.placement, parent_marker.job_key)
     workdir = parent_payload / "ht.run.current"
     assert (workdir / "parent-result").read_text(encoding="utf-8") == "parent-finished\n"
-    links = list((workdir / "children").glob("ht.task.any.one.child.0.unclaimed.4.*"))
-    assert len(links) == 1
-    assert links[0].is_symlink()
-    assert links[0].name.endswith(".finished")
-    assert links[0].resolve() == workspace.payload_path(child_marker.placement, child_marker.job_key)
-    links[0].unlink()
-    with V1TaskManager(workspace, log_compression="none"):
-        pass
-    rebuilt = list((workdir / "children").glob("ht.task.any.one.child.0.unclaimed.4.finished"))
-    assert len(rebuilt) == 1
-    assert rebuilt[0].resolve() == workspace.payload_path(child_marker.placement, child_marker.job_key)
+    pending = list((workdir / "children").glob("ht.task.any.one.child.0.none.4.waitstart"))
+    assert len(pending) == 1 and pending[0].is_dir()
+    spawned = JobState(parent_payload).read()["v1_spawned"]
+    assert isinstance(spawned, list)
+    assert _task_directories(parent_payload, set(cast(list[str], spawned))) == []
+
+
+def test_v1_next_spawns_payload_children(tmp_path: Path) -> None:
+    source = _legacy_source(
+        tmp_path,
+        """#!/usr/bin/env bash
+. "$HTTK_DIR/Execution/tasks/ht_tasks_api.sh"
+HT_TASK_INIT "$@"
+MAKE_CHILD() { cp "$HT_TASK_TOP_DIR/child_ht_steps" ht_steps; chmod +x ht_steps; }
+if [ "$STEP" = start ]; then
+    mkdir -p "$HT_TASK_TOP_DIR/children"
+    printf 'Structure_A\\n' | HT_TASK_CREATE MAKE_CHILD "$HT_TASK_TOP_DIR/children" child any 4
+    HT_TASK_NEXT finish
+fi
+touch parent-finished
+HT_TASK_FINISHED
+""",
+    )
+    child = source / "child_ht_steps"
+    child.write_text(
+        "#!/usr/bin/env bash\n. \"$HTTK_DIR/Execution/tasks/ht_tasks_api.sh\"\nHT_TASK_INIT \"$@\"\ntouch child-finished\nHT_TASK_FINISHED\n",
+        encoding="utf-8",
+    )
+    child.chmod(0o755)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    parent = _new_v1_job(workspace, source, "project/next")
+    with TaskManager(workspace, maximum_workers=2, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=15)
+    child_marker = next(marker for marker in workspace.scan_markers() if marker.job_id != parent.job_id)
+    assert child_marker.kind == "succeeded"
+    assert workspace.load_job(child_marker).tag == "any-structure_a"
+
+
+def test_v1_payload_children_sanitize_long_tags(tmp_path: Path) -> None:
+    task_id = "A" * 60
+    source = _legacy_source(
+        tmp_path,
+        f"""#!/usr/bin/env bash
+. "$HTTK_DIR/Execution/tasks/ht_tasks_api.sh"
+HT_TASK_INIT "$@"
+MAKE_CHILD() {{ cp "$HT_TASK_TOP_DIR/child_ht_steps" ht_steps; chmod +x ht_steps; }}
+if [ "$STEP" = start ]; then
+    mkdir -p "$HT_TASK_TOP_DIR/children"
+    printf '{task_id}\\n' | HT_TASK_CREATE MAKE_CHILD "$HT_TASK_TOP_DIR/children" child any 4
+    HT_TASK_SUBTASKS finish
+fi
+HT_TASK_FINISHED
+""",
+    )
+    child = source / "child_ht_steps"
+    child.write_text(
+        "#!/usr/bin/env bash\n. \"$HTTK_DIR/Execution/tasks/ht_tasks_api.sh\"\nHT_TASK_INIT \"$@\"\nHT_TASK_FINISHED\n",
+        encoding="utf-8",
+    )
+    child.chmod(0o755)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    parent = _new_v1_job(workspace, source, "project/payload-child")
+    with TaskManager(workspace, maximum_workers=2, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=15)
+    child_marker = next(marker for marker in workspace.scan_markers() if marker.job_id != parent.job_id)
+    assert workspace.load_job(child_marker).tag == f"any-{task_id.lower()}"[:48]
+
+
+def test_v1_pending_join_replays_after_state_checkpoint_crash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = tmp_path / "payload"
+    source = payload / "children" / "ht.task.any.one.child.0.none.4.waitstart"
+    source.mkdir(parents=True)
+    state: dict[str, object] = {}
+    gathered: list[str] = []
+    attempt = SimpleNamespace(
+        payload=payload,
+        context=SimpleNamespace(activation_id="activation"),
+        state=SimpleNamespace(
+            get=lambda name, default=None: state.get(name, default), merge=lambda values: state.update(values)
+        ),
+        gather=lambda step, **_kwargs: gathered.append(step),
+        advance=lambda _step, **_kwargs: None,
+    )
+
+    def crash_after_checkpoint(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected crash")
+
+    publish_pending = v1_runner._publish_pending
+    monkeypatch.setattr(v1_runner, "_publish_pending", crash_after_checkpoint)
+    with pytest.raises(RuntimeError, match="injected crash"):
+        _continue_with_children(
+            cast(Attempt, attempt), mode="gather", step="after", priority=None, sources=[source], attempts=1
+        )
+    pending = state["v1_pending"]
+    assert isinstance(pending, dict)
+    monkeypatch.setattr(v1_runner, "_publish_pending", publish_pending)
+    monkeypatch.setattr(v1_runner, "_spawn", lambda *_args: ["children/ht.task.any.one.child.0.none.4.waitstart"])
+    v1_runner._publish_pending(cast(Attempt, attempt), pending, 1)
+    assert gathered == ["start"]
+
+
+def test_v1_priority_join_replays_after_second_checkpoint_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = tmp_path / "payload"
+    source = payload / "children" / "ht.task.any.one.child.0.none.4.waitstart"
+    source.mkdir(parents=True)
+    state: dict[str, object] = {}
+    gathered: list[dict[str, object]] = []
+    checkpoints = 0
+
+    def merge(values: dict[str, object]) -> None:
+        nonlocal checkpoints
+        state.update(values)
+        checkpoints += 1
+        if checkpoints == 2:
+            raise RuntimeError("injected crash")
+
+    attempt = SimpleNamespace(
+        payload=payload,
+        context=SimpleNamespace(activation_id="activation"),
+        state=SimpleNamespace(get=lambda name, default=None: state.get(name, default), merge=merge),
+        gather=lambda _step, **kwargs: gathered.append(kwargs),
+        advance=lambda _step, **_kwargs: None,
+    )
+    monkeypatch.setattr(v1_runner, "_spawn", lambda *_args: ["children/ht.task.any.one.child.0.none.4.waitstart"])
+    with pytest.raises(RuntimeError, match="injected crash"):
+        _continue_with_children(
+            cast(Attempt, attempt), mode="gather", step="after", priority=900, sources=[source], attempts=1
+        )
+    pending = state["v1_pending"]
+    assert isinstance(pending, dict)
+    v1_runner._publish_pending(cast(Attempt, attempt), pending, 1)
+    assert gathered == [{"when": "all_terminal", "priority": 900}]
 
 
 def test_v1_ht_run_exit_zero_succeeds(tmp_path: Path) -> None:
@@ -206,9 +346,9 @@ exit 0
         program="ht_run",
     )
     workspace = Workspace.initialize(tmp_path / "workspace")
-    submitted = submit_v1_task(workspace, source, "project/ht-run")
+    submitted = _new_v1_job(workspace, source, "project/ht-run")
 
-    with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=10)
 
     marker = workspace.find_marker_by_id(submitted.job_id)
@@ -227,60 +367,24 @@ if [ "$STEP" = "freeze" ]; then
     printf 'frozen\\n' > freeze-result
     exit 0
 fi
+HT_TASK_SET_PRIORITY 5
 HT_TASK_BROKEN
 """,
     )
     workspace = Workspace.initialize(tmp_path / "workspace")
-    submitted = submit_v1_task(workspace, source, "project/broken")
+    submitted = _new_v1_job(workspace, source, "project/broken")
 
-    with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=10)
 
     marker = workspace.find_marker_by_id(submitted.job_id)
     assert marker is not None and marker.kind == "failed"
+    assert marker.priority == 900
     workdir = workspace.payload_path(marker.placement, marker.job_key) / "ht.run.current"
     assert (workdir / "freeze-result").read_text(encoding="utf-8") == "frozen\n"
     assert not (workdir / "ht.nextstep").exists()
     state = workspace.read_state(marker)
     assert state["failure"]["code"] == "declared_failure"
-
-
-def test_v1_adapter_runs_as_a_module_of_this_package(tmp_path: Path) -> None:
-    """No file path and no sys.path hack: the adapter is imported as a module."""
-
-    source = _legacy_source(
-        tmp_path,
-        """#!/usr/bin/env bash
-. "$HTTK_DIR/Execution/tasks/ht_tasks_api.sh"
-HT_TASK_INIT "$@"
-HT_TASK_FINISHED
-""",
-    )
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    submitted = submit_v1_task(workspace, source, "project/module")
-    marker = workspace.find_marker_by_id(submitted.job_id)
-    assert marker is not None
-    executor = V1RunnerExecutor(log_compression="none")
-    from httk.workflow.executors import AttemptLaunch
-
-    payload = workspace.payload_path(marker.placement, marker.job_key)
-    command = list(
-        executor.command(
-            AttemptLaunch(
-                job=workspace.load_job(marker),
-                marker=marker,
-                payload=payload,
-                workdir=payload,
-                control=payload,
-                context_path=payload / "context.json",
-                context={},
-                runner=payload / "ht_steps",
-            )
-        )
-    )
-    assert command[:3] == [sys.executable, "-m", "httk.workflow.compat.v1._runner"]
-    assert not any(item.endswith("_runner.py") for item in command)
-    assert "sys.path.insert" not in (Path(__file__).parents[1] / "src/httk/workflow/compat/v1/_runner.py").read_text()
 
 
 def test_v1_terminal_outcome_does_not_publish_leftover_subtasks(tmp_path: Path) -> None:
@@ -311,9 +415,9 @@ HT_TASK_FINISHED
     )
     child.chmod(0o755)
     workspace = Workspace.initialize(tmp_path / "workspace")
-    parent = submit_v1_task(workspace, source, "project/abandoned")
+    parent = _new_v1_job(workspace, source, "project/abandoned")
 
-    with V1TaskManager(workspace, maximum_workers=2, heartbeat_interval=0.01, log_compression="none") as manager:
+    with TaskManager(workspace, maximum_workers=2, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=15)
 
     marker = workspace.find_marker_by_id(parent.job_id)
@@ -341,9 +445,9 @@ HT_TASK_BROKEN
 """,
     )
     workspace = Workspace.initialize(tmp_path / "workspace")
-    submitted = submit_v1_task(workspace, source, "project/freeze-failure")
+    submitted = _new_v1_job(workspace, source, "project/freeze-failure")
 
-    with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=10)
 
     marker = workspace.find_marker_by_id(submitted.job_id)
@@ -390,7 +494,7 @@ id = "tests.v1.package"
 
 [workflow.runner]
 language = "httk-v1"
-taskset = "legacy"
+taskset = "default"
 attempts = 2
 
 [workflow.inputs.value]
@@ -434,11 +538,15 @@ def test_v1_language_manifest_package_runs_and_collects(tmp_path: Path) -> None:
     )
     assert len(jobs) == 3
     definition = JobDefinition.from_path(jobs[0].payload / "job.json")
-    assert definition.runner_executor == "httk-v1"
-    assert definition.runner_source == "payload"
-    assert definition.claim_pool == "legacy"
+    assert definition.runner_executor == "path"
+    assert definition.runner_source == "installed"
+    assert definition.claim_pool == "default"
     assert definition.workdir_path.as_posix() == "ht.run.current"
     assert definition.workflow == "tests.v1.package"
+    declared = definition.environment["declared"]
+    assert isinstance(declared, dict)
+    runtime_root = declared["httk_v1.root"]
+    assert isinstance(runtime_root, dict) and runtime_root["default"] == ""
     assert definition.raw["compatibility"] == {
         "profile": "httk-v1-task-v1",
         "program": "ht_steps",
@@ -449,7 +557,7 @@ def test_v1_language_manifest_package_runs_and_collects(tmp_path: Path) -> None:
     assert not (jobs[0].payload / "collect.py").exists()
     assert not (jobs[0].payload / "report.sh").exists()
 
-    with V1TaskManager(workspace, heartbeat_interval=0.01, log_compression="none") as manager:
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=15)
     assert all(workspace.find_marker_by_id(job.job_id).kind == "succeeded" for job in jobs)  # type: ignore[union-attr]
     collected = list(collect(workspace))
@@ -498,7 +606,7 @@ def test_v1_language_rejects_symlinked_package_members(tmp_path: Path) -> None:
     (package / "linked.txt").symlink_to(outside)
     workspace = Workspace.initialize(tmp_path / "workspace")
     with pytest.raises(ValueError, match=r"symlink.*linked\.txt"):
-        new_job(workspace, package)
+        new_job(workspace, package, format="httk-v1")
 
 
 def test_v1_ht_instantiate_contract_runs_and_unlinks_script(tmp_path: Path) -> None:
@@ -515,7 +623,7 @@ def test_v1_ht_instantiate_contract_runs_and_unlinks_script(tmp_path: Path) -> N
     load_workflow_package(package)
     workspace = Workspace.initialize(tmp_path / "workspace")
     job = new_job(workspace, package, inputs={"value": "instantiated"})
-    with V1TaskManager(workspace, log_compression="none") as manager:
+    with TaskManager(workspace) as manager:
         manager.run_until_idle(timeout=15)
     marker = workspace.find_marker_by_id(job.job_id)
     assert marker is not None and marker.kind == "succeeded"
@@ -541,7 +649,7 @@ def test_v1_template_runner_is_rendered_executable_and_runs(tmp_path: Path) -> N
     job = new_job(workspace, package, inputs={"value": "rendered"})
     assert (job.payload / "ht_steps").is_file()
     assert (job.payload / "ht_steps").stat().st_mode & 0o777 == 0o751
-    with V1TaskManager(workspace, log_compression="none") as manager:
+    with TaskManager(workspace) as manager:
         manager.run_until_idle(timeout=15)
     marker = workspace.find_marker_by_id(job.job_id)
     assert marker is not None and marker.kind == "succeeded"
@@ -557,18 +665,69 @@ def test_v1_bare_directory_is_realized_and_degraded_on_collect(tmp_path: Path) -
         encoding="utf-8",
     )
     runner.chmod(0o755)
-    assert resolve_workflow(root).language == "httk-v1"
+    assert resolve_workflow(root, format="httk-v1").language == "httk-v1"
     workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, root, parameters={"value": "bare"})
+    job = new_job(workspace, root, parameters={"value": "bare"}, format="httk-v1")
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=2)
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "submitted"
-    with V1TaskManager(workspace, log_compression="none") as manager:
-        manager.run_until_idle(timeout=15)
     marker = workspace.find_marker_by_id(job.job_id)
     assert marker is not None and marker.kind == "succeeded"
     collected = next(collect(workspace))
     assert collected.outputs == {}
     assert collected.missing_collector is not None
     assert "declares [workflow.collect]" in collected.missing_collector
+
+
+def test_v1_bare_directory_is_not_auto_matched(tmp_path: Path) -> None:
+    root = tmp_path / "bare"
+    root.mkdir()
+    (root / "ht_steps").write_text(_V1_PROGRAM, encoding="utf-8")
+    (root / "ht_steps").chmod(0o755)
+
+    with pytest.raises(ValueError, match="unknown workflow path"):
+        resolve_workflow(root)
+
+
+def test_v1_environment_wrapper_and_log_compression(tmp_path: Path) -> None:
+    package = _v1_package(tmp_path / "package", _V1_MANIFEST, "#!/bin/sh\nprintf run\\n\n")
+    (package / "collect.py").write_text("def collect(record): return {}\n", encoding="utf-8")
+    wrapper = tmp_path / "wrapper"
+    wrapper.write_text("#!/bin/sh\ntouch wrapped\nexec \"$@\"\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(
+        workspace,
+        package,
+        environment={"httk_v1.wrapper": str(wrapper), "httk_v1.log_compression": "none"},
+    )
+    with TaskManager(workspace) as manager:
+        manager.run_until_idle(timeout=10)
+    assert (job.payload / "ht.run.current" / "wrapped").is_file()
+    assert (job.payload / "ht.taskmgr.stdout").is_file()
+
+
+def test_v1_default_bzip2_log_and_timeout(tmp_path: Path) -> None:
+    package = _v1_package(
+        tmp_path / "package",
+        _V1_MANIFEST,
+        "#!/usr/bin/env bash\n. \"$HTTK_DIR/Execution/tasks/ht_tasks_api.sh\"\nHT_TASK_INIT \"$@\"\nif [ \"$STEP\" = freeze ]; then touch frozen; exit 0; fi\nsleep 2\n",
+    )
+    (package / "collect.py").write_text("def collect(record): return {}\n", encoding="utf-8")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package, environment={"httk_v1.timeout": 1})
+    with TaskManager(workspace) as manager:
+        manager.run_until_idle(timeout=10)
+    marker = workspace.find_marker_by_id(job.job_id)
+    assert marker is not None and marker.kind == "failed"
+    assert (job.payload / "ht.run.current" / "frozen").is_file()
+    package2 = _v1_package(
+        tmp_path / "package2",
+        _V1_MANIFEST.replace("tests.v1.package", "tests.v1.bzip2"),
+        "#!/usr/bin/env bash\n. \"$HTTK_DIR/Execution/tasks/ht_tasks_api.sh\"\nHT_TASK_INIT \"$@\"\nprintf run\\n\nHT_TASK_FINISHED\n",
+    )
+    (package2 / "collect.py").write_text("def collect(record): return {}\n", encoding="utf-8")
+    job2 = new_job(workspace, package2)
+    with TaskManager(workspace) as manager:
+        manager.run_until_idle(timeout=10)
+    assert (job2.payload / "ht.taskmgr.stdout").is_file()
+    assert (job2.payload / "ht.run.current" / "ht.taskmgr.stdout.bz2").is_file()
