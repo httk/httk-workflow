@@ -1,4 +1,4 @@
-"""Load directory-based workflow packages from ``workflow.toml`` manifests."""
+"""Load directory-based workflow packages from ``httk_workflow.toml`` manifests."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from .errors import FormatError
 from .models import validate_declarations
 from .scaffold import WorkflowProvider, payload_relative, register_workflow
 
-MANIFEST_NAME = "workflow.toml"
+MANIFEST_NAME = "httk_workflow.toml"
 
 __all__ = [
     "MANIFEST_NAME",
@@ -389,7 +389,7 @@ def _workflow_declaration(
 def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     """Parse and validate one directory workflow package.
 
-    The ``workflow.toml`` file is httk-owned glue: unknown keys are rejected
+    The ``httk_workflow.toml`` file is httk-owned glue: unknown keys are rejected
     at every supported table, and external declarations are checked against
     the manifest's roles. Declared inputs describe staged objects, while
     parameters remain opaque implementation knobs and are carried under the
@@ -430,6 +430,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
             "declaration_file",
             "runner",
             "instantiate",
+            "collect",
             "postprocess",
             "inputs",
             "parameters",
@@ -548,11 +549,29 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     if lang is None and any(destination is None for destination in inputs.values()) and instantiate_file is None:
         raise _error(root, "hook-consumed workflow inputs require [workflow.instantiate]")
 
-    postprocess_file: str | None = None
+    collect_file: str | None = None
+    if "collect" in workflow:
+        collect = _table(workflow["collect"], "[workflow.collect]", root)
+        _unknown(collect, {"file"}, "[workflow.collect]", root)
+        collect_file = _member(root, collect.get("file"), "[workflow.collect].file", python=True)
+
+    postprocess_scripts: dict[str, dict[str, object]] = {}
     if "postprocess" in workflow:
-        postprocess = _table(workflow["postprocess"], "[workflow.postprocess]", root)
-        _unknown(postprocess, {"file"}, "[workflow.postprocess]", root)
-        postprocess_file = _member(root, postprocess.get("file"), "[workflow.postprocess].file", python=True)
+        raw_postprocess = workflow["postprocess"]
+        teaching_error = (
+            "the collect hook moved to [workflow.collect], and "
+            "[workflow.postprocess.<name>] tables declare curated scripts"
+        )
+        if not isinstance(raw_postprocess, Mapping) or "file" in raw_postprocess:
+            raise _error(root, teaching_error)
+        for name, value in raw_postprocess.items():
+            script_name = _validate_name(name, "[workflow.postprocess] name", root)
+            table = _table(value, f"[workflow.postprocess.{script_name}]", root)
+            path = f"[workflow.postprocess.{script_name}]"
+            _unknown(table, {"file", "description"}, path, root)
+            member = _member(root, table.get("file"), f"{path}.file", python=False)
+            description_value = _string(table, "description", path, root)
+            postprocess_scripts[script_name] = {"file": member, "description": description_value}
 
     parameters = _validate_parameters(_table(workflow.get("parameters", {}), "[workflow.parameters]", root), root)
     outputs = _validate_outputs(
@@ -621,15 +640,16 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         directory=root.resolve(),
         entry=entry,
         instantiate_file=instantiate_file,
-        postprocess_file=postprocess_file,
+        collect_file=collect_file,
+        postprocess_scripts=postprocess_scripts,
         parameters=parameters,
         outputs=outputs,
         declaration_uri=declaration_uri,
         declaration_file=None,
         _input_metadata=input_metadata,
-        postprocessor=(
-            f"httk.workflow.languages.{language_name.replace('-', '_')}:postprocess"
-            if language_name is not None and lang is not None and lang.has_default_postprocessor
+        collector=(
+            f"httk.workflow.languages.{language_name.replace('-', '_')}:collect"
+            if language_name is not None and lang is not None and lang.has_default_collector
             else None
         ),
     )
@@ -650,8 +670,8 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     provider = replace(provider, declarations=validated)
     if declaration_member is not None:
         provider = replace(provider, declaration_file=declaration_member)
-    if postprocess_file is not None:
-        provider = replace(provider, postprocessor=cast(Any, _source_hook(root, postprocess_file, "postprocess")))
+    if collect_file is not None:
+        provider = replace(provider, collector=cast(Any, _source_hook(root, collect_file, "collect")))
     return provider
 
 

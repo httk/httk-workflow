@@ -291,7 +291,7 @@ def add_v1_collect_arguments(parser: argparse.ArgumentParser) -> None:
         "--workflow-dir",
         required=True,
         metavar="PKG",
-        help="the directory workflow package providing the postprocess hook",
+        help="the directory workflow package providing the collect hook",
     )
     parser.add_argument("--into", metavar="PATH", help="save collected entries, runs, and products to SQLite")
     parser.add_argument("--json", action="store_true", help="print collected summaries as JSON lines")

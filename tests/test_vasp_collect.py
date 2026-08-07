@@ -1,5 +1,9 @@
-"""VASP postprocessors return role-keyed outputs only."""
+"""VASP collectors and their packaged postprocess script use published data."""
 
+import importlib.resources
+import json
+import stat
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -10,10 +14,12 @@ pytest.importorskip("httk.io")
 import httk.core
 
 from httk.workflow.collecting import JobRecord
-from httk.workflow.vasp.postprocess import (
-    postprocess_vasp_relax,
-    postprocess_vasp_relax_static,
-    postprocess_vasp_static,
+from httk.workflow.postprocessing import run_postprocess_script
+from httk.workflow.scaffold import registered_workflow
+from httk.workflow.vasp.collect import (
+    collect_vasp_relax,
+    collect_vasp_relax_static,
+    collect_vasp_static,
 )
 
 _POSCAR = """silicon
@@ -66,25 +72,44 @@ def _write(root: Path, *parts: str) -> None:
 def test_relax_returns_declared_roles(tmp_path: Path) -> None:
     _write(tmp_path / "data", "vasp", "CONTCAR")
     _write(tmp_path / "data", "vasp", "OUTCAR")
-    outputs = postprocess_vasp_relax(_record(tmp_path, "httk.vasp.relax"))
+    outputs = collect_vasp_relax(_record(tmp_path, "httk.vasp.relax"))
     assert set(outputs) == {"relaxed_structure", "total_energy"}
     assert isinstance(outputs["total_energy"], httk.core.DataRecord)
 
 
 def test_static_returns_only_energy(tmp_path: Path) -> None:
     _write(tmp_path / "data", "vasp", "OUTCAR")
-    outputs = postprocess_vasp_static(_record(tmp_path, "httk.vasp.static"))
+    outputs = collect_vasp_static(_record(tmp_path, "httk.vasp.static"))
     assert set(outputs) == {"total_energy"}
 
 
 def test_relax_static_uses_two_output_layouts(tmp_path: Path) -> None:
     _write(tmp_path / "data", "relax", "CONTCAR")
     _write(tmp_path / "data", "static", "OUTCAR")
-    outputs = postprocess_vasp_relax_static(_record(tmp_path, "httk.vasp.relax-static"))
+    outputs = collect_vasp_relax_static(_record(tmp_path, "httk.vasp.relax-static"))
     assert set(outputs) == {"relaxed_structure", "total_energy"}
 
 
 def test_missing_file_names_job_identity(tmp_path: Path) -> None:
     _write(tmp_path / "data", "vasp", "CONTCAR")
     with pytest.raises(ValueError, match=r"ws:12345678-1234-4234-8234-123456789abc.*OUTCAR"):
-        postprocess_vasp_relax(_record(tmp_path, "httk.vasp.relax"))
+        collect_vasp_relax(_record(tmp_path, "httk.vasp.relax"))
+
+
+def test_packaged_relaxation_report_runs_from_published_data(tmp_path: Path) -> None:
+    _write(tmp_path / "data", "vasp", "CONTCAR")
+    _write(tmp_path / "data", "vasp", "OUTCAR")
+    (tmp_path / "run").mkdir()
+    record = replace(_record(tmp_path, "httk.vasp.relax"), workdir_path=PurePosixPath("run"))
+    workflow = registered_workflow("vasp-relax")
+    assert workflow is not None
+    assert workflow.runner_package is not None
+    script = Path(str(importlib.resources.files(workflow.runner_package).joinpath("scripts/relaxation_report")))
+    assert script.stat().st_mode & stat.S_IXUSR
+
+    result = run_postprocess_script(workflow, "relaxation-report", record)
+    assert result.returncode == 0
+    report = json.loads((result.output_dir / "relaxation_report.json").read_text(encoding="utf-8"))
+    assert report["final_energy"] == pytest.approx(-27.09328752)
+    assert report["structure_files"] == ["vasp/CONTCAR"]
+    assert "vasp/CONTCAR" in (result.output_dir / "relaxation_report.txt").read_text(encoding="utf-8")

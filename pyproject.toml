@@ -12,9 +12,8 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 authors = [{ name = "Rickard Armiento", email = "gitcommits@armiento.net" }]
 dependencies = [
-  # 2.0.2 is the release that adds httk.core.project (the project anchor and the
-  # umbrella `httk project` command this package registers its extensions into).
-  "httk-core>=2.0.2,<3",
+  # 2.1.0 is the release that adds httk.core.FileRecord for first-class file outputs.
+  "httk-core>=2.1.0,<3",
 ]
 keywords = [
   "Materials Discovery",
@@ -115,6 +114,7 @@ namespaces = true
 # needs it installed exactly like the shell libraries above.
 "httk.workflow.vasp.runners" = [
   "*.sh",
+  "scripts/relaxation_report",
 ]
 # httk.workflow.languages.cwl and httk.workflow.languages.pwd follow the same rule and
 # need no entry of their own: cwl_runner.py and pwd_runner.py are modules of those

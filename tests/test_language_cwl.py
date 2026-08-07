@@ -1,12 +1,13 @@
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
 import pytest
-from httk.core import DataRecord
+from httk.core import DataRecord, FileEntry, FileRecord
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
@@ -97,6 +98,26 @@ steps:
     in:
       files: say/spoken
     out: [joined]
+"""
+
+_SCATTER_FILE_OUTPUT_WORKFLOW = """
+cwlVersion: v1.2
+class: Workflow
+requirements:
+  ScatterFeatureRequirement: {}
+inputs:
+  messages: string[]
+outputs:
+  transcripts:
+    type: File[]
+    outputSource: say/spoken
+steps:
+  say:
+    run: echo.cwl
+    scatter: message
+    in:
+      message: messages
+    out: [spoken]
 """
 
 _SUBWORKFLOW = """
@@ -230,7 +251,7 @@ def _package(
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     port_line = "" if input_port is None else f'port = "{input_port}"\n'
-    (root / "workflow.toml").write_text(
+    (root / "httk_workflow.toml").write_text(
         f'''[workflow]
 id = "tests.language.{root.name}"
 
@@ -280,9 +301,9 @@ def test_bare_cwl_document_runs_and_collects_without_a_provider(package: Path, w
     marker = workspace.find_marker_by_id(job.job_id)
     assert marker is not None and marker.kind == "succeeded"
     item = next(collect(workspace))
-    assert isinstance(item.outputs["spoken"], DataRecord)
-    output = item.outputs["spoken"].value
-    assert (workspace.root / str(output["path"])).read_text(encoding="utf-8").strip() == "hello"
+    assert isinstance(item.outputs["spoken"], FileRecord)
+    output = item.outputs["spoken"]
+    assert (workspace.root / output.url).read_text(encoding="utf-8").strip() == "hello"
 
 
 def test_cli_job_new_accepts_a_bare_cwl_document(package: Path, workspace: Workspace, tmp_path: Path, capsys) -> None:
@@ -304,8 +325,8 @@ def test_cwl_language_collects_records_and_product_links(
     tmp_path: Path, workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     package = _package(tmp_path / "collect", "echo.cwl", _ECHO_TOOL, "message", "spoken")
-    manifest = (package / "workflow.toml").read_text(encoding="utf-8")
-    (package / "workflow.toml").write_text(
+    manifest = (package / "httk_workflow.toml").read_text(encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(
         manifest.replace(
             '[workflow.outputs.spoken]\nentry_type = "strings"',
             '[workflow.outputs.spoken]\nentry_type = "strings"\nproduct_of = "message"',
@@ -338,7 +359,7 @@ def test_cwl_language_collects_records_and_product_links(
     item = next(collect(workspace))
     scaffold_module._WORKFLOW_PROVIDERS.pop(provider.workflow_id, None)
     assert set(item.outputs) == {"spoken"}
-    assert isinstance(item.outputs["spoken"], DataRecord)
+    assert isinstance(item.outputs["spoken"], FileRecord)
     assert item.outputs["spoken"].type and item.outputs["spoken"].id
     assert item.unfulfilled == ()
     assert {edge.label for edge in item.run.artifacts} >= {"spoken"}
@@ -356,14 +377,18 @@ def test_cwl_file_output_collects_a_workspace_relative_descriptor(tmp_path: Path
 
     item = next(collect(workspace))
     value = item.outputs["spoken"]
-    assert isinstance(value, DataRecord)
-    descriptor = value.value
-    assert descriptor["kind"] == "File"
-    assert not Path(descriptor["path"]).is_absolute()
-    assert descriptor["basename"] == "spoken.txt"
-    expected = hashlib.sha256((workspace.root / descriptor["path"]).read_bytes()).hexdigest()
-    assert descriptor["sha256"] == expected
-    assert descriptor["size"] == len("hello\n")
+    outputs = json.loads((job.payload / "run" / "cwl-outputs.json").read_text(encoding="utf-8"))
+    old_path = Path(str(outputs["spoken"]["path"])).resolve().relative_to(workspace.root).as_posix()
+    assert isinstance(value, FileRecord)
+    assert value.type == "files"
+    assert re.fullmatch(r"[0-9a-f]{64}", value.id)
+    assert value.url == old_path
+    assert not PurePosixPath(value.url).is_absolute()
+    assert value.name == "spoken.txt"
+    expected = hashlib.sha256((workspace.root / value.url).read_bytes()).hexdigest()
+    assert value.sha256 == expected
+    assert value.size == len("hello\n")
+    assert value.media_type is None
     assert job.payload.exists()
 
 
@@ -377,32 +402,32 @@ def test_cwl_file_output_rejects_outside_and_missing_paths(tmp_path: Path, works
     outputs["spoken"]["path"] = "/etc/passwd"
     output_path.write_text(json.dumps(outputs), encoding="utf-8")
     outside = next(collect(workspace))
-    assert outside.outputs == {} and outside.missing_postprocessor is not None
-    assert "outside" in outside.missing_postprocessor
+    assert outside.outputs == {} and outside.missing_collector is not None
+    assert "outside" in outside.missing_collector
 
     outputs["spoken"]["path"] = "does-not-exist.txt"
     output_path.write_text(json.dumps(outputs), encoding="utf-8")
     missing = next(collect(workspace))
-    assert missing.outputs == {} and missing.missing_postprocessor is not None
-    assert "missing" in missing.missing_postprocessor
+    assert missing.outputs == {} and missing.missing_collector is not None
+    assert "missing" in missing.missing_collector
 
 
-def test_cwl_bare_jobs_collect_with_or_without_allow_job_postprocessor(tmp_path: Path, workspace: Workspace) -> None:
+def test_cwl_bare_jobs_collect_with_or_without_allow_job_collector(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(tmp_path / "allow", "echo.cwl", _ECHO_TOOL, "message", "spoken")
     new_job(workspace, package, inputs={"message": "hello"})
     _drive(workspace)
 
     without = next(collect(workspace))
-    with_flag = next(collect(workspace, allow_job_postprocessor=True))
-    assert without.missing_postprocessor is None
-    assert with_flag.missing_postprocessor is None
+    with_flag = next(collect(workspace, allow_job_collector=True))
+    assert without.missing_collector is None
+    assert with_flag.missing_collector is None
     without_output = without.outputs["spoken"]
     with_output = with_flag.outputs["spoken"]
-    assert isinstance(without_output, DataRecord) and isinstance(with_output, DataRecord)
-    assert without_output.value == with_output.value
+    assert isinstance(without_output, FileRecord) and isinstance(with_output, FileRecord)
+    assert without_output == with_output
 
 
-def test_cwl_custom_package_postprocess_marker_degrades_without_provider(tmp_path: Path, workspace: Workspace) -> None:
+def test_cwl_custom_package_collect_marker_degrades_without_provider(tmp_path: Path, workspace: Workspace) -> None:
     package = _package(
         tmp_path / "custom-hook",
         "echo.cwl",
@@ -411,24 +436,24 @@ def test_cwl_custom_package_postprocess_marker_degrades_without_provider(tmp_pat
         "spoken",
         runner_extra='''
 
-[workflow.postprocess]
-file = "postprocess.py"
+[workflow.collect]
+file = "collect.py"
 ''',
     )
-    (package / "postprocess.py").write_text(
-        "def postprocess(record):\n    return {}\n",
+    (package / "collect.py").write_text(
+        "def collect(record):\n    return {}\n",
         encoding="utf-8",
     )
     job = new_job(workspace, package, inputs={"message": "hello"})
     definition = JobDefinition.from_path(job.payload / "job.json")
-    assert definition.parameters["workflow_postprocess"] == "package"
+    assert definition.parameters["workflow_collect"] == "package"
     assert definition.parameters["workflow_realization"] == "language"
     _drive(workspace)
 
     item = next(collect(workspace))
     assert item.outputs == {}
-    assert item.missing_postprocessor is not None
-    assert "package postprocess hook" in item.missing_postprocessor
+    assert item.missing_collector is not None
+    assert "package collect hook" in item.missing_collector
 
 
 def test_generated_definitions_follow_a_role_when_its_kind_changes() -> None:
@@ -446,9 +471,11 @@ def test_generated_definitions_follow_a_role_when_its_kind_changes() -> None:
     assert hyphenated.definition_id != underscored.definition_id
 
 
-def test_cwl_collect_into_round_trips_a_data_record(tmp_path: Path, workspace: Workspace, capsys) -> None:
+def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: Workspace, capsys) -> None:
     pytest.importorskip("httk.data")
     pytest.importorskip("httk.atomistic")
+    from httk.data.db import Database, SqlStore
+
     package = _package(tmp_path / "collect-into", "echo.cwl", _ECHO_TOOL, "message", "spoken")
     new_job(workspace, package, inputs={"message": "hello"})
     _drive(workspace)
@@ -458,8 +485,36 @@ def test_cwl_collect_into_round_trips_a_data_record(tmp_path: Path, workspace: W
     store_path = tmp_path / "results.sqlite"
     assert command(["collect", workspace_name, "--into", str(store_path)], context) == 0
     report = json.loads(capsys.readouterr().out)
+    assert report["outputs"]["spoken"]["type"] == "files"
     assert report["stored"]["entries"]
     assert report["stored"]["run"]
+    with Database.sqlite(store_path) as database:
+        store = SqlStore(database)
+        entry = store.fetch_entry(FileEntry, report["stored"]["entries"][0])
+    assert isinstance(entry, FileRecord)
+    assert entry.id == report["stored"]["entries"][0]
+
+
+def test_cwl_file_list_output_stays_a_data_record_descriptor_list(tmp_path: Path, workspace: Workspace) -> None:
+    package = _package(
+        tmp_path / "collect-file-list",
+        "flow.cwl",
+        _SCATTER_FILE_OUTPUT_WORKFLOW,
+        "messages",
+        "transcripts",
+        input_entry_type="strings",
+        data_mode="transactional",
+        extra_documents={"echo.cwl": _ECHO_TOOL},
+    )
+    new_job(workspace, package, inputs={"messages": ["one", "two"]})
+    _drive(workspace)
+
+    value = next(collect(workspace)).outputs["transcripts"]
+    assert isinstance(value, DataRecord)
+    assert isinstance(value.value, list) and len(value.value) == 2
+    assert all(set(descriptor) == {"kind", "path", "basename", "sha256", "size"} for descriptor in value.value)
+    assert all(descriptor["kind"] == "File" for descriptor in value.value)
+    assert all(not PurePosixPath(str(descriptor["path"])).is_absolute() for descriptor in value.value)
 
 
 def test_cwl_language_reserved_parameter_and_file_collisions_fail(

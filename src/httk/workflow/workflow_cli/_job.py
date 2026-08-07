@@ -138,8 +138,8 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
     workspace = Workspace(_local_root(arguments, context, action="submit into it"))
     if arguments.workflow_dir is not None:
         workflow_dir = Path(arguments.workflow_dir).expanduser()
-        if not workflow_dir.is_dir() or not (workflow_dir / "workflow.toml").is_file():
-            raise ValueError(f"--workflow-dir must name a directory containing workflow.toml: {workflow_dir}")
+        if not workflow_dir.is_dir() or not (workflow_dir / "httk_workflow.toml").is_file():
+            raise ValueError(f"--workflow-dir must name a directory containing httk_workflow.toml: {workflow_dir}")
         workflow_target: str | os.PathLike[str] = workflow_dir.resolve()
     else:
         workflow_target = arguments.workflow
@@ -392,7 +392,7 @@ def build_job_parser(
     workflow_group.add_argument(
         "--workflow-dir",
         metavar="PATH",
-        help="a workflow package directory containing workflow.toml (path-only; no registry lookup)",
+        help="a workflow package directory containing httk_workflow.toml (path-only; no registry lookup)",
     )
     new.add_argument(
         "--parameter",

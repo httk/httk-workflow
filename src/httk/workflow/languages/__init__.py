@@ -203,9 +203,9 @@ class WorkflowLanguage:
     :param ports: Read the input and output ports of a document.
     :param validate_runner: Validate runner options for a document.
     :param prepare: Prepare a language request for execution.
-    :param postprocess: Convert a completed job record into language outputs.
+    :param collect: Convert a completed job record into language outputs.
     :param requires_document: Require a source document in package manifests.
-    :param has_default_postprocessor: Provide a default postprocessor path.
+    :param has_default_collector: Provide a default collector path.
     :param allows_modes: Permit manifest data and workdir mode overrides.
     """
 
@@ -216,9 +216,9 @@ class WorkflowLanguage:
     ports: Callable[[Path], LanguagePorts]
     validate_runner: Callable[[Mapping[str, object], Path], None]
     prepare: Callable[[LanguageRequest], LanguageScaffold]
-    postprocess: Callable[[JobRecord], Mapping[str, object]]
+    collect: Callable[[JobRecord], Mapping[str, object]]
     requires_document: bool = True
-    has_default_postprocessor: bool = True
+    has_default_collector: bool = True
     allows_modes: bool = True
 
 

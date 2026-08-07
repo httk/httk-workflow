@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from httk.workflow.collecting import JobRecord
 
-__all__ = ["postprocess_vasp_relax", "postprocess_vasp_relax_static", "postprocess_vasp_static"]
+__all__ = ["collect_vasp_relax", "collect_vasp_relax_static", "collect_vasp_static"]
 
 if TYPE_CHECKING:
     import httk.core
@@ -51,7 +51,7 @@ def _load(path: Path, *, raw: bool = False) -> Any:
         return core.load(str(path), raw=raw)
     except ImportError as exc:
         raise ValueError(
-            "VASP postprocessing requires the file readers and structure adapters provided by "
+            "VASP collecting requires the file readers and structure adapters provided by "
             f"httk-io + httk-atomistic: {exc}"
         ) from exc
 
@@ -80,7 +80,7 @@ def _energy(record: JobRecord, path: Path) -> httk.core.DataRecord:
         ) from exc
 
 
-def postprocess_vasp_relax(record: JobRecord) -> Mapping[str, object]:
+def collect_vasp_relax(record: JobRecord) -> Mapping[str, object]:
     """Extract the relaxed structure and final energy from one VASP job.
 
     :param record: Read the collected VASP job record.
@@ -94,7 +94,7 @@ def postprocess_vasp_relax(record: JobRecord) -> Mapping[str, object]:
     }
 
 
-def postprocess_vasp_static(record: JobRecord) -> Mapping[str, object]:
+def collect_vasp_static(record: JobRecord) -> Mapping[str, object]:
     """Extract the final energy from one static VASP job.
 
     :param record: Read the collected VASP job record.
@@ -105,7 +105,7 @@ def postprocess_vasp_static(record: JobRecord) -> Mapping[str, object]:
     return {"total_energy": _energy(record, _data_file(record, f"{prefix}/OUTCAR" if prefix else "OUTCAR"))}
 
 
-def postprocess_vasp_relax_static(record: JobRecord) -> Mapping[str, object]:
+def collect_vasp_relax_static(record: JobRecord) -> Mapping[str, object]:
     """Extract the relaxed structure and final static energy.
 
     :param record: Read the collected VASP job record.

@@ -29,7 +29,7 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
             for role, value in outputs.items()
         },
         "unfulfilled": list(item.unfulfilled),
-        "missing_postprocessor": item.missing_postprocessor,
+        "missing_collector": item.missing_collector,
         "run": {
             "workflow_declaration_uri": item.run.workflow_declaration_uri,
             "edges": _edge_counts(item.run),
@@ -157,7 +157,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             workspace,
             states=arguments.state or DEFAULT_COLLECT_STATES,
             placement=arguments.placement,
-            allow_job_postprocessor=arguments.allow_job_postprocessor,
+            allow_job_collector=arguments.allow_job_collector,
         )
     )
     reports = (
@@ -191,9 +191,9 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
     parser.add_argument("--jsonl", action="store_true", dest="raw", help=argparse.SUPPRESS)
     parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
-        "--allow-job-postprocessor",
+        "--allow-job-collector",
         action="store_true",
-        help="allow postprocessors loaded and verified from a pinned workspace workflow tree",
+        help="allow collectors loaded and verified from a pinned workspace workflow tree",
     )
     parser.add_argument(
         "--into",

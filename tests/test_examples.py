@@ -149,7 +149,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     assert len(records) == 1
     assert records[0]["format"] == "httk-workflow-collected"
     assert records[0]["workflow"] == "httk.vasp.relax"
-    assert records[0]["missing_postprocessor"] is None
+    assert records[0]["missing_collector"] is None
     assert records[0]["job_key"].startswith("silicon--")
 
 

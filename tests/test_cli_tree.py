@@ -136,6 +136,14 @@ def test_the_removed_spellings_are_absent_from_the_help(tmp_path: Path, capsys) 
     assert "--taskset" in v1_run and "--set" not in v1_run
 
 
+def test_postprocess_is_a_single_verb(tmp_path: Path) -> None:
+    parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
+    parsed = parser.parse_args(["postprocess", "WS", "--script", "report"])
+    assert parsed.handler is workflow_cli.handle_postprocess
+    assert parsed.workspace == "WS"
+    assert parsed.script == "report"
+
+
 # ---------------------------------------------------------------------------
 # Errors, at the level they happened at
 # ---------------------------------------------------------------------------

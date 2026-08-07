@@ -312,7 +312,7 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
     )
 
 
-def postprocess(record: "JobRecord") -> Mapping[str, object]:
+def collect(record: "JobRecord") -> Mapping[str, object]:
     """Convert one PWD runner output document into provenance-capable records."""
 
     prefix = _parameter(record, "pwd_data_prefix", "pwd")
@@ -326,12 +326,12 @@ LANGUAGE = WorkflowLanguage(
     steps=("execute",),
     initial_step="execute",
     requires_document=True,
-    has_default_postprocessor=True,
+    has_default_collector=True,
     matches=_matches,
     ports=_ports,
     validate_runner=_validate_runner,
     prepare=_prepare,
-    postprocess=postprocess,
+    collect=collect,
 )
 
 

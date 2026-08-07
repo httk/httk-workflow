@@ -810,11 +810,11 @@ An existing template directory can become a package without first rendering it:
 
 ```text
 silicon-relax/
-├── workflow.toml
+├── httk_workflow.toml
 ├── ht_steps.template
 ├── ht.instantiate.py
 ├── INCAR.template
-└── postprocess.py
+└── collect.py
 ```
 
 Use a manifest that makes the v1 contract explicit:
@@ -835,9 +835,12 @@ entry_type = "structures"
 type = "number"
 default = 520
 
-[workflow.postprocess]
-file = "postprocess.py"
+[workflow.collect]
+file = "collect.py"
 ```
+
+Pre-rename alpha jobs carrying the `workflow_postprocess` parameter lose
+package-hook collection; re-scaffold them.
 
 Submit a one-shot job or a structure campaign:
 
@@ -865,7 +868,7 @@ the script or supply compatible objects when it crosses this boundary.
 ## 16. Harvest old result trees
 
 Use `finished_tasks` to inspect a tree and `collect_finished_tree` to run its
-package postprocessor against every finished task:
+package collector against every finished task:
 
 ```python
 from httk.workflow.compat.v1 import collect_finished_tree, finished_tasks

@@ -6,14 +6,18 @@ Collecting is the read-only counterpart of running work. The low-level
 `job_records()` iterator reads each stopped job into a `JobRecord`, preserving
 where the files are, what produced them, and what happened on the way. The
 framework-level `collect()` iterator dispatches each record through its
-registered workflow postprocessor and yields a `CollectedJob` with role-keyed
+registered workflow collector and yields a `CollectedJob` with role-keyed
 outputs, provenance, products, and any unfulfilled roles.
+
+When a collected output role is a file-valued single result, its run edge points
+to a standard `files` entry (`type = "files"`); file lists remain values within
+their role record.
 
 The job-embedded declaration governs the Run (immutable facts per job). ProductLinks
 come from the live registered provider's manifest and therefore apply today's
 curation; otherwise, for the job-pinned fallback, they come from that job's
 own verified pinned manifest and preserve its historical curation,
-not today's. Postprocessing is the workflow-owned substep of collecting. If no
+not today's. The workflow collect hook is the workflow-owned substep of collecting. If no
 provider or pinned manifest is reachable, no products are emitted.
 
 `JobRecord` is the layering boundary of *httk₂*. *httk-workflow* has no
@@ -160,11 +164,11 @@ With `--raw`, each line is exactly `JobRecord.as_mapping()`, and
 survives being written to a file, shipped, and read back by the process that
 stores it.
 
-## Workflow postprocessing
+## Workflow collect hooks
 
-`collect()` is the workflow-owned postprocessing layer. It resolves the record's
+`collect()` is the workflow-owned collection layer. It resolves the record's
 workflow id through `workflow_provider()`, calls that provider's callable or
-lazy `module:function` postprocessor, validates role names against declared
+lazy `module:function` collector, validates role names against declared
 `outputs` in the job's embedded workflow declaration, and assembles the
 `Run` and `ProductLink` values. Product curation is read from the live
 registered provider's manifest, or from the job's own verified pinned manifest
@@ -172,29 +176,29 @@ when the fallback is enabled; the embedded declaration supplies only the
 immutable Run facts. Old jobs without that declaration fall back to
 the currently registered provider declaration, so their role interpretation is
 necessarily live rather than historical. A workflow
-without a provider or postprocessor is represented as a degraded `CollectedJob`
-with `missing_postprocessor` set. With `--allow-job-postprocessor`, collecting
+without a provider or collector is represented as a degraded `CollectedJob`
+with `missing_collector` set. With `--allow-job-collector`, collecting
 can inspect the job-pinned package tree, validate its own manifest and digest,
-and load that tree's postprocess hook; refusals degrade only that job. See
+and load that tree's collect hook; refusals degrade only that job. See
 {doc}`workflow_packages` for the trust tiers and package hook contract.
 
 ### Language fallback and degradation
 
 For a language job, provider dispatch is followed by the job's own
 `workflow_language` parameter. A provider-less CWL or PWD job then uses the
-language default postprocessor: `cwl-outputs.json` or `pwd-outputs.json` is read
+language default collector: `cwl-outputs.json` or `pwd-outputs.json` is read
 from the workdir or transactional data tree, ports are mapped to declared
 roles, and values become `DataRecord` objects. CWL `File` values are accepted
 only when their paths remain inside the workspace, workdir, or data tree; the
 result records a file descriptor and sha256.
 
-A package with a custom hook records `workflow_postprocess = "package"`.
+A package with a custom hook records `workflow_collect = "package"`.
 Provider-less collection of that job degrades with a registration hint; it
 does not silently run the language default. httk-v1 has no default at all and
-degrades with a message to declare `[workflow.postprocess]`. The
-`allow_job_postprocessor` pinned-tree fallback is attempted only after this
+degrades with a message to declare `[workflow.collect]`. The
+`allow_job_collector` pinned-tree fallback is attempted only after this
 language fallback, and only with a matching digest and manifest. Any
-postprocessor failure degrades that job and does not stop the sweep.
+collector failure degrades that job and does not stop the sweep.
 
 For the distinction between declared entry-typed inputs and opaque implementation
 parameters, see {doc}`workflow_packages` and {doc}`declarations`.

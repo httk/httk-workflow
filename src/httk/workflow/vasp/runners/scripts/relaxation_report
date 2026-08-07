@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Write a small report for a published VASP relaxation."""
+
+import json
+import os
+import re
+from pathlib import Path
+
+_ENERGY = re.compile(r"energy\s*\(\s*sigma\s*[-=]>\s*0\s*\)\s*=\s*([-+0-9.eEdD]+)", re.IGNORECASE)
+
+
+def _energy(path: Path) -> float | None:
+    try:
+        matches = _ENERGY.findall(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return None
+    if not matches:
+        return None
+    try:
+        return float(matches[-1].replace("D", "E").replace("d", "e"))
+    except ValueError:
+        return None
+
+
+def main() -> None:
+    data_root = Path(os.environ.get("HTTK_WORKFLOW_DATA_DIR") or os.environ.get("HTTK_WORKFLOW_WORKDIR", "."))
+    job_dir = os.environ.get("HTTK_WORKFLOW_JOB_DIR")
+    outcars = sorted(data_root.rglob("OUTCAR")) if data_root.is_dir() else []
+    structures = (
+        sorted(
+            path.relative_to(data_root).as_posix() for name in ("CONTCAR", "POSCAR") for path in data_root.rglob(name)
+        )
+        if data_root.is_dir()
+        else []
+    )
+    preferred = [path for path in outcars if "static" in path.parts]
+    energy_file = (preferred or outcars)[-1] if (preferred or outcars) else None
+    report = {
+        "job_dir": job_dir,
+        "data_dir": str(data_root),
+        "final_energy": None if energy_file is None else _energy(energy_file),
+        "energy_file": None if energy_file is None else energy_file.relative_to(data_root).as_posix(),
+        "structure_files": structures,
+    }
+    Path("relaxation_report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    energy = report["final_energy"] if report["final_energy"] is not None else "unavailable"
+    found = ", ".join(structures) if structures else "none found"
+    Path("relaxation_report.txt").write_text(
+        f"job dir: {job_dir or 'not provided'}\nfinal energy: {energy}\nstructure files: {found}\n",
+        encoding="utf-8",
+    )
+
+
+if __name__ == "__main__":
+    main()

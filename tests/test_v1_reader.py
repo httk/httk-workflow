@@ -30,17 +30,17 @@ def _task(root: Path, name: str, dates: tuple[str, ...], *, code: str | None = "
 
 def _package(root: Path) -> Path:
     root.mkdir()
-    (root / "workflow.toml").write_text(
+    (root / "httk_workflow.toml").write_text(
         '[workflow]\nid = "tests.v1.finished"\ndeclaration_uri = "urn:finished"\n'
         '[workflow.runner]\nlanguage = "httk-v1"\n'
-        '[workflow.postprocess]\nfile = "postprocess.py"\n'
+        '[workflow.collect]\nfile = "collect.py"\n'
         '[workflow.outputs.result]\nentry_type = "_httk_records"\n',
         encoding="utf-8",
     )
-    (root / "postprocess.py").write_text(
+    (root / "collect.py").write_text(
         "from httk.core import DataRecord\n"
         "from httk.workflow.compat.v1 import run_directory, task_file\n"
-        "def postprocess(record):\n"
+        "def collect(record):\n"
         "    path = task_file(run_directory(record), 'result.txt')\n"
         "    return {'result': DataRecord.from_value('urn:result', 'result', path.read_text())}\n",
         encoding="utf-8",
@@ -105,7 +105,7 @@ def test_collect_finished_tree_package_extract_and_degradation(tmp_path: Path) -
 
     collected = list(collect_finished_tree(root, workflow_dir=package))
     assert len(collected) == 2
-    good = next(item for item in collected if item.missing_postprocessor is None)
+    good = next(item for item in collected if item.missing_collector is None)
     assert cast(Any, good.outputs["result"]).value == "2021-06-07_08.09.10"
     assert isinstance(good.run.immutable_id, str)
     assert good.run.immutable_id.startswith("httk-v1:")
@@ -114,7 +114,7 @@ def test_collect_finished_tree_package_extract_and_degradation(tmp_path: Path) -
     assert good.run.last_modified == datetime(2021, 6, 7, 8, 9, 10, tzinfo=UTC)
     assert good.run.workflow_declaration_uri == "urn:finished"
     assert [edge.label for edge in good.run.outputs] == ["result"]
-    assert next(item for item in collected if item.missing_postprocessor is not None)
+    assert next(item for item in collected if item.missing_collector is not None)
 
     direct = list(
         collect_finished_tree(

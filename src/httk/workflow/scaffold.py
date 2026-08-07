@@ -142,11 +142,12 @@ class WorkflowProvider:
     :param inputs: Map input names to payload destinations or hook handling.
     :param instantiate: Indicate that the workflow has an instantiate hook.
     :param declarations: Declare workflow declaration documents.
-    :param postprocessor: Identify the optional result postprocessor.
+    :param collector: Identify the optional result collector.
     :param directory: Locate a directory-sourced workflow package.
     :param entry: Name the directory package's runner entry.
     :param instantiate_file: Name the directory package's instantiate hook.
-    :param postprocess_file: Name the directory package's postprocessor.
+    :param collect_file: Name the directory package's collector.
+    :param postprocess_scripts: Map curated postprocess script names to package members and descriptions.
     :param parameters: Declare the workflow's parameter metadata.
     :param outputs: Declare the workflow's output metadata.
     :param declaration_uri: Identify the source declaration URI.
@@ -168,11 +169,12 @@ class WorkflowProvider:
     inputs: Mapping[str, str | None] = field(default_factory=dict)
     instantiate: bool = False
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
-    postprocessor: Callable[[JobRecord], Mapping[str, object]] | str | None = None
+    collector: Callable[[JobRecord], Mapping[str, object]] | str | None = None
     directory: Path | None = None
     entry: str = "run"
     instantiate_file: str | None = None
-    postprocess_file: str | None = None
+    collect_file: str | None = None
+    postprocess_scripts: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
@@ -198,7 +200,7 @@ class WorkflowProvider:
             if packaged and (
                 self.entry != "run"
                 or self.instantiate_file is not None
-                or self.postprocess_file is not None
+                or self.collect_file is not None
                 or self.declaration_file is not None
             ):
                 raise ValueError("directory-only fields are not allowed on a packaged workflow provider")
@@ -215,6 +217,7 @@ class WorkflowProvider:
         object.__setattr__(self, "runner_options", MappingProxyType(dict(self.runner_options)))
         object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
+        object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
         object.__setattr__(self, "_input_metadata", MappingProxyType(dict(self._input_metadata)))
 
 
@@ -312,16 +315,18 @@ class ResolvedWorkflow:
     :param data_mode: Preserve the workflow data mode.
     :param workdir_mode: Preserve the workflow workdir mode.
     :param packaged: Preserve the packaged runner file name when applicable.
+    :param runner_package: Preserve the package containing packaged members.
     :param registration_id: Preserve the registration id when applicable.
     :param summary: Describe the resolved workflow.
     :param inputs: Map input names to payload destinations or hook handling.
     :param instantiate: Indicate that the workflow has an instantiate hook.
     :param declarations: Preserve workflow declaration documents.
-    :param postprocessor: Preserve the optional result postprocessor.
+    :param collector: Preserve the optional result collector.
     :param directory: Locate a directory-sourced workflow package.
     :param entry: Name the directory package's runner entry.
     :param instantiate_file: Name the directory package's instantiate hook.
-    :param postprocess_file: Name the directory package's postprocessor.
+    :param collect_file: Name the directory package's collector.
+    :param postprocess_scripts: Preserve curated postprocess script metadata.
     :param parameters: Preserve the workflow's parameter metadata.
     :param outputs: Preserve the workflow's output metadata.
     :param declaration_uri: Identify the source declaration URI.
@@ -340,16 +345,18 @@ class ResolvedWorkflow:
     data_mode: DataMode = "none"
     workdir_mode: WorkdirMode = "persistent"
     packaged: str | None = None
+    runner_package: str | None = None
     registration_id: str | None = None
     summary: str = ""
     inputs: Mapping[str, str | None] = field(default_factory=dict)
     instantiate: bool = False
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
-    postprocessor: Callable[[JobRecord], Mapping[str, object]] | str | None = None
+    collector: Callable[[JobRecord], Mapping[str, object]] | str | None = None
     directory: Path | None = None
     entry: str = "run"
     instantiate_file: str | None = None
-    postprocess_file: str | None = None
+    collect_file: str | None = None
+    postprocess_scripts: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
@@ -370,11 +377,12 @@ class ResolvedWorkflow:
             if self.packaged is not None and (
                 self.entry != "run"
                 or self.instantiate_file is not None
-                or self.postprocess_file is not None
+                or self.collect_file is not None
                 or self.declaration_file is not None
             ):
                 raise ValueError("directory-only fields are not allowed on a packaged resolved workflow")
         object.__setattr__(self, "runner_options", MappingProxyType(dict(self.runner_options)))
+        object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
 
     @property
     def store_name(self) -> str:
@@ -652,6 +660,7 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
     return ResolvedWorkflow(
         source=source,
         workflow_id=provider.workflow_id,
+        runner_package=provider.runner_package,
         language=provider.language,
         document=provider.document,
         runner_options=provider.runner_options,
@@ -671,11 +680,12 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
         inputs=provider.inputs,
         instantiate=provider.instantiate,
         declarations=provider.declarations,
-        postprocessor=provider.postprocessor,
+        collector=provider.collector,
         directory=provider.directory,
         entry=provider.entry,
         instantiate_file=provider.instantiate_file,
-        postprocess_file=provider.postprocess_file,
+        collect_file=provider.collect_file,
+        postprocess_scripts=provider.postprocess_scripts,
         parameters=provider.parameters,
         outputs=provider.outputs,
         declaration_uri=provider.declaration_uri,
@@ -711,7 +721,7 @@ def resolve_workflow(
     resolved = registered_workflow(text)
     if resolved is None:
         path = Path(text).expanduser()
-        if path.is_dir() and (path / "workflow.toml").is_file():
+        if path.is_dir() and (path / "httk_workflow.toml").is_file():
             from .packages import load_workflow_package
 
             provider = load_workflow_package(path, register=False)
@@ -735,11 +745,12 @@ def resolve_workflow(
                 inputs=provider.inputs,
                 instantiate=provider.instantiate,
                 declarations=provider.declarations,
-                postprocessor=provider.postprocessor,
+                collector=provider.collector,
                 directory=provider.directory or path.resolve(),
                 entry=provider.entry,
                 instantiate_file=provider.instantiate_file,
-                postprocess_file=provider.postprocess_file,
+                collect_file=provider.collect_file,
+                postprocess_scripts=provider.postprocess_scripts,
                 parameters=provider.parameters,
                 outputs=provider.outputs,
                 declaration_uri=provider.declaration_uri,
@@ -1072,9 +1083,9 @@ def _prepare(
         parameters = dict(scaffolded.parameters)
         parameters["workflow_realization"] = "language"
         reserved_parameters = (*scaffolded.reserved_parameters, "workflow_realization")
-        if resolved.postprocess_file is not None:
-            parameters["workflow_postprocess"] = "package"
-            reserved_parameters = (*reserved_parameters, "workflow_postprocess")
+        if resolved.collect_file is not None:
+            parameters["workflow_collect"] = "package"
+            reserved_parameters = (*reserved_parameters, "workflow_collect")
         return _Prepared(
             workflow=resolved,
             runner_source=runner_source,
@@ -1153,9 +1164,8 @@ def _language_request(resolved: ResolvedWorkflow) -> LanguageRequest:
         from .packages import MANIFEST_NAME
 
         members = [MANIFEST_NAME]
-        members.extend(
-            member for member in (resolved.postprocess_file, resolved.declaration_file) if member is not None
-        )
+        members.extend(member for member in (resolved.collect_file, resolved.declaration_file) if member is not None)
+        members.extend(str(script["file"]) for script in resolved.postprocess_scripts.values())
         if not (resolved.directory / MANIFEST_NAME).is_file():
             members = []
         excluded = tuple(dict.fromkeys(members))

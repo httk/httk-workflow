@@ -96,6 +96,7 @@ def _workflow_description(target: str) -> dict[str, object]:
         "inputs": _input_document(workflow),
         "parameters": {name: dict(metadata) for name, metadata in workflow.parameters.items()},
         "outputs": _output_document(workflow),
+        "postprocess": {name: dict(script) for name, script in workflow.postprocess_scripts.items()},
         "declaration": _declaration_document(workflow),
         "hooks": {
             "instantiate": {
@@ -103,9 +104,9 @@ def _workflow_description(target: str) -> dict[str, object]:
                 "file": workflow.instantiate_file,
                 "packaged": workflow.packaged is not None,
             },
-            "postprocess": {
-                "present": workflow.postprocess_file is not None or workflow.postprocessor is not None,
-                "file": workflow.postprocess_file,
+            "collect": {
+                "present": workflow.collect_file is not None or workflow.collector is not None,
+                "file": workflow.collect_file,
                 "packaged": workflow.packaged is not None,
             },
         },
@@ -150,12 +151,23 @@ def _render_text(description: Mapping[str, object]) -> str:
             assert isinstance(value, Mapping)
             details = ", ".join(f"{field}={_value(item)}" for field, item in value.items())
             lines.append(f"  {name}: {details}")
+    lines.append("postprocess scripts:")
+    scripts = description["postprocess"]
+    assert isinstance(scripts, Mapping)
+    if not scripts:
+        lines.append("  -")
+    for name, value in scripts.items():
+        assert isinstance(value, Mapping)
+        details = f"{name}: {value['file']}"
+        if value["description"]:
+            details += f" — {value['description']}"
+        lines.append(f"  {details}")
     declaration = description["declaration"]
     assert isinstance(declaration, Mapping)
     lines.append(f"declaration: {declaration['origin']} ({declaration['id'] or 'no $id'})")
     hooks = description["hooks"]
     assert isinstance(hooks, Mapping)
-    for name in ("instantiate", "postprocess"):
+    for name in ("instantiate", "collect"):
         hook = hooks[name]
         assert isinstance(hook, Mapping)
         location = f" ({hook['file']})" if hook["file"] else ""

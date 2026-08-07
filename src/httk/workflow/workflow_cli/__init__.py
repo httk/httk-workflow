@@ -89,6 +89,7 @@ from ._manager import (
     build_run_parser,
     handle_manager_run,
 )
+from ._postprocess import build_postprocess_parser, handle_postprocess
 from ._project import (
     _render_project,
     add_project_doctor_arguments,
@@ -172,6 +173,7 @@ def build_parser(program: str, context: CLIContext) -> argparse.ArgumentParser:
     build_job_parser(groups)
     build_describe_parser(groups)
     build_collect_parser(groups)
+    build_postprocess_parser(groups)
     build_run_parser(groups)
     build_manager_parser(groups)
     build_v1_parser(groups)

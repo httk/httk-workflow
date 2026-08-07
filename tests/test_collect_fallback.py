@@ -1,4 +1,4 @@
-"""Job-pinned postprocessor fallback coverage."""
+"""Job-pinned collector fallback coverage."""
 
 import json
 from collections.abc import Mapping
@@ -27,13 +27,13 @@ _DATA_MANIFEST = _MANIFEST.replace("tests.package", "tests.fallback.package").re
 _DATA_POSTPROCESS = """from httk.core import DataRecord
 
 
-def postprocess(record):
+def collect(record):
     return {"relaxed_structure": DataRecord.from_value("https://example.test/energy", "total", 1.5)}
 """
 _CHAIN_POSTPROCESS = """from httk.core import DataRecord
 
 
-def postprocess(record):
+def collect(record):
     return {
         "relaxed_structure": DataRecord.from_value("https://example.test/structure", "relaxed", 1.5),
         "total_energy": DataRecord.from_value("https://example.test/energy", "energy", -2.5),
@@ -44,19 +44,19 @@ _FAKE_POSTPROCESS = """class FakeEntry:
     id = "fake-1"
 
 
-def postprocess(record):
+def collect(record):
     return {"relaxed_structure": FakeEntry()}
 """
 _POSCAR = "silicon\n1.0\n"
 
 
 def _finished(
-    tmp_path: Path, *, manifest: str = _DATA_MANIFEST, postprocess: str = _DATA_POSTPROCESS
+    tmp_path: Path, *, manifest: str = _DATA_MANIFEST, collect: str = _DATA_POSTPROCESS
 ) -> tuple[Workspace, Path]:
     package = _package(tmp_path / "package", manifest)
     (package / "run").write_text(_SUCCESS_RUNNER, encoding="utf-8")
     (package / "run").chmod(0o755)
-    (package / "postprocess.py").write_text(postprocess, encoding="utf-8")
+    (package / "collect.py").write_text(collect, encoding="utf-8")
     structure = tmp_path / "POSCAR"
     structure.write_text(_POSCAR, encoding="utf-8")
     workspace = Workspace.initialize(tmp_path / "workspace")
@@ -74,16 +74,16 @@ def _runner_path(workspace: Workspace, record: JobRecord) -> Path:
     return workspace.runner_store_path(str(runner["path"]))
 
 
-def test_collect_uses_a_pinned_tree_postprocessor_when_allowed(tmp_path: Path) -> None:
+def test_collect_uses_a_pinned_tree_collector_when_allowed(tmp_path: Path) -> None:
     workspace, package = _finished(tmp_path)
     record = next(job_records(workspace))
 
     without = next(collect(workspace))
-    assert without.outputs == {} and without.missing_postprocessor is not None
-    assert "allow_job_postprocessor=True" in without.missing_postprocessor
+    assert without.outputs == {} and without.missing_collector is not None
+    assert "allow_job_collector=True" in without.missing_collector
 
-    with_fallback = next(collect(workspace, allow_job_postprocessor=True))
-    assert with_fallback.missing_postprocessor is None
+    with_fallback = next(collect(workspace, allow_job_collector=True))
+    assert with_fallback.missing_collector is None
     assert set(with_fallback.outputs) == {"relaxed_structure"}
     assert getattr(with_fallback.outputs["relaxed_structure"], "id", None)
     runner = record.job["runner"]
@@ -104,12 +104,12 @@ product_of = "relaxed_structure"
 role = "total_energy"
 '''
     )
-    workspace, _ = _finished(tmp_path, manifest=manifest, postprocess=_CHAIN_POSTPROCESS)
+    workspace, _ = _finished(tmp_path, manifest=manifest, collect=_CHAIN_POSTPROCESS)
     scaffold_module._WORKFLOW_PROVIDERS.pop("tests.fallback.package", None)
 
-    item = next(collect(workspace, allow_job_postprocessor=True))
+    item = next(collect(workspace, allow_job_collector=True))
 
-    assert item.missing_postprocessor is None
+    assert item.missing_collector is None
     assert len(item.products) == 1
     product = item.products[0]
     assert product.source_type == "_httk_records"
@@ -124,13 +124,13 @@ def test_collect_degrades_a_tampered_pinned_tree_loudly(tmp_path: Path) -> None:
     record = next(job_records(workspace))
     runner = _runner_path(workspace, record)
     runner.chmod(0o755)
-    (runner / "postprocess.py").chmod(0o644)
-    (runner / "postprocess.py").write_text(_DATA_POSTPROCESS + "\n# tampered\n", encoding="utf-8")
+    (runner / "collect.py").chmod(0o644)
+    (runner / "collect.py").write_text(_DATA_POSTPROCESS + "\n# tampered\n", encoding="utf-8")
 
-    item = next(collect(workspace, allow_job_postprocessor=True))
+    item = next(collect(workspace, allow_job_collector=True))
     assert item.outputs == {}
-    assert item.missing_postprocessor is not None
-    assert "pinned runner tree was modified" in item.missing_postprocessor
+    assert item.missing_collector is not None
+    assert "pinned runner tree was modified" in item.missing_collector
 
 
 def test_collect_degrades_a_pinned_tree_with_the_wrong_manifest_id(tmp_path: Path) -> None:
@@ -138,18 +138,20 @@ def test_collect_degrades_a_pinned_tree_with_the_wrong_manifest_id(tmp_path: Pat
     record = next(job_records(workspace))
     runner = _runner_path(workspace, record)
     runner.chmod(0o755)
-    (runner / "workflow.toml").chmod(0o644)
+    (runner / "httk_workflow.toml").chmod(0o644)
     manifest = (
-        (runner / "workflow.toml").read_text(encoding="utf-8").replace("tests.fallback.package", "tests.other.package")
+        (runner / "httk_workflow.toml")
+        .read_text(encoding="utf-8")
+        .replace("tests.fallback.package", "tests.other.package")
     )
-    (runner / "workflow.toml").write_text(manifest, encoding="utf-8")
+    (runner / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
 
-    item = next(collect(workspace, allow_job_postprocessor=True))
+    item = next(collect(workspace, allow_job_collector=True))
     assert item.outputs == {}
-    assert item.missing_postprocessor is not None
+    assert item.missing_collector is not None
     # Digest verification deliberately precedes manifest parsing: a modified
     # manifest is tampering, not a trusted wrong-id diagnostic.
-    assert "pinned runner tree was modified" in item.missing_postprocessor
+    assert "pinned runner tree was modified" in item.missing_collector
 
 
 def test_collect_refuses_a_file_runner_for_the_job_fallback(tmp_path: Path) -> None:
@@ -171,9 +173,9 @@ if __name__ == "__main__":
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=120.0)
 
-    item = next(collect(workspace, allow_job_postprocessor=True))
-    assert item.missing_postprocessor is not None
-    assert "requires a directory runner tree" in item.missing_postprocessor
+    item = next(collect(workspace, allow_job_collector=True))
+    assert item.missing_collector is not None
+    assert "requires a directory runner tree" in item.missing_collector
 
 
 def test_collect_degrades_an_unknown_language_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,11 +195,11 @@ def test_collect_degrades_an_unknown_language_fallback(tmp_path: Path, monkeypat
 
     item = next(collecting_module.collect(workspace))
     assert item.outputs == {}
-    assert item.missing_postprocessor is not None
-    assert "missing" in item.missing_postprocessor
+    assert item.missing_collector is not None
+    assert "missing" in item.missing_collector
 
 
-@pytest.mark.parametrize("parameter", ("workflow_language", "workflow_postprocess"))
+@pytest.mark.parametrize("parameter", ("workflow_language", "workflow_collect"))
 def test_native_parameters_do_not_trigger_language_fallback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parameter: str
 ) -> None:
@@ -212,11 +214,11 @@ def test_native_parameters_do_not_trigger_language_fallback(
 
     without = next(collecting_module.collect(workspace))
     assert without.outputs == {}
-    assert without.missing_postprocessor is not None
-    assert "no provider" in without.missing_postprocessor
+    assert without.missing_collector is not None
+    assert "no provider" in without.missing_collector
 
-    with_fallback = next(collecting_module.collect(workspace, allow_job_postprocessor=True))
-    assert with_fallback.missing_postprocessor is None
+    with_fallback = next(collecting_module.collect(workspace, allow_job_collector=True))
+    assert with_fallback.missing_collector is None
     assert set(with_fallback.outputs) == {"relaxed_structure"}
 
 
@@ -232,7 +234,7 @@ def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_pa
     store_path = tmp_path / "results.sqlite"
     assert (
         command(
-            ["collect", workspace_name, "--allow-job-postprocessor", "--into", str(store_path)],
+            ["collect", workspace_name, "--allow-job-collector", "--into", str(store_path)],
             context,
         )
         == 0
@@ -253,12 +255,12 @@ def test_collect_into_reports_an_unknown_entry_type_per_job(tmp_path: Path, caps
     pytest.importorskip("httk.atomistic")
 
     manifest = _DATA_MANIFEST.replace('entry_type = "records"', 'entry_type = "fake_entries"')
-    workspace, _ = _finished(tmp_path, manifest=manifest, postprocess=_FAKE_POSTPROCESS)
+    workspace, _ = _finished(tmp_path, manifest=manifest, collect=_FAKE_POSTPROCESS)
     context = CLIContext("httk", tmp_path)
     workspace_name = register_ws(context, workspace.root, "collect-unknown")
     assert (
         command(
-            ["collect", workspace_name, "--allow-job-postprocessor", "--into", str(tmp_path / "unknown.sqlite")],
+            ["collect", workspace_name, "--allow-job-collector", "--into", str(tmp_path / "unknown.sqlite")],
             context,
         )
         == 0

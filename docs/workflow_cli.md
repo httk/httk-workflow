@@ -51,6 +51,7 @@ httk workflow runner     publish | describe
 httk workflow job        new | submit | request | list | show | log | why | debug
 httk workflow describe   TARGET [--json]
 httk workflow collect
+httk workflow postprocess
 httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-managers
 httk workflow v1         prepare | submit | run | collect
@@ -150,8 +151,27 @@ Language documents use `job new --workflow DOCUMENT`; see
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--raw`, `--allow-job-postprocessor`, `--into PATH` |
+| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--raw`, `--allow-job-collector`, `--into PATH` |
 | `v1 collect ROOT` | harvest a pre-existing v1 result tree | `--workflow-dir PKG`, `--into PATH`, `--json` |
+
+### postprocess — run a curated script
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| postprocess WORKSPACE | run one declared script for each selected collected job | --script NAME (required), --workflow-dir PKG, --state, --placement, --timeout, --json |
+
+~~~console
+httk workflow postprocess WS --script relaxation-report
+httk workflow postprocess WS --script report --workflow-dir ./my-workflow --json
+~~~
+
+With --json, each result is one JSON object in the
+httk-workflow-postprocess wire format, version 1, with workspace_id, job_id,
+job_key, script, and either returncode plus output_dir, or an error. Without
+--json, each result is tab-separated as
+job_key<TAB>script<TAB>returncode<TAB>output_dir; errors use ERROR in the
+return-code field. The command exits 0 only when every selected script ran
+and returned 0; any resolution error or nonzero script return exits 1.
 
 ### `describe` — inspect a workflow without publishing it
 

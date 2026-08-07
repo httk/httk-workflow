@@ -29,8 +29,8 @@ steps = ["start"]
 [workflow.instantiate]
 file = "instantiate.py"
 
-[workflow.postprocess]
-file = "postprocess.py"
+[workflow.collect]
+file = "collect.py"
 
 [workflow.inputs.structure]
 destination = "POSCAR"
@@ -88,15 +88,15 @@ _LANGUAGE_PWD = {
 
 def _package(root: Path, manifest: str = _MANIFEST) -> Path:
     root.mkdir(parents=True, exist_ok=True)
-    (root / "workflow.toml").write_text(manifest, encoding="utf-8")
+    (root / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
     (root / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (root / "run").chmod(0o755)
     (root / "instantiate.py").write_text(
         "def instantiate(context):\n    (context.payload / 'instantiated.txt').write_text(__file__)\n",
         encoding="utf-8",
     )
-    (root / "postprocess.py").write_text(
-        "def postprocess(record):\n    return {}\n",
+    (root / "collect.py").write_text(
+        "def collect(record):\n    return {}\n",
         encoding="utf-8",
     )
     return root
@@ -120,7 +120,7 @@ entry_type = "strings"
 [workflow.outputs.{output_name}]
 entry_type = "strings"
 '''
-    (root / "workflow.toml").write_text(content, encoding="utf-8")
+    (root / "httk_workflow.toml").write_text(content, encoding="utf-8")
     if language == "cwl":
         (root / "echo.cwl").write_text(_LANGUAGE_CWL, encoding="utf-8")
     else:
@@ -137,8 +137,8 @@ def test_manifest_parses_and_generates_the_declared_roles(tmp_path: Path) -> Non
     assert provider.initial_step == "start"
     assert provider.inputs == {"structure": "POSCAR"}
     assert provider.instantiate_file == "instantiate.py"
-    assert provider.postprocess_file == "postprocess.py"
-    assert callable(provider.postprocessor) and cast(Any, provider.postprocessor)(object()) == {}
+    assert provider.collect_file == "collect.py"
+    assert callable(provider.collector) and cast(Any, provider.collector)(object()) == {}
     assert workflow_declaration_from_manifest(provider) == {
         "$id": "https://example.test/workflows/package",
         "description": "A package for tests.",
@@ -169,7 +169,7 @@ def test_cwl_language_manifest_uses_registry_defaults(tmp_path: Path) -> None:
     assert provider.document == "echo.cwl"
     assert provider.steps == ("start", "enter", "advance", "collect")
     assert provider.instantiate is True and provider.inputs == {"message": None}
-    assert provider.postprocessor == "httk.workflow.languages.cwl:postprocess"
+    assert provider.collector == "httk.workflow.languages.cwl:collect"
     assert workflow_declaration_from_manifest(provider)["inputs"] == [{"name": "message", "entry_type": "strings"}]
 
 
@@ -187,12 +187,93 @@ def test_pwd_language_manifest_keeps_runner_options(tmp_path: Path) -> None:
     assert provider.inputs == {"message": None}
 
 
-def test_language_postprocess_file_overrides_default(tmp_path: Path) -> None:
-    package = _language_package(tmp_path / "cwl", manifest_extra='\n[workflow.postprocess]\nfile = "postprocess.py"')
-    (package / "postprocess.py").write_text("def postprocess(record):\n    return {}\n", encoding="utf-8")
+def test_language_collect_file_overrides_default(tmp_path: Path) -> None:
+    package = _language_package(tmp_path / "cwl", manifest_extra='\n[workflow.collect]\nfile = "collect.py"')
+    (package / "collect.py").write_text("def collect(record):\n    return {}\n", encoding="utf-8")
     provider = parse_workflow_manifest(package)
-    assert provider.postprocess_file == "postprocess.py"
-    assert callable(provider.postprocessor)
+    assert provider.collect_file == "collect.py"
+    assert callable(provider.collector)
+
+
+def test_manifest_parses_curated_postprocess_scripts_in_order(tmp_path: Path) -> None:
+    manifest = (
+        _MANIFEST
+        + """
+
+[workflow.postprocess.relaxation-report]
+file = "scripts/relaxation_report"
+description = "write a relaxation report"
+
+[workflow.postprocess.dos-plot]
+file = "scripts/plot_dos.sh"
+"""
+    )
+    package = _package(tmp_path / "package", manifest)
+    scripts = package / "scripts"
+    scripts.mkdir()
+    (scripts / "relaxation_report").write_text("#!/bin/sh\n", encoding="utf-8")
+    (scripts / "plot_dos.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    provider = parse_workflow_manifest(package)
+
+    assert list(provider.postprocess_scripts) == ["relaxation-report", "dos-plot"]
+    assert provider.postprocess_scripts == {
+        "relaxation-report": {"file": "scripts/relaxation_report", "description": "write a relaxation report"},
+        "dos-plot": {"file": "scripts/plot_dos.sh", "description": None},
+    }
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("\n[workflow.postprocess]\nfile = \"postprocess.py\"\n", r"\[workflow\.collect\]"),
+        ("\npostprocess = \"postprocess.py\"\n", r"\[workflow\.collect\]"),
+    ],
+)
+def test_manifest_teaches_the_postprocess_shape(tmp_path: Path, extra: str, message: str) -> None:
+    manifest = _MANIFEST + extra
+    if extra.startswith("\npostprocess ="):
+        manifest = _MANIFEST.replace("\n[workflow.runner]", extra + "\n[workflow.runner]")
+    with pytest.raises(ValueError, match=message):
+        parse_workflow_manifest(_package(tmp_path / "package", manifest))
+
+
+@pytest.mark.parametrize(
+    ("file", "message"),
+    [("missing.sh", "does not exist"), ("scripts/report.txt", "unknown key")],
+)
+def test_manifest_validates_postprocess_members_and_keys(tmp_path: Path, file: str, message: str) -> None:
+    manifest = _MANIFEST + f'\n[workflow.postprocess.report]\nfile = "{file}"\n'
+    if message == "unknown key":
+        manifest += "unknown = true\n"
+    package = _package(tmp_path / "package", manifest)
+    if file.startswith("scripts/"):
+        (package / "scripts").mkdir()
+        (package / file.removeprefix("scripts/")).write_text("#!/bin/sh\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        parse_workflow_manifest(package)
+
+
+def test_manifest_rejects_bad_postprocess_names_and_empty_descriptions(tmp_path: Path) -> None:
+    manifest = (
+        _MANIFEST
+        + """
+
+[workflow.postprocess.""]
+file = "report.sh"
+description = ""
+"""
+    )
+    package = _package(tmp_path / "package", manifest)
+    (package / "report.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[workflow\.postprocess\] name"):
+        parse_workflow_manifest(package)
+
+    manifest = _MANIFEST + '\n[workflow.postprocess.report]\nfile = "report.sh"\ndescription = ""\n'
+    package = _package(tmp_path / "empty-description", manifest)
+    (package / "report.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"\[workflow\.postprocess\.report\]\.description"):
+        parse_workflow_manifest(package)
 
 
 @pytest.mark.parametrize(
@@ -210,18 +291,20 @@ def test_language_runner_fields_are_forbidden(tmp_path: Path, extra: str, messag
 
 def test_language_manifest_forbids_instantiate_and_destinations(tmp_path: Path) -> None:
     package = _language_package(tmp_path / "instantiate")
-    manifest = (package / "workflow.toml").read_text(encoding="utf-8")
-    (package / "workflow.toml").write_text(manifest + '\n[workflow.instantiate]\nfile = "run.py"\n', encoding="utf-8")
+    manifest = (package / "httk_workflow.toml").read_text(encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(
+        manifest + '\n[workflow.instantiate]\nfile = "run.py"\n', encoding="utf-8"
+    )
     (package / "run.py").write_text("def instantiate(context): pass\n", encoding="utf-8")
     with pytest.raises(ValueError, match=r"\[workflow\.instantiate\].*implied"):
         parse_workflow_manifest(package)
     package = _language_package(tmp_path / "destination")
     manifest = (
-        (package / "workflow.toml")
+        (package / "httk_workflow.toml")
         .read_text(encoding="utf-8")
         .replace('entry_type = "strings"', 'entry_type = "strings"\ndestination = "message"')
     )
-    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
     with pytest.raises(ValueError, match=r"\[workflow\.inputs\.message\]\.destination.*implied"):
         parse_workflow_manifest(package)
 
@@ -236,7 +319,7 @@ def test_language_manifest_forbids_instantiate_and_destinations(tmp_path: Path) 
 )
 def test_language_manifest_reports_missing_or_invalid_runner_data(tmp_path: Path, change: str) -> None:
     package = _language_package(tmp_path / "package")
-    manifest = (package / "workflow.toml").read_text(encoding="utf-8")
+    manifest = (package / "httk_workflow.toml").read_text(encoding="utf-8")
     if change.startswith("document"):
         manifest = manifest.replace('document = "echo.cwl"', change)
         message = "document.*does not exist"
@@ -246,7 +329,7 @@ def test_language_manifest_reports_missing_or_invalid_runner_data(tmp_path: Path
     else:
         manifest = manifest.replace('document = "echo.cwl"', 'document = "echo.cwl"\n' + change)
         message = "unknown runner option"
-    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
     with pytest.raises(ValueError, match=message):
         parse_workflow_manifest(package)
 
@@ -254,20 +337,20 @@ def test_language_manifest_reports_missing_or_invalid_runner_data(tmp_path: Path
 def test_language_ports_default_and_validate_names(tmp_path: Path) -> None:
     package = _language_package(tmp_path / "ports", manifest_extra='')
     manifest = (
-        (package / "workflow.toml")
+        (package / "httk_workflow.toml")
         .read_text(encoding="utf-8")
         .replace('[workflow.outputs.spoken]', '[workflow.outputs.spoken]\nport = "missing"')
     )
-    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
     with pytest.raises(ValueError, match=r"\[workflow\.outputs\.spoken\].*known ports: spoken"):
         parse_workflow_manifest(package)
     package = _language_package(tmp_path / "default")
     manifest = (
-        (package / "workflow.toml")
+        (package / "httk_workflow.toml")
         .read_text(encoding="utf-8")
         .replace("[workflow.inputs.message]", '[workflow.inputs.message]\nport = "message"')
     )
-    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
     provider = parse_workflow_manifest(package)
     assert provider._input_metadata["message"]["port"] == "message"
 
@@ -275,14 +358,14 @@ def test_language_ports_default_and_validate_names(tmp_path: Path) -> None:
 def test_language_inputs_reject_duplicate_effective_ports(tmp_path: Path) -> None:
     package = _language_package(tmp_path / "inputs")
     manifest = (
-        (package / "workflow.toml").read_text(encoding="utf-8")
+        (package / "httk_workflow.toml").read_text(encoding="utf-8")
         + """
 [workflow.inputs.message_alias]
 entry_type = "strings"
 port = "message"
 """
     )
-    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
     with pytest.raises(
         ValueError, match=r"\[workflow\.inputs\.message_alias\].*\[workflow\.inputs\.message\].*message"
     ):
@@ -292,14 +375,14 @@ port = "message"
 def test_language_outputs_reject_duplicate_effective_ports(tmp_path: Path) -> None:
     package = _language_package(tmp_path / "outputs")
     manifest = (
-        (package / "workflow.toml").read_text(encoding="utf-8")
+        (package / "httk_workflow.toml").read_text(encoding="utf-8")
         + """
 [workflow.outputs.spoken_alias]
 entry_type = "strings"
 port = "spoken"
 """
     )
-    (package / "workflow.toml").write_text(manifest, encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
     with pytest.raises(ValueError, match=r"\[workflow\.outputs\.spoken_alias\].*\[workflow\.outputs\.spoken\].*spoken"):
         parse_workflow_manifest(package)
 
@@ -532,7 +615,7 @@ def test_directory_workflow_scaffolds_from_the_published_tree_and_pins_declarati
 
     stored = workspace.runner_store_path(str(job.runner["path"]))
     stored.chmod(0o755)
-    (stored / "postprocess.py").chmod(0o644)
-    (stored / "postprocess.py").write_text("def postprocess(record):\n    return {'changed': True}\n", encoding="utf-8")
+    (stored / "collect.py").chmod(0o644)
+    (stored / "collect.py").write_text("def collect(record):\n    return {'changed': True}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="published workflow tree"):
         new_job(workspace, package, inputs={"structure": structure})

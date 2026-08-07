@@ -37,7 +37,7 @@ def _program(root: Path) -> str | None:
 def matches(path: Path) -> bool:
     """Return whether *path* is a bare v1 task directory."""
 
-    return path.is_dir() and not (path / "workflow.toml").is_file() and _program(path) is not None
+    return path.is_dir() and not (path / "httk_workflow.toml").is_file() and _program(path) is not None
 
 
 def ports(path: Path) -> LanguagePorts:
@@ -175,11 +175,11 @@ def prepare(request: LanguageRequest) -> LanguageScaffold:
     )
 
 
-def postprocess(record: JobRecord) -> Mapping[str, object]:
+def collect(record: JobRecord) -> Mapping[str, object]:
     """Reject use as a default collector for v1 packages."""
 
     del record
-    raise ValueError("an httk-v1 workflow package declares [workflow.postprocess]")
+    raise ValueError("an httk-v1 workflow package declares [workflow.collect]")
 
 
 LANGUAGE = WorkflowLanguage(
@@ -187,11 +187,11 @@ LANGUAGE = WorkflowLanguage(
     steps=("start",),
     initial_step="start",
     requires_document=False,
-    has_default_postprocessor=False,
+    has_default_collector=False,
     allows_modes=False,
     matches=matches,
     ports=ports,
     validate_runner=validate_runner,
     prepare=prepare,
-    postprocess=postprocess,
+    collect=collect,
 )

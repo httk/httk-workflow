@@ -2,7 +2,7 @@
 
 from httk.workflow.scaffold import WorkflowProvider, register_workflow
 
-from .postprocess import postprocess_vasp_relax, postprocess_vasp_relax_static, postprocess_vasp_static
+from .collect import collect_vasp_relax, collect_vasp_relax_static, collect_vasp_static
 
 RUNNER_PACKAGE = "httk.workflow.vasp.runners"
 _RELAX_ID = "https://schemas.httk.org/defs/v0.1/workflows/vasp-relax"
@@ -145,6 +145,12 @@ _RELAX_STATIC_OUTPUTS = {
         "product_of": "relaxed_structure",
     },
 }
+_RELAX_POSTPROCESS_SCRIPTS = {
+    "relaxation-report": {
+        "file": "scripts/relaxation_report",
+        "description": "write a relaxation summary (text + JSON) into the job's postprocess directory",
+    }
+}
 
 PROVIDERS = (
     WorkflowProvider(
@@ -159,7 +165,8 @@ PROVIDERS = (
         outputs=_RELAX_OUTPUTS,
         summary="relax one structure with the reviewed remedy ladder",
         declarations={"workflow": _RELAX_DECLARATION},
-        postprocessor=postprocess_vasp_relax,
+        collector=collect_vasp_relax,
+        postprocess_scripts=_RELAX_POSTPROCESS_SCRIPTS,
     ),
     WorkflowProvider(
         workflow_id="httk.vasp.relax-bash",
@@ -173,7 +180,8 @@ PROVIDERS = (
         outputs=_RELAX_OUTPUTS,
         summary="the same relaxation, authored in Bash",
         declarations={"workflow": _RELAX_DECLARATION},
-        postprocessor=postprocess_vasp_relax,
+        collector=collect_vasp_relax,
+        postprocess_scripts=_RELAX_POSTPROCESS_SCRIPTS,
     ),
     WorkflowProvider(
         workflow_id="httk.vasp.static",
@@ -187,7 +195,7 @@ PROVIDERS = (
         outputs=_STATIC_OUTPUTS,
         summary="one single-point calculation of one structure",
         declarations={"workflow": _STATIC_DECLARATION},
-        postprocessor=postprocess_vasp_static,
+        collector=collect_vasp_static,
     ),
     WorkflowProvider(
         workflow_id="httk.vasp.relax-static",
@@ -201,7 +209,8 @@ PROVIDERS = (
         outputs=_RELAX_STATIC_OUTPUTS,
         summary="relax, promote the relaxed structure, then run it statically",
         declarations={"workflow": _RELAX_STATIC_DECLARATION},
-        postprocessor=postprocess_vasp_relax_static,
+        collector=collect_vasp_relax_static,
+        postprocess_scripts=_RELAX_POSTPROCESS_SCRIPTS,
     ),
 )
 

@@ -3,7 +3,7 @@
 *For workflow authors who want one portable directory to describe, instantiate,
 run, and collect a workflow.*
 
-A workflow package is a directory whose `workflow.toml` is the strictly
+A workflow package is a directory whose `httk_workflow.toml` is the strictly
 *httk*-owned glue around a runner. It is not an embedded OPTIMADE declaration
 language: the manifest can generate the workflow declaration, or point to an
 externally authored declaration that it validates and carries.
@@ -14,15 +14,15 @@ The smallest useful package has an executable `run` entry and a manifest:
 
 ```text
 my-workflow/
-├── workflow.toml
+├── httk_workflow.toml
 ├── run
 ├── instantiate.py       # optional
-├── postprocess.py        # optional
+├── collect.py            # optional
 └── support/              # any regular support files
 ```
 
 `run` receives the normal runner environment and publishes the outcome protocol
-used by the manager. `instantiate.py` and `postprocess.py` are optional Python
+used by the manager. `instantiate.py` and `collect.py` are optional Python
 hooks. A package may contain other regular files needed by its entry or hooks;
 manifest members must be relative regular files inside the package, and hook
 members must end in `.py`. Symlinks, special files, absolute names, and `..`
@@ -60,14 +60,14 @@ the language supplies built-in steps. `[workflow.instantiate]` is forbidden
 because language inputs are hook-consumed. `destination` is forbidden on
 CWL/PWD and on httk-v1 inputs; an omitted v1 destination is an
 `ht.instantiate.py` global. Language workflows may declare
-`[workflow.postprocess]` to override the default. CWL and PWD have defaults;
+`[workflow.collect]` to override the default. CWL and PWD have defaults;
 httk-v1 has none and normally declares a hook.
 
 Language manifests cannot set `data_mode` or `workdir_mode` for httk-v1: they
 are forced to `none` and persistent `ht.run.current`. Unknown language keys are
 errors.
 
-## `workflow.toml` reference
+## `httk_workflow.toml` reference
 
 This is the complete manifest vocabulary validated by
 `parse_workflow_manifest`. Unknown keys at any level are errors. TOML syntax,
@@ -79,7 +79,7 @@ before a provider is returned.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `id` | yes | Nonempty workflow id with no whitespace. This is the registry key, the `job.json` workflow, and the postprocess dispatch key. |
+| `id` | yes | Nonempty workflow id with no whitespace. This is the registry key, the `job.json` workflow, and the collect dispatch key. |
 | `alias` | no | Alternate name matching `[a-z0-9._-]+`. |
 | `description` | no | Human-readable summary and generated declaration description. |
 | `declaration_uri` | no | String `$id` for the generated or external workflow declaration. |
@@ -130,15 +130,59 @@ document and may occur only once. `port` defaults to the manifest name.
 
 Each hook table has exactly one key, `file`, naming a relative `.py` regular
 file member. Presence of `[workflow.instantiate]` declares an instantiate hook;
-presence of `[workflow.postprocess]` declares a postprocess hook.
+presence of `[workflow.collect]` declares a collect hook.
 
 ```toml
 [workflow.instantiate]
 file = "instantiate.py"
 
-[workflow.postprocess]
-file = "postprocess.py"
+[workflow.collect]
+file = "collect.py"
 ```
+
+### [workflow.postprocess.<NAME>]: curated scripts
+
+Curated postprocess scripts are provider-owned executables that run after a job
+has been collected. A package can declare more than one:
+
+~~~toml
+[workflow.postprocess.relaxation-report]
+file = "scripts/relaxation_report"
+description = "write a text and JSON relaxation summary"
+
+[workflow.postprocess.archive]
+file = "scripts/archive_results.sh"
+description = "copy selected results to an archive"
+~~~
+
+| Key | Required | Meaning |
+| --- | --- | --- |
+| <NAME> | required | The name selected by httk workflow postprocess --script. |
+| file | required | A relative executable regular file inside the registered package. |
+| description | optional | Human-readable text shown by workflow describe. |
+
+The old flat [workflow.postprocess] table with a file key is rejected with
+a teaching error: the collect hook belongs in [workflow.collect], while
+[workflow.postprocess.<NAME>] tables declare curated scripts.
+
+Scripts run only from the registered provider package or from the package
+explicitly supplied with --workflow-dir; they are never loaded from job
+payloads or pinned workflow-store trees. (Loading curated scripts from those
+trees is future work.) The process receives
+HTTK_WORKFLOW_WORKSPACE_DIR, HTTK_WORKFLOW_JOB_DIR, and
+HTTK_WORKFLOW_WORKDIR; when transactional data exists it also receives
+HTTK_WORKFLOW_DATA_DIR, otherwise scripts should fall back to the workdir.
+The current working directory is always workdir/postprocess/<NAME>/, where
+reports should be written.
+
+The collect hook is a provider output adapter that returns role-keyed data
+for the collect verb; the postprocess scripts: section in describe lists
+these separate, explicitly selected follow-up executables.
+
+The `url` of a workflow-produced `files` entry is deliberately a
+workspace-relative POSIX locator, resolved against a root at read time and
+containment-checked, not a dereferenceable URL; it is relocation-stable by
+design and follows the established local-file locator convention.
 
 ### `[workflow.inputs.<NAME>]`
 
@@ -258,18 +302,18 @@ def instantiate(context):
     ...
 
 
-def postprocess(record):
+def collect(record):
     # return {"output_role": entry_object, ...}
     ...
 ```
 
 An instantiate hook runs during scaffolding and may write the payload or update
-parameters. A postprocess hook runs during `collect`; it returns role-keyed outputs.
+parameters. A collect hook runs during `collect`; it returns role-keyed outputs.
 The framework validates those roles, derives unfulfilled roles, overlays output
 edges onto the `Run`, and emits `ProductLink` values from manifest/provider
 `product_of`. A direct
-package path's instantiate hook and the job-pinned postprocess fallback execute
-from the published, digest-pinned tree; registered-directory postprocessors
+package path's instantiate hook and the job-pinned collect fallback execute
+from the published, digest-pinned tree; registered-directory collectors
 instead execute current source bytes by explicit registration consent.
 
 The job-embedded declaration governs the Run (immutable facts per job). ProductLinks
@@ -282,7 +326,7 @@ emitted.
 There are THREE TRUST TIERS:
 
 1. **installed/registered** — a provider registered by a package or domain
-   carries its runner and postprocess adapter. Installed runner references are
+   carries its runner and collect adapter. Installed runner references are
    trusted by the registration and distribution boundary.
 2. **explicit-path consent** — a package or runner supplied by an explicit
    filesystem path is parsed and used because the caller selected that path.
@@ -290,9 +334,9 @@ There are THREE TRUST TIERS:
    bytes at collection time: this is tier two and is not digest-gated. A direct
    package path is published and its scaffold instantiate hook executes from
    the resulting pinned tree.
-3. **allow-job-postprocessor off-by-default digest-verified** — `collect` only
-   loads a postprocess hook from a job-pinned workspace package tree when
-   `allow_job_postprocessor=True` (or the CLI flag is supplied). The tree's own
+3. **allow-job-collector off-by-default digest-verified** — `collect` only
+   loads a collect hook from a job-pinned workspace package tree when
+   `allow_job_collector=True` (or the CLI flag is supplied). The tree's own
    manifest must match the job workflow id, and its full tree digest must match
    `job.json`; refusal or tampering degrades that job instead of stopping the
    sweep.
@@ -327,7 +371,7 @@ httk workflow collect WS --into results.sqlite
 `httk workflow describe TARGET [--json]` reports a registered id or alias,
 runner file, or package directory without publishing it. The default collect
 verb emits one `CollectedJob` summary per line; `--raw` emits `JobRecord`
-records. `--allow-job-postprocessor` enables the third trust tier above.
+records. `--allow-job-collector` enables the third trust tier above.
 
 Python users who need persistence call `store.save(...)` themselves. `--into`
 is the CLI shortcut: it opens a file-backed SQLite `SqlStore`, saves output
@@ -342,5 +386,5 @@ succeed. Inspect each JSONL line's `storage_error` before retrying or
 reconciling the destination store.
 
 See {doc}`declarations` for declaration carriage, {doc}`provenance` for the
-tree-pinned provenance handoff, {doc}`collecting` for postprocessing and
+tree-pinned provenance handoff, {doc}`collecting` for collect-hook and
 fallback behavior, and {doc}`workflow_cli` for the complete command reference.

@@ -569,7 +569,7 @@ def test_collect_assembles_overlay_edges_and_products(
                 "product_of": "relaxed_structure",
             },
         },
-        postprocessor=lambda _record: {"relaxed_structure": Structure(), "total_energy": Energy()},
+        collector=lambda _record: {"relaxed_structure": Structure(), "total_energy": Energy()},
     )
     monkeypatch.setitem(scaffold_module._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
     monkeypatch.setattr(collecting_module, "job_records", lambda *_args, **_kwargs: iter((record,)))
@@ -606,7 +606,7 @@ def test_collect_assembles_overlay_edges_and_products(
         runner_file="runner.py",
         initial_step="run",
         declarations={"workflow": {"outputs": [{"name": "different", "entry_type": "records"}]}},
-        postprocessor=lambda _record: {"relaxed_structure": Structure(), "total_energy": Energy()},
+        collector=lambda _record: {"relaxed_structure": Structure(), "total_energy": Energy()},
     )
     monkeypatch.setitem(scaffold_module._WORKFLOW_PROVIDERS, changed_provider.workflow_id, changed_provider)
     recollected = next(collecting_module.collect(workspace))
@@ -616,7 +616,7 @@ def test_collect_assembles_overlay_edges_and_products(
 
     incomplete_provider = replace(
         provider,
-        postprocessor=lambda _record: {"total_energy": Energy()},
+        collector=lambda _record: {"total_energy": Energy()},
     )
     monkeypatch.setitem(scaffold_module._WORKFLOW_PROVIDERS, incomplete_provider.workflow_id, incomplete_provider)
     incomplete = next(collecting_module.collect(workspace))

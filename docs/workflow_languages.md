@@ -21,11 +21,16 @@ does not need the parser extra.
 
 A package selects a language in `[workflow.runner]`. The language supplies its
 steps, instantiate behavior, runner, workdir contract, and default
-postprocessor. A package may override the default with `[workflow.postprocess]`.
+collector. A package may override the default with `[workflow.collect]`.
 Language inputs are consumed by that realization, so `destination` is forbidden
 and `[workflow.instantiate]` is implied and forbidden. The optional `port` key
 maps a package input or output name to a document port; omitted ports use the
 package name. Ports are checked against the document and duplicates are errors.
+
+Language registrations expose a `collector` field and a
+`has_default_collector` flag. For languages with defaults, package resolution
+uses `httk.workflow.languages.<mod>:collect`; CWL and PWD set the flag true,
+while httk-v1 sets it false.
 
 ### CWL package
 
@@ -48,8 +53,12 @@ entry_type = "strings"
 
 The CWL document is parsed and normalized during preparation. Its input values
 are staged according to the CWL schema; output ports become declared output
-roles. CWL `File` outputs are converted during collection to file-descriptor
-`DataRecord` values, with workspace-confined paths, size, and sha256 evidence.
+roles. A single CWL `File` output is served and stored as a standard `files`
+entry, with a workspace-relative POSIX `url`, file `name`, size, and flat
+`sha256`; media types are left unset unless a collector knows them explicitly.
+Lists of files deliberately remain descriptor values inside a
+`DataRecord`, preserving list shape for callers; the asymmetry keeps one file
+addressable as an entry while a list remains one role value.
 
 ### PWD package
 
@@ -100,8 +109,8 @@ attempts = 10
 [workflow.inputs.structure]
 entry_type = "structures"
 
-[workflow.postprocess]
-file = "postprocess.py"
+[workflow.collect]
+file = "collect.py"
 ```
 
 The source directory must contain executable `ht_steps` or `ht_run`, including
@@ -139,28 +148,29 @@ runner store.
 
 ## Collection
 
-The collector chooses a registered provider's postprocessor first. A language
+The collector chooses a registered provider's collector first. A language
 job without a provider falls back through its job `workflow_language` parameter
 to the language default:
 
 | Language | Default output document | Default behavior |
 | --- | --- | --- |
-| CWL | `cwl-outputs.json` | map ports to declared roles and create `DataRecord` values |
+| CWL | `cwl-outputs.json` | map ports to declared roles; single `File` values become `files` entries and lists remain `DataRecord` values |
 | PWD | `pwd-outputs.json` | map ports to declared roles and create `DataRecord` values |
-| httk-v1 | none | degrade unless the package declares `[workflow.postprocess]` |
+| httk-v1 | none | degrade unless the package declares `[workflow.collect]` |
 
 The registered provider's custom hook is authoritative. Such a package records
-`workflow_postprocess = "package"` in the job; a provider-less collection
+`workflow_collect = "package"` in the job; a provider-less collection
 degrades with a registration hint rather than silently running a language
-default. The `allow_job_postprocessor` pinned-tree fallback is attempted only
+default. The `allow_job_collector` pinned-tree fallback is attempted only
 after the language fallback and only when its digest and manifest match the
-job. A failed language or hook postprocessor degrades that job and does not
+job. A failed language or hook collector degrades that job and does not
 stop collection of its siblings.
 
-The default CWL/PWD postprocessors read the output JSON from the workdir or
+The default CWL/PWD collectors read the output JSON from the workdir or
 transactional data tree, map document ports to manifest roles, and return
-`DataRecord` values. CWL `File` outputs additionally require a readable path
-inside the workspace, workdir, or data tree and record sha256 evidence.
+`DataRecord` values. CWL single `File` outputs additionally require a readable
+path inside the workspace, workdir, or data tree and become standard `files`
+entries; file lists retain their descriptor values and record sha256 evidence.
 
 ## CWL supported subset
 
