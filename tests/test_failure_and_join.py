@@ -11,6 +11,7 @@ from httk.workflow import (
     Workspace,
 )
 from httk.workflow.protocol import Failure, validate_failure
+from httk.workflow.runtime_builders import ChildReference
 
 _SRC = str(Path(__file__).parents[1] / "src")
 
@@ -133,6 +134,92 @@ def branch(a):
 
 @run.step
 def aggregate(a):
+    a.succeed()
+
+
+raise SystemExit(run.main())
+"""
+
+_JOIN_EXTENSION_RUNNER = """#!/usr/bin/env python3
+import json
+import shutil
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, "@SRC@")
+
+from httk.workflow import Runner
+from httk.workflow.protocol import JobSpec, prepare_job_payload
+
+run = Runner("tests.join_extensions")
+
+
+def record(a):
+    path = a.workdir / "events.json"
+    events = json.loads(path.read_text()) if path.exists() else []
+    events.append({"step": a.step, "children": [{"label": child.label, "kind": child.kind} for child in a.children]})
+    path.write_text(json.dumps(events))
+
+
+def spawn_child(a, label, delay, fail=False):
+    payload = a.workdir / ("child-" + label)
+    files = payload / "files"
+    files.mkdir(parents=True)
+    runner = files / "runner"
+    shutil.copy2(a.payload / "files" / "runner", runner)
+    runner.chmod(0o755)
+    prepare_job_payload(
+        payload,
+        JobSpec(
+            name="Child",
+            workflow="tests.join_extensions",
+            runner_path="files/runner",
+            initial_step="child",
+            parameters={"delay": delay, "fail": fail},
+        ),
+    )
+    a.spawn(payload, label=label)
+
+
+@run.step
+def branch(a):
+    if "@MODE@" == "failed":
+        spawn_child(a, "a-child", 0.05, fail=True)
+        spawn_child(a, "b-child", 0.4, fail=True)
+    elif "@MODE@" == "rejoin":
+        spawn_child(a, "a-child", 0.4)
+        spawn_child(a, "b-child", 0.05)
+    else:
+        spawn_child(a, "a-child", 0.02)
+    a.gather("wake", when="all_terminal" if "@MODE@" == "terminal_rejoin" else "any_terminal")
+
+
+@run.step
+def child(a):
+    time.sleep(float(a.parameter("delay")))
+    if a.parameter("fail", False):
+        a.fail("child.broken", "the child declared a failure")
+    else:
+        a.succeed()
+
+
+@run.step
+def wake(a):
+    record(a)
+    if "@MODE@" == "rejoin" and not (a.workdir / "rejoined").exists():
+        (a.workdir / "rejoined").touch()
+        spawn_child(a, "c-child", 0.05)
+        a.gather("wake", when="any_terminal", rejoin=("a-child",))
+    elif "@MODE@" == "terminal_rejoin":
+        a.gather("done", when="any_terminal", rejoin=("a-child",))
+    else:
+        a.succeed()
+
+
+@run.step
+def done(a):
+    record(a)
     a.succeed()
 
 
@@ -280,9 +367,123 @@ def test_gather_refuses_a_join_over_no_children(tmp_path: Path) -> None:
     # A join is resolvable only for children the publishing bundle registers, so
     # a gather without a spawn on this attempt can never become work.
     attempt = Attempt.initialize(environment)
-    with pytest.raises(ValueError, match="none were spawned"):
+    with pytest.raises(ValueError, match="neither was provided"):
         attempt.gather("aggregate")
     assert not (control / "outcome.ready").exists()
+
+
+def test_any_terminal_wakes_for_a_failed_child(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    runner = _JOIN_EXTENSION_RUNNER.replace("@SRC@", _SRC).replace("@MODE@", "failed")
+    payload, job_id = _payload(tmp_path / "source", runner, initial_step="branch")
+    workspace.submit(payload, "project/any-terminal-failed")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=60.0)
+    parent = workspace.find_marker_by_id(job_id)
+    assert parent is not None and parent.kind == "succeeded"
+    events = json.loads((workspace.payload_path(parent.placement, parent.job_key) / "run" / "events.json").read_text())
+    kinds = {item["kind"] for item in events[0]["children"]}
+    assert "failed" in kinds
+    assert kinds & {"ready", "running"}
+
+
+def test_gather_rejoins_children_from_an_earlier_activation(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    runner = _JOIN_EXTENSION_RUNNER.replace("@SRC@", _SRC).replace("@MODE@", "rejoin")
+    payload, job_id = _payload(tmp_path / "source", runner, initial_step="branch")
+    workspace.submit(payload, "project/rejoin")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=60.0)
+    parent = workspace.find_marker_by_id(job_id)
+    assert parent is not None and parent.kind == "succeeded"
+    events = json.loads((workspace.payload_path(parent.placement, parent.job_key) / "run" / "events.json").read_text())
+    assert [item["step"] for item in events] == ["wake", "wake"]
+    assert {item["label"] for item in events[1]["children"]} == {"a-child", "c-child"}
+
+
+def test_gather_rejoins_an_already_terminal_child_without_new_children(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    runner = _JOIN_EXTENSION_RUNNER.replace("@SRC@", _SRC).replace("@MODE@", "terminal_rejoin")
+    payload, job_id = _payload(tmp_path / "source", runner, initial_step="branch")
+    workspace.submit(payload, "project/terminal-rejoin")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=60.0)
+    parent = workspace.find_marker_by_id(job_id)
+    assert parent is not None and parent.kind == "succeeded"
+    events = json.loads((workspace.payload_path(parent.placement, parent.job_key) / "run" / "events.json").read_text())
+    assert [item["step"] for item in events] == ["wake", "done"]
+    assert events[1]["children"] == [{"label": "a-child", "kind": "succeeded"}]
+
+
+def _in_process_attempt(tmp_path: Path, *, label: str | None = None) -> Attempt:
+    control = tmp_path / "control"
+    control.mkdir()
+    child_id = str(uuid.uuid4())
+    context = {
+        "format": "httk-workflow-attempt-context",
+        "format_version": 1,
+        "workspace_id": str(uuid.uuid4()),
+        "job_id": str(uuid.uuid4()),
+        "job_key": f"job--{uuid.uuid4()}",
+        "placement": "project/a",
+        "step": "branch",
+        "activation_id": str(uuid.uuid4()),
+        "attempt_id": str(uuid.uuid4()),
+        "data_generation": None,
+        "children": []
+        if label is None
+        else [
+            {
+                "label": label,
+                "job_id": child_id,
+                "job_key": f"child--{child_id}",
+                "kind": "succeeded",
+                "placement": "project/a",
+                "payload_path": f"project/a/child--{child_id}",
+            }
+        ],
+    }
+    (control / "context.json").write_text(json.dumps(context), encoding="utf-8")
+    (tmp_path / "run").mkdir()
+    return Attempt.initialize(
+        {
+            "HTTK_WORKFLOW_CONTEXT": str(control / "context.json"),
+            "HTTK_WORKFLOW_CONTROL_DIR": str(control),
+            "HTTK_WORKFLOW_JOB_DIR": str(tmp_path / "job"),
+            "HTTK_WORKFLOW_WORKDIR": str(tmp_path / "run"),
+            "HTTK_WORKFLOW_WORKSPACE_DIR": str(tmp_path / "workspace"),
+        }
+    )
+
+
+def test_gather_rejoin_unknown_label_raises_in_process(tmp_path: Path) -> None:
+    attempt = _in_process_attempt(tmp_path)
+    with pytest.raises(ValueError, match="missing.*known labels: none"):
+        attempt.gather("aggregate", rejoin=("missing",))
+
+
+def test_gather_rejects_duplicate_rejoin_label_in_process(tmp_path: Path) -> None:
+    attempt = _in_process_attempt(tmp_path, label="old-child")
+    with pytest.raises(ValueError, match="duplicate join child label.*old-child"):
+        attempt.gather("aggregate", rejoin=("old-child", "old-child"))
+
+
+def test_gather_rejects_rejoin_label_used_by_a_new_child_in_process(tmp_path: Path) -> None:
+    attempt = _in_process_attempt(tmp_path, label="old-child")
+    draft = attempt._require_draft()
+    draft._children.append(
+        (
+            ChildReference(
+                attempt.context.workspace_id,
+                str(uuid.uuid4()),
+                f"new-child--{uuid.uuid4()}",
+                "project/a",
+            ),
+            {"label": "old-child"},
+        )
+    )
+    with pytest.raises(ValueError, match="duplicate join child label.*old-child"):
+        attempt.gather("aggregate", rejoin=("old-child",))
 
 
 def test_unresolvable_join_child_fails_instead_of_waiting_forever(tmp_path: Path) -> None:

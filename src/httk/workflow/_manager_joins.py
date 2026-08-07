@@ -34,6 +34,8 @@ def satisfied(condition: str, join: Mapping[str, Any], kinds: Sequence[str]) -> 
         return all(kind in TERMINAL_KINDS for kind in kinds)
     if condition == "any_succeeded":
         return any(kind == "succeeded" for kind in kinds)
+    if condition == "any_terminal":
+        return any(kind in TERMINAL_KINDS for kind in kinds)
     if condition == "at_least":
         return sum(kind == "succeeded" for kind in kinds) >= int(join.get("count", 0))
     raise FormatError(f"unknown join condition: {condition!r}")
@@ -46,6 +48,8 @@ def impossible(condition: str, join: Mapping[str, Any], kinds: Sequence[str]) ->
         return False
     if condition == "any_succeeded":
         return all(kind in TERMINAL_KINDS for kind in kinds) and not any(kind == "succeeded" for kind in kinds)
+    if condition == "any_terminal":
+        return False
     if condition == "at_least":
         count = int(join.get("count", 0))
         successes = sum(kind == "succeeded" for kind in kinds)

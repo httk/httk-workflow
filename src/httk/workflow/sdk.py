@@ -35,7 +35,7 @@ import os
 import shutil
 import sys
 import traceback
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -730,32 +730,73 @@ class Attempt:
         when: JoinCondition = "all_succeeded",
         count: int | None = None,
         on_impossible: str | None = None,
+        rejoin: Iterable[str] = (),
     ) -> Path:
-        """Wait for the children spawned on this attempt, then run *step*.
+        """Wait for this attempt's and optionally earlier children, then run *step*.
 
-        The join names exactly the children :meth:`spawn` registered on this
-        attempt, which is also the bundle that creates them, so the manager can
-        always resolve it. *when* is one of ``all_succeeded``, ``all_terminal``,
-        ``any_succeeded``, or ``at_least`` with *count*. When the condition can no
-        longer be met, the job advances to *on_impossible* if one is named and
-        fails with ``dependency_failure`` otherwise.
+        The join names children :meth:`spawn` registered on this attempt and
+        labels from earlier join activations named by *rejoin*. *when* is one of
+        ``all_succeeded``, ``all_terminal``, ``any_succeeded``, ``any_terminal``,
+        or ``at_least`` with *count*. When the condition can no longer be met,
+        the job advances to *on_impossible* if one is named and fails with
+        ``dependency_failure`` otherwise.
 
         :param step: The step to run when the join condition is met.
         :param when: The child completion condition.
         :param count: The required count when ``when`` is ``at_least``.
         :param on_impossible: The step to run when the condition cannot be met.
+        :param rejoin: Labels of children observed by an earlier join activation.
         :return: The path of the published wait outcome.
-        :raises ValueError: If no children were spawned or a named step is invalid.
+        :raises ValueError: If no children were spawned or rejoined, a rejoined label is unknown, or a named step is invalid.
         """
 
         self._reject_published()
         self._check_step(step, "gather target")
         if on_impossible is not None:
             self._check_step(on_impossible, "on_impossible target")
+        rejoin_children: list[dict[str, object]] = []
+        known_labels = ", ".join(self.children.labels) or "none"
         draft = self._draft
-        if draft is None or not draft.children:
-            raise ValueError("gather joins the children spawned on this attempt, and none were spawned")
-        join = join_mapping(draft.children, when, count, on_impossible)
+        children = () if draft is None else draft.children
+        labels: set[str] = set()
+        identities: set[tuple[str, str]] = set()
+        if draft is not None:
+            for draft_child, entry in draft._children:
+                label = entry.get("label")
+                if label is not None:
+                    label = str(label)
+                    if label in labels:
+                        raise ValueError(f"duplicate join child label: {label}")
+                    labels.add(label)
+                identity = (draft_child.workspace_id, draft_child.job_id)
+                if identity in identities:
+                    raise ValueError(f"duplicate join child identity: {draft_child.job_id}")
+                identities.add(identity)
+        for label in rejoin:
+            observed = self.children.get(label)
+            if observed is None:
+                raise ValueError(f"unknown rejoin child label {label!r}; known labels: {known_labels}")
+            if label in labels:
+                raise ValueError(f"duplicate join child label: {label}")
+            identity = (self.context.workspace_id, observed.job_id)
+            if identity in identities:
+                raise ValueError(f"duplicate join child identity: {observed.job_id}")
+            labels.add(label)
+            identities.add(identity)
+            rejoin_children.append(
+                {
+                    "workspace_id": self.context.workspace_id,
+                    "job_id": observed.job_id,
+                    "job_key": observed.job_key,
+                    "label": label,
+                    "placement_hint": observed.placement.as_posix(),
+                }
+            )
+        if not children and not rejoin_children:
+            raise ValueError(
+                "gather requires children spawned on this attempt or rejoin entries, and neither was provided"
+            )
+        join = join_mapping(children, when, count, on_impossible, rejoin_children)
         return self._publish("wait", next_step=step, join=join)
 
     def succeed(self) -> Path:

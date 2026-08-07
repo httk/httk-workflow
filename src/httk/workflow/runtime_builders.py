@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from .runtime import AttemptContext
 
 type OutcomeAction = Literal["advance", "retry", "wait", "succeed", "fail", "pause"]
-type JoinCondition = Literal["all_succeeded", "all_terminal", "any_succeeded", "at_least"]
+type JoinCondition = Literal["all_succeeded", "all_terminal", "any_succeeded", "any_terminal", "at_least"]
 
 
 def _relative(value: str | os.PathLike[str], name: str) -> PurePosixPath:
@@ -100,6 +100,7 @@ def join_mapping(
     condition: JoinCondition = "all_succeeded",
     count: int | None = None,
     on_impossible_step: str | None = None,
+    additional_children: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """Return the validated ``join`` member of one waiting outcome.
 
@@ -107,19 +108,21 @@ def join_mapping(
     :param condition: Select the condition that decides the join.
     :param count: Set the success threshold for ``at_least``.
     :param on_impossible_step: Name the step to advance to when the join is impossible.
+    :param additional_children: Add already registered child references to the join.
     :return: The validated join mapping.
     :raises ValueError: If the child set or condition arguments are invalid.
     """
 
-    if not children:
+    serialized_children = [child.as_mapping() for child in children] + [dict(child) for child in additional_children]
+    if not serialized_children:
         raise ValueError("a join requires at least one child")
     if condition == "at_least":
-        if count is None or not 1 <= count <= len(children):
+        if count is None or not 1 <= count <= len(serialized_children):
             raise ValueError("an at_least join requires a valid count")
     elif count is not None:
         raise ValueError("join count is valid only for at_least")
     result: dict[str, object] = {
-        "children": [child.as_mapping() for child in children],
+        "children": serialized_children,
         "condition": condition,
     }
     if count is not None:

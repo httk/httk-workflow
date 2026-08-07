@@ -312,9 +312,9 @@ prepare a payload directory and spawn that with `--payload`.
 `httk_workflow_gather STEP` joins exactly the children spawned on this attempt —
 the same bundle that creates them, which is what makes the join resolvable — and
 runs `STEP` when the condition holds. `--when` is `all_succeeded` (the default),
-`all_terminal`, `any_succeeded`, or `at_least` with `--count`. When the condition
-can no longer be met the job advances to `--on-impossible` if one is named, and
-fails with `dependency_failure` otherwise.
+`all_terminal`, `any_succeeded`, `any_terminal`, or `at_least` with `--count`.
+When the condition can no longer be met the job advances to `--on-impossible` if
+one is named, and fails with `dependency_failure` otherwise.
 
 ### Data and workdir changes
 
