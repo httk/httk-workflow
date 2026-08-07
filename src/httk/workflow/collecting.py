@@ -424,7 +424,7 @@ def _job_mapping(job: JobDefinition) -> dict[str, object]:
     """
 
     policy = job.retry_policy
-    return {
+    result: dict[str, object] = {
         "id": job.id,
         "tag": job.tag,
         "job_key": job.job_key,
@@ -453,6 +453,9 @@ def _job_mapping(job: JobDefinition) -> dict[str, object]:
         "parameters": dict(job.parameters),
         "parent": None if job.parent is None else dict(job.parent),
     }
+    if job.environment:
+        result["environment"] = dict(job.environment)
+    return result
 
 
 def _optional_posix(value: object) -> PurePosixPath | None:

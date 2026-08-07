@@ -142,6 +142,10 @@ def campaign(tmp_path_factory: pytest.TempPathFactory) -> tuple[Workspace, dict[
             initial_step="branch",
             maximum_attempts_per_activation=1,
             parameters={"structure": "Si"},
+            environment={
+                "declared": {"timeout": {"type": "integer", "setting": "httk_v1.timeout"}},
+                "overrides": {"timeout": 60},
+            },
         ),
     )
     workspace.submit(root / "parent", "project/campaign")
@@ -247,6 +251,10 @@ def test_a_record_pins_the_job_digest_and_the_runner_that_executed_it(
     assert parent.job["workflow"] == "tests.collect"
     assert parent.job["initial_step"] == "branch"
     assert parent.job["parameters"] == {"structure": "Si"}
+    assert parent.job["environment"] == {
+        "declared": {"timeout": {"type": "integer", "setting": "httk_v1.timeout"}},
+        "overrides": {"timeout": 60},
+    }
     assert parent.job["runner"] == {
         "executor": "path",
         "source": "workspace",

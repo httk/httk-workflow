@@ -134,6 +134,9 @@ def _parser() -> argparse.ArgumentParser:
     setting = commands.add_parser("setting")
     setting.add_argument("name")
     setting.add_argument("--default")
+    environment = commands.add_parser("environment")
+    environment.add_argument("name")
+    environment.add_argument("--default")
     state_get = commands.add_parser("state-get")
     state_get.add_argument("name")
     state_set = commands.add_parser("state-set")
@@ -201,12 +204,14 @@ def _parser() -> argparse.ArgumentParser:
     gather.add_argument("--when", choices=_JOIN_CONDITIONS, default="all_succeeded")
     gather.add_argument("--count", type=int)
     gather.add_argument("--on-impossible")
+    gather.add_argument("--priority", type=int)
     commands.add_parser("succeed")
     fail = commands.add_parser("fail")
     fail.add_argument("code")
     fail.add_argument("message")
     fail.add_argument("--details")
     fail.add_argument("--retryable", action="store_true")
+    fail.add_argument("--priority", type=int)
     retry = commands.add_parser("retry")
     retry.add_argument("reason")
     pause = commands.add_parser("pause")
@@ -767,6 +772,15 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
             _print(_value(arguments.default))
         else:
             _print(value)
+    elif command == "environment":
+        attempt = _attempt()
+        try:
+            if arguments.default is None:
+                _print(attempt.environment(arguments.name))
+            else:
+                _print(attempt.environment(arguments.name, _value(arguments.default)))
+        except KeyError as exc:
+            raise _Absent(str(exc.args[0])) from exc
     elif command == "state-get":
         state = _attempt().state.read()
         if arguments.name not in state:
@@ -816,6 +830,7 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
             when=cast(JoinCondition, arguments.when),
             count=arguments.count,
             on_impossible=arguments.on_impossible,
+            priority=arguments.priority,
         )
     elif command == "succeed":
         _publishing().succeed()
@@ -826,6 +841,7 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
             arguments.message,
             details=details,
             retryable=arguments.retryable,
+            priority=arguments.priority,
         )
     elif command == "retry":
         _publishing().retry(arguments.reason)

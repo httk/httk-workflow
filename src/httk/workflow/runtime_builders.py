@@ -34,6 +34,7 @@ from .models import (
     JobDefinition,
     normalize_placement,
     validate_declarations,
+    validate_environment,
     validate_failure,
     validate_label,
     validate_parameters,
@@ -163,6 +164,7 @@ class JobSpec:
     :param retry_on: Name manager-detected failure codes eligible for retry.
     :param resources: Supply resource requirements.
     :param parameters: Supply opaque job parameters.
+    :param environment: Supply declared environment metadata and overrides.
     :param declarations: Supply workflow declarations.
     :param compatibility: Supply an optional compatibility profile.
     """
@@ -189,6 +191,7 @@ class JobSpec:
     retry_on: tuple[str, ...] = ()
     resources: Mapping[str, object] = field(default_factory=dict)
     parameters: Mapping[str, object] = field(default_factory=dict)
+    environment: Mapping[str, object] = field(default_factory=dict)
     #: Workflow declarations carried verbatim into ``job.json``, keyed by name.
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     compatibility: Mapping[str, object] | None = None
@@ -242,6 +245,8 @@ class JobSpec:
         }
         if self.parameters:
             result["parameters"] = validate_parameters(self.parameters)
+        if self.environment:
+            result["environment"] = validate_environment(self.environment)
         if self.declarations:
             result["declarations"] = validate_declarations(self.declarations)
         if self.compatibility is not None:

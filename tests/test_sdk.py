@@ -245,6 +245,8 @@ def _attempt(
     *,
     step: str,
     parameters: dict[str, object] | None = None,
+    environment: dict[str, object] | None = None,
+    settings: dict[str, object] | None = None,
     data_generation: int | None = None,
     children: list[dict[str, object]] | None = None,
     runner: Runner | None = None,
@@ -265,6 +267,7 @@ def _attempt(
             initial_step=step,
             data_mode="none" if data_generation is None else "transactional",
             parameters=parameters or {},
+            environment=environment or {},
         ),
     )
     control = payload / f".httk-attempt.{uuid.uuid4()}"
@@ -285,11 +288,12 @@ def _attempt(
                 "attempt_id": str(uuid.uuid4()),
                 "data_generation": data_generation,
                 "children": children or [],
+                "settings": settings or {},
             }
         ),
         encoding="utf-8",
     )
-    environment = {
+    attempt_environment = {
         "HTTK_WORKFLOW_CONTEXT": str(control / "context.json"),
         "HTTK_WORKFLOW_CONTROL_DIR": str(control),
         "HTTK_WORKFLOW_JOB_DIR": str(payload),
@@ -298,12 +302,167 @@ def _attempt(
         "HTTK_WORKFLOW_STEP": step,
     }
     if data_generation is not None:
-        environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
-    return Attempt.initialize(environment, runner=runner)
+        attempt_environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
+    return Attempt.initialize(attempt_environment, runner=runner)
+
+
+def test_attempt_environment_resolves_declared_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    attempt = _attempt(
+        tmp_path,
+        step="start",
+        environment={
+            "declared": {
+                "command": {"type": "string", "setting": "tool.command", "default": "manifest"},
+                "retries": {"type": "integer"},
+                "path": {"type": "string", "setting": "tool.path"},
+            },
+            "overrides": {"command": "override"},
+        },
+        settings={"tool.command": "workspace", "retries": 2},
+    )
+    monkeypatch.setenv("HTTK_TOOL_COMMAND", "env")
+    assert attempt.environment("command") == "override"
+    assert attempt.environment("retries") == 2
+    monkeypatch.delenv("HTTK_TOOL_COMMAND")
+    monkeypatch.setenv("HTTK_TOOL_PATH", "env")
+    assert attempt.environment("path") == "env"
+    with pytest.raises(KeyError, match="not declared"):
+        attempt.environment("missing")
+
+
+def _run_manager_environment_job(
+    root: Path,
+    *,
+    name: str = "timeout",
+    setting: str = "httk_v1.timeout",
+    environment_type: str = "integer",
+    setting_value: object = 60,
+    workspace_settings: dict[str, object] | None = None,
+    environment_default: object | None = None,
+) -> str:
+    workspace = Workspace.initialize(root / "workspace")
+    for workspace_setting, value in (workspace_settings or {setting: setting_value}).items():
+        workspace.set_setting(workspace_setting, value)
+    payload = root / "payload"
+    runner = payload / "runner.py"
+    runner.parent.mkdir(parents=True)
+    runner.write_text(
+        f'''#!/usr/bin/env python3
+import sys
+sys.path.insert(0, {_SRC!r})
+from httk.workflow import Attempt
+
+attempt = Attempt.initialize()
+try:
+    value = attempt.environment({name!r})
+except ValueError as exc:
+    (attempt.workdir / "error").write_text(str(exc), encoding="utf-8")
+else:
+    (attempt.workdir / "value").write_text(f"{{type(value).__name__}}:{{value}}", encoding="utf-8")
+attempt.succeed()
+''',
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    metadata: dict[str, object] = {"type": environment_type, "setting": setting}
+    if environment_default is not None:
+        metadata["default"] = environment_default
+    job = prepare_job_payload(
+        payload,
+        JobSpec(
+            name="Environment manager job",
+            workflow="tests.environment",
+            runner_path="runner.py",
+            environment={
+                "declared": {name: metadata},
+                "overrides": {},
+            },
+        ),
+    )
+    workspace.submit(payload, "project/environment")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30)
+    marker = workspace.find_marker_by_id(job.id)
+    assert marker is not None and marker.kind == "succeeded"
+    run = workspace.payload_path(marker.placement, marker.job_key) / "run"
+    if (run / "error").is_file():
+        return (run / "error").read_text()
+    return (run / "value").read_text()
+
+
+def test_attempt_environment_decodes_real_manager_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("HTTK_HTTK_V1_TIMEOUT", raising=False)
+    assert _run_manager_environment_job(tmp_path / "workspace-setting") == "int:60"
+    monkeypatch.setenv("HTTK_HTTK_V1_TIMEOUT", "60")
+    assert _run_manager_environment_job(tmp_path / "environment-variable") == "int:60"
+
+
+def test_manager_does_not_mask_string_type_errors_with_synthetic_exports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HTTK_TOOL_LABEL", raising=False)
+    error = _run_manager_environment_job(
+        tmp_path / "string-setting",
+        name="label",
+        setting="tool.label",
+        environment_type="string",
+    )
+    assert "workflow environment 'label' from workspace setting 'tool.label'" in error
+    assert "declared type 'string'" in error
+
+
+def test_manager_filters_colliding_derived_setting_exports(tmp_path: Path) -> None:
+    value = _run_manager_environment_job(
+        tmp_path,
+        name="label",
+        setting="tool_value",
+        environment_type="string",
+        workspace_settings={"tool.value": 7},
+        environment_default="fallback",
+    )
+    assert value == "str:fallback"
+
+
+def test_attempt_environment_rejects_bad_typed_external_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    attempt = _attempt(
+        tmp_path,
+        step="start",
+        environment={"declared": {"timeout": {"type": "integer"}}, "overrides": {}},
+    )
+    monkeypatch.setenv("HTTK_TIMEOUT", "not-an-integer")
+    with pytest.raises(ValueError, match="timeout.*environment variable.*integer"):
+        attempt.environment("timeout")
+
+    string_attempt = _attempt(
+        tmp_path / "string",
+        step="start",
+        environment={"declared": {"label": {"type": "string"}}, "overrides": {}},
+    )
+    monkeypatch.setenv("HTTK_LABEL", "60")
+    assert string_attempt.environment("label") == "60"
 
 
 def _published(attempt: Attempt) -> dict[str, Any]:
     return json.loads((attempt.control / "outcome.ready" / "outcome.json").read_text(encoding="utf-8"))
+
+
+def test_fail_can_set_terminal_priority(tmp_path: Path) -> None:
+    attempt = _attempt(tmp_path, step="start")
+    attempt.fail("tests.failed", "failed at elevated priority", priority=900)
+    assert _published(attempt)["priority"] == 900
+
+
+def test_gather_can_set_join_priority(tmp_path: Path) -> None:
+    attempt = _attempt(tmp_path, step="start")
+    child = tmp_path / "child"
+    (child / "files").mkdir(parents=True)
+    (child / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    prepare_job_payload(
+        child, JobSpec(name="Child", workflow="tests.sdk", runner_path="files/runner", initial_step="start")
+    )
+    attempt.spawn(child, label="child")
+    attempt.gather("start", priority=900)
+    assert _published(attempt)["priority"] == 900
 
 
 def _main(runner: Runner, attempt: Attempt) -> int:

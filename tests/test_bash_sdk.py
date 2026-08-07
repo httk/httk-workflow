@@ -221,6 +221,15 @@ def test_a_step_that_publishes_nothing_is_reported_as_no_outcome(tmp_path: Path)
     }
 
 
+def test_fail_can_set_terminal_priority(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, step="start")
+    completed = fixture.run(
+        _runner("start", body='step_start() { httk_workflow_fail tests.failed "broken" --priority 900; }')
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert fixture.outcome()["priority"] == 900
+
+
 def test_registration_must_match_the_step_functions(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, step="relax")
     missing = fixture.run(_runner("relax", "collect", body="step_relax() { httk_workflow_succeed; }"))
@@ -369,7 +378,7 @@ def test_spawn_reads_json_input_values_from_files(tmp_path: Path) -> None:
         --runner ws:parity/run.sh@{"a" * 64} \\
         --tag defect \\
         --priority 700
-    httk_workflow_gather relax --when any_succeeded
+    httk_workflow_gather relax --when any_succeeded --priority 900
 }}
 step_relax() {{ httk_workflow_succeed; }}""",
     )
@@ -398,6 +407,7 @@ step_relax() {{ httk_workflow_succeed; }}""",
     }
     assert child["tag"] == "defect" and child["priority"] == 700
     assert fixture.outcome()["join"]["condition"] == "any_succeeded"
+    assert fixture.outcome()["priority"] == 900
 
 
 def test_a_step_prepares_a_payload_and_spawns_the_directory(tmp_path: Path) -> None:
