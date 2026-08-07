@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # The campaign of examples/defect_campaign.py, authored in Bash.
 #
-# The same four steps, the same job inputs, the same job state, the same failure
+# The same four steps, the same job parameters, the same job state, the same failure
 # codes, and the same published outcomes: one workflow protocol, two authoring
 # SDKs. Every child job runs this same file at the "relax" step.
 #
 #     httk project init --name campaign
 #     httk workflow job new \
 #         --workflow examples/defect_campaign.sh --step characterize \
-#         --input sites=3 --input diverging=1 --tag campaign
+#         --parameter sites=3 --parameter diverging=1 --tag campaign
 #     httk workflow run
 #
-# Job inputs:
+# Job parameters:
 #   sites      -- how many sites to relax, one child job each
 #   diverging  -- a comma-separated list of site numbers that fail (default none)
 set -euo pipefail
@@ -27,8 +27,8 @@ httk_workflow_runner examples.defects characterize relax aggregate triage
 # Spawn one child job per site and wait for every one of them.
 step_characterize() {
     local sites diverging site diverge
-    sites=$(httk_workflow_input sites)
-    diverging=$(httk_workflow_input diverging '')
+    sites=$(httk_workflow_parameter sites)
+    diverging=$(httk_workflow_parameter diverging '')
     httk_workflow_state_set sites "$sites"
     site=0
     while [ "$site" -lt "$sites" ]; do
@@ -38,8 +38,8 @@ step_characterize() {
         esac
         httk_workflow_spawn "site-$site" \
             --step relax \
-            --input site="$site" \
-            --input diverge="$diverge" \
+            --parameter site="$site" \
+            --parameter diverge="$diverge" \
             --data-mode transactional \
             --max-attempts-per-activation 1 \
             --placement project/children >/dev/null
@@ -51,9 +51,9 @@ step_characterize() {
 # Relax one site: the step every spawned child runs.
 step_relax() {
     local site
-    site=$(httk_workflow_input site)
+    site=$(httk_workflow_parameter site)
     printf '%s\n' "$site" >site.txt
-    if [ "$(httk_workflow_input diverge)" = true ]; then
+    if [ "$(httk_workflow_parameter diverge)" = true ]; then
         httk_workflow_fail relax.diverged "site $site did not relax"
     else
         httk_workflow_put site.txt results/site.txt >/dev/null

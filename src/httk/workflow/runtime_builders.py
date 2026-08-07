@@ -34,8 +34,8 @@ from .models import (
     normalize_placement,
     validate_declarations,
     validate_failure,
-    validate_inputs,
     validate_label,
+    validate_parameters,
     validate_sha256,
     validate_step,
 )
@@ -141,7 +141,7 @@ class JobSpec:
     maximum_activations: int | None = None
     retry_on: tuple[str, ...] = ()
     resources: Mapping[str, object] = field(default_factory=dict)
-    inputs: Mapping[str, object] = field(default_factory=dict)
+    parameters: Mapping[str, object] = field(default_factory=dict)
     #: Workflow declarations carried verbatim into ``job.json``, keyed by name.
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
@@ -186,8 +186,8 @@ class JobSpec:
             "resources": dict(self.resources),
             "parent": None if parent is None else dict(parent),
         }
-        if self.inputs:
-            result["inputs"] = validate_inputs(self.inputs)
+        if self.parameters:
+            result["parameters"] = validate_parameters(self.parameters)
         if self.declarations:
             result["declarations"] = validate_declarations(self.declarations)
         return result

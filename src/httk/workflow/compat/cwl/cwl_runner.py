@@ -50,7 +50,7 @@ only what is left. A tool that was interrupted mid-run is re-run from a cleaned
 execution directory: staging is idempotent, and a half-written output of a dead
 process is never collected.
 
-Job inputs
+Job parameters
 ----------
 
 * ``cwl_document`` — where the normalized plan is, inside the payload.
@@ -122,7 +122,7 @@ class ToolError(Exception):
 def plan_root(a: Attempt) -> Path:
     """Return the payload holding the plan: this job's, or the root job's."""
 
-    pointer = a.input("cwl_payload", None)
+    pointer = a.parameter("cwl_payload", None)
     if isinstance(pointer, str) and pointer:
         return a.workspace.joinpath(*PurePosixPath(pointer).parts)
     return a.payload
@@ -132,7 +132,7 @@ def plan_of(a: Attempt) -> dict[str, object]:
     """Return the normalized plan this job runs."""
 
     root = plan_root(a)
-    pointer = a.input("cwl_document")
+    pointer = a.parameter("cwl_document")
     path = root.joinpath(*PurePosixPath(str(pointer)).parts)
     if not path.is_file():
         raise ToolError("cwl.document_missing", f"the CWL plan {pointer} is not in {root}")
@@ -494,7 +494,7 @@ def run_tool(a: Attempt, tool: Mapping[str, object], bindings: Mapping[str, obje
 def _timeout(a: Attempt, tool: Mapping[str, object]) -> float:
     """Return how long one tool execution may take."""
 
-    override = a.input("cwl_timeout", None)
+    override = a.parameter("cwl_timeout", None)
     if isinstance(override, (int, float)) and not isinstance(override, bool):
         return float(override)
     requirements = tool.get("requirements")
@@ -601,7 +601,7 @@ def child_inputs(a: Attempt, target: Sequence[str], bindings: Mapping[str, objec
 
     return {
         "cwl_payload": payload_relative(a),
-        "cwl_document": str(a.input("cwl_document")),
+        "cwl_document": str(a.parameter("cwl_document")),
         "cwl_target": list(target),
         "cwl_bindings": dict(bindings),
     }
@@ -613,7 +613,7 @@ def finish(a: Attempt, outputs: Mapping[str, object]) -> None:
     path = a.workdir / OUTPUTS_FILE
     path.write_text(json.dumps(outputs, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if a.context.data_generation is not None:
-        prefix = str(a.input("cwl_data_prefix", DEFAULT_DATA_PREFIX))
+        prefix = str(a.parameter("cwl_data_prefix", DEFAULT_DATA_PREFIX))
         for name, value in outputs.items():
             produced = [value] if is_file(value) else list(value) if isinstance(value, list) else []
             for index, item in enumerate(produced):
@@ -684,7 +684,7 @@ def start(a: Attempt) -> None:
 
     try:
         plan = plan_of(a)
-        pointer = str(a.input("cwl_inputs"))
+        pointer = str(a.parameter("cwl_inputs"))
         path = a.payload.joinpath(*PurePosixPath(pointer).parts)
         if not path.is_file():
             raise ToolError("cwl.document_missing", f"the CWL input object {pointer} is not in this payload")
@@ -721,8 +721,8 @@ def _defaulted(process: Mapping[str, object], values: Mapping[str, object]) -> d
 def enter(a: Attempt) -> None:
     """Start a child at the position of the plan its inputs name."""
 
-    target = [str(item) for item in as_list(a.input("cwl_target", []))]
-    bindings = a.input("cwl_bindings", {})
+    target = [str(item) for item in as_list(a.parameter("cwl_target", []))]
+    bindings = a.parameter("cwl_bindings", {})
     if not isinstance(bindings, Mapping):
         a.fail("cwl.child_invalid", "the child job input 'cwl_bindings' is not an object")
         return
@@ -793,7 +793,7 @@ def _advance(a: Attempt) -> None:
             a.spawn(
                 ChildSpec(
                     step="enter",
-                    inputs=child_inputs(a, [*target, name], shard),
+                    parameters=child_inputs(a, [*target, name], shard),
                     runner=RunnerRef.inherit(),
                     name=f"{name} shard {index}",
                 ),
@@ -807,7 +807,7 @@ def _advance(a: Attempt) -> None:
         a.spawn(
             ChildSpec(
                 step="enter",
-                inputs=child_inputs(a, [*target, name], bindings),
+                parameters=child_inputs(a, [*target, name], bindings),
                 runner=RunnerRef.inherit(),
                 name=f"{name} subworkflow",
             ),

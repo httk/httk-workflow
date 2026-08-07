@@ -32,14 +32,14 @@ file = "instantiate.py"
 [workflow.postprocess]
 file = "postprocess.py"
 
-[workflow.parameters.structure]
+[workflow.inputs.structure]
 destination = "POSCAR"
 entry_type = "structures"
 ref = "https://example.test/structures"
 description = "The input structure."
 role = "initial_structure"
 
-[workflow.inputs.label]
+[workflow.parameters.label]
 type = "string"
 default = "test"
 
@@ -54,8 +54,8 @@ role = "relaxed_structure"
 _DECLARATION = {
     "$id": "https://example.test/workflows/package",
     "description": "External declaration.",
-    "parameters": [{"name": "initial_structure", "entry_type": "structures"}],
-    "output_types": [{"name": "relaxed_structure", "entry_type": "structures"}],
+    "inputs": [{"name": "initial_structure", "entry_type": "structures"}],
+    "outputs": [{"name": "relaxed_structure", "entry_type": "structures"}],
 }
 
 
@@ -81,14 +81,14 @@ def test_manifest_parses_and_generates_the_declared_roles(tmp_path: Path) -> Non
     assert provider.directory == (tmp_path / "package").resolve()
     assert provider.entry == "run"
     assert provider.initial_step == "start"
-    assert provider.parameters == {"structure": "POSCAR"}
+    assert provider.inputs == {"structure": "POSCAR"}
     assert provider.instantiate_file == "instantiate.py"
     assert provider.postprocess_file == "postprocess.py"
     assert callable(provider.postprocessor) and cast(Any, provider.postprocessor)(object()) == {}
     assert workflow_declaration_from_manifest(provider) == {
         "$id": "https://example.test/workflows/package",
         "description": "A package for tests.",
-        "parameters": [
+        "inputs": [
             {
                 "name": "initial_structure",
                 "entry_type": "structures",
@@ -96,7 +96,7 @@ def test_manifest_parses_and_generates_the_declared_roles(tmp_path: Path) -> Non
                 "description": "The input structure.",
             }
         ],
-        "output_types": [
+        "outputs": [
             {
                 "name": "relaxed_structure",
                 "entry_type": "structures",
@@ -139,7 +139,7 @@ def test_external_declaration_rejects_product_of(tmp_path: Path) -> None:
     )
     declaration = dict(_DECLARATION)
     declaration["$id"] = "https://example.test/workflows/external"
-    declaration["output_types"] = [
+    declaration["outputs"] = [
         {"name": "relaxed_structure", "entry_type": "structures", "product_of": "initial_structure"}
     ]
     (package / "declaration.json").write_text(json.dumps(declaration), encoding="utf-8")
@@ -153,7 +153,7 @@ def test_external_declaration_rejects_product_of(tmp_path: Path) -> None:
         ("$id", "https://example.test/workflows/wrong", "declaration \\$id does not match"),
         ("output_name", "not_an_output", "is not a manifest output role"),
         ("output_type", "records", "incompatible entry_type"),
-        ("parameter_name", "not_a_role", "is not a manifest parameter/input role"),
+        ("parameter_name", "not_a_role", "is not a manifest input role"),
     ],
 )
 def test_external_declaration_must_match_the_manifest(tmp_path: Path, field: str, value: str, message: str) -> None:
@@ -167,11 +167,11 @@ def test_external_declaration_must_match_the_manifest(tmp_path: Path, field: str
     if field == "$id":
         declaration["$id"] = value
     elif field == "output_name":
-        declaration["output_types"][0]["name"] = value
+        declaration["outputs"][0]["name"] = value
     elif field == "output_type":
-        declaration["output_types"][0]["entry_type"] = value
+        declaration["outputs"][0]["entry_type"] = value
     else:
-        declaration["parameters"][0]["name"] = value
+        declaration["inputs"][0]["name"] = value
     (package / "declaration.json").write_text(json.dumps(declaration), encoding="utf-8")
     with pytest.raises(ValueError, match=message):
         parse_workflow_manifest(package)
@@ -184,13 +184,13 @@ def test_external_declaration_must_match_the_manifest(tmp_path: Path, field: str
         ("alias = \"test-package\"", r"\[workflow\]\.alias must match"),
         ("[workflow.runner]\nsteps = [\"start\"]\nunknown = true", r"unknown key \[workflow\.runner\.unknown\]"),
         (
-            "[workflow.parameters.structure]\ndestination = \"POSCAR\"\nunknown = true",
-            r"unknown key \[workflow\.parameters\.structure\.unknown\]",
+            "[workflow.inputs.structure]\ndestination = \"POSCAR\"\nunknown = true",
+            r"unknown key \[workflow\.inputs\.structure\.unknown\]",
         ),
         ("steps = []", "steps must be a nonempty list"),
         ("steps = [\"one\", \"two\"]", "initial_step is required"),
-        ("product_of = \"missing\"", "product_of names unknown parameter or output role"),
-        ("[workflow.inputs.label]\ntype = \"integer\"\ndefault = \"bad\"", "default does not match type"),
+        ("product_of = \"missing\"", "product_of names unknown input or output role"),
+        ("[workflow.parameters.label]\ntype = \"integer\"\ndefault = \"bad\"", "default does not match type"),
     ],
 )
 def test_manifest_validation_errors_are_pathful(tmp_path: Path, change: str, message: str) -> None:
@@ -203,7 +203,7 @@ def test_manifest_validation_errors_are_pathful(tmp_path: Path, change: str, mes
         manifest = manifest.replace(
             '[workflow.runner]\nsteps = ["start"]', change.split("\nunknown", 1)[0] + "\nunknown = true"
         )
-    elif change.startswith("[workflow.parameters"):
+    elif change.startswith("[workflow.inputs"):
         manifest = manifest.replace('role = "initial_structure"', 'unknown = true\nrole = "initial_structure"')
     elif change == "steps = []" or change.startswith("steps ="):
         manifest = manifest.replace('steps = ["start"]', change)
@@ -234,7 +234,7 @@ def test_manifest_rejects_output_product_cycles(tmp_path: Path, product: str, ex
 
 def test_manifest_rejects_ambiguous_product_role(tmp_path: Path) -> None:
     manifest = _MANIFEST + '\n[workflow.outputs.initial]\nentry_type = "structures"\nrole = "initial_structure"\n'
-    with pytest.raises(ValueError, match="both a parameter and output role"):
+    with pytest.raises(ValueError, match="both an input and output role"):
         parse_workflow_manifest(_package(tmp_path / "package", manifest))
 
 
@@ -282,7 +282,7 @@ def test_directory_workflow_scaffolds_from_the_published_tree_and_pins_declarati
     structure = tmp_path / "POSCAR"
     structure.write_text("structure", encoding="utf-8")
     workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, package, parameters={"structure": structure}, inputs={"label": "job"})
+    job = new_job(workspace, package, inputs={"structure": structure}, parameters={"label": "job"})
     definition = JobDefinition.from_path(job.payload / "job.json")
     assert definition.workflow == "tests.package"
     assert definition.runner_source == "workspace"
@@ -296,4 +296,4 @@ def test_directory_workflow_scaffolds_from_the_published_tree_and_pins_declarati
     (stored / "postprocess.py").chmod(0o644)
     (stored / "postprocess.py").write_text("def postprocess(record):\n    return {'changed': True}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="published workflow tree"):
-        new_job(workspace, package, parameters={"structure": structure})
+        new_job(workspace, package, inputs={"structure": structure})

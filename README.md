@@ -19,7 +19,7 @@ From nothing to a finished VASP relaxation, without writing a runner:
 
 ```console
 httk project init --name quickstart
-httk workflow job new --workflow vasp-relax --parameter structure=POSCAR --tag silicon
+httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
 httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
 httk workflow run
 httk workflow collect

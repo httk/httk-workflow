@@ -79,7 +79,7 @@ def _fixture(
     tmp_path: Path,
     *,
     step: str,
-    inputs: dict[str, object] | None = None,
+    parameters: dict[str, object] | None = None,
     children: list[dict[str, object]] | None = None,
     data_generation: int | None = None,
     name: str = "attempt",
@@ -99,7 +99,7 @@ def _fixture(
             runner_path="files/runner",
             initial_step=step,
             data_mode="none" if data_generation is None else "transactional",
-            inputs=inputs or {},
+            parameters=parameters or {},
         ),
     )
     control = payload / f".httk-attempt.{uuid.uuid4()}"
@@ -288,7 +288,7 @@ def test_exit_codes_separate_an_absent_answer_from_a_refused_call(tmp_path: Path
     fixture = _fixture(
         tmp_path,
         step="only",
-        inputs={"encut": 520},
+        parameters={"encut": 520},
         children=[_child("site-0", "succeeded")],
     )
     source = _runner(
@@ -304,9 +304,9 @@ step_only() { :; }
 httk_workflow_state_set answer 42
 record present_state httk_workflow_state_get answer
 record absent_state httk_workflow_state_get missing
-record present_input httk_workflow_input encut
-record absent_input httk_workflow_input nothing
-record defaulted_input httk_workflow_input nothing fallback
+record present_parameter httk_workflow_parameter encut
+record absent_parameter httk_workflow_parameter nothing
+record defaulted_parameter httk_workflow_parameter nothing fallback
 record present_child httk_workflow_child site-0 state
 record absent_child_field httk_workflow_child site-0 failure_code
 record absent_child httk_workflow_child site-9 state
@@ -320,9 +320,9 @@ record refused_assignment httk_workflow_state_merge nonsense""",
     assert dict(line.split("=") for line in completed.stdout.splitlines()) == {
         "present_state": "0",
         "absent_state": "1",
-        "present_input": "0",
-        "absent_input": "1",
-        "defaulted_input": "0",
+        "present_parameter": "0",
+        "absent_parameter": "1",
+        "defaulted_parameter": "0",
         "present_child": "0",
         "absent_child_field": "1",
         "absent_child": "1",
@@ -333,11 +333,11 @@ record refused_assignment httk_workflow_state_merge nonsense""",
     # A refused read says why on stderr; an absent one is silent when there is
     # nothing to say beyond its status.
     diagnosed = fixture.run(
-        _runner("only", body="step_only() { :; }\nhttk_workflow_input nothing", main=""),
+        _runner("only", body="step_only() { :; }\nhttk_workflow_parameter nothing", main=""),
         name="diagnosed.sh",
     )
     assert diagnosed.returncode == 1
-    assert "job input 'nothing' is not defined; defined inputs: encut" in diagnosed.stderr
+    assert "job parameter 'nothing' is not defined; defined parameters: encut" in diagnosed.stderr
 
 
 def test_a_corrupt_attempt_context_is_refused_with_two(tmp_path: Path) -> None:
@@ -363,9 +363,9 @@ def test_spawn_reads_json_input_values_from_files(tmp_path: Path) -> None:
         body=f"""step_branch() {{
     httk_workflow_spawn site-0 \\
         --step relax \\
-        --input structure=@defect-0.json \\
-        --input supercell=2 \\
-        --input label=alpha \\
+        --parameter structure=@defect-0.json \\
+        --parameter supercell=2 \\
+        --parameter label=alpha \\
         --runner ws:parity/run.sh@{"a" * 64} \\
         --tag defect \\
         --priority 700
@@ -384,7 +384,7 @@ step_relax() {{ httk_workflow_succeed; }}""",
     # payload it just registered.
     assert completed.stdout.split("\n")[0] == job_key
     child = json.loads((ready / "children" / "jobs" / job_key / "job.json").read_text(encoding="utf-8"))
-    assert child["inputs"] == {
+    assert child["parameters"] == {
         "structure": {"species": ["Si", "O"], "site": [0.5, 0.5, 0.0]},
         "supercell": 2,
         "label": "alpha",
@@ -413,7 +413,7 @@ def test_a_step_prepares_a_payload_and_spawns_the_directory(tmp_path: Path) -> N
                 "runner_sha256": "b" * 64,
                 "initial_step": "branch",
                 "tag": "prepared",
-                "inputs": {"encut": 520},
+                "parameters": {"encut": 520},
             }
         ),
         encoding="utf-8",
@@ -434,12 +434,12 @@ def test_a_step_prepares_a_payload_and_spawns_the_directory(tmp_path: Path) -> N
     assert prepared["runner_source"] == "workspace"
     assert prepared["runner_sha256"] == "b" * 64
     assert prepared["runner_executor"] == "path"
-    assert prepared["inputs"] == {"encut": 520}
+    assert prepared["parameters"] == {"encut": 520}
     ready = fixture.control / "outcome.ready"
     spawn = json.loads((ready / "children" / "spawn.json").read_text(encoding="utf-8"))
     assert [entry["label"] for entry in spawn["children"]] == ["prepared"]
     child = json.loads((ready / "children" / "jobs" / prepared["job_key"] / "job.json").read_text(encoding="utf-8"))
-    assert child["id"] == prepared["id"] and child["inputs"] == {"encut": 520}
+    assert child["id"] == prepared["id"] and child["parameters"] == {"encut": 520}
 
 
 def test_a_step_name_that_is_not_registered_is_refused_at_the_call(tmp_path: Path) -> None:

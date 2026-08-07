@@ -35,26 +35,26 @@ run = Runner("tests.campaign")
 
 @run.step
 def characterize(a):
-    a.state["sites"] = a.input("sites")
-    failing = a.input("failing", [])
-    for site in range(a.input("sites")):
+    a.state["sites"] = a.parameter("sites")
+    failing = a.parameter("failing", [])
+    for site in range(a.parameter("sites")):
         a.spawn(
             ChildSpec(
                 step="relax",
-                inputs={{"site": site, "diverge": site in failing}},
+                parameters={{"site": site, "diverge": site in failing}},
                 maximum_attempts_per_activation=1,
             ),
             label="site-%d" % site,
             placement="project/children",
         )
-    a.gather("aggregate", when=a.input("when", "all_terminal"), on_impossible="triage")
+    a.gather("aggregate", when=a.parameter("when", "all_terminal"), on_impossible="triage")
 
 
 @run.step
 def relax(a):
-    (a.workdir / "site.txt").write_text(str(a.input("site")), encoding="utf-8")
-    if a.input("diverge"):
-        a.fail("relax.diverged", "site %s did not relax" % a.input("site"))
+    (a.workdir / "site.txt").write_text(str(a.parameter("site")), encoding="utf-8")
+    if a.parameter("diverge"):
+        a.fail("relax.diverged", "site %s did not relax" % a.parameter("site"))
     else:
         a.succeed()
 
@@ -115,7 +115,7 @@ def _publish_campaign(workspace: Workspace, root: Path) -> dict[str, object]:
 def _submit_campaign(
     workspace: Workspace,
     root: Path,
-    inputs: dict[str, object],
+    parameters: dict[str, object],
     *,
     initial_step: str = "characterize",
 ) -> str:
@@ -134,7 +134,7 @@ def _submit_campaign(
             tag="campaign",
             initial_step=initial_step,
             maximum_attempts_per_activation=1,
-            inputs=inputs,
+            parameters=parameters,
         ),
     )
     workspace.submit(payload, "project/campaign")
@@ -244,7 +244,7 @@ def _attempt(
     tmp_path: Path,
     *,
     step: str,
-    inputs: dict[str, object] | None = None,
+    parameters: dict[str, object] | None = None,
     data_generation: int | None = None,
     children: list[dict[str, object]] | None = None,
     runner: Runner | None = None,
@@ -264,7 +264,7 @@ def _attempt(
             runner_path="files/runner",
             initial_step=step,
             data_mode="none" if data_generation is None else "transactional",
-            inputs=inputs or {},
+            parameters=parameters or {},
         ),
     )
     control = payload / f".httk-attempt.{uuid.uuid4()}"
@@ -358,18 +358,18 @@ def test_describe_mode_prints_the_step_set_and_touches_nothing(
 
 def test_runner_creation_parameters_are_immutable_and_optional() -> None:
     plain = Runner("tests.plain")
-    assert plain.parameters == {}
-    assert "parameters" not in plain.description()
+    assert plain.inputs == {}
+    assert "inputs" not in plain.description()
 
-    run = Runner("tests.parameters", parameters={"structure": "POSCAR", "future": None})
-    assert run.parameters == {"structure": "POSCAR", "future": None}
+    run = Runner("tests.parameters", inputs={"structure": "POSCAR", "future": None})
+    assert run.inputs == {"structure": "POSCAR", "future": None}
     with pytest.raises(TypeError):
-        run.parameters["other"] = "x"  # type: ignore[index]
-    assert run.description()["parameters"] == {"structure": "POSCAR", "future": None}
+        run.inputs["other"] = "x"  # type: ignore[index]
+    assert run.description()["inputs"] == {"structure": "POSCAR", "future": None}
     with pytest.raises(ValueError, match="nonempty"):
-        Runner("tests.invalid", parameters={"": "POSCAR"})
+        Runner("tests.invalid", inputs={"": "POSCAR"})
     with pytest.raises(ValueError, match="nonempty string or null"):
-        Runner("tests.invalid", parameters={"x": 7})  # type: ignore[dict-item]
+        Runner("tests.invalid", inputs={"x": 7})  # type: ignore[dict-item]
 
 
 def test_registration_refuses_a_duplicate_step_name() -> None:
@@ -470,7 +470,7 @@ def test_an_uncaught_exception_leaves_a_breadcrumb_and_no_draft(tmp_path: Path) 
     @run.step(name="explode")
     def explode(a: Attempt) -> None:
         a.put(a.workdir / "energy.json", "results/energy.json")
-        raise KeyError("missing input")
+        raise KeyError("missing parameter")
 
     attempt = _attempt(tmp_path, step="explode", data_generation=0, runner=run)
     (attempt.workdir / "energy.json").write_text("{}", encoding="utf-8")
@@ -516,30 +516,30 @@ def test_data_operations_refuse_a_job_without_transactional_data(tmp_path: Path)
 
 
 def test_job_inputs_round_trip_and_are_bounded(tmp_path: Path) -> None:
-    attempt = _attempt(tmp_path, step="relax", inputs={"encut": 520, "species": ["Si", "O"], "spin": None})
-    assert attempt.input("encut") == 520
-    assert attempt.input("species") == ["Si", "O"]
-    assert attempt.input("spin") is None
-    assert attempt.input("missing", "fallback") == "fallback"
-    with pytest.raises(KeyError, match="defined inputs: encut, species, spin"):
-        attempt.input("missing")
-    assert attempt.inputs == {"encut": 520, "species": ["Si", "O"], "spin": None}
+    attempt = _attempt(tmp_path, step="relax", parameters={"encut": 520, "species": ["Si", "O"], "spin": None})
+    assert attempt.parameter("encut") == 520
+    assert attempt.parameter("species") == ["Si", "O"]
+    assert attempt.parameter("spin") is None
+    assert attempt.parameter("missing", "fallback") == "fallback"
+    with pytest.raises(KeyError, match="defined parameters: encut, species, spin"):
+        attempt.parameter("missing")
+    assert attempt.parameters == {"encut": 520, "species": ["Si", "O"], "spin": None}
 
     # The inputs of a job are part of job.json and therefore of its digest.
     stored = JobDefinition.from_path(attempt.payload / "job.json")
-    assert stored.inputs == attempt.inputs
+    assert stored.parameters == attempt.parameters
     assert stored.digest == JobDefinition.from_path(attempt.payload / "job.json").digest
 
     oversized = JobSpec(
         name="Too much",
         workflow="tests.sdk",
         runner_path="files/runner",
-        inputs={"blob": "x" * 300000},
+        parameters={"blob": "x" * 300000},
     )
     with pytest.raises(FormatError, match="exceeds the 262144-byte limit"):
         oversized.as_mapping()
     with pytest.raises(FormatError, match="keys must be nonempty strings"):
-        JobDefinition.from_mapping({**stored.raw, "inputs": {"": 1}})
+        JobDefinition.from_mapping({**stored.raw, "parameters": {"": 1}})
 
 
 def test_a_prepared_payload_child_can_be_spawned_by_path(tmp_path: Path) -> None:

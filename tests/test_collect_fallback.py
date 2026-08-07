@@ -58,7 +58,7 @@ def _finished(
     structure = tmp_path / "POSCAR"
     structure.write_text(_POSCAR, encoding="utf-8")
     workspace = Workspace.initialize(tmp_path / "workspace")
-    new_job(workspace, package, parameters={"structure": structure})
+    new_job(workspace, package, inputs={"structure": structure})
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=120.0)
     return workspace, package

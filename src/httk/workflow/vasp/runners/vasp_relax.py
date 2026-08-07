@@ -7,7 +7,7 @@ executes VASP under supervision and, when the run fails in a way the reviewed
 remedy ladder recognizes, applies exactly one remedy and asks for another attempt;
 ``publish`` publishes the files that describe the finished calculation.
 
-The job inputs are documented in :mod:`httk.workflow.vasp.runners`. Nothing here
+The job inputs and parameters are documented in :mod:`httk.workflow.vasp.runners`. Nothing here
 imports anything but an installed *httk-workflow*, so this one file is the whole
 runner: reference it as ``pkg:httk.workflow.vasp.runners/vasp_relax.py``, publish it to
 a workspace runner store, or copy it and edit it.
@@ -56,41 +56,41 @@ KEEP_BETWEEN_RUNS = ("WAVECAR", "CHGCAR", "CHG")
 run = Runner(WORKFLOW)
 
 
-def text_input(a: Attempt, name: str, default: str) -> str:
+def text_parameter(a: Attempt, name: str, default: str) -> str:
     """Return one string input, refusing a value of another type."""
 
-    value = a.input(name, default)
+    value = a.parameter(name, default)
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise ValueError(f"job input {name!r} must be a string, not {type(value).__name__}")
+        raise ValueError(f"job parameter {name!r} must be a string, not {type(value).__name__}")
     return value
 
 
-def number_input(a: Attempt, name: str, default: float | None) -> float | None:
+def number_parameter(a: Attempt, name: str, default: float | None) -> float | None:
     """Return one numeric input, refusing a value of another type."""
 
-    value = a.input(name, default)
+    value = a.parameter(name, default)
     if value is None:
         return None
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"job input {name!r} must be a number, not {type(value).__name__}")
+        raise ValueError(f"job parameter {name!r} must be a number, not {type(value).__name__}")
     return float(value)
 
 
-def tags_input(a: Attempt, name: str) -> dict[str, object]:
+def tags_parameter(a: Attempt, name: str) -> dict[str, object]:
     """Return one INCAR tag object input."""
 
-    value = a.input(name, {})
+    value = a.parameter(name, {})
     if not isinstance(value, Mapping):
-        raise ValueError(f"job input {name!r} must be an object of INCAR tags")
+        raise ValueError(f"job parameter {name!r} must be an object of INCAR tags")
     return {str(tag): item for tag, item in value.items()}
 
 
-def names_input(a: Attempt, name: str, default: str) -> tuple[str, ...]:
+def names_parameter(a: Attempt, name: str, default: str) -> tuple[str, ...]:
     """Return one space-separated list input as a tuple of file names."""
 
-    return tuple(text_input(a, name, default).split())
+    return tuple(text_parameter(a, name, default).split())
 
 
 def state_int(a: Attempt, name: str) -> int:
@@ -103,16 +103,16 @@ def state_int(a: Attempt, name: str) -> int:
 def preparation_options(a: Attempt, *, library: str | None) -> VaspPreparationOptions:
     """Build the preparation options this job's inputs describe."""
 
-    parallel_tag = text_input(a, "parallel_tag", "") or None
-    parallel_value = number_input(a, "parallel_value", None)
+    parallel_tag = text_parameter(a, "parallel_tag", "") or None
+    parallel_value = number_parameter(a, "parallel_value", None)
     return VaspPreparationOptions(
-        kpoint_density=number_input(a, "kpoint_density", 20.0) or 20.0,
-        centering=text_input(a, "centering", VaspPreparationOptions.centering),
-        accuracy_per_atom=number_input(a, "accuracy_per_atom", 0.001),
+        kpoint_density=number_parameter(a, "kpoint_density", 20.0) or 20.0,
+        centering=text_parameter(a, "centering", VaspPreparationOptions.centering),
+        accuracy_per_atom=number_parameter(a, "accuracy_per_atom", 0.001),
         pseudopotential_library=library,
         parallel_tag=parallel_tag,
         parallel_value=None if parallel_value is None else int(parallel_value),
-        incar_tags=tags_input(a, "incar_tags"),
+        incar_tags=tags_parameter(a, "incar_tags"),
     )
 
 
@@ -124,7 +124,7 @@ def stage_inputs(a: Attempt, *, extra_tags: Mapping[str, object] | None = None) 
     """
 
     validate_vasp_workdir(a.workdir)
-    poscar = a.payload / text_input(a, "poscar", "files/POSCAR")
+    poscar = a.payload / text_parameter(a, "poscar", "files/POSCAR")
     if not poscar.is_file():
         a.fail(
             "vasp.input_missing",
@@ -133,15 +133,17 @@ def stage_inputs(a: Attempt, *, extra_tags: Mapping[str, object] | None = None) 
         )
         return None
     shutil.copyfile(poscar, a.workdir / "POSCAR")
-    incar = a.payload / text_input(a, "incar", "files/INCAR")
+    incar = a.payload / text_parameter(a, "incar", "files/INCAR")
     if incar.is_file():
         shutil.copyfile(incar, a.workdir / "INCAR")
     else:
         # Everything an INCAR needs is derived below, so an absent one is a valid
         # starting point rather than a reason to refuse the job.
         (a.workdir / "INCAR").write_text("", encoding="utf-8")
-    potcar = a.payload / text_input(a, "potcar", "files/POTCAR")
-    library: str | None = str(a.setting("vasp.pseudo_library", text_input(a, "pseudopotential_library", ""))) or None
+    potcar = a.payload / text_parameter(a, "potcar", "files/POTCAR")
+    library: str | None = (
+        str(a.setting("vasp.pseudo_library", text_parameter(a, "pseudopotential_library", ""))) or None
+    )
     if potcar.is_file():
         shutil.copyfile(potcar, a.workdir / "POTCAR")
         library = None
@@ -159,14 +161,14 @@ def vasp_argv(a: Attempt) -> tuple[str, ...]:
     The command is the ``vasp.command`` application setting, so
     :meth:`~httk.workflow.sdk.Attempt.setting` resolves it most-specific first: the job's own
     ``vasp.command`` input, then ``HTTK_VASP_COMMAND`` in the environment, then the
-    workspace's configured command, and finally the legacy ``vasp_command`` input.
+    workspace's configured command, and finally the legacy ``vasp_command`` parameter.
     That keeps a machine's ``srun -n 32 vasp_std`` — deployment state a job
     submitted elsewhere cannot know — winning over the workspace default, while
     letting an operator configure the command once per workspace instead of
     exporting it for every job.
     """
 
-    text = a.setting("vasp.command", text_input(a, "vasp_command", ""))
+    text = a.setting("vasp.command", text_parameter(a, "vasp_command", ""))
     return tuple(shlex.split(str(text)))
 
 
@@ -183,7 +185,7 @@ def execute(a: Attempt, *, next_step: str) -> None:
         a.fail(
             "vasp.command_missing",
             "no VASP command is configured: set it with `httk workflow workspace settings set vasp.command '...'`, "
-            "or set HTTK_VASP_COMMAND on the machine that runs this job, or give the job a vasp_command input",
+            "or set HTTK_VASP_COMMAND on the machine that runs this job, or give the job a vasp_command parameter",
         )
         return
     history = job_remedy_history_path(a.payload)
@@ -193,7 +195,7 @@ def execute(a: Attempt, *, next_step: str) -> None:
     report = run_vasp(
         argv,
         directory=a.workdir,
-        timeout=number_input(a, "timeout", DEFAULT_TIMEOUT),
+        timeout=number_parameter(a, "timeout", DEFAULT_TIMEOUT),
     )
     a.log.append("note", f"VASP {report.classification}")
     energy = last_oszicar_energy(a.workdir / "OSZICAR") if (a.workdir / "OSZICAR").is_file() else None
@@ -204,7 +206,7 @@ def execute(a: Attempt, *, next_step: str) -> None:
         a.advance(next_step, state=state)
         return
     applied = state_int(a, "remedies")
-    maximum = int(number_input(a, "maximum_remedies", DEFAULT_MAXIMUM_REMEDIES) or 0)
+    maximum = int(number_parameter(a, "maximum_remedies", DEFAULT_MAXIMUM_REMEDIES) or 0)
     # The decision is planned before the budget is consulted so that a job which
     # stops here says which remedy it would have applied, and why the ladder ended.
     try:
@@ -212,7 +214,7 @@ def execute(a: Attempt, *, next_step: str) -> None:
             report.diagnostics,
             directory=a.workdir,
             history_path=history,
-            policy=text_input(a, "remedy_policy", "reviewed-v1"),
+            policy=text_parameter(a, "remedy_policy", "reviewed-v1"),
         )
     except ValueError as exception:
         # An unregistered policy or an unusable history is a job that cannot be
@@ -230,7 +232,7 @@ def execute(a: Attempt, *, next_step: str) -> None:
         a.fail("vasp.failed", message, details=decision.as_mapping())
         return
     apply_vasp_remedy(decision, directory=a.workdir, history_path=history)
-    amplitude = number_input(a, "rattle_amplitude", 0.0) or 0.0
+    amplitude = number_parameter(a, "rattle_amplitude", 0.0) or 0.0
     if amplitude > 0:
         # The entropy is the attempt itself, so the perturbation is reproducible
         # and no two attempts of this job rattle the same way.
@@ -248,7 +250,7 @@ def execute(a: Attempt, *, next_step: str) -> None:
 def publish_files(a: Attempt, *, prefix: str) -> None:
     """Publish the collected files of a finished calculation."""
 
-    names = names_input(a, "collect", DEFAULT_COLLECT)
+    names = names_parameter(a, "collect", DEFAULT_COLLECT)
     published: list[str] = []
     for name in names:
         source = a.workdir / name
@@ -285,7 +287,7 @@ def run_step(a: Attempt) -> None:
 def publish(a: Attempt) -> None:
     """Publish the finished calculation and complete the job."""
 
-    publish_files(a, prefix=text_input(a, "data_prefix", "vasp"))
+    publish_files(a, prefix=text_parameter(a, "data_prefix", "vasp"))
     a.succeed()
 
 

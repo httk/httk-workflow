@@ -194,11 +194,11 @@ httk_workflow_context() {
     _httk_workflow_bridge context "$@"
 }
 
-httk_workflow_input() {
+httk_workflow_parameter() {
     if [ "$#" -ge 2 ]; then
-        _httk_workflow_bridge input "$1" --default "$2"
+        _httk_workflow_bridge parameter "$1" --default "$2"
     else
-        _httk_workflow_bridge input "$1"
+        _httk_workflow_bridge parameter "$1"
     fi
 }
 

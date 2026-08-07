@@ -1016,7 +1016,7 @@ class TaskManager:
             # The workspace application settings, snapshotted at claim time, so a
             # runner resolves a.setting("vasp.command") without the operator
             # re-exporting it for every job. This is the workspace layer of the
-            # inputs → environment → workspace → default resolution.
+            # parameters → environment → workspace → default resolution.
             "settings": settings,
             "resources": dict(job.resources),
             "join": claimed_state.join_summary,

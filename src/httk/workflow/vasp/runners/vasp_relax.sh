@@ -3,9 +3,9 @@
 # One VASP relaxation, authored in Bash: the same workflow as vasp_relax.py.
 #
 # The two runners implement one contract — the same workflow name, the same steps,
-# the same job inputs, the same job state, the same failure codes, and the same
+# the same job inputs and parameters, the same job state, the same failure codes, and the same
 # files in the workdir and in the published data — because they call the same
-# helpers through the Bash bridge. The job inputs are documented in
+# helpers through the Bash bridge. The job inputs and parameters are documented in
 # httk.workflow.vasp.runners; a job may run either file and get the same result.
 set -euo pipefail
 source "$HTTK_WORKFLOW_BASH_API"
@@ -19,7 +19,7 @@ _vasp_collect_default="INCAR KPOINTS OUTCAR CONTCAR OSZICAR vasprun.xml vasp-run
 # workdir holds exactly the calculation.
 step_prepare() {
     local poscar incar potcar library options density centering accuracy tags parallel_tag parallel_value
-    poscar=$HTTK_WORKFLOW_JOB_DIR/$(httk_workflow_input poscar files/POSCAR)
+    poscar=$HTTK_WORKFLOW_JOB_DIR/$(httk_workflow_parameter poscar files/POSCAR)
     if [ ! -f "$poscar" ]; then
         printf '{"expected": "%s"}\n' "$poscar" >"$HTTK_WORKFLOW_CONTROL_DIR/vasp-input-missing.json"
         httk_workflow_fail vasp.input_missing \
@@ -28,27 +28,27 @@ step_prepare() {
         return
     fi
     cp "$poscar" POSCAR
-    incar=$HTTK_WORKFLOW_JOB_DIR/$(httk_workflow_input incar files/INCAR)
+    incar=$HTTK_WORKFLOW_JOB_DIR/$(httk_workflow_parameter incar files/INCAR)
     if [ -f "$incar" ]; then
         cp "$incar" INCAR
     else
         : >INCAR
     fi
-    library=$(httk_workflow_input pseudopotential_library '')
+    library=$(httk_workflow_parameter pseudopotential_library '')
     if [ "$library" = null ]; then
         library=
     fi
-    potcar=$HTTK_WORKFLOW_JOB_DIR/$(httk_workflow_input potcar files/POTCAR)
+    potcar=$HTTK_WORKFLOW_JOB_DIR/$(httk_workflow_parameter potcar files/POTCAR)
     if [ -f "$potcar" ]; then
         cp "$potcar" POTCAR
         library=
     fi
-    density=$(httk_workflow_input kpoint_density 20.0)
-    centering=$(httk_workflow_input centering Monkhorst-Pack)
-    accuracy=$(httk_workflow_input accuracy_per_atom 0.001)
-    tags=$(httk_workflow_input incar_tags '{}')
-    parallel_tag=$(httk_workflow_input parallel_tag '')
-    parallel_value=$(httk_workflow_input parallel_value 0)
+    density=$(httk_workflow_parameter kpoint_density 20.0)
+    centering=$(httk_workflow_parameter centering Monkhorst-Pack)
+    accuracy=$(httk_workflow_parameter accuracy_per_atom 0.001)
+    tags=$(httk_workflow_parameter incar_tags '{}')
+    parallel_tag=$(httk_workflow_parameter parallel_tag '')
+    parallel_value=$(httk_workflow_parameter parallel_value 0)
     options=$HTTK_WORKFLOW_CONTROL_DIR/vasp-options.json
     {
         printf '{"kpoint_density": %s, "centering": "%s", "accuracy_per_atom": %s, "incar_tags": %s' \
@@ -71,13 +71,13 @@ step_prepare() {
 # the reviewed ladder has nothing left to try.
 step_run() {
     local command timeout status classification energy applied maximum decision policy problem message amplitude
-    command=$(httk_workflow_setting vasp.command "$(httk_workflow_input vasp_command '')")
+    command=$(httk_workflow_setting vasp.command "$(httk_workflow_parameter vasp_command '')")
     if [ -z "$command" ]; then
         httk_workflow_fail vasp.command_missing \
-            "no VASP command is configured: set it with httk workflow workspace settings set vasp.command '...', or set HTTK_VASP_COMMAND on the machine that runs this job, or give the job a vasp_command input"
+            "no VASP command is configured: set it with httk workflow workspace settings set vasp.command '...', or set HTTK_VASP_COMMAND on the machine that runs this job, or give the job a vasp_command parameter"
         return
     fi
-    timeout=$(httk_workflow_input timeout 86400)
+    timeout=$(httk_workflow_parameter timeout 86400)
     httk_vasp_preclean --directory . --keep WAVECAR --keep CHGCAR --keep CHG >/dev/null
     status=0
     # Deliberately unquoted: the resolved VASP command is one argv string, not one path.
@@ -105,9 +105,9 @@ step_run() {
         return
     fi
     applied=$(httk_workflow_state_get remedies || echo 0)
-    maximum=$(httk_workflow_input maximum_remedies 8)
+    maximum=$(httk_workflow_parameter maximum_remedies 8)
     decision=$HTTK_WORKFLOW_CONTROL_DIR/vasp-remedy-decision.json
-    policy=$(httk_workflow_input remedy_policy reviewed-v1)
+    policy=$(httk_workflow_parameter remedy_policy reviewed-v1)
     status=0
     problem=$(
         httk_vasp_remedy_plan vasp-run-report.json --directory . --policy "$policy" --output "$decision"
@@ -127,7 +127,7 @@ step_run() {
         return
     fi
     httk_vasp_remedy_apply "$decision" --directory .
-    amplitude=$(httk_workflow_input rattle_amplitude 0)
+    amplitude=$(httk_workflow_parameter rattle_amplitude 0)
     if [ "$(httk_calc "$amplitude > 0")" = 1 ]; then
         # The entropy is the attempt itself, so the perturbation is reproducible
         # and no two attempts of this job rattle the same way.
@@ -143,8 +143,8 @@ step_run() {
 # job has no transactional data.
 step_publish() {
     local prefix name published=
-    prefix=$(httk_workflow_input data_prefix vasp)
-    for name in $(httk_workflow_input collect "$_vasp_collect_default"); do
+    prefix=$(httk_workflow_parameter data_prefix vasp)
+    for name in $(httk_workflow_parameter collect "$_vasp_collect_default"); do
         if [ ! -f "$name" ]; then
             continue
         fi

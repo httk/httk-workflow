@@ -60,13 +60,13 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 if TYPE_CHECKING:
     from .collecting import JobRecord
 
-from ._util import sha256_file, tree_digest, validate_parameters
+from ._util import sha256_file, tree_digest, validate_inputs
 from .errors import FormatError
 from .models import (
     ATTEMPT_CONTROL_PREFIX,
     JOB_STATE_DIRECTORY,
     normalize_placement,
-    validate_inputs,
+    validate_parameters,
 )
 from .runtime_builders import JobSpec, prepare_job_payload
 from .workspace import Workspace
@@ -136,7 +136,7 @@ class WorkflowProvider:
     data_mode: DataMode = "none"
     workdir_mode: WorkdirMode = "persistent"
     summary: str = ""
-    parameters: Mapping[str, str | None] = field(default_factory=dict)
+    inputs: Mapping[str, str | None] = field(default_factory=dict)
     instantiate: bool = False
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     postprocessor: Callable[[JobRecord], Mapping[str, object]] | str | None = None
@@ -144,11 +144,11 @@ class WorkflowProvider:
     entry: str = "run"
     instantiate_file: str | None = None
     postprocess_file: str | None = None
-    inputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
     declaration_file: str | None = None
-    _parameter_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
+    _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         packaged = self.runner_package is not None or self.runner_file is not None
@@ -165,19 +165,17 @@ class WorkflowProvider:
             raise ValueError("directory-only fields are not allowed on a packaged workflow provider")
         if self.directory is not None and (not self.entry or PurePosixPath(self.entry).is_absolute()):
             raise ValueError(f"workflow directory entry must be a relative member: {self.entry!r}")
-        parameters = validate_parameters(self.parameters)
-        if any(destination is None for destination in parameters.values()) and not self.instantiate:
-            raise ValueError(
-                f"workflow {self.workflow_id!r} has hook-consumed parameters and requires an instantiate hook"
-            )
+        inputs = validate_inputs(self.inputs)
+        if any(destination is None for destination in inputs.values()) and not self.instantiate:
+            raise ValueError(f"workflow {self.workflow_id!r} has hook-consumed inputs and requires an instantiate hook")
         if self.alias is not None and (
             not isinstance(self.alias, str) or re.fullmatch(r"[a-z0-9._-]+", self.alias) is None
         ):
             raise ValueError(f"workflow alias must match [a-z0-9._-]+: {self.alias!r}")
-        object.__setattr__(self, "parameters", MappingProxyType(parameters))
-        object.__setattr__(self, "inputs", MappingProxyType(dict(self.inputs)))
+        object.__setattr__(self, "inputs", MappingProxyType(inputs))
+        object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
-        object.__setattr__(self, "_parameter_metadata", MappingProxyType(dict(self._parameter_metadata)))
+        object.__setattr__(self, "_input_metadata", MappingProxyType(dict(self._input_metadata)))
 
 
 #: Every registered workflow, keyed by name in registration order. The scaffold
@@ -263,7 +261,7 @@ class ResolvedWorkflow:
     packaged: str | None = None
     registration_id: str | None = None
     summary: str = ""
-    parameters: Mapping[str, str | None] = field(default_factory=dict)
+    inputs: Mapping[str, str | None] = field(default_factory=dict)
     instantiate: bool = False
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     postprocessor: Callable[[JobRecord], Mapping[str, object]] | str | None = None
@@ -271,11 +269,11 @@ class ResolvedWorkflow:
     entry: str = "run"
     instantiate_file: str | None = None
     postprocess_file: str | None = None
-    inputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
     declaration_file: str | None = None
-    _parameter_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
+    _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         if self.packaged is not None and self.directory is not None:
@@ -358,16 +356,16 @@ class _Prepared:
 class InstantiateContext:
     """The mutable creation-time view passed to a runner's instantiate hook.
 
-    ``payload`` is the staging root, ``parameters`` contains every supplied
-    creation parameter, ``inputs`` is the merged job input mapping, and ``tag``
-    is the caller's tag. The hook may write below ``payload`` and update
-    ``inputs``; use :meth:`suggest_tag` to provide a tag without overriding one
+    ``payload`` is the staging root, ``inputs`` contains every supplied staged
+    input, ``parameters`` is the merged opaque knob mapping, and ``tag`` is the
+    caller's tag. The hook may write below ``payload`` and update
+    ``parameters``; use :meth:`suggest_tag` to provide a tag without overriding one
     the caller supplied.
     """
 
     payload: Path
-    parameters: Mapping[str, object]
-    inputs: dict[str, object]
+    inputs: Mapping[str, object]
+    parameters: dict[str, object]
     tag: str | None
 
     def suggest_tag(self, tag: str) -> None:
@@ -456,22 +454,27 @@ def _parse_description(text: str, path: Path) -> dict[str, object]:
         raise ValueError(f"the runner {path} did not print a runner description: {exc}") from exc
     if not isinstance(described, Mapping) or not isinstance(described.get("workflow"), str):
         raise ValueError(f"the runner {path} did not print a runner description with a workflow name")
+    if "parameters" in described:
+        raise ValueError(
+            f"the runner {path} emitted the legacy 'parameters' staging map; "
+            "update it to the current description format using 'inputs'"
+        )
     steps = described.get("steps")
     if not isinstance(steps, list) or not all(isinstance(step, str) for step in steps):
         raise ValueError(f"the runner {path} described steps that are not an array of names")
-    raw_parameters = described.get("parameters", {})
+    raw_inputs = described.get("inputs", {})
     try:
-        parameters = validate_parameters(raw_parameters)
+        inputs = validate_inputs(raw_inputs)
     except ValueError as exc:
-        raise ValueError(f"the runner {path} described invalid parameters: {exc}") from exc
+        raise ValueError(f"the runner {path} described invalid inputs: {exc}") from exc
     instantiate = described.get("instantiate", False)
     if not isinstance(instantiate, bool):
         raise ValueError(f"the runner {path} described instantiate that is not a boolean")
-    if any(destination is None for destination in parameters.values()) and not instantiate:
-        raise ValueError(f"the runner {path} has hook-consumed parameters and requires an instantiate hook")
+    if any(destination is None for destination in inputs.values()) and not instantiate:
+        raise ValueError(f"the runner {path} has hook-consumed inputs and requires an instantiate hook")
     result: dict[str, object] = {"workflow": described["workflow"], "steps": [str(step) for step in steps]}
-    if "parameters" in described:
-        result["parameters"] = parameters
+    if "inputs" in described:
+        result["inputs"] = inputs
     if "instantiate" in described:
         result["instantiate"] = instantiate
     return result
@@ -527,7 +530,7 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
         packaged=None if provider.directory is not None else provider.runner_file,
         registration_id=provider.workflow_id,
         summary=provider.summary,
-        parameters=provider.parameters,
+        inputs=provider.inputs,
         instantiate=provider.instantiate,
         declarations=provider.declarations,
         postprocessor=provider.postprocessor,
@@ -535,11 +538,11 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
         entry=provider.entry,
         instantiate_file=provider.instantiate_file,
         postprocess_file=provider.postprocess_file,
-        inputs=provider.inputs,
+        parameters=provider.parameters,
         outputs=provider.outputs,
         declaration_uri=provider.declaration_uri,
         declaration_file=provider.declaration_file,
-        _parameter_metadata=provider._parameter_metadata,
+        _input_metadata=provider._input_metadata,
     )
 
 
@@ -576,7 +579,7 @@ def resolve_workflow(
                 data_mode=provider.data_mode,
                 workdir_mode=provider.workdir_mode,
                 summary=provider.summary,
-                parameters=provider.parameters,
+                inputs=provider.inputs,
                 instantiate=provider.instantiate,
                 declarations=provider.declarations,
                 postprocessor=provider.postprocessor,
@@ -584,11 +587,11 @@ def resolve_workflow(
                 entry=provider.entry,
                 instantiate_file=provider.instantiate_file,
                 postprocess_file=provider.postprocess_file,
-                inputs=provider.inputs,
+                parameters=provider.parameters,
                 outputs=provider.outputs,
                 declaration_uri=provider.declaration_uri,
                 declaration_file=provider.declaration_file,
-                _parameter_metadata=provider._parameter_metadata,
+                _input_metadata=provider._input_metadata,
             )
         elif not path.is_file():
             known = ", ".join(registered_workflows()) or "none registered"
@@ -604,7 +607,7 @@ def resolve_workflow(
                 initial_step=_initial_step(path, steps, step),
                 steps=steps,
                 summary=f"the runner {path}",
-                parameters=cast(dict[str, str | None], described.get("parameters", {})),
+                inputs=cast(dict[str, str | None], described.get("inputs", {})),
                 instantiate=bool(described.get("instantiate", False)),
             )
     if workflow_id is not None:
@@ -718,8 +721,8 @@ def new_job(
     or the path of a runner file. *files* maps payload names to the files to stage
     there: a bare name lands in the payload's :data:`~httk.workflow.scaffold.FILES_DIRECTORY`, which is
     where a packaged runner reads its inputs, and a name with a directory in
-    it is used verbatim. *inputs* becomes the job's ``inputs`` object, whose
-    members are documented per runner.
+    it is used verbatim. *inputs* stages the workflow's declared objects into
+    the payload; *parameters* is the job's opaque implementation mapping.
 
     *data_mode* defaults to what the workflow needs — ``transactional`` for a
     workflow whose runner publishes collected results, and ``none`` for a runner
@@ -782,7 +785,7 @@ def new_jobs(
             for path in sorted(Path("structures").glob("POSCAR.*")):
                 yield {"files": {"POSCAR": path}, "tag": structure_tag(path)}
 
-        for job in new_jobs(workspace, "some-workflow", structures(), inputs={"kpoint_density": 30.0}):
+        for job in new_jobs(workspace, "some-workflow", structures(), parameters={"kpoint_density": 30.0}):
             print(job.job_key)
     """
 
@@ -927,18 +930,18 @@ def _submit(
     try:
         staging.mkdir(parents=True, exist_ok=False)
         _stage_files(staging, files or {})
-        supplied_parameters = dict(parameters or {})
-        _stage_parameters(staging, workflow, supplied_parameters, instantiate=prepared.instantiate is not None)
-        job_inputs = dict(inputs or {})
+        supplied_inputs = dict(inputs or {})
+        _stage_inputs(staging, workflow, supplied_inputs, instantiate=prepared.instantiate is not None)
+        job_parameters = dict(parameters or {})
         if prepared.instantiate is not None:
             context = InstantiateContext(
                 payload=staging,
-                parameters=MappingProxyType(supplied_parameters),
-                inputs=job_inputs,
+                inputs=MappingProxyType(supplied_inputs),
+                parameters=job_parameters,
                 tag=tag,
             )
             prepared.instantiate(context)
-            job_inputs = context.inputs
+            job_parameters = context.parameters
             tag = caller_tag if caller_tag is not None else context.tag
         job = prepare_job_payload(
             staging,
@@ -953,7 +956,7 @@ def _submit(
                 workdir_mode=workdir_mode,
                 data_mode=prepared.data_mode,
                 priority=500 if priority is None else priority,
-                inputs=validate_inputs(job_inputs),
+                parameters=validate_parameters(job_parameters),
                 declarations=workflow.declarations,
             ),
         )
@@ -991,24 +994,24 @@ def _stage_files(payload: Path, files: Mapping[str, str | os.PathLike[str]]) -> 
         shutil.copyfile(path, destination)
 
 
-def _stage_parameters(
+def _stage_inputs(
     payload: Path,
     workflow: ResolvedWorkflow,
-    parameters: Mapping[str, object],
+    inputs: Mapping[str, object],
     *,
     instantiate: bool = False,
 ) -> None:
-    """Realize creation parameters into the payload declared by the workflow."""
+    """Realize declared inputs into the payload declared by the workflow."""
 
-    declared = workflow.parameters
-    for name, value in parameters.items():
+    declared = workflow.inputs
+    for name, value in inputs.items():
         if name not in declared:
             names = ", ".join(declared) or "none"
-            raise ValueError(f"unknown workflow parameter {name!r}; declared parameters: {names}")
+            raise ValueError(f"unknown workflow input {name!r}; declared inputs: {names}")
         destination_name = declared[name]
         if destination_name is None:
             if not instantiate:
-                raise ValueError(f"workflow parameter {name!r} requires an instantiate hook")
+                raise ValueError(f"workflow input {name!r} requires an instantiate hook")
             continue
         destination = payload_relative(destination_name)
         if isinstance(value, (str, os.PathLike)):

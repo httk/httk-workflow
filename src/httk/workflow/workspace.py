@@ -61,7 +61,7 @@ def _validate_setting_key(key: str) -> str:
 
     Application settings are a flat, dotted-name map (``vasp.command``,
     ``vasp.pseudo_library``) of small values a runner resolves at execution
-    time — never nested objects, which belong in a job's ``inputs`` instead.
+    time — never nested objects, which belong in a job's ``parameters`` instead.
     """
 
     if not isinstance(key, str) or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", key) is None:
@@ -362,7 +362,7 @@ class Workspace:
         Application settings are distinct from :attr:`policy`, which tunes the
         engine. These are the values an application step resolves at run time —
         the VASP command, a pseudopotential library — one layer of the
-        job-inputs → environment → workspace → default resolution a runner reads
+        job-parameters → environment → workspace → default resolution a runner reads
         through :meth:`~httk.workflow.sdk.Attempt.setting`. A workspace written
         before the section existed reads as an empty map.
         """

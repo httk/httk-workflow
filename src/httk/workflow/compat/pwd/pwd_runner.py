@@ -2,7 +2,7 @@
 """Run one imported Python Workflow Definition document, node by node.
 
 The job this runner executes carries a whole PWD graph — either embedded in its
-``inputs`` as ``pwd_document`` or staged in the payload and pointed at by
+``parameters`` as ``pwd_document`` or staged in the payload and pointed at by
 ``pwd_document_path``. The graph runs *inside one job*, sequentially, in the
 topological order the importer already validated.
 
@@ -37,7 +37,7 @@ A node that raises fails the job with ``pwd.node_failed``, retryable by default,
 so the manager repeats the attempt within the job's own attempt budget and the
 repeat starts from the checkpoint.
 
-Job inputs
+Job parameters
 ----------
 
 * ``pwd_document`` — the whole PWD document, embedded.
@@ -110,13 +110,13 @@ class NodeError(Exception):
 def document_of(a: Attempt) -> PwdDocument:
     """Return the PWD document this job carries, embedded or staged."""
 
-    embedded = a.input("pwd_document", None)
+    embedded = a.parameter("pwd_document", None)
     if embedded is None:
-        pointer = a.input("pwd_document_path", None)
+        pointer = a.parameter("pwd_document_path", None)
         if not isinstance(pointer, str) or not pointer:
             raise ValueError(
-                "this job carries no PWD document: it needs either a pwd_document input or a "
-                "pwd_document_path input naming one in its payload"
+                "this job carries no PWD document: it needs either a pwd_document parameter or a "
+                "pwd_document_path parameter naming one in its payload"
             )
         path = a.payload.joinpath(*Path(pointer).parts)
         if not path.is_file():
@@ -124,7 +124,7 @@ def document_of(a: Attempt) -> PwdDocument:
         embedded = json.loads(path.read_text(encoding="utf-8"))
         source = str(path)
     else:
-        source = "the pwd_document input"
+        source = "the pwd_document parameter"
     # The importer validated this document before the job was submitted; a job
     # whose payload was edited afterwards is refused here rather than half-run.
     return validate_pwd_document(embedded, source=source, allow_unknown_version=True)
@@ -134,9 +134,9 @@ def import_roots(a: Attempt) -> list[str]:
     """Return the import roots this job adds, payload first."""
 
     roots = [str(a.payload / "files")]
-    extra = a.input("pwd_module_path", [])
+    extra = a.parameter("pwd_module_path", [])
     if isinstance(extra, str) or not isinstance(extra, Sequence):
-        raise ValueError("job input 'pwd_module_path' must be an array of import roots")
+        raise ValueError("job parameter 'pwd_module_path' must be an array of import roots")
     roots.extend(str(item) for item in extra)
     return roots
 
@@ -144,9 +144,9 @@ def import_roots(a: Attempt) -> list[str]:
 def allowed_modules(a: Attempt) -> tuple[str, ...]:
     """Return the module prefix allowlist of this job, empty meaning none."""
 
-    value = a.input("pwd_allowed_modules", [])
+    value = a.parameter("pwd_allowed_modules", [])
     if isinstance(value, str) or not isinstance(value, Sequence):
-        raise ValueError("job input 'pwd_allowed_modules' must be an array of module prefixes")
+        raise ValueError("job parameter 'pwd_allowed_modules' must be an array of module prefixes")
     return tuple(str(item) for item in value)
 
 
@@ -274,7 +274,7 @@ def publish_outputs(a: Attempt, document: PwdDocument, results: Mapping[int, obj
     path = a.workdir / OUTPUTS_FILE
     path.write_text(json.dumps(outputs, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     if a.context.data_generation is not None:
-        prefix = a.input("pwd_data_prefix", DEFAULT_DATA_PREFIX)
+        prefix = a.parameter("pwd_data_prefix", DEFAULT_DATA_PREFIX)
         a.put(path, f"{prefix}/{OUTPUTS_FILE}")
     a.log.append("note", f"pwd outputs: {', '.join(outputs) or 'none'}")
 
@@ -287,9 +287,9 @@ def execute(a: Attempt) -> None:
     for root in reversed(import_roots(a)):
         if root not in sys.path:
             sys.path.insert(0, root)
-    overrides = a.input("pwd_inputs", {})
+    overrides = a.parameter("pwd_inputs", {})
     if not isinstance(overrides, Mapping):
-        raise ValueError("job input 'pwd_inputs' must be an object of input node values")
+        raise ValueError("job parameter 'pwd_inputs' must be an object of input node values")
     allowlist = allowed_modules(a)
     stored = a.state.get(STATE_RESULTS, {})
     checkpoint = dict(stored) if isinstance(stored, Mapping) else {}
@@ -304,7 +304,7 @@ def execute(a: Attempt) -> None:
         try:
             value = execute_node(a, document, node, results, overrides=overrides, allowlist=allowlist)
         except NodeError as exception:
-            retryable = bool(a.input("pwd_retry_failed_nodes", True))
+            retryable = bool(a.parameter("pwd_retry_failed_nodes", True))
             a.fail(
                 "pwd.node_failed",
                 str(exception),

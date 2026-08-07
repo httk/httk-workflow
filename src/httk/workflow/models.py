@@ -69,12 +69,12 @@ MAXIMUM_VISIBILITY_DEADLINE_SECONDS = 86400.0
 MINIMUM_JOURNAL_SEGMENT_BYTES = 4096
 MAXIMUM_JOURNAL_SEGMENT_BYTES = 1 << 40
 
-# The serialized budget of the optional application-defined ``inputs`` object.
-# Inputs describe one job; bulk data belongs in the payload or in transactional
+# The serialized budget of the optional application-defined ``parameters`` object.
+# Parameters describe one job; bulk data belongs in the payload or in transactional
 # data, so a small bound keeps job.json readable and cheap to digest.
-MAXIMUM_INPUTS_BYTES = 262144
+MAXIMUM_PARAMETERS_BYTES = 262144
 # The serialized budget of the optional ``declarations`` object, which gets its
-# own allowance of exactly the same size as ``inputs`` for exactly the same
+# own allowance of exactly the same size as ``parameters`` for exactly the same
 # reason: a declaration describes one job, it is not a place for bulk content.
 MAXIMUM_DECLARATIONS_BYTES = 262144
 
@@ -140,8 +140,8 @@ def validate_attempt_control(value: object, name: str = "attempt_control") -> st
     return text
 
 
-def validate_inputs(value: object, name: str = "inputs") -> dict[str, object]:
-    """Validate the optional application-defined ``inputs`` object of a job.
+def validate_parameters(value: object, name: str = "parameters") -> dict[str, object]:
+    """Validate the optional application-defined ``parameters`` object of a job.
 
     The member is opaque to the protocol: only its shape, its key syntax, and
     its serialized size are checked. Its bytes are part of ``job.json`` and are
@@ -156,9 +156,9 @@ def validate_inputs(value: object, name: str = "inputs") -> dict[str, object]:
         size = len(json_bytes(mapping))
     except (TypeError, ValueError) as exc:
         raise FormatError(f"{name} must contain only JSON values: {exc}") from exc
-    if size > MAXIMUM_INPUTS_BYTES:
+    if size > MAXIMUM_PARAMETERS_BYTES:
         raise FormatError(
-            f"{name} serializes to {size} bytes, which exceeds the {MAXIMUM_INPUTS_BYTES}-byte limit; "
+            f"{name} serializes to {size} bytes, which exceeds the {MAXIMUM_PARAMETERS_BYTES}-byte limit; "
             "put bulk content in the job payload or in transactional data instead"
         )
     return dict(mapping)
@@ -859,7 +859,7 @@ class JobDefinition:
     required_capabilities: frozenset[str]
     retry_policy: RetryPolicy
     resources: Mapping[str, object]
-    inputs: Mapping[str, object]
+    parameters: Mapping[str, object]
     #: The workflow declarations of this job, carried verbatim, keyed by name.
     declarations: Mapping[str, Mapping[str, object]]
     parent: Mapping[str, object] | None
@@ -912,6 +912,12 @@ class JobDefinition:
     def from_mapping(cls, value: Mapping[str, object]) -> "JobDefinition":
         if value.get("format") != "httk-workflow-job" or value.get("format_version") != 1:
             raise FormatError("job format must be httk-workflow-job version 1")
+        if "inputs" in value and "parameters" in value:
+            raise FormatError(
+                "job.json carries both 'inputs' and 'parameters'; use only the renamed 'parameters' member"
+            )
+        if "inputs" in value:
+            raise FormatError("job.json member 'inputs' was renamed 'parameters'; re-scaffold the job")
         job_id = canonical_uuid(value.get("id"))
         tag_raw = value.get("tag")
         tag = None if tag_raw is None else validate_label(tag_raw, "tag")
@@ -951,8 +957,8 @@ class JobDefinition:
             raise FormatError("claim.required_capabilities must be an array")
         capabilities = frozenset(validate_label(item, "capability") for item in capabilities_raw)
         resources = require_mapping(value.get("resources", {}), "resources")
-        inputs_raw = value.get("inputs")
-        inputs = {} if inputs_raw is None else validate_inputs(inputs_raw)
+        parameters_raw = value.get("parameters")
+        parameters = {} if parameters_raw is None else validate_parameters(parameters_raw)
         declarations_raw = value.get("declarations")
         declarations = {} if declarations_raw is None else validate_declarations(declarations_raw)
         parent_raw = value.get("parent")
@@ -976,7 +982,7 @@ class JobDefinition:
             required_capabilities=capabilities,
             retry_policy=RetryPolicy.from_mapping(value.get("retry_policy", {})),
             resources=dict(resources),
-            inputs=inputs,
+            parameters=parameters,
             declarations=declarations,
             parent=None if parent is None else dict(parent),
             raw=dict(value),

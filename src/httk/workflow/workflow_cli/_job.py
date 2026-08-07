@@ -8,7 +8,7 @@ from ._common import (
     _group,
     _json_value,
     _leaf,
-    _load_parameters,
+    _load_inputs,
     _local_root,
     _pairs,
 )
@@ -133,7 +133,7 @@ def build_runner_parser(
 
 
 def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Scaffold and submit one job or a parameter-source batch."""
+    """Scaffold and submit one job or an input-source batch."""
 
     workspace = Workspace(_local_root(arguments, context, action="submit into it"))
     if arguments.workflow_dir is not None:
@@ -143,9 +143,12 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
         workflow_target: str | os.PathLike[str] = workflow_dir.resolve()
     else:
         workflow_target = arguments.workflow
-    inputs = {name: _json_value(text, f"job input {name!r}") for name, text in _pairs(arguments.inputs, "a job input")}
+    parameters = {
+        name: _json_value(text, f"job parameter {name!r}")
+        for name, text in _pairs(arguments.parameters, "a job parameter")
+    }
     files: dict[str, str | Path] = {name: Path(text) for name, text in _pairs(arguments.files, "a staged file")}
-    parameters, items, parameter_tag = _load_parameters(arguments.parameters, arguments.parameter_from)
+    inputs, items, input_tag = _load_inputs(arguments.inputs, arguments.input_from)
     shared: dict[str, Any] = {
         "inputs": inputs,
         "files": files,
@@ -163,7 +166,7 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
             item["tag"] = arguments.tag or item.get("tag")
         results: Iterator[ScaffoldedJob] = new_jobs(workspace, workflow_target, items, **shared)
     else:
-        results = iter([new_job(workspace, workflow_target, tag=arguments.tag or parameter_tag, **shared)])
+        results = iter([new_job(workspace, workflow_target, tag=arguments.tag or input_tag, **shared)])
     if arguments.json:
         # One self-describing report per job, as an array, exactly as `job_records
         # --json` prints one array of records.
@@ -392,12 +395,12 @@ def build_job_parser(
         help="a workflow package directory containing workflow.toml (path-only; no registry lookup)",
     )
     new.add_argument(
-        "--input",
+        "--parameter",
         action="append",
         default=[],
-        dest="inputs",
+        dest="parameters",
         metavar="NAME=VALUE",
-        help="one job input; VALUE is JSON when it parses as JSON and a string otherwise, "
+        help="one implementation parameter; VALUE is JSON when it parses as JSON and a string otherwise, "
         "and NAME=@FILE reads a JSON file (repeatable)",
     )
     new.add_argument(
@@ -409,25 +412,25 @@ def build_job_parser(
         help="stage PATH in the payload as NAME; a bare NAME lands in files/ (repeatable)",
     )
     new.add_argument(
-        "--parameter",
+        "--input",
         action="append",
         default=[],
-        dest="parameters",
+        dest="inputs",
         metavar="NAME=VALUE",
-        help="one creation parameter; VALUE is passed verbatim (repeatable)",
+        help="one declared input value to stage (repeatable)",
     )
     new.add_argument(
-        "--parameter-from",
+        "--input-from",
         action="append",
         nargs="+",
         default=[],
         metavar=("NAME", "SOURCE"),
-        help="load a creation parameter from one or more files, or readable files in a directory (repeatable)",
+        help="load a declared input from one or more files, or readable files in a directory (repeatable)",
     )
     new.add_argument(
         "--tag",
         metavar="TAG",
-        help="the readable half of the job key (default: derived from a parameter source)",
+        help="the readable half of the job key (default: derived from an input source)",
     )
     new.add_argument("--name", metavar="NAME", help="the human-readable job name")
     new.add_argument(

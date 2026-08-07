@@ -67,6 +67,48 @@ def test_job_definition_uses_runner_executor_wire_key() -> None:
         JobDefinition.from_mapping(job)
 
 
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ({"inputs": {}}, "renamed 'parameters'"),
+        ({"inputs": {}, "parameters": {}}, "both 'inputs' and 'parameters'"),
+    ],
+)
+def test_job_definition_rejects_crossing_rename_residue(extra: dict[str, object], message: str) -> None:
+    job: dict[str, Any] = {
+        "format": "httk-workflow-job",
+        "format_version": 1,
+        "id": "12345678-1234-4234-8234-123456789abc",
+        "name": "Test job",
+        "workflow": "tests.example",
+        "runner": {"path": "files/runner", "arguments": []},
+        "workdir": {"mode": "persistent", "path": "run"},
+        "data": {"mode": "none"},
+        "initial_step": "run",
+        "priority": 500,
+        "claim": {"pool": "default", "required_capabilities": []},
+        "retry_policy": {"retry_on": []},
+        "resources": {},
+        "parent": None,
+        **extra,
+    }
+    with pytest.raises(FormatError, match=message):
+        JobDefinition.from_mapping(job)
+
+
+@pytest.mark.parametrize("description", [{"parameters": {}}, {"inputs": {}, "parameters": {}}])
+def test_runner_description_rejects_crossing_rename_residue(tmp_path: Path, description: dict[str, object]) -> None:
+    runner = tmp_path / "legacy-description.py"
+    runner.write_text(
+        "#!/usr/bin/env python3\n"
+        f"import json\nprint(json.dumps({description | {'workflow': 'tests.legacy', 'steps': ['run']}}))\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    with pytest.raises(ValueError, match=r"legacy 'parameters'.*current description format"):
+        describe_runner(runner)
+
+
 from httk.workflow.workflow_cli import command
 
 _POSCAR = """silicon
@@ -157,7 +199,7 @@ def test_every_packaged_runner_has_a_workflow_that_says_what_it_implements() -> 
         described = describe_runner(workflow.source)
         assert described["workflow"] == workflow.workflow_id
         assert described["steps"] == sorted(workflow.steps)
-        assert workflow.parameters == {"structure": "POSCAR"}
+        assert workflow.inputs == {"structure": "POSCAR"}
         assert workflow.initial_step in workflow.steps
 
     expected = {
@@ -210,7 +252,9 @@ def test_workflow_declarations_are_forwarded_and_digest_covered(
 
 
 def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, structure: Path) -> None:
-    job = new_job(workspace, "vasp-relax", files={"POSCAR": structure}, tag="silicon", inputs={"kpoint_density": 30.0})
+    job = new_job(
+        workspace, "vasp-relax", files={"POSCAR": structure}, tag="silicon", parameters={"kpoint_density": 30.0}
+    )
 
     # The job is submitted, its runner is in the store under a name carrying the
     # digest of its bytes, and the payload holds the structure where the runner
@@ -224,7 +268,7 @@ def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, 
     definition = JobDefinition.from_path(job.payload / "job.json")
     assert definition.workflow == "httk.vasp.relax" and definition.initial_step == "prepare"
     assert definition.data_mode == "transactional" and definition.workdir_mode == "persistent"
-    assert definition.inputs == {"kpoint_density": 30.0}
+    assert definition.parameters == {"kpoint_density": 30.0}
     assert workspace.find_marker_by_id(job.job_id) is not None
 
     # Scaffolding a second job publishes nothing new: identical bytes are one
@@ -235,26 +279,26 @@ def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, 
 
 
 def test_a_path_parameter_lands_at_the_declared_payload_destination(workspace: Workspace, structure: Path) -> None:
-    job = new_job(workspace, "vasp-relax", parameters={"structure": structure})
+    job = new_job(workspace, "vasp-relax", inputs={"structure": structure})
     assert (job.payload / "files" / "POSCAR").read_text(encoding="utf-8") == _POSCAR
     assert "parameters" not in json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
 
 
 def test_parameter_validation_and_realization_fail_before_submission(tmp_path: Path, workspace: Workspace) -> None:
-    with pytest.raises(ValueError, match="declared parameters: structure"):
-        new_job(workspace, "vasp-relax", parameters={"unknown": object()})
+    with pytest.raises(ValueError, match="declared inputs: structure"):
+        new_job(workspace, "vasp-relax", inputs={"unknown": object()})
 
     runner = tmp_path / "hook.py"
     runner.write_text(
         "from httk.workflow import Runner\n"
-        "run = Runner('tests.hook', parameters={'x': None})\n"
+        "run = Runner('tests.hook', inputs={'x': None})\n"
         "@run.step\n"
         "def start(a): a.succeed()\n"
         "raise SystemExit(run.main())\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="requires an instantiate hook"):
-        new_job(workspace, runner, parameters={"x": object()})
+        new_job(workspace, runner, inputs={"x": object()})
     assert not list(workspace.scan_markers())
     assert list((workspace.control / "tmp").iterdir()) == []
 
@@ -269,13 +313,13 @@ def test_an_instantiate_hook_stages_parameters_and_runs_once_per_campaign(tmp_pa
         f"counter = Path({str(counter)!r})\n"
         "if __name__ != '__main__':\n"
         "    counter.write_text(str(int(counter.read_text()) + 1) if counter.exists() else '1')\n"
-        "run = Runner('tests.hook', parameters={'structure': 'POSCAR', 'note': None})\n"
+        "run = Runner('tests.hook', inputs={'structure': 'POSCAR', 'note': None})\n"
         "@run.instantiate\n"
         "def instantiate(ctx):\n"
         "    assert (ctx.payload / 'files' / 'POSCAR').is_file()\n"
-        "    (ctx.payload / 'files' / 'generated.txt').write_text(ctx.parameters['note'], encoding='utf-8')\n"
-        "    ctx.inputs['derived'] = ctx.parameters['note']\n"
-        "    if ctx.parameters['note'] == 'one': ctx.suggest_tag('suggested')\n"
+        "    (ctx.payload / 'files' / 'generated.txt').write_text(ctx.inputs['note'], encoding='utf-8')\n"
+        "    ctx.parameters['derived'] = ctx.inputs['note']\n"
+        "    if ctx.inputs['note'] == 'one': ctx.suggest_tag('suggested')\n"
         "    else: ctx.tag = 'direct-assignment'\n"
         "@run.step\n"
         "def start(a): a.succeed()\n"
@@ -289,16 +333,16 @@ def test_an_instantiate_hook_stages_parameters_and_runs_once_per_campaign(tmp_pa
         new_jobs(
             workspace,
             runner,
-            [{"parameters": {"note": "one"}}, {"parameters": {"note": "two"}, "tag": "explicit"}],
-            parameters={"structure": structure},
-            inputs={"shared": True},
+            [{"inputs": {"note": "one"}}, {"inputs": {"note": "two"}, "tag": "explicit"}],
+            inputs={"structure": structure},
+            parameters={"shared": True},
         )
     )
     assert counter.read_text(encoding="utf-8") == "1"
     assert (jobs[0].payload / "files" / "generated.txt").read_text(encoding="utf-8") == "one"
     assert (jobs[1].payload / "files" / "generated.txt").read_text(encoding="utf-8") == "two"
     assert jobs[0].tag == "suggested" and jobs[1].tag == "explicit"
-    assert json.loads((jobs[0].payload / "job.json").read_text(encoding="utf-8"))["inputs"] == {
+    assert json.loads((jobs[0].payload / "job.json").read_text(encoding="utf-8"))["parameters"] == {
         "shared": True,
         "derived": "one",
     }
@@ -309,7 +353,7 @@ def test_an_instantiate_hook_failure_leaves_no_submission_or_scratch(tmp_path: P
     runner.write_text(
         "import json\n"
         "from httk.workflow import Runner\n"
-        "run = Runner('tests.raising', parameters={'note': None})\n"
+        "run = Runner('tests.raising', inputs={'note': None})\n"
         "@run.instantiate\n"
         "def instantiate(ctx): raise RuntimeError('hook failed')\n"
         "@run.step\n"
@@ -318,7 +362,7 @@ def test_an_instantiate_hook_failure_leaves_no_submission_or_scratch(tmp_path: P
         encoding="utf-8",
     )
     with pytest.raises(RuntimeError, match="hook failed"):
-        new_job(workspace, runner, parameters={"note": "value"})
+        new_job(workspace, runner, inputs={"note": "value"})
     assert not list(workspace.scan_markers())
     assert list((workspace.control / "tmp").iterdir()) == []
 
@@ -357,10 +401,10 @@ def test_an_instantiate_hook_executes_the_bytes_it_verified(
     runner = tmp_path / "verified.py"
     runner.write_text(
         "from httk.workflow import Runner\n"
-        "run = Runner('tests.verified', parameters={'value': None})\n"
+        "run = Runner('tests.verified', inputs={'value': None})\n"
         "@run.instantiate\n"
         "def instantiate(ctx):\n"
-        "    (ctx.payload / 'verified.txt').write_text(ctx.parameters['value'], encoding='utf-8')\n"
+        "    (ctx.payload / 'verified.txt').write_text(ctx.inputs['value'], encoding='utf-8')\n"
         "@run.step\n"
         "def start(a): a.succeed()\n"
         "if __name__ == '__main__': raise SystemExit(run.main())\n",
@@ -385,7 +429,7 @@ def test_an_instantiate_hook_executes_the_bytes_it_verified(
 
     monkeypatch.setattr(workspace, "publish_runner", publish_then_replace)
     monkeypatch.setattr(Path, "read_bytes", read_verified_bytes)
-    job = new_job(workspace, runner, parameters={"value": "verified"})
+    job = new_job(workspace, runner, inputs={"value": "verified"})
     assert reads == 1
     assert (job.payload / "verified.txt").read_text(encoding="utf-8") == "verified"
 
@@ -425,14 +469,14 @@ def test_hook_consumed_parameters_require_the_hook_and_old_description_defaults_
     runner = tmp_path / "no-hook.py"
     runner.write_text(
         "from httk.workflow import Runner\n"
-        "run = Runner('tests.no-hook', parameters={'x': None})\n"
+        "run = Runner('tests.no-hook', inputs={'x': None})\n"
         "@run.step\n"
         "def start(a): a.succeed()\n"
         "if __name__ == '__main__': raise SystemExit(run.main())\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="requires an instantiate hook"):
-        new_job(workspace, runner, parameters={"x": "value"})
+        new_job(workspace, runner, inputs={"x": "value"})
     plain = tmp_path / "plain.py"
     plain.write_text(_SINGLE_STEP_RUNNER, encoding="utf-8")
     assert resolve_workflow(plain).instantiate is False
@@ -444,16 +488,16 @@ def test_an_object_parameter_is_serialized_and_a_failing_save_leaves_no_scratch(
     runner = tmp_path / "object.py"
     runner.write_text(
         "from httk.workflow import Runner\n"
-        "run = Runner('tests.object', parameters={'data': 'files/data.testfmt'})\n"
+        "run = Runner('tests.object', inputs={'data': 'files/data.testfmt'})\n"
         "@run.step\n"
         "def start(a): a.succeed()\n"
         "raise SystemExit(run.main())\n",
         encoding="utf-8",
     )
-    job = new_job(workspace, runner, parameters={"data": {"value": 7}})
+    job = new_job(workspace, runner, inputs={"data": {"value": 7}})
     assert (job.payload / "files" / "data.testfmt").read_text(encoding="utf-8") == "{'value': 7}"
     with pytest.raises(RuntimeError, match="test serializer failed"):
-        new_job(workspace, runner, parameters={"data": {"raise": True}})
+        new_job(workspace, runner, inputs={"data": {"raise": True}})
     assert len(list(workspace.scan_markers())) == 1
     assert list((workspace.control / "tmp").iterdir()) == []
 
@@ -462,14 +506,14 @@ def test_an_object_parameter_requires_a_registered_writer(tmp_path: Path, worksp
     runner = tmp_path / "missing.py"
     runner.write_text(
         "from httk.workflow import Runner\n"
-        "run = Runner('tests.missing', parameters={'data': 'files/data.no-writer'})\n"
+        "run = Runner('tests.missing', inputs={'data': 'files/data.no-writer'})\n"
         "@run.step\n"
         "def start(a): a.succeed()\n"
         "raise SystemExit(run.main())\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="httk-io and httk-atomistic"):
-        new_job(workspace, runner, parameters={"data": object()})
+        new_job(workspace, runner, inputs={"data": object()})
 
 
 def test_a_runner_without_a_parameter_description_has_an_empty_declaration(tmp_path: Path) -> None:
@@ -565,14 +609,14 @@ def test_a_campaign_publishes_one_runner_and_yields_jobs_lazily(workspace: Works
 
     assert [path.name for path in structure_files(directory)] == ["POSCAR.Si2O", "POSCAR.fcc-Al", "mp-149.vasp"]
     items: list[JobItem] = [
-        {"files": {"POSCAR": path}, "tag": structure_tag(path), "inputs": {"index": index}}
+        {"files": {"POSCAR": path}, "tag": structure_tag(path), "parameters": {"index": index}}
         for index, path in enumerate(structure_files(directory))
     ]
     campaign = new_jobs(
         workspace,
         "vasp-relax",
         iter(items),
-        inputs={"kpoint_density": 15.0},
+        parameters={"kpoint_density": 15.0},
         placement="project/screening",
     )
 
@@ -586,7 +630,7 @@ def test_a_campaign_publishes_one_runner_and_yields_jobs_lazily(workspace: Works
     assert len({str(job.runner["path"]) for job in jobs}) == 1
     assert len(list(workspace.runners.iterdir())) == 1
     definition = JobDefinition.from_path(jobs[1].payload / "job.json")
-    assert definition.inputs == {"kpoint_density": 15.0, "index": 1}
+    assert definition.parameters == {"kpoint_density": 15.0, "index": 1}
     assert len(list(workspace.scan_markers())) == 3
 
 
@@ -664,15 +708,15 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
                 ws_name,
                 "--workflow",
                 "vasp-relax",
-                "--parameter",
+                "--input",
                 f"structure={structure}",
                 "--tag",
                 "silicon",
-                "--input",
+                "--parameter",
                 "kpoint_density=30.0",
-                "--input",
+                "--parameter",
                 'incar_tags={"ENCUT": 520}',
-                "--input",
+                "--parameter",
                 "remedy_policy=reviewed-v1",
                 "--placement",
                 "project/si",
@@ -685,7 +729,11 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
     assert key.startswith("silicon--")
     definition = JobDefinition.from_path(Path(payload) / "job.json")
     # A value is JSON when it parses as JSON and a string when it does not.
-    assert definition.inputs == {"kpoint_density": 30.0, "incar_tags": {"ENCUT": 520}, "remedy_policy": "reviewed-v1"}
+    assert definition.parameters == {
+        "kpoint_density": 30.0,
+        "incar_tags": {"ENCUT": 520},
+        "remedy_policy": "reviewed-v1",
+    }
     assert (Path(payload) / "files" / "POSCAR").is_file()
 
     directory = tmp_path / "structures"
@@ -700,7 +748,7 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
                 ws_name,
                 "--workflow",
                 "vasp-relax",
-                "--parameter-from",
+                "--input-from",
                 "structure",
                 str(directory),
                 "--json",
@@ -734,12 +782,12 @@ def test_the_command_reports_what_it_cannot_do(
     empty.mkdir()
     assert (
         command(
-            ["job", "new", name, "--workflow", "vasp-relax", "--parameter-from", "structure", str(empty)],
+            ["job", "new", name, "--workflow", "vasp-relax", "--input-from", "structure", str(empty)],
             _context(tmp_path),
         )
         == 2
     )
-    assert "no readable parameter files" in capsys.readouterr().err
+    assert "no readable input files" in capsys.readouterr().err
 
 
 def test_parameter_from_single_file_and_two_batches_are_validated(
@@ -757,7 +805,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
                 name,
                 "--workflow",
                 "vasp-relax",
-                "--parameter-from",
+                "--input-from",
                 "structure",
                 str(structure),
                 "--json",
@@ -779,7 +827,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
     runner = tmp_path / "object.py"
     runner.write_text(
         "from httk.workflow import Runner\n"
-        "run = Runner('tests.cli-object', parameters={'data': 'data.testfmt'})\n"
+        "run = Runner('tests.cli-object', inputs={'data': 'data.testfmt'})\n"
         "@run.step\n"
         "def start(a): a.succeed()\n"
         "raise SystemExit(run.main())\n",
@@ -793,7 +841,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
                 name,
                 "--workflow",
                 str(runner),
-                "--parameter-from",
+                "--input-from",
                 "data",
                 str(directory),
                 "--file",
@@ -820,10 +868,10 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
                 name,
                 "--workflow",
                 "vasp-relax",
-                "--parameter-from",
+                "--input-from",
                 "structure",
                 str(directory),
-                "--parameter-from",
+                "--input-from",
                 "structure",
                 str(directory),
             ],
@@ -831,7 +879,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
         )
         == 2
     )
-    assert "only one --parameter-from" in capsys.readouterr().err
+    assert "only one --input-from" in capsys.readouterr().err
     assert command(["job", "new", name, "--workflow", "vasp-relax", "--from", str(structure)], _context(tmp_path)) == 2
     assert "unrecognized arguments: --from" in capsys.readouterr().err
 
@@ -865,7 +913,7 @@ def test_parameter_from_cif_is_written_as_a_poscar_when_domain_plugins_are_avail
                 "cif",
                 "--workflow",
                 "vasp-relax",
-                "--parameter-from",
+                "--input-from",
                 "structure",
                 str(cif),
                 "--json",

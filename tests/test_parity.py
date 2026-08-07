@@ -31,14 +31,14 @@ run = Runner("tests.parity")
 
 @run.step
 def characterize(a):
-    sites = a.input("sites")
-    failing = str(a.input("failing", "")).split(",")
+    sites = a.parameter("sites")
+    failing = str(a.parameter("failing", "")).split(",")
     a.state["sites"] = sites
     for site in range(sites):
         a.spawn(
             ChildSpec(
                 step="relax",
-                inputs={"site": site, "diverge": str(site) in failing},
+                parameters={"site": site, "diverge": str(site) in failing},
                 data_mode="transactional",
                 maximum_attempts_per_activation=1,
             ),
@@ -50,9 +50,9 @@ def characterize(a):
 
 @run.step
 def relax(a):
-    site = a.input("site")
+    site = a.parameter("site")
     (a.workdir / "site.txt").write_text("%s\\n" % site, encoding="utf-8")
-    if a.input("diverge"):
+    if a.parameter("diverge"):
         a.fail("relax.diverged", "site %s did not relax" % site)
     else:
         a.put(a.workdir / "site.txt", "results/site.txt")
@@ -92,8 +92,8 @@ httk_workflow_runner tests.parity characterize relax aggregate triage
 
 step_characterize() {
     local sites failing site diverge
-    sites=$(httk_workflow_input sites)
-    failing=$(httk_workflow_input failing '')
+    sites=$(httk_workflow_parameter sites)
+    failing=$(httk_workflow_parameter failing '')
     httk_workflow_state_set sites "$sites"
     site=0
     while [ "$site" -lt "$sites" ]; do
@@ -103,8 +103,8 @@ step_characterize() {
         esac
         httk_workflow_spawn "site-$site" \\
             --step relax \\
-            --input site="$site" \\
-            --input diverge="$diverge" \\
+            --parameter site="$site" \\
+            --parameter diverge="$diverge" \\
             --data-mode transactional \\
             --max-attempts-per-activation 1 \\
             --placement project/children >/dev/null
@@ -115,9 +115,9 @@ step_characterize() {
 
 step_relax() {
     local site
-    site=$(httk_workflow_input site)
+    site=$(httk_workflow_parameter site)
     printf '%s\\n' "$site" >site.txt
-    if [ "$(httk_workflow_input diverge)" = true ]; then
+    if [ "$(httk_workflow_parameter diverge)" = true ]; then
         httk_workflow_fail relax.diverged "site $site did not relax"
     else
         httk_workflow_put site.txt results/site.txt >/dev/null
@@ -186,7 +186,7 @@ def _campaign(root: Path, source: str, name: str, *, sites: int) -> Workspace:
             tag="campaign",
             initial_step="characterize",
             maximum_attempts_per_activation=1,
-            inputs={**_CAMPAIGN_INPUTS, "sites": sites},
+            parameters={**_CAMPAIGN_INPUTS, "sites": sites},
         ),
     )
     workspace.submit(payload, "project/campaign")

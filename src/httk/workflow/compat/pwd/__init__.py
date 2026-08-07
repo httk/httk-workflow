@@ -21,10 +21,10 @@ that job, sequentially, in topological order, by the packaged
 is created: a PWD node is one Python call, which is not worth a claim, a lease
 and a process of its own.
 
-The document travels in the job's ``inputs`` when it fits within
-*maximum_embedded_bytes*, and in ``files/pwd.json`` with an inputs pointer when
-it does not, because ``inputs`` is bounded by
-:data:`~httk.workflow.models.MAXIMUM_INPUTS_BYTES` and a generated document can
+The document travels in the job's ``parameters`` when it fits within
+*maximum_embedded_bytes*, and in ``files/pwd.json`` with a document pointer when
+it does not, because ``parameters`` is bounded by
+:data:`~httk.workflow.models.MAXIMUM_PARAMETERS_BYTES` and a generated document can
 be much larger than that.
 
 .. warning::
@@ -47,7 +47,7 @@ from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from httk.workflow import Workspace
-from httk.workflow.models import MAXIMUM_INPUTS_BYTES
+from httk.workflow.models import MAXIMUM_PARAMETERS_BYTES
 
 from .._integration import (
     DEFAULT_PLACEMENT,
@@ -70,9 +70,9 @@ RUNNER = "pwd_runner.py"
 KNOWN_VERSIONS = ("0.1.0",)
 #: Where an oversized document is staged inside the payload.
 DOCUMENT_FILE = f"{FILES_DIRECTORY}/pwd.json"
-#: How much of the ``inputs`` budget an embedded document may take. The rest of
+#: How much of the ``parameters`` budget an embedded document may take. The rest of
 #: the budget belongs to the members that describe how to run it.
-DEFAULT_MAXIMUM_EMBEDDED_BYTES = MAXIMUM_INPUTS_BYTES // 2
+DEFAULT_MAXIMUM_EMBEDDED_BYTES = MAXIMUM_PARAMETERS_BYTES // 2
 
 _NODE_TYPES = ("function", "input", "output")
 
@@ -373,7 +373,7 @@ def import_pwd(
         workflow=WORKFLOW,
         initial_step=INITIAL_STEP,
         name=name or f"pwd: {tag or Path(os.fspath(document_path)).name}",
-        inputs=inputs,
+        parameters=inputs,
         documents=documents,
         files=staged_modules,
         tag=tag,

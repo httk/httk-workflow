@@ -28,7 +28,7 @@ characterization — the point is the campaign, not the physics):
     httk project init --name campaign
     httk workflow job new \\
         --workflow examples/defect_campaign.py --step characterize \\
-        --input sites=3 --input diverging=1 --tag campaign
+        --parameter sites=3 --parameter diverging=1 --tag campaign
     httk workflow run
     httk workflow job list
 
@@ -37,7 +37,7 @@ The campaign then fails by design, with ``defects.child_failed``, because
 one child is what this example is for. ``examples/defect_campaign.sh`` is the same
 campaign authored in Bash, publishing the same outcomes byte for byte.
 
-Job inputs
+Job parameters
 ----------
 
 * ``sites`` — how many sites to relax, one child job each.
@@ -53,15 +53,15 @@ run = Runner("examples.defects")
 def characterize(a: Attempt) -> None:
     """Spawn one child job per site and wait for every one of them."""
 
-    sites = int(str(a.input("sites")))
-    diverging = str(a.input("diverging", "")).split(",")
+    sites = int(str(a.parameter("sites")))
+    diverging = str(a.parameter("diverging", "")).split(",")
     # Job state is the runner's own memory of this job; it survives every attempt.
     a.state["sites"] = sites
     for site in range(sites):
         a.spawn(
             ChildSpec(
                 step="relax",
-                inputs={"site": site, "diverge": str(site) in diverging},
+                parameters={"site": site, "diverge": str(site) in diverging},
                 data_mode="transactional",
                 maximum_attempts_per_activation=1,
             ),
@@ -77,9 +77,9 @@ def characterize(a: Attempt) -> None:
 def relax(a: Attempt) -> None:
     """Relax one site: the step every spawned child runs."""
 
-    site = a.input("site")
+    site = a.parameter("site")
     (a.workdir / "site.txt").write_text(f"{site}\n", encoding="utf-8")
-    if a.input("diverge"):
+    if a.parameter("diverge"):
         # A declared failure code is what a parent triages on and what a job lists
         # in retry_on; it is never a stack trace.
         a.fail("relax.diverged", f"site {site} did not relax")

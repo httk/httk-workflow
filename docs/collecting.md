@@ -11,8 +11,8 @@ outputs, provenance, products, and any unfulfilled roles.
 
 The job-embedded declaration governs the Run (immutable facts per job). ProductLinks
 come from the live registered provider's manifest and therefore apply today's
-curation; if collection uses the job-pinned fallback instead, they come from
-that job's own verified pinned manifest and preserve its historical curation,
+curation; otherwise, for the job-pinned fallback, they come from that job's
+own verified pinned manifest and preserve its historical curation,
 not today's. Postprocessing is the workflow-owned substep of collecting. If no
 provider or pinned manifest is reachable, no products are emitted.
 
@@ -137,7 +137,7 @@ $ httk workflow collect workflow-workspace | head -1
 {"children":{},"data_generation":null,"data_path":null,"declarations":{},"failure":null,
  "format":"httk-workflow-collect","format_version":1,
  "job":{"claim":{"pool":"default","required_capabilities":[]},"data":{"mode":"none"},
- "digest":"0e6f…","id":"5c0a…","initial_step":"only","inputs":{},"job_key":"single--5c0a…",
+"digest":"0e6f…","id":"5c0a…","initial_step":"only","parameters":{},"job_key":"single--5c0a…",
  "name":"collect single","parent":null,"priority":500,
  "runner":{"arguments":[],"executor":"path","path":"single/run.py","sha256":"41b1…",
  "source":"workspace"},"retry_policy":{…},"resources":{},"tag":"single",
@@ -165,7 +165,7 @@ stores it.
 `collect()` is the workflow-owned postprocessing layer. It resolves the record's
 workflow id through `workflow_provider()`, calls that provider's callable or
 lazy `module:function` postprocessor, validates role names against declared
-`output_types` in the job's embedded workflow declaration, and assembles the
+`outputs` in the job's embedded workflow declaration, and assembles the
 `Run` and `ProductLink` values. Product curation is read from the live
 registered provider's manifest, or from the job's own verified pinned manifest
 when the fallback is enabled; the embedded declaration supplies only the
@@ -177,3 +177,6 @@ with `missing_postprocessor` set. With `--allow-job-postprocessor`, collecting
 can inspect the job-pinned package tree, validate its own manifest and digest,
 and load that tree's postprocess hook; refusals degrade only that job. See
 {doc}`workflow_packages` for the trust tiers and package hook contract.
+
+For the distinction between declared entry-typed inputs and opaque implementation
+parameters, see {doc}`workflow_packages` and {doc}`declarations`.

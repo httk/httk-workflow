@@ -108,7 +108,7 @@ def _campaign(
     runner: str,
     *,
     source: str = "workspace",
-    inputs: dict[str, object] | None = None,
+    parameters: dict[str, object] | None = None,
     fail_once: bool = False,
     files: tuple[str, ...] = ("POSCAR", "INCAR", "POTCAR"),
     data_mode: str = "transactional",
@@ -144,7 +144,7 @@ def _campaign(
             initial_step=initial_step,
             data_mode="transactional" if data_mode == "transactional" else "none",
             maximum_total_attempts=8,
-            inputs=inputs or {},
+            parameters=parameters or {},
         ),
     )
     workspace.submit(payload, "project/vasp")
@@ -200,7 +200,7 @@ def test_the_packaged_relax_runner_prepares_runs_and_collects(tmp_path: Path, mo
         tmp_path / "relax",
         monkeypatch,
         "vasp_relax.py",
-        inputs={"incar_tags": {"ISYM": 0}},
+        parameters={"incar_tags": {"ISYM": 0}},
     )
 
     kind, payload = _payload_of(workspace, job_id)
@@ -294,7 +294,7 @@ def test_the_bash_runner_and_the_python_runner_publish_the_same_result(
             monkeypatch,
             runner,
             fail_once=fail_once,
-            inputs={"kpoint_density": 15.0, "incar_tags": {"NELM": 40}},
+            parameters={"kpoint_density": 15.0, "incar_tags": {"NELM": 40}},
         )
         kind, payload = _payload_of(workspace, job_id)
         state = _job_state(payload)
@@ -374,7 +374,7 @@ def test_the_static_runner_switches_off_the_ionic_loop(tmp_path: Path, monkeypat
         tmp_path / "static",
         monkeypatch,
         "vasp_static.py",
-        inputs={"poscar": "files/POSCAR", "data_prefix": "single-point"},
+        parameters={"poscar": "files/POSCAR", "data_prefix": "single-point"},
     )
 
     kind, payload = _payload_of(workspace, job_id)

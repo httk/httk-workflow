@@ -887,7 +887,7 @@ def import_cwl(
         workflow=WORKFLOW,
         initial_step=INITIAL_STEP,
         name=name or f"cwl: {tag or Path(os.fspath(workflow_path)).name}",
-        inputs=inputs,
+        parameters=inputs,
         documents=documents,
         files=files,
         tag=tag,

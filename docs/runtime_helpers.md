@@ -41,7 +41,7 @@ def characterize(a):
     a.state["sites"] = len(sites)
     for index, site in enumerate(sites):
         a.spawn(
-            ChildSpec(step="relax", inputs={"site": site}, maximum_attempts_per_activation=2),
+            ChildSpec(step="relax", parameters={"site": site}, maximum_attempts_per_activation=2),
             label=f"site-{index}",
         )
     a.gather("aggregate", when="all_terminal", on_impossible="triage")
@@ -49,7 +49,7 @@ def characterize(a):
 
 @run.step
 def relax(a):
-    site = a.input("site")
+    site = a.parameter("site")
     result = a.run(["relax", "--site", json.dumps(site)], timeout=3600)
     if result.timed_out:
         a.retry("the relaxation timed out")
@@ -106,7 +106,7 @@ job = prepare_job_payload(
         runner_path=str(reference["path"]),
         runner_sha256=str(reference["sha256"]),
         initial_step="characterize",
-        inputs={"encut": 520, "supercell": [2, 2, 2]},
+        parameters={"encut": 520, "supercell": [2, 2, 2]},
     ),
 )
 workspace.submit("prepared-job", "project/si-vacancies")
@@ -114,9 +114,9 @@ workspace.submit("prepared-job", "project/si-vacancies")
 
 ## Steps and dispatch
 
-`Runner(workflow, parameters=...)` declares creation-time payload parameters as
-`name` → destination (or `null` for a hook-consumed parameter). The optional
-`parameters` member is included in the runner description when non-empty.
+`Runner(workflow, inputs=...)` declares creation-time staged inputs as
+`name` → destination (or `null` for a hook-consumed input). The optional
+`inputs` member is included in the runner description when non-empty.
 
 `@run.step` registers the handler under the function's own name;
 `@run.step(name="collect-results")` names it explicitly. Registering the same
@@ -149,16 +149,16 @@ the job publishes.
 
 `@run.instantiate` is a Python-only creation-time hook, replacing v1's
 `ht.instantiate.py`. `new_job(s)` resolves the workflow on the creating machine,
-after declarative parameters are staged and before `job.json` is finalized. Its
-`InstantiateContext` provides the staging `payload`, read-only `parameters`,
-mutable merged `inputs`, and caller `tag`; `suggest_tag` supplies a tag only
+after declared inputs are staged and before `job.json` is finalized. Its
+`InstantiateContext` provides the staging `payload`, read-only `inputs`,
+mutable merged `parameters`, and caller `tag`; `suggest_tag` supplies a tag only
 when the caller did not. For example:
 
 ```python
 @run.instantiate
 def instantiate(ctx):
-    (ctx.payload / "files" / "generated.txt").write_text(ctx.parameters["note"])
-    ctx.inputs["derived"] = "ready"
+    (ctx.payload / "files" / "generated.txt").write_text(ctx.inputs["structure"])
+    ctx.parameters["derived"] = "ready"
     ctx.suggest_tag("generated")
 ```
 
@@ -173,7 +173,7 @@ declare this hook.
 | `a.context` | the immutable identity and restart evidence of this attempt |
 | `a.step` | the step this attempt runs |
 | `a.payload`, `a.workdir`, `a.workspace`, `a.data` | absolute paths; `a.data` is set only for a transactional job |
-| `a.job`, `a.inputs`, `a.input(name[, default])` | the job definition and its application-defined `inputs` object |
+| `a.job`, `a.parameters`, `a.parameter(name[, default])` | the job definition and its opaque implementation `parameters` object |
 | `a.state` | dict-like JSON state that belongs to the **job** |
 | `a.log` | the append-only structured run log of the workdir |
 | `a.children` | the typed children of the join that started this activation |
@@ -256,7 +256,7 @@ becomes the child's job tag by default, so its payload directory is readable at 
 glance.
 
 A `ChildSpec` needs no prepared payload at all. It synthesizes a complete
-`job.json` from the step and inputs the child starts with, and everything else
+`job.json` from the step and parameters the child starts with, and everything else
 follows the spawning job: workflow, claim pool, priority, resources, and runner.
 `RunnerRef.inherit()` — the default — copies the parent's own `(source, path,
 sha256)`, which is what a campaign whose steps all live in one published runner

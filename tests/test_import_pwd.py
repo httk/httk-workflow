@@ -213,7 +213,7 @@ def test_unknown_members_survive_the_import(tmp_path: Path, workspace: Workspace
     job = import_pwd(workspace, _document(tmp_path, annotated), modules=[module], tag="annotated")
 
     definition = JobDefinition.from_path(job.payload / "job.json")
-    embedded = definition.inputs["pwd_document"]
+    embedded = definition.parameters["pwd_document"]
     assert isinstance(embedded, dict)
     assert embedded["engineAnnotations"] == {"who": "some other engine"}
 
@@ -353,8 +353,8 @@ def test_a_document_too_large_to_embed_is_staged_in_the_payload(
     )
 
     definition = JobDefinition.from_path(job.payload / "job.json")
-    assert "pwd_document" not in definition.inputs
-    assert definition.inputs["pwd_document_path"] == DOCUMENT_FILE
+    assert "pwd_document" not in definition.parameters
+    assert definition.parameters["pwd_document_path"] == DOCUMENT_FILE
     staged = job.payload / "files" / "pwd.json"
     assert json.loads(staged.read_text(encoding="utf-8"))["nodes"] == _ARITHMETIC["nodes"]
     assert DEFAULT_MAXIMUM_EMBEDDED_BYTES > 64

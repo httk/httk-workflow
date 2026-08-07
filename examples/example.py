@@ -64,7 +64,7 @@ def main() -> int:
         workspace,
         "vasp-relax",
         files={"POSCAR": structure},
-        inputs={"kpoint_density": 20.0, "incar_tags": {"ENCUT": 320}},
+        parameters={"kpoint_density": 20.0, "incar_tags": {"ENCUT": 320}},
         tag="silicon",
     )
     print(f"submitted {job.job_key} at {job.placement}, running {job.runner['path']}")

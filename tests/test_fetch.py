@@ -47,7 +47,7 @@ run = Runner("tests.fetch")
 @run.step
 def compute(a):
     (a.workdir / "energy.txt").write_text("-4.25", encoding="utf-8")
-    if a.input("failing"):
+    if a.parameter("failing"):
         a.fail("compute.diverged", "the calculation did not converge", details={{"cycles": 3}})
     else:
         a.succeed()
@@ -90,7 +90,7 @@ def _stage(payload: Path, *, failing: bool, runner: dict[str, object]) -> str:
             tag="failing" if failing else "succeeding",
             initial_step="compute",
             maximum_attempts_per_activation=1,
-            inputs={"failing": failing},
+            parameters={"failing": failing},
         ),
     )
     # A helper the job carries rather than references: it is load bearing only

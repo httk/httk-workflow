@@ -176,8 +176,8 @@ def require_string(value: object, name: str) -> str:
     return value
 
 
-def validate_parameters(value: object, name: str = "parameters") -> dict[str, str | None]:
-    """Validate a creation-parameter declaration."""
+def validate_inputs(value: object, name: str = "inputs") -> dict[str, str | None]:
+    """Validate a declared input staging map."""
 
     if not isinstance(value, Mapping):
         raise ValueError(f"{name} must be an object")
