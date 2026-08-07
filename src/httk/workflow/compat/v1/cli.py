@@ -81,7 +81,12 @@ def _parser(program: str = "httk-v1-taskmanager") -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None, *, program: str = "httk-v1-taskmanager") -> int:
-    """Run the httk v1 compatibility command."""
+    """Run the httk v1 compatibility command.
+
+    :param argv: Dispatch these command-line arguments, or process the current argv when unset.
+    :param program: Display this executable name in help.
+    :return: The command exit status.
+    """
 
     arguments = sys.argv[1:] if argv is None else argv
     return dispatch(_parser(program), arguments, CLIContext("httk", Path.cwd()))

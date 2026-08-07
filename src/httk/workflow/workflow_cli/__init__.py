@@ -1,4 +1,4 @@
-"""The canonical :command:`httk workflow` command tree.
+"""Assemble the canonical :command:`httk workflow` command tree.
 
 This package assembles the existing command-group handlers into one parser and
 keeps the historical ``httk.workflow.workflow_cli`` import surface intact.

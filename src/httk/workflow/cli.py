@@ -1,4 +1,4 @@
-"""Command-line interface installed as :command:`httk-taskmanager`.
+"""Run the command-line interface installed as :command:`httk-taskmanager`.
 
 This executable is a thin alias for five leaves of the canonical
 :command:`httk workflow` tree. It declares no arguments and implements no
@@ -87,7 +87,12 @@ def _parser(program: str = "httk-taskmanager") -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None, *, program: str = "httk-taskmanager") -> int:
-    """Run the command-line interface."""
+    """Run the command-line interface.
+
+    :param argv: Command-line arguments, or the process arguments when absent.
+    :param program: Program name shown in parser output.
+    :return: Process exit status.
+    """
 
     arguments = sys.argv[1:] if argv is None else argv
     return dispatch(_parser(program), arguments, CLIContext("httk", Path.cwd()))

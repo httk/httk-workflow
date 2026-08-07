@@ -1,4 +1,4 @@
-"""Runner-executor contracts used by the workflow manager."""
+"""Define runner-executor contracts used by the workflow manager."""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -26,6 +26,15 @@ class AttemptLaunch:
     ``runner`` is the executable the manager resolved for this attempt. A
     payload runner is the file inside ``payload``; a shared runner is the
     verified copy the manager staged below ``control``, never the original.
+
+    :param job: Immutable job definition being attempted.
+    :param marker: Authoritative marker for the attempt.
+    :param payload: Immutable job payload directory.
+    :param workdir: Directory in which the runner executes.
+    :param control: Attempt-control directory.
+    :param context_path: Path of the serialized runner context.
+    :param context: Runner context members.
+    :param runner: Resolved executable, or no value to use the payload runner.
     """
 
     job: JobDefinition
@@ -48,7 +57,14 @@ class AttemptLaunch:
 
 @dataclass(frozen=True)
 class OutcomeCommit:
-    """A published outcome being committed by the authoritative manager."""
+    """Describe a published outcome being committed by the authoritative manager.
+
+    :param job: Immutable job definition producing the outcome.
+    :param marker: Authoritative marker being committed.
+    :param payload: Immutable job payload directory.
+    :param outcome_path: Path of the published outcome.
+    :param outcome: Outcome members.
+    """
 
     job: JobDefinition
     marker: Marker
@@ -80,11 +96,18 @@ class RunnerExecutor(Protocol):
 
 
 class PathRunnerExecutor:
-    """The normal executor which directly executes ``runner.path``."""
+    """Execute the runner path directly from the payload or staged copy."""
 
     name = "path"
 
     def validate(self, job: JobDefinition, payload: Path) -> None:
+        """Validate the payload runner when the job runs one.
+
+        :param job: Job definition whose runner is checked.
+        :param payload: Immutable job payload directory.
+        :return: ``None``.
+        :raises httk.workflow.errors.FormatError: If a payload runner is missing or not a file.
+        """
         if job.runner_source != "payload":
             # A shared runner lives outside the immutable payload, so it is
             # resolved, staged, and digest-verified per attempt instead.
@@ -94,13 +117,34 @@ class PathRunnerExecutor:
             raise FormatError(f"runner does not exist or is not a regular file: {job.runner_path}")
 
     def command(self, launch: AttemptLaunch) -> Sequence[str]:
+        """Build the command for one path-runner attempt.
+
+        :param launch: Attempt paths and runner context.
+        :return: Argument vector for the runner process.
+        """
         return [str(launch.runner_command), *launch.job.runner_arguments]
 
     def commit_outcome(self, commit: OutcomeCommit) -> None:
+        """Complete path-executor outcome work before the marker advances.
+
+        :param commit: Published outcome and its job context.
+        :return: ``None``.
+        """
         return
 
     def reconcile(self, workspace: "Workspace") -> None:
+        """Reconcile path-executor derived state.
+
+        :param workspace: Workspace whose derived state is reconciled.
+        :return: ``None``.
+        """
         return
 
     def marker_changed(self, workspace: "Workspace", marker: Marker) -> None:
+        """Refresh path-executor state after a marker transition.
+
+        :param workspace: Workspace containing the changed marker.
+        :param marker: Newly authoritative marker.
+        :return: ``None``.
+        """
         return

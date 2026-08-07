@@ -164,7 +164,11 @@ def _cursor_relation(position: tuple[str, ...], after: tuple[str, ...] | None) -
 
 @dataclass(frozen=True)
 class MarkerFault:
-    """One state entry shaped like a marker that cannot be interpreted."""
+    """Describe one state entry shaped like a marker that cannot be interpreted.
+
+    :param path: Identify the unusable state entry.
+    :param reason: Explain why the entry could not be interpreted.
+    """
 
     path: Path
     reason: str
@@ -191,7 +195,16 @@ def _marker_shaped(name: str) -> bool:
 
 
 class Workspace:
-    """One self-contained httk workflow filesystem workspace."""
+    """Attach to one self-contained httk workflow filesystem workspace.
+
+    :param root: Locate the workspace root.
+    :param mutable: Preserve the attachment mutability option accepted by callers.
+    :param durable: Enable storage-crash durability for filesystem publications.
+    :param marker_index_capacity: Bound the in-memory active-marker index.
+    :raises ValueError: If the marker index capacity is not positive.
+    :raises httk.workflow.errors.FormatError: If the workspace format or identity is invalid.
+    :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace uses unsupported extensions or a profile.
+    """
 
     def __init__(
         self,
@@ -247,7 +260,12 @@ class Workspace:
         self._marker_duplicates: frozenset[str] = frozenset()
 
     def ensure_directory(self, path: Path) -> Path:
-        """Create a directory below the workspace root."""
+        """Create a directory below the workspace root.
+
+        :param path: Identify the directory to create.
+        :return: The created directory path.
+        :raises ValueError: If the path is outside the workspace root.
+        """
 
         path = Path(path)
         try:
@@ -266,7 +284,16 @@ class Workspace:
         durable: bool = True,
         policy: Mapping[str, object] | None = None,
     ) -> "Workspace":
-        """Create and return a new workspace."""
+        """Create and return a new workspace.
+
+        :param root: Locate the new workspace root.
+        :param extensions: Enable optional workspace extensions.
+        :param durable: Enable storage-crash durability for filesystem publications.
+        :param policy: Override the default workspace policy values.
+        :return: The initialized workspace.
+        :raises httk.workflow.errors.FormatError: If the filesystem cannot satisfy the workspace profile.
+        :raises httk.workflow.errors.UnsupportedExtensionError: If an extension is not supported.
+        """
 
         initial_policy = WorkspacePolicy.from_mapping({} if policy is None else policy)
         root_path = Path(root).resolve()
@@ -312,7 +339,10 @@ class Workspace:
 
     @classmethod
     def default(cls) -> Self:
-        """Resolve the project (or per-user) default workspace, creating it if needed."""
+        """Resolve the project or per-user default workspace, creating it if needed.
+
+        :return: The default workspace.
+        """
 
         from . import registry
 
@@ -322,13 +352,19 @@ class Workspace:
 
     @property
     def policy(self) -> WorkspacePolicy:
-        """Return the tunables this workspace publishes to every attacher."""
+        """Return the tunables this workspace publishes to every attacher.
+
+        :return: The current workspace policy.
+        """
 
         return self._policy
 
     @property
     def visibility_deadline(self) -> float:
-        """Return how long a metadata visibility retry may keep probing."""
+        """Return how long a metadata visibility retry may keep probing.
+
+        :return: The workspace metadata visibility deadline.
+        """
 
         return self._policy.visibility_deadline_seconds
 
@@ -339,6 +375,9 @@ class Workspace:
         exclusively created temporary file and a rename, so a reader never sees
         a torn object. It is deliberately not serialized against another writer:
         policy is administrative, changes are rare, and last writer wins.
+
+        :param changes: Supply policy values to validate and merge.
+        :return: The resulting workspace policy.
         """
 
         stored = read_json(self.control / "format.json")
@@ -365,12 +404,18 @@ class Workspace:
         job-parameters → environment → workspace → default resolution a runner reads
         through :meth:`~httk.workflow.sdk.Attempt.setting`. A workspace written
         before the section existed reads as an empty map.
+
+        :return: The workspace's application settings.
         """
 
         return _validate_settings(self.format.get("settings", {}))
 
     def read_settings(self) -> dict[str, object]:
-        """Read and validate the current settings from disk."""
+        """Read and validate the current settings from disk.
+
+        :return: The current application settings.
+        :raises httk.workflow.errors.FormatError: If the stored settings are not valid.
+        """
 
         return _validate_settings(read_json(self.control / "format.json").get("settings", {}))
 
@@ -387,6 +432,11 @@ class Workspace:
         The write is the same read-modify-write of ``format.json`` that
         :meth:`set_policy` uses: an exclusively created temporary and a rename,
         so a reader never sees a torn object, and last writer wins.
+
+        :param key: Name the application setting to store.
+        :param value: Supply the setting value.
+        :return: The resulting application settings.
+        :raises ValueError: If the setting name or value is invalid, or its environment name collides.
         """
 
         _validate_setting_key(key)
@@ -401,7 +451,12 @@ class Workspace:
         return dict(settings)
 
     def unset_setting(self, key: str) -> dict[str, object]:
-        """Remove one application setting, refusing one that is not set."""
+        """Remove one application setting, refusing one that is not set.
+
+        :param key: Name the application setting to remove.
+        :return: The resulting application settings.
+        :raises ValueError: If the setting is not set.
+        """
 
         stored = read_json(self.control / "format.json")
         settings = _validate_settings(stored.get("settings", {}))
@@ -420,6 +475,10 @@ class Workspace:
         remote definition's whitelisted settings become the workspace's
         starting application settings. An explicit setting already present is
         never overwritten, so a value the operator chose outlives a reseed.
+
+        :param seeds: Supply initial application settings to merge.
+        :return: The resulting application settings.
+        :raises ValueError: If a supplied setting is invalid.
         """
 
         merged = _validate_settings(seeds)
@@ -438,7 +497,12 @@ class Workspace:
         return dict(current)
 
     def open_journal_writer(self, *, writer_id: str | None = None) -> JournalWriter:
-        """Open one exclusive journal writer configured by workspace policy."""
+        """Open one exclusive journal writer configured by workspace policy.
+
+        :param writer_id: Reuse a canonical writer identity when one is supplied.
+        :return: The exclusive journal writer.
+        :raises ValueError: If the writer identity is not canonical.
+        """
 
         return JournalWriter(
             self.control,
@@ -453,14 +517,24 @@ class Workspace:
         repair: bool = False,
         quarantine_unrepairable: bool = False,
     ) -> "FsckReport":
-        """Verify that every marker resolves to its journal frame."""
+        """Verify that every marker resolves to its journal frame.
+
+        :param repair: Repair recoverable marker or journal inconsistencies.
+        :param quarantine_unrepairable: Quarantine entries that cannot be repaired.
+        :return: The workspace check report.
+        """
 
         from .fsck import check_workspace
 
         return check_workspace(self, repair=repair, quarantine_unrepairable=quarantine_unrepairable)
 
     def collect_garbage(self, *, dry_run: bool = False, now: float | None = None) -> "GcReport":
-        """Collect the disk this workspace's retention policy permits freeing."""
+        """Collect the disk this workspace's retention policy permits freeing.
+
+        :param dry_run: Report eligible removals without changing the workspace.
+        :param now: Use this timestamp when evaluating retention deadlines.
+        :return: The garbage-collection report.
+        """
 
         from .gc import collect_garbage
 
@@ -472,6 +546,10 @@ class Workspace:
         The store is flat and name-keyed below ``.httk-workflow/runners/``.
         Relative subdirectories are permitted so a campaign can group runners,
         but a name can never escape the store.
+
+        :param path: Name the runner within the workspace store.
+        :return: The runner's store path.
+        :raises httk.workflow.errors.FormatError: If the runner path is invalid or escapes the store.
         """
 
         relative = validate_runner_path(str(PurePosixPath(path)), "workspace")
@@ -494,6 +572,13 @@ class Workspace:
         idempotent no-op, and replacing a name whose content differs requires
         *replace* so a live campaign referring to the old digest can never be
         changed underneath by accident.
+
+        :param source: Locate the runner file or directory to publish.
+        :param name: Choose the store name, defaulting to the source name.
+        :param replace: Replace a different existing runner with the same name.
+        :return: The published runner reference.
+        :raises FileExistsError: If a different runner already has the target name.
+        :raises httk.workflow.errors.FormatError: If the source, target name, or entry type is invalid.
         """
 
         source_path = Path(source).expanduser()
@@ -605,7 +690,15 @@ class Workspace:
         destination_placement: str | PurePosixPath | None = None,
         transfer_id: str | None = None,
     ) -> Path:
-        """Seal one quiescent job as a detached transfer bundle."""
+        """Seal one quiescent job as a detached transfer bundle.
+
+        :param job_id: Identify the job to detach.
+        :param destination_workspace_id: Identify the destination workspace.
+        :param destination_remote: Name the destination remote, when applicable.
+        :param destination_placement: Choose the destination placement.
+        :param transfer_id: Reuse a transfer identity when resuming a publication.
+        :return: The sealed transfer bundle path.
+        """
 
         from .transfers import detach_job
 
@@ -619,27 +712,45 @@ class Workspace:
         )
 
     def import_bundle(self, bundle: str | os.PathLike[str]) -> dict[str, object]:
-        """Import a validated detached transfer bundle."""
+        """Import a validated detached transfer bundle.
+
+        :param bundle: Locate the detached transfer bundle.
+        :return: The imported transfer description.
+        """
 
         from .transfers import import_bundle
 
         return import_bundle(self, bundle)
 
     def acknowledge_transfer(self, acknowledgement: Mapping[str, object]) -> Path:
-        """Retire a source bundle after destination acknowledgement."""
+        """Retire a source bundle after destination acknowledgement.
+
+        :param acknowledgement: Supply the destination acknowledgement.
+        :return: The retired source bundle path.
+        """
 
         from .transfers import acknowledge_transfer
 
         return acknowledge_transfer(self, acknowledgement)
 
     def recover_transfers(self) -> list[dict[str, object]]:
-        """Recover or report interrupted detached-transfer publications."""
+        """Recover or report interrupted detached-transfer publications.
+
+        :return: Descriptions of recovered or still-pending transfers.
+        """
 
         from .transfers import recover_transfers
 
         return recover_transfers(self)
 
     def state_directory(self, kind: str, placement: PurePosixPath) -> Path:
+        """Return the state directory for a kind and placement.
+
+        :param kind: Select the state kind.
+        :param placement: Select the placement below that kind.
+        :return: The state directory path.
+        :raises ValueError: If the state kind is unknown.
+        """
         if kind not in STATE_KINDS:
             raise ValueError(f"unknown state kind: {kind}")
         return (self.control / "state" / kind).joinpath(*placement.parts)
@@ -653,9 +764,26 @@ class Workspace:
         generation: int,
         record_ref: str,
     ) -> Path:
+        """Build the path of one state marker.
+
+        :param kind: Select the state kind.
+        :param placement: Select the marker placement.
+        :param job_key: Identify the job.
+        :param priority: Set the marker priority.
+        :param generation: Set the state generation.
+        :param record_ref: Identify the journal record.
+        :return: The marker path.
+        :raises ValueError: If the state kind is unknown.
+        """
         return self.state_directory(kind, placement) / marker_basename(job_key, priority, generation, record_ref)
 
     def payload_path(self, placement: PurePosixPath, job_key: str) -> Path:
+        """Return the payload path for one job placement.
+
+        :param placement: Select the payload placement.
+        :param job_key: Identify the job payload.
+        :return: The payload directory path.
+        """
         return self.root.joinpath(*placement.parts, job_key)
 
     def _iter_state_subtree(
@@ -745,6 +873,12 @@ class Workspace:
         lease alive from inside the walk. A pass MAY restrict itself to placement
         *roots*; the debug workspace narrows what it surfaces through its private
         ``_scheduling_includes`` hook.
+
+        :param kinds: Restrict the walk to these state kinds.
+        :param roots: Restrict the walk to these placement roots.
+        :param heartbeat: Call this function during a long walk.
+        :param heartbeat_every: Set how many entries to examine between heartbeat opportunities.
+        :yield: Each schedulable marker found during the walk.
         """
 
         visited = 0
@@ -767,6 +901,9 @@ class Workspace:
         :class:`MarkerFault` instead of aborting the scan. This is the exhaustive
         walk the workspace tools (fsck, collection, status, collect) use; the
         scheduling passes use the bounded :class:`~httk.workflow.workspace.MarkerStream` instead.
+
+        :param kinds: Restrict the scan to these state kinds.
+        :yield: Each valid marker or reported marker fault.
         """
 
         for kind in tuple(kinds or CORE_STATE_KINDS):
@@ -775,6 +912,11 @@ class Workspace:
                     yield entry
 
     def scan_markers(self, kinds: Iterable[str] | None = None) -> Iterable[Marker]:
+        """Yield every valid marker below ``state/``.
+
+        :param kinds: Restrict the scan to these state kinds.
+        :yield: Each valid marker.
+        """
         for entry in self.scan_marker_entries(kinds):
             if isinstance(entry, Marker):
                 yield entry
@@ -798,6 +940,8 @@ class Workspace:
         corruption rather than a job state: the core profile leaves its repair
         to an explicit workspace tool, so a manager only reports it and never
         schedules or relocates it.
+
+        :param fault: Describe the unusable state entry to report.
         """
 
         message = "unusable state entry %s: %s (repair it with a workspace tool)"
@@ -945,6 +1089,13 @@ class Workspace:
         return marker if marker.job_id == job_id else None
 
     def find_markers(self, job_key: str, kinds: Iterable[str] | None = None) -> list[Marker]:
+        """Find all current markers for a job key.
+
+        :param job_key: Identify the job to find.
+        :param kinds: Restrict the search to these state kinds.
+        :return: The matching current markers.
+        :raises httk.workflow.errors.WorkspaceCorruptionError: If more than one current marker identifies the job.
+        """
         selected = tuple(kinds or CORE_STATE_KINDS)
         if set(selected) <= set(CORE_STATE_KINDS):
             try:
@@ -966,6 +1117,10 @@ class Workspace:
         saw, then one complete rescan. Absence is only ever reported after that
         rescan, so a job another actor has just created or moved is never
         mistaken for a job that does not exist.
+
+        :param job_id: Identify the job to find.
+        :return: The current marker, or ``None`` when the job has no marker.
+        :raises httk.workflow.errors.WorkspaceCorruptionError: If more than one current marker identifies the job.
         """
 
         index = self._marker_index
@@ -1020,6 +1175,11 @@ class Workspace:
         The index is used only as a shortcut when it already names this job at
         exactly this placement, which turns the bounded directory sweep below
         into one confirmed lookup.
+
+        :param job_key: Identify the job to find.
+        :param placement: Restrict the lookup to this placement.
+        :return: The matching current marker, or ``None`` when none exists.
+        :raises httk.workflow.errors.WorkspaceCorruptionError: If more than one marker exists at the placement.
         """
 
         index = self._marker_index
@@ -1053,6 +1213,12 @@ class Workspace:
         return matches[0] if matches else None
 
     def load_job(self, marker: Marker) -> JobDefinition:
+        """Load and validate the job definition referenced by a marker.
+
+        :param marker: Identify the job payload to load.
+        :return: The validated job definition.
+        :raises httk.workflow.errors.FormatError: If the payload identity disagrees with the marker.
+        """
         path = self.payload_path(marker.placement, marker.job_key) / "job.json"
         job = JobDefinition.from_path(path)
         if job.job_key != marker.job_key:
@@ -1062,6 +1228,14 @@ class Workspace:
         return job
 
     def read_state(self, marker: Marker) -> dict[str, Any]:
+        """Read and validate the state frame referenced by a marker.
+
+        :param marker: Identify the state frame to read.
+        :return: The validated state frame.
+        :raises httk.workflow.errors.FormatError: If the marker's record reference is invalid.
+        :raises httk.workflow.errors.WorkspaceCorruptionError: If the journal frame disagrees with the marker.
+        :raises httk.workflow.errors.WorkspaceUnavailableError: If the journal record remains incoherently visible.
+        """
         if marker.record_ref == "init":
             return {
                 "format": "httk-workflow-state",
@@ -1097,7 +1271,19 @@ class Workspace:
         *,
         priority: int | None = None,
     ) -> Marker:
-        """Append a state frame and atomically move *marker* to it."""
+        """Append a state frame and atomically move *marker* to it.
+
+        :param writer: Append the new state frame through this journal writer.
+        :param marker: Identify the current marker to advance.
+        :param kind: Select the next state kind.
+        :param updates: Add state members to the new frame.
+        :param priority: Override the marker priority when supplied.
+        :return: The marker after the transition.
+        :raises ValueError: If the next state kind is unknown.
+        :raises httk.workflow.errors.WorkspaceCorruptionError: If the state generation is exhausted.
+        :raises httk.workflow.errors.TransitionLostError: If another actor moved the marker first.
+        :raises httk.workflow.errors.WorkspaceUnavailableError: If the marker move cannot be resolved.
+        """
 
         next_priority = marker.priority if priority is None else priority
         generation = marker.generation + 1
@@ -1138,6 +1324,12 @@ class Workspace:
         carried forward automatically. The frame must still name this marker's
         job and kind at the next generation, so a repair can never disguise a
         state change as a repair.
+
+        :param writer: Append the repair frame through this journal writer.
+        :param marker: Identify the damaged marker to repair.
+        :param frame: Supply the complete replacement state frame.
+        :return: The marker after the repair frame is published.
+        :raises httk.workflow.errors.FormatError: If the repair frame changes required marker identity.
         """
 
         generation = marker.generation + 1
@@ -1235,7 +1427,15 @@ class Workspace:
         *,
         move: bool = False,
     ) -> Marker:
-        """Copy or move a complete payload into the workspace and publish it."""
+        """Copy or move a complete payload into the workspace and publish it.
+
+        :param source: Locate the complete job payload to submit.
+        :param placement: Select the job placement.
+        :param move: Move the source instead of copying it.
+        :return: The submitted job marker.
+        :raises FileExistsError: If the target payload already exists.
+        :raises httk.workflow.workspace.WorkspaceOperationError: If a move crosses filesystems.
+        """
 
         source_path = Path(source).resolve()
         job = JobDefinition.from_path(source_path / "job.json")
@@ -1264,13 +1464,22 @@ class Workspace:
         return Marker.from_path(self.control / "state", destination)
 
     def validate_job_payload(self, marker: Marker) -> JobDefinition:
-        """Perform manager-side immutable submission validation."""
+        """Perform manager-side immutable submission validation.
+
+        :param marker: Identify the submitted payload to validate.
+        :return: The validated job definition.
+        """
 
         job = self.load_job(marker)
         return job
 
     def quarantine(self, path: Path, *, reason: str) -> Path:
-        """Move a malformed protocol entry into the canonical quarantine."""
+        """Move a malformed protocol entry into the canonical quarantine.
+
+        :param path: Locate the malformed protocol entry.
+        :param reason: Record why the entry was quarantined.
+        :return: The quarantine directory containing the entry.
+        """
 
         identifier = f"{int(time.time())}-{uuid.uuid4()}"
         destination = self.control / "quarantine" / identifier
@@ -1298,7 +1507,11 @@ class Workspace:
         return destination
 
     def payload_digest(self, marker: Marker) -> str:
-        """Return the digest of one payload, ignoring runner-private entries."""
+        """Return the digest of one payload, ignoring runner-private entries.
+
+        :param marker: Identify the job payload to digest.
+        :return: The payload digest.
+        """
 
         return tree_digest(
             self.payload_path(marker.placement, marker.job_key),
@@ -1306,7 +1519,11 @@ class Workspace:
         )
 
     def publish_request(self, request: Mapping[str, object]) -> Path:
-        """Atomically publish an operator request."""
+        """Atomically publish an operator request.
+
+        :param request: Supply the operator request to publish.
+        :return: The ready request path.
+        """
 
         temporary = self.control / "requests" / "tmp" / f"{uuid.uuid4()}.json"
         ready = self.control / "requests" / "ready" / temporary.name
@@ -1331,6 +1548,10 @@ class MarkerStream:
     best-within-window rather than exact-global: bounded discovery
     is the whole point, and rotation is what guarantees the starved window is
     reached on a later tick.
+
+    :param workspace: Provide the workspace whose state tree is scanned.
+    :param kind: Select the active state kind to scan.
+    :param prefixes: Restrict scanning to these placement prefixes.
     """
 
     def __init__(
@@ -1381,6 +1602,12 @@ class MarkerStream:
         every advance either processes ``processing_budget`` markers past the
         cursor or exhausts the subtree, and never spends its whole budget
         re-skipping a directory it has already consumed.
+
+        :param processing_budget: Bound the number of markers returned.
+        :param discovery_budget: Bound the number of new directory entries visited.
+        :param heartbeat: Call this function during a long walk.
+        :param heartbeat_every: Set how many entries to examine between heartbeat opportunities.
+        :return: The markers found within the bounded window.
         """
 
         roots = self._roots()

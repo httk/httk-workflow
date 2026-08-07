@@ -150,7 +150,17 @@ def submit_remote_managers(
     timeout: float | None,
     adapter: Callable[..., dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Submit managers for a far-side workspace name using its probed root."""
+    """Submit managers for a far-side workspace name using its probed root.
+
+    :param target: The resolved remote adapter bundle.
+    :param name: The remote workspace name.
+    :param root: The remote workspace root.
+    :param count: The number of managers to submit.
+    :param argv_tail: Additional manager arguments.
+    :param timeout: The adapter operation timeout.
+    :param adapter: The adapter callable, or :func:`run_adapter` when omitted.
+    :return: The adapter result document.
+    """
 
     if count < 1:
         raise ValueError("manager count must be a positive integer")
@@ -175,7 +185,17 @@ def probe_remote_workspace(
     noun: str = "workspace",
     adapter: Callable[..., dict[str, Any]] | None = None,
 ) -> tuple[str, str]:
-    """Return the UUID and current root reported for a remote workspace name."""
+    """Return the UUID and current root reported for a remote workspace name.
+
+    :param target: The resolved remote adapter bundle.
+    :param name: The remote workspace name.
+    :param timeout: The adapter operation timeout.
+    :param noun: The noun used in diagnostic messages.
+    :param adapter: The adapter callable, or :func:`run_adapter` when omitted.
+    :return: The remote workspace identifier and root.
+    :raises RuntimeError: If the remote status operation fails.
+    :raises ValueError: If the remote returns an incompatible status document.
+    """
 
     runner = run_adapter if adapter is None else adapter
     status = runner(
@@ -217,7 +237,11 @@ SEED_SETTING_MAP: Mapping[str, str] = {
 
 
 def seed_application_settings(bundle: str | os.PathLike[str]) -> dict[str, object]:
-    """Return the application settings a remote seeds a workspace with."""
+    """Return the application settings a remote seeds a workspace with.
+
+    :param bundle: The adapter bundle path.
+    :return: The whitelisted application settings derived from the bundle.
+    """
 
     configured = remote_settings(bundle)
     seeds: dict[str, object] = {}
@@ -232,7 +256,12 @@ def seed_application_settings(bundle: str | os.PathLike[str]) -> dict[str, objec
 
 @dataclass(frozen=True)
 class RemoteTarget:
-    """Resolved remote bundle."""
+    """Resolved remote bundle.
+
+    :param name: The remote name.
+    :param bundle: The resolved adapter bundle path.
+    :param project_local: Whether the bundle came from project data.
+    """
 
     name: str
     bundle: Path
@@ -240,7 +269,11 @@ class RemoteTarget:
 
 
 def metadata_path(bundle: str | os.PathLike[str]) -> Path:
-    """Return the metadata file of one adapter bundle."""
+    """Return the metadata file of one adapter bundle.
+
+    :param bundle: The adapter bundle path.
+    :return: The bundle metadata path.
+    """
 
     return Path(bundle).expanduser() / METADATA_FILE
 
@@ -256,13 +289,23 @@ def _read_object(path: Path) -> dict[str, Any]:
 
 
 def read_metadata(bundle: str | os.PathLike[str]) -> dict[str, Any]:
-    """Read the metadata of one adapter bundle."""
+    """Read the metadata of one adapter bundle.
+
+    :param bundle: The adapter bundle path.
+    :return: The decoded metadata document.
+    :raises ValueError: If the metadata cannot be read as an object.
+    """
 
     return _read_object(metadata_path(bundle))
 
 
 def validate_adapter_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
-    """Validate static adapter metadata and the single dispatcher executable."""
+    """Validate static adapter metadata and the single dispatcher executable.
+
+    :param bundle: The adapter bundle path.
+    :return: The validated metadata document.
+    :raises ValueError: If metadata, the dispatcher, or a required binary is invalid or unavailable.
+    """
 
     root = Path(bundle).expanduser().resolve()
     metadata = read_metadata(root)
@@ -293,6 +336,12 @@ def validate_adapter_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
 
 
 def valid_remote_name(name: str) -> str:
+    """Validate and return one remote name.
+
+    :param name: The remote name to validate.
+    :return: The validated remote name.
+    :raises httk.workflow.errors.ResolutionMiss: If the name is not valid for remote resolution.
+    """
     if not name or "/" in name or ":" in name or name in {".", ".."}:
         raise ResolutionMiss(f"invalid remote name: {name!r}; ':' is reserved for workspace bindings")
     return name
@@ -303,7 +352,13 @@ def resolve_remote(
     *,
     project: str | os.PathLike[str] | None = None,
 ) -> RemoteTarget:
-    """Resolve project-local before global remote definitions."""
+    """Resolve project-local before global remote definitions.
+
+    :param value: The remote name to resolve.
+    :param project: The project path, or the discovered project when omitted.
+    :return: The resolved remote target.
+    :raises httk.workflow.errors.ResolutionMiss: If the name is invalid or no bundle is found.
+    """
 
     name = valid_remote_name(value)
     project_root = discover_project(project)
@@ -319,13 +374,21 @@ def resolve_remote(
 
 
 def project_remote_roots(project_root: Path) -> tuple[Path, ...]:
-    """Return where one project keeps its remotes."""
+    """Return where one project keeps its remotes.
+
+    :param project_root: The project root.
+    :return: The project remote roots in precedence order.
+    """
 
     return (project_root / PROJECT_DIRECTORY / "remotes",)
 
 
 def list_remotes(project: str | os.PathLike[str] | None = None) -> list[dict[str, object]]:
-    """List definitions with project entries shadowing global entries."""
+    """List definitions with project entries shadowing global entries.
+
+    :param project: The project path, or the discovered project when omitted.
+    :return: Remote definitions with scope and bundle path.
+    """
 
     rows: dict[str, dict[str, object]] = {}
     global_root = remotes_home()
@@ -350,7 +413,16 @@ def add_remote(
     global_scope: bool = False,
     project: str | os.PathLike[str] | None = None,
 ) -> Path:
-    """Copy one maintained adapter template into user/project data."""
+    """Copy one maintained adapter template into user/project data.
+
+    :param name: The remote name to create.
+    :param template: The maintained adapter template name.
+    :param global_scope: Whether to create the remote in global data.
+    :param project: The project path for a project-local remote.
+    :return: The newly created adapter bundle path.
+    :raises ValueError: If the name, template, or scope is invalid.
+    :raises FileExistsError: If the destination already exists.
+    """
 
     valid_remote_name(name)
     if name == "local":
@@ -379,7 +451,12 @@ def add_remote(
 
 
 def split_settings(settings: Mapping[str, str]) -> tuple[dict[str, str], dict[str, str]]:
-    """Partition ``--set`` values into persistable settings and credentials."""
+    """Partition ``--set`` values into persistable settings and credentials.
+
+    :param settings: The settings supplied by the caller.
+    :return: Persistable settings followed by manifest-excluded credentials.
+    :raises ValueError: If a setting name is retired or unsupported.
+    """
 
     retired = sorted(set(settings) & _RETIRED_REMOTE_SETTINGS)
     if retired:
@@ -396,7 +473,12 @@ def split_settings(settings: Mapping[str, str]) -> tuple[dict[str, str], dict[st
 
 
 def read_credentials(bundle: str | os.PathLike[str]) -> dict[str, Any]:
-    """Read remote credentials that never enter a project manifest."""
+    """Read remote credentials that never enter a project manifest.
+
+    :param bundle: The adapter bundle path.
+    :return: The stored credential document, or an empty mapping when absent.
+    :raises ValueError: If the credentials file is not a JSON object.
+    """
 
     path = Path(bundle).expanduser().resolve() / CREDENTIALS_FILE
     if not path.is_file():
@@ -408,7 +490,13 @@ def store_credentials(
     bundle: str | os.PathLike[str],
     settings: Mapping[str, str],
 ) -> Path:
-    """Merge *settings* into the manifest-excluded remote credentials."""
+    """Merge *settings* into the manifest-excluded remote credentials.
+
+    :param bundle: The adapter bundle path.
+    :param settings: Credential members to merge.
+    :return: The credentials file path.
+    :raises ValueError: If the existing credentials file is invalid.
+    """
 
     root = Path(bundle).expanduser().resolve()
     path = root / CREDENTIALS_FILE
@@ -420,7 +508,12 @@ def store_credentials(
 
 
 def remote_settings(bundle: str | os.PathLike[str]) -> dict[str, Any]:
-    """Return persisted remote settings with credentials merged back in."""
+    """Return persisted remote settings with credentials merged back in.
+
+    :param bundle: The adapter bundle path.
+    :return: Persisted settings and manifest-excluded credentials.
+    :raises ValueError: If adapter metadata or credentials are invalid.
+    """
 
     root = Path(bundle).expanduser().resolve()
     configured = read_metadata(root).get("settings", {})
@@ -464,6 +557,13 @@ def import_v1_remote(
     assignment-only ``config`` files are read, and the result uses a maintained
     v2 adapter implementation. What is read is an *httk v1* computer definition,
     so the legacy names below are the names that tree really uses.
+
+    :param source: The legacy executable bundle path.
+    :param name: The imported remote name, or the source directory name when omitted.
+    :param global_scope: Whether to create the imported remote in global data.
+    :param project: The project path for a project-local import.
+    :return: The created versioned adapter bundle path.
+    :raises ValueError: If the legacy bundle cannot be recognized or imported.
     """
 
     legacy = Path(source).expanduser().resolve()
@@ -545,7 +645,17 @@ def run_adapter(
     *,
     timeout: float | None = None,
 ) -> dict[str, Any]:
-    """Execute one JSON adapter operation without invoking a shell."""
+    """Execute one JSON adapter operation without invoking a shell.
+
+    :param bundle: The adapter bundle path.
+    :param operation: The adapter operation name.
+    :param request: The operation request members.
+    :param timeout: The operation timeout, or the bundle default when omitted.
+    :return: The adapter result document.
+    :raises TimeoutError: If the adapter exceeds its timeout.
+    :raises ValueError: If the request or result violates the adapter protocol.
+    :raises RuntimeError: If the adapter refuses or fails the operation.
+    """
 
     if operation not in ADAPTER_OPERATIONS:
         raise ValueError(f"unknown adapter operation: {operation}")

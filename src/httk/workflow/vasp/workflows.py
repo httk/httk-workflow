@@ -207,6 +207,13 @@ PROVIDERS = (
 
 
 def register() -> None:
+    """Register the packaged VASP workflow providers.
+
+    The registered workflow IDs are ``httk.vasp.relax``/``vasp-relax``,
+    ``httk.vasp.relax-bash`` (with the same declaration ID),
+    ``httk.vasp.static``, and ``httk.vasp.relax-static``. Every provider ends
+    at the terminal ``publish`` step.
+    """
     for provider in PROVIDERS:
         register_workflow(provider)
 

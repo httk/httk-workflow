@@ -126,6 +126,11 @@ class RemedyPolicy:
     deliberately has no input remedy for. A group with its own reviewed practice
     registers its own policy with :func:`register_remedy_policy` instead of
     editing this module.
+
+    :param name: Identify the registered policy.
+    :param sequences: Map diagnostic codes to ordered remedy changes.
+    :param precedence: Order diagnostic codes for remedy selection.
+    :param refusals: Explain diagnostic codes this policy will not remedy.
     """
 
     name: str
@@ -163,6 +168,14 @@ def register_remedy_policy(
     what decides which of several simultaneous diagnostics is acted on, and every
     change must spell one supported remedy operation, so a policy that cannot be
     executed is refused when it is registered rather than when a run needs it.
+
+    :param name: Register the policy under this nonempty name.
+    :param sequences: Define ordered changes for each diagnostic code.
+    :param precedence: Order diagnostic codes for selection.
+    :param refusals: Explain diagnostic codes deliberately left without a remedy.
+    :param replace: Replace an existing policy with this definition.
+    :return: The normalized registered policy.
+    :raises ValueError: If the policy is duplicate, incomplete, or unsupported.
     """
 
     if not isinstance(name, str) or not name:
@@ -200,13 +213,21 @@ def register_remedy_policy(
 
 
 def remedy_policy_names() -> tuple[str, ...]:
-    """Return the names of every registered remedy policy, in registration order."""
+    """Return the names of every registered remedy policy, in registration order.
+
+    :return: Registered policy names in registration order.
+    """
 
     return tuple(_REMEDY_POLICIES)
 
 
 def remedy_policy(name: str) -> RemedyPolicy:
-    """Return one registered remedy policy, naming the alternatives if absent."""
+    """Return one registered remedy policy, naming the alternatives if absent.
+
+    :param name: Select this registered policy.
+    :return: The selected remedy policy.
+    :raises ValueError: If no policy has this name.
+    """
 
     policy = _REMEDY_POLICIES.get(name)
     if policy is None:
@@ -226,7 +247,15 @@ register_remedy_policy(
 
 @dataclass(frozen=True)
 class VaspRemedyDecision:
-    """One explicit bounded remedy proposal."""
+    """One explicit bounded remedy proposal.
+
+    :param policy: Identify the policy that produced the decision.
+    :param problem: Identify the selected diagnostic problem.
+    :param step: Record the ladder step considered.
+    :param changes: Record the input changes to apply.
+    :param give_up: Mark that no remedy should be applied.
+    :param reason: Explain the decision.
+    """
 
     policy: str
     problem: str
@@ -236,6 +265,10 @@ class VaspRemedyDecision:
     reason: str
 
     def as_mapping(self) -> dict[str, object]:
+        """Serialize the remedy decision.
+
+        :return: The JSON-compatible decision mapping.
+        """
         return {
             "format": "httk-vasp-remedy-decision",
             "format_version": 1,
@@ -256,6 +289,9 @@ def job_remedy_history_path(payload: str | os.PathLike[str]) -> Path:
     ``<payload>/.httk-job/`` rather than in the workdir. A job with an isolated
     workdir therefore keeps escalating instead of silently starting the ladder
     from the beginning on every attempt.
+
+    :param payload: Locate the job payload.
+    :return: The job-scoped remedy history path.
     """
 
     return Path(payload).resolve() / JOB_STATE_DIRECTORY / REMEDY_HISTORY_NAME
@@ -362,6 +398,13 @@ def plan_vasp_remedy(
     step whose changes cannot be executed there is skipped, and the first
     executable step wins. When nothing is left the decision gives up, so a runner
     only ever hands :func:`apply_vasp_remedy` a remedy it can perform.
+
+    :param diagnostics: Supply diagnostics from the VASP run.
+    :param directory: Inspect and plan changes in this VASP directory.
+    :param history_path: Read the remedy history from this path.
+    :param policy: Select this registered remedy policy.
+    :return: The next applicable remedy decision.
+    :raises ValueError: If the remedy history or policy is invalid.
     """
 
     resolved = remedy_policy(policy)
@@ -410,6 +453,13 @@ def apply_vasp_remedy(
     workspace, so a power cut cannot lose a remedy the ladder has already
     recorded. It defaults to ``False`` for a caller applying a remedy outside an
     attempt; the Bash bridge sources it from the workspace durability contract.
+
+    :param decision: Apply this previously planned remedy.
+    :param directory: Apply changes in this VASP directory.
+    :param history_path: Read and update the remedy history at this path.
+    :param durable: Synchronize the published batch when true.
+    :return: The committed remedy batch path.
+    :raises ValueError: If the decision gives up or its changes are not applicable.
     """
 
     if decision.give_up:

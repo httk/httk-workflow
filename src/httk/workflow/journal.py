@@ -45,7 +45,14 @@ class _FrameProblem(Exception):
 
 
 class JournalWriter:
-    """The exclusive journal writer for one manager incarnation."""
+    """Open the exclusive journal writer for one manager incarnation.
+
+    :param control_dir: Locate the workspace control directory.
+    :param writer_id: Reuse a canonical writer identity when supplied.
+    :param durable: Synchronize journal writes before returning from append.
+    :param maximum_segment_bytes: Set the maximum size of a journal segment.
+    :raises ValueError: If the writer identity is not canonical.
+    """
 
     def __init__(
         self,
@@ -92,7 +99,11 @@ class JournalWriter:
         self._handle = self._open_segment(self._segment_number)
 
     def append(self, record: Mapping[str, object]) -> str:
-        """Append *record* and return its canonical ``hwref-v1`` reference."""
+        """Append *record* and return its canonical ``hwref-v1`` reference.
+
+        :param record: Supply the journal record to append.
+        :return: The canonical record reference.
+        """
 
         payload = json_bytes(dict(record))
         length_bytes = _LENGTH.pack(len(payload))
@@ -107,6 +118,8 @@ class JournalWriter:
         return encode_record_ref(self.writer_id, self._segment_number, offset, len(payload), checksum)
 
     def close(self) -> None:
+        """Close the current journal segment."""
+
         self._handle.close()
 
     def __enter__(self) -> Self:
@@ -117,7 +130,15 @@ class JournalWriter:
 
 
 def encode_record_ref(writer_id: str, segment: int, offset: int, length: int, checksum: bytes) -> str:
-    """Encode one canonical ``hwref-v1`` reference."""
+    """Encode one canonical ``hwref-v1`` reference.
+
+    :param writer_id: Identify the journal writer.
+    :param segment: Identify the journal segment.
+    :param offset: Locate the frame within the segment.
+    :param length: Record the frame payload length.
+    :param checksum: Supply the frame checksum.
+    :return: The canonical record reference.
+    """
 
     return (
         f"w{writer_id.replace('-', '')}"
@@ -129,7 +150,12 @@ def encode_record_ref(writer_id: str, segment: int, offset: int, length: int, ch
 
 
 def parse_record_ref(record_ref: str) -> tuple[str, int, int, int, str]:
-    """Parse one canonical ``hwref-v1`` reference."""
+    """Parse one canonical ``hwref-v1`` reference.
+
+    :param record_ref: Supply the record reference to parse.
+    :return: The writer, segment, offset, length, and checksum components.
+    :raises httk.workflow.errors.FormatError: If the reference is not canonical.
+    """
 
     match = _REF_PATTERN.fullmatch(record_ref)
     if match is None:
@@ -143,7 +169,13 @@ def parse_record_ref(record_ref: str) -> tuple[str, int, int, int, str]:
 
 
 def segment_path(control_dir: Path, writer_id: str, segment: int) -> Path:
-    """Return the segment file one record reference names."""
+    """Return the segment file one record reference names.
+
+    :param control_dir: Locate the workspace control directory.
+    :param writer_id: Identify the journal writer.
+    :param segment: Identify the journal segment.
+    :return: The segment file path.
+    """
 
     return control_dir / "journal" / writer_id / f"{to_base36(segment)}.hwj"
 
@@ -196,6 +228,14 @@ def read_record(control_dir: Path, record_ref: str, *, deadline_seconds: float |
     backoff until *deadline_seconds* — the workspace's configured visibility
     deadline — expires. Damage that no amount of waiting can repair is reported
     at once.
+
+    :param control_dir: Locate the workspace control directory.
+    :param record_ref: Identify the journal record to read.
+    :param deadline_seconds: Bound retries for metadata visibility.
+    :return: The verified journal record.
+    :raises httk.workflow.errors.FormatError: If the record reference is invalid.
+    :raises httk.workflow.errors.WorkspaceCorruptionError: If the record is permanently damaged.
+    :raises httk.workflow.errors.WorkspaceUnavailableError: If the record remains incoherently visible.
     """
 
     writer_id, segment, offset, expected_length, expected_prefix = parse_record_ref(record_ref)
@@ -213,7 +253,13 @@ def read_record(control_dir: Path, record_ref: str, *, deadline_seconds: float |
 
 @dataclass(frozen=True)
 class RecordVerification:
-    """The outcome of reading one referenced frame without raising."""
+    """Report the outcome of reading one referenced frame without raising.
+
+    :param record_ref: Identify the record that was checked.
+    :param frame: Hold the verified frame when reading succeeded.
+    :param problem: Name the verification problem when reading failed.
+    :param detail: Explain the verification result.
+    """
 
     record_ref: str
     frame: dict[str, Any] | None
@@ -222,7 +268,10 @@ class RecordVerification:
 
     @property
     def ok(self) -> bool:
-        """Report whether the referenced frame was read and verified."""
+        """Report whether the referenced frame was read and verified.
+
+        :return: ``True`` when the frame is present and valid.
+        """
 
         return self.frame is not None
 
@@ -233,6 +282,11 @@ def verify_record(control_dir: Path, record_ref: str, *, deadline_seconds: float
     This is the reading half of a workspace check: it distinguishes a segment
     that is gone from one that is truncated, corrupt, or simply not holding the
     frame the reference names, which is what a repair decision needs.
+
+    :param control_dir: Locate the workspace control directory.
+    :param record_ref: Identify the journal record to verify.
+    :param deadline_seconds: Bound retries for metadata visibility.
+    :return: The verification result.
     """
 
     try:
@@ -259,7 +313,14 @@ def verify_record(control_dir: Path, record_ref: str, *, deadline_seconds: float
 
 @dataclass(frozen=True)
 class JournalFrame:
-    """One intact frame found by walking a segment from its header."""
+    """Describe one intact frame found by walking a segment from its header.
+
+    :param record_ref: Identify the canonical record reference.
+    :param writer_id: Identify the journal writer.
+    :param segment: Identify the journal segment.
+    :param offset: Locate the frame within the segment.
+    :param frame: Hold the decoded journal record.
+    """
 
     record_ref: str
     writer_id: str
@@ -276,6 +337,11 @@ def iter_segment_frames(path: Path, writer_id: str, segment: int) -> Iterator[Jo
     exactly what a repair is looking for; a torn or partially visible tail is
     the normal state of a segment a live writer is appending to and simply ends
     the walk.
+
+    :param path: Locate the journal segment.
+    :param writer_id: Identify the journal writer.
+    :param segment: Identify the journal segment number.
+    :yield: Each intact frame found in the segment.
     """
 
     try:
@@ -316,7 +382,11 @@ def iter_segment_frames(path: Path, writer_id: str, segment: int) -> Iterator[Jo
 
 
 def iter_journal_frames(control_dir: Path) -> Iterator[JournalFrame]:
-    """Yield every intact frame of every segment of every writer."""
+    """Yield every intact frame of every segment of every writer.
+
+    :param control_dir: Locate the workspace control directory.
+    :yield: Each intact journal frame.
+    """
 
     journal = control_dir / "journal"
     if not journal.is_dir():

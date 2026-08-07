@@ -83,7 +83,13 @@ class PwdFormatError(ValueError):
 
 @dataclass(frozen=True)
 class PwdDocument:
-    """One validated PWD document, and the order its function nodes run in."""
+    """One validated PWD document, and the order its function nodes run in.
+
+    :param raw: Preserve the validated source document.
+    :param nodes: Preserve validated nodes keyed by identifier.
+    :param edges: Preserve validated graph edges.
+    :param order: Record the topological node execution order.
+    """
 
     #: The document exactly as it was read, unknown members and all.
     raw: Mapping[str, object]
@@ -96,6 +102,7 @@ class PwdDocument:
 
     @property
     def version(self) -> str | None:
+        """Return the document version when one is declared."""
         version = self.raw.get("version")
         return version if isinstance(version, str) else None
 
@@ -121,7 +128,13 @@ class PwdDocument:
 
 
 def load_pwd_document(path: str | os.PathLike[str], *, allow_unknown_version: bool = False) -> PwdDocument:
-    """Read and validate one PWD document from *path*."""
+    """Read and validate one PWD document from *path*.
+
+    :param path: Read the PWD JSON document at this path.
+    :param allow_unknown_version: Try versions outside the supported set.
+    :return: The validated PWD document.
+    :raises httk.workflow.compat.pwd.PwdFormatError: If the file cannot be read, parsed, or validated.
+    """
 
     document = Path(path).expanduser()
     try:
@@ -147,6 +160,12 @@ def validate_pwd_document(
     ``python-workflow-definition`` package happens to be installed it is asked
     for a second opinion — it is never a dependency of *httk-workflow*, only a
     stricter validator when it is there.
+
+    :param raw: Validate this decoded PWD document.
+    :param source: Identify the document in validation errors.
+    :param allow_unknown_version: Try versions outside the supported set.
+    :return: The validated PWD document.
+    :raises httk.workflow.compat.pwd.PwdFormatError: If the document shape, graph, or version is invalid.
     """
 
     if not isinstance(raw, Mapping):
@@ -341,6 +360,23 @@ def import_pwd(
     The graph is validated, ordered and refused here rather than at run time: a
     document with a cycle, a dangling edge or a node that is not a callable
     reference never reaches a queue.
+
+    :param workspace: Submit the imported job to this workspace.
+    :param document_path: Read the PWD document at this path.
+    :param placement: Submit the job at this workspace placement.
+    :param tag: Set the optional job tag.
+    :param name: Set the optional job display name.
+    :param priority: Set the optional job priority.
+    :param modules: Stage these Python modules into the job payload.
+    :param module_path: Add these import roots for execution.
+    :param workflow_inputs: Override input node values by name.
+    :param allowed_modules: Restrict imports to these module prefixes.
+    :param data_mode: Select whether outputs use transactional data.
+    :param maximum_attempts: Set the maximum attempts per activation.
+    :param maximum_embedded_bytes: Embed documents up to this serialized size.
+    :param allow_unknown_version: Try versions outside the supported set.
+    :return: The submitted job description.
+    :raises httk.workflow.compat.pwd.PwdFormatError: If the document is invalid.
     """
 
     document = load_pwd_document(document_path, allow_unknown_version=allow_unknown_version)

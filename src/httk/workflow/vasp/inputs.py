@@ -37,7 +37,14 @@ KPOINT_CENTERINGS = ("Gamma", "Monkhorst-Pack")
 
 @dataclass(frozen=True)
 class PoscarHeader:
-    """The VASP-5 header information needed by execution helpers."""
+    """The VASP-5 header information needed by execution helpers.
+
+    :param comment: Preserve the POSCAR comment line.
+    :param scale: Preserve the universal POSCAR scale.
+    :param lattice: Preserve the three lattice vectors.
+    :param species: Preserve the VASP-5 species names.
+    :param counts: Preserve the atom count for each species.
+    """
 
     comment: str
     scale: float
@@ -47,7 +54,12 @@ class PoscarHeader:
 
 
 def read_poscar_header(path: str | os.PathLike[str] = "POSCAR") -> PoscarHeader:
-    """Read a VASP-5 POSCAR header without interpreting site coordinates."""
+    """Read a VASP-5 POSCAR header without interpreting site coordinates.
+
+    :param path: Read the POSCAR file at this path.
+    :return: The parsed POSCAR header.
+    :raises ValueError: If the header is too short or malformed.
+    """
 
     lines = Path(path).read_text(encoding="utf-8").splitlines()
     if len(lines) < 7:
@@ -80,6 +92,9 @@ def suggested_magnetic_moments(path: str | os.PathLike[str] = "POSCAR") -> str:
     it there, so overestimating is the safer direction. The value of five is the
     empirical default carried over from *httk* v1. Encode a per-structure choice in
     the POSCAR comment as ``[MAGMOM=...]``.
+
+    :param path: Read the POSCAR comment and species counts from this path.
+    :return: The explicit or generated MAGMOM value.
     """
 
     header = read_poscar_header(path)
@@ -109,7 +124,16 @@ def automatic_kpoint_grid(
     equal: bool = False,
     bump: int = 0,
 ) -> tuple[int, int, int]:
-    """Calculate a reciprocal-length automatic grid."""
+    """Calculate a reciprocal-length automatic grid.
+
+    :param density: Scale reciprocal lengths by this positive density.
+    :param poscar: Read lattice vectors from this POSCAR.
+    :param minimum: Enforce this minimum value in each grid direction.
+    :param equal: Use the largest direction value for all directions.
+    :param bump: Add this nonnegative amount to each calculated direction.
+    :return: The three automatic grid dimensions.
+    :raises ValueError: If an argument is invalid or the lattice is singular.
+    """
 
     if density <= 0 or minimum < 1 or bump < 0:
         raise ValueError("density must be positive; minimum must be positive; bump cannot be negative")
@@ -148,6 +172,12 @@ def write_automatic_kpoints(
     The centering defaults to :data:`DEFAULT_KPOINT_CENTERING` here, in
     :class:`~httk.workflow.vasp.inputs.VaspPreparationOptions`, and in the Bash bridge, so a workflow that
     hits a k-point failure class still has the ``Gamma`` remedy available.
+
+    :param grid: Write these three positive grid dimensions.
+    :param path: Write the KPOINTS file to this path.
+    :param centering: Use this supported k-point centering.
+    :return: The written KPOINTS path.
+    :raises ValueError: If the grid or centering is unsupported.
     """
 
     values = tuple(grid)
@@ -164,7 +194,11 @@ def write_automatic_kpoints(
 
 
 def read_incar(path: str | os.PathLike[str] = "INCAR") -> dict[str, str]:
-    """Read the last value of each simple INCAR assignment."""
+    """Read the last value of each simple INCAR assignment.
+
+    :param path: Read the INCAR file at this path.
+    :return: Upper-case INCAR tags mapped to their last values.
+    """
 
     result: dict[str, str] = {}
     for line in Path(path).read_text(encoding="utf-8").splitlines():
@@ -196,6 +230,11 @@ def update_incar(
     statements of a line rather than drop or keep the whole line: updating
     ``ISYM`` in ``ISPIN = 2 ; ISYM = 2`` leaves ``ISPIN = 2`` and appends the new
     ``ISYM``, instead of leaving a line that still assigns the old value.
+
+    :param values: Replace these INCAR tag assignments.
+    :param path: Update the INCAR file at this path.
+    :return: The updated INCAR path.
+    :raises ValueError: If a tag name is empty or invalid.
     """
 
     destination = Path(path)
@@ -265,6 +304,13 @@ class PotcarChoice:
     every choice is recorded: the variant directory, the suffix that selected it,
     the full source path, its digest, and the ``TITEL`` the potential names
     itself with.
+
+    :param species: Record the POSCAR species name.
+    :param variant: Record the selected pseudopotential directory name.
+    :param suffix: Record the suffix selected for the species.
+    :param source: Record the source potential path.
+    :param sha256: Record the source file digest.
+    :param titel: Record the potential's ``TITEL`` value, when present.
     """
 
     species: str
@@ -275,6 +321,10 @@ class PotcarChoice:
     titel: str | None
 
     def as_mapping(self) -> dict[str, object]:
+        """Serialize the potential choice.
+
+        :return: The JSON-compatible choice mapping.
+        """
         return {
             "species": self.species,
             "variant": self.variant,
@@ -287,7 +337,13 @@ class PotcarChoice:
 
 @dataclass(frozen=True)
 class PotcarAssembly:
-    """One assembled POTCAR and the provenance of every piece in it."""
+    """One assembled POTCAR and the provenance of every piece in it.
+
+    :param path: Record the assembled POTCAR path.
+    :param library: Record the pseudopotential library root.
+    :param choices: Record the selected potential for each species.
+    :param provenance: Record the provenance output path.
+    """
 
     path: Path
     library: Path
@@ -295,6 +351,10 @@ class PotcarAssembly:
     provenance: Path
 
     def as_mapping(self) -> dict[str, object]:
+        """Serialize the assembly provenance.
+
+        :return: The JSON-compatible provenance mapping.
+        """
         return {
             "format": "httk-vasp-potcar-provenance",
             "format_version": 1,
@@ -319,6 +379,14 @@ def assemble_potcar(
     describes what it chose: the returned :class:`PotcarAssembly` names every
     potential, and the same record is written next to the POTCAR as
     ``<POTCAR>.provenance.json`` unless *provenance* names another file.
+
+    :param library: Search this pseudopotential library root.
+    :param poscar: Read species names from this POSCAR.
+    :param output: Write the assembled POTCAR to this path.
+    :param suffix_preference: Try these species suffixes in order.
+    :param provenance: Write provenance to this path, or beside the POTCAR when unset.
+    :return: The assembled POTCAR and its provenance.
+    :raises FileNotFoundError: If a species has no matching potential.
     """
 
     root = Path(library).expanduser().resolve()
@@ -376,7 +444,14 @@ def contcar_to_poscar(
     reference: str | os.PathLike[str] = "POSCAR",
     output: str | os.PathLike[str] = "POSCAR",
 ) -> Path:
-    """Replace CONTCAR's comment with the reference POSCAR comment."""
+    """Replace CONTCAR's comment with the reference POSCAR comment.
+
+    :param contcar: Read the relaxed structure from this CONTCAR path.
+    :param reference: Read the replacement comment from this POSCAR path.
+    :param output: Write the resulting POSCAR to this path.
+    :return: The written POSCAR path.
+    :raises ValueError: If either input file is empty.
+    """
 
     reference_lines = Path(reference).read_text(encoding="utf-8").splitlines(keepends=True)
     lines = Path(contcar).read_text(encoding="utf-8").splitlines(keepends=True)
@@ -388,7 +463,11 @@ def contcar_to_poscar(
 
 
 def normalize_poscar_handedness(path: str | os.PathLike[str] = "POSCAR") -> Path:
-    """Make a left-handed POSCAR lattice right-handed without moving sites."""
+    """Make a left-handed POSCAR lattice right-handed without moving sites.
+
+    :param path: Normalize the POSCAR file at this path.
+    :return: The normalized POSCAR path.
+    """
 
     destination = Path(path)
     lines = destination.read_text(encoding="utf-8").splitlines()
@@ -407,7 +486,13 @@ def scale_poscar_lattice(
     factor: float,
     path: str | os.PathLike[str] = "POSCAR",
 ) -> Path:
-    """Multiply POSCAR's universal linear scale by a positive factor."""
+    """Multiply POSCAR's universal linear scale by a positive factor.
+
+    :param factor: Multiply the current scale by this positive finite value.
+    :param path: Update the POSCAR file at this path.
+    :return: The updated POSCAR path.
+    :raises ValueError: If the factor or POSCAR scale line is invalid.
+    """
 
     if not math.isfinite(factor) or factor <= 0:
         raise ValueError("lattice scale factor must be positive and finite")
@@ -431,6 +516,10 @@ def derive_seed(entropy: str) -> int:
     ordinal, a job key, a remedy step — so the same attempt always derives the
     same seed and two different attempts derive different ones, without anything
     reading a clock or a global random state.
+
+    :param entropy: Identify the perturbation with this nonempty string.
+    :return: The reproducible seed.
+    :raises ValueError: If entropy is not a nonempty string.
     """
 
     if not isinstance(entropy, str) or not entropy:
@@ -454,6 +543,13 @@ def rattle_poscar(
     as ``f"{job_key}:{attempt_ordinal}"``. Giving neither is refused rather than
     silently repeated, because two retries that rattle identically are two
     identical calculations.
+
+    :param path: Update site coordinates in this POSCAR.
+    :param amplitude: Bound each coordinate perturbation by this value.
+    :param seed: Use this random seed when supplied.
+    :param entropy: Derive a seed from this string when supplied.
+    :return: The updated POSCAR path.
+    :raises ValueError: If the perturbation settings or coordinate rows are invalid.
     """
 
     if not math.isfinite(amplitude) or amplitude < 0:
@@ -518,6 +614,13 @@ def calculate_nbands(
     an even number, and to a multiple of *divisor* when a parallel band divisor
     (``NPAR``) is in play, because VASP would otherwise round NBANDS up itself and
     report a changed value.
+
+    :param poscar: Read species and atom counts from this POSCAR.
+    :param potcar: Read valence counts from this POTCAR.
+    :param incar: Read spin and magnetization tags from this INCAR.
+    :param divisor: Round the result up to a multiple of this positive divisor.
+    :return: The conservative even band count.
+    :raises ValueError: If the divisor or required input metadata is invalid.
     """
 
     if divisor is not None and (isinstance(divisor, bool) or divisor < 1):
@@ -567,7 +670,12 @@ def potcar_summary(
     path: str | os.PathLike[str] = "POTCAR",
     output: str | os.PathLike[str] = "POTCAR.summary",
 ) -> Path:
-    """Write a non-potential metadata summary suitable for logs."""
+    """Write a non-potential metadata summary suitable for logs.
+
+    :param path: Read POTCAR metadata from this path.
+    :param output: Write the summary to this path.
+    :return: The written summary path.
+    """
 
     text = Path(path).read_text(encoding="utf-8", errors="replace")
     blocks: list[str] = []
@@ -595,6 +703,16 @@ class VaspPreparationOptions:
     one and a half orders of magnitude tighter than the ionic loop it feeds. The
     margin of ``33`` is a heuristic, empirical default carried over from *httk*
     v1, not a derived quantity.
+
+    :param kpoint_density: Set the reciprocal-length k-point density.
+    :param centering: Select the automatic k-point centering.
+    :param accuracy_per_atom: Set the target total-energy accuracy, or disable derived accuracy tags when unset.
+    :param ediff_margin: Divide the cell accuracy by this margin for ``EDIFF``.
+    :param pseudopotential_library: Assemble POTCAR from this library when set.
+    :param parallel_tag: Set the selected parallel INCAR tag when set.
+    :param parallel_value: Set the value for the selected parallel tag.
+    :param normalize_handedness: Normalize a left-handed POSCAR before preparation.
+    :param incar_tags: Apply these explicit INCAR tags before derived defaults.
     """
 
     kpoint_density: float = 20.0
@@ -619,6 +737,11 @@ def prepare_vasp_inputs(
     afterwards: the derived values are defaults for what the caller did not say,
     so an explicit ``EDIFF``, ``MAGMOM``, or ``NBANDS`` survives preparation, and
     an explicit ``ISPIN`` is what the band-count heuristic reads.
+
+    :param options: Use these preparation options, or their defaults when unset.
+    :param directory: Prepare the VASP inputs in this directory.
+    :return: A record of prepared files and selected input choices.
+    :raises ValueError: If the workdir, options, or input metadata is invalid.
     """
 
     if options is None:

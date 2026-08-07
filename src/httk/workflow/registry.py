@@ -48,7 +48,13 @@ _REGISTRY_FORMAT_VERSION = 2
 
 @dataclass(frozen=True)
 class WorkspaceBinding:
-    """One workspace reference, with a path only when it is local."""
+    """Represent one workspace reference, with a path only when it is local.
+
+    :param name: Preserve the plain or remote-qualified workspace name.
+    :param remote: Identify the owning machine, or the local sentinel.
+    :param path: Locate the workspace locally, or leave it unset for remote
+        bindings.
+    """
 
     name: str
     remote: str
@@ -56,12 +62,25 @@ class WorkspaceBinding:
 
 
 def valid_workspace_name(name: str) -> str:
+    """Validate one plain local workspace name.
+
+    :param name: Supply the name to validate.
+    :return: The unchanged valid name.
+    :raises httk.workflow.errors.ResolutionMiss: If the name contains reserved separators or is
+        empty.
+    """
     if not name or "/" in name or ":" in name or name in {".", ".."}:
         raise ResolutionMiss(f"invalid workspace name: {name!r}; ':' is reserved for remote-qualified names")
     return name
 
 
 def valid_workspace_binding_name(name: str) -> str:
+    """Validate one remote-qualified workspace name.
+
+    :param name: Supply the ``REMOTE:NAME`` binding to validate.
+    :return: The unchanged valid binding.
+    :raises httk.workflow.errors.ResolutionMiss: If the remote or workspace component is invalid.
+    """
     if name.count(":") != 1:
         raise ResolutionMiss(f"invalid workspace binding name: {name!r}; use REMOTE:NAME")
     remote, workspace = name.split(":", 1)
@@ -73,6 +92,12 @@ def valid_workspace_binding_name(name: str) -> str:
 
 
 def split_workspace_binding(name: str) -> tuple[str, str] | None:
+    """Split a workspace name into remote and local parts when qualified.
+
+    :param name: Supply a plain or remote-qualified workspace name.
+    :return: The remote and workspace names, or ``None`` for a local name.
+    :raises httk.workflow.errors.ResolutionMiss: If the supplied name is invalid.
+    """
     if ":" not in name:
         valid_workspace_name(name)
         return None
@@ -81,6 +106,10 @@ def split_workspace_binding(name: str) -> tuple[str, str] | None:
 
 
 def workspaces_path() -> Path:
+    """Return the per-user workspace registry path.
+
+    :return: The path of the registry file.
+    """
     return config_home() / WORKSPACES_FILE
 
 
@@ -170,7 +199,14 @@ def register_workspace(
     *,
     durable: bool = True,
 ) -> WorkspaceBinding:
-    """Register one absolute local workspace path under a plain name."""
+    """Register one absolute local workspace path under a plain name.
+
+    :param name: Assign this plain name to the workspace.
+    :param path: Locate the local workspace to register.
+    :param durable: Flush the registry update durably when true.
+    :return: The registered local binding.
+    :raises ValueError: If the name or path is already registered.
+    """
 
     workspaces = _read_global()
     location = str(Path(path).expanduser().resolve())
@@ -192,6 +228,14 @@ def _update_workspace_path(name: str, path: Path, *, durable: bool = True) -> Wo
 
 
 def forget_workspace(name: str, *, durable: bool = True, force: bool = False) -> WorkspaceBinding:
+    """Forget one registered workspace without removing its files.
+
+    :param name: Identify the registered workspace.
+    :param durable: Flush the registry update durably when true.
+    :param force: Permit forgetting a workspace with outbound transfers pending.
+    :return: The forgotten binding.
+    :raises ValueError: If pending transfers block the operation.
+    """
     binding = _local_binding(name)
     assert binding.path is not None
     if not force:
@@ -213,7 +257,13 @@ def forget_workspace(name: str, *, durable: bool = True, force: bool = False) ->
 
 
 def resolve_workspace(name: str, *, project: str | os.PathLike[str] | None = None) -> WorkspaceBinding:
-    """Resolve a local name globally or a remote name at use time."""
+    """Resolve a local name globally or a remote name at use time.
+
+    :param name: Supply a plain or remote-qualified workspace name.
+    :param project: Locate project configuration for remote resolution.
+    :return: The resolved workspace binding.
+    :raises httk.workflow.errors.ResolutionMiss: If the workspace or remote is unknown.
+    """
 
     binding = split_workspace_binding(name)
     if binding is None:
@@ -226,6 +276,12 @@ def resolve_workspace(name: str, *, project: str | os.PathLike[str] | None = Non
 
 
 def default_workspace(*, project: str | os.PathLike[str] | None = None, durable: bool = True) -> WorkspaceBinding:
+    """Resolve or initialize the project's default local workspace.
+
+    :param project: Locate project configuration for its default binding.
+    :param durable: Flush any initialized registry state durably when true.
+    :return: The default workspace binding.
+    """
     project_root = discover_project(project)
     if project_root is not None:
         section = read_project_section(project_root, "workspace")
@@ -265,10 +321,20 @@ def default_workspace(*, project: str | os.PathLike[str] | None = None, durable:
 
 
 def list_workspaces(*, project: str | os.PathLike[str] | None = None) -> list[WorkspaceBinding]:
+    """List registered local workspaces in stable name order.
+
+    :param project: Retain the project-aware API shape for callers.
+    :return: The registered local bindings.
+    """
     return [WorkspaceBinding(name, LOCAL_REMOTE, record["path"]) for name, record in sorted(_read_global().items())]
 
 
 def is_local(binding: WorkspaceBinding) -> bool:
+    """Report whether a workspace binding points to the local machine.
+
+    :param binding: Supply the workspace binding to inspect.
+    :return: Whether the binding is local.
+    """
     return binding.remote == LOCAL_REMOTE
 
 
@@ -280,7 +346,17 @@ def create_workspace(
     policy: Mapping[str, object] | None = None,
     settings: Mapping[str, object] | None = None,
 ) -> WorkspaceBinding:
-    """Initialize a local workspace, apply settings, and register its name."""
+    """Initialize a local workspace, apply settings, and register its name.
+
+    :param name: Assign this plain name to the initialized workspace.
+    :param path: Locate the workspace directory to initialize.
+    :param durable: Flush initialization and registry updates durably when true.
+    :param policy: Apply workspace policy values during initialization.
+    :param settings: Apply workspace settings after initialization.
+    :return: The registered local binding.
+    :raises TypeError: If the path is omitted.
+    :raises ValueError: If the workspace cannot be registered.
+    """
 
     if path is None:
         raise TypeError("create_workspace requires a path")
@@ -293,6 +369,13 @@ def create_workspace(
 
 
 def delete_workspace(name: str, *, force: bool = False) -> WorkspaceBinding:
+    """Delete a local workspace and forget its registry entry.
+
+    :param name: Identify the registered workspace to delete.
+    :param force: Confirm the destructive deletion.
+    :return: The deleted binding.
+    :raises ValueError: If deletion is not explicitly forced.
+    """
     if not force:
         raise ValueError(f"destroying the workspace {name!r} requires force")
     binding = _local_binding(name)
@@ -302,6 +385,11 @@ def delete_workspace(name: str, *, force: bool = False) -> WorkspaceBinding:
 
 
 def remove_local_workspace(path: Path) -> None:
+    """Remove one local workflow workspace directory.
+
+    :param path: Locate the workspace directory to remove.
+    :raises ValueError: If the path is not a workflow workspace.
+    """
     resolved = path.expanduser().resolve()
     if not (resolved / ".httk-workflow" / "format.json").is_file():
         raise ValueError(f"not an httk workflow workspace: {resolved}")

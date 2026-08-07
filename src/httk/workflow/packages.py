@@ -308,7 +308,11 @@ def _validate_external_declaration(
 
 
 def workflow_declaration_from_manifest(provider: WorkflowProvider) -> dict[str, object]:
-    """Generate the OPTIMADE workflow declaration carried by a package."""
+    """Generate the workflow declaration carried by a package.
+
+    :param provider: Supply the validated package provider.
+    :return: The generated workflow declaration.
+    """
 
     document: dict[str, object] = {}
     if provider.declaration_uri is not None:
@@ -337,7 +341,19 @@ def workflow_declaration_from_manifest(provider: WorkflowProvider) -> dict[str, 
 
 
 def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
-    """Parse and validate one directory workflow package."""
+    """Parse and validate one directory workflow package.
+
+    The ``workflow.toml`` file is httk-owned glue: unknown keys are rejected
+    at every supported table, and external declarations are checked against
+    the manifest's roles. Declared inputs describe staged objects, while
+    parameters remain opaque implementation knobs and are carried under the
+    job's ``parameters`` member; the legacy ``inputs`` wire member is rejected.
+
+    :param directory: Locate the package directory to parse.
+    :return: The validated workflow provider.
+    :raises ValueError: If the package is missing, malformed, or violates the
+        manifest contract.
+    """
 
     root = Path(directory).expanduser()
     if not root.is_dir() or root.is_symlink():
@@ -495,7 +511,13 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
 
 
 def load_workflow_package(path: str | Path, *, register: bool = True) -> WorkflowProvider:
-    """Parse one package and optionally add it to the workflow registry."""
+    """Parse one package and optionally add it to the workflow registry.
+
+    :param path: Locate the package directory to load.
+    :param register: Add the provider to the process registry when true.
+    :return: The validated workflow provider.
+    :raises ValueError: If parsing or registration rejects the package.
+    """
 
     provider = parse_workflow_manifest(path)
     if register:

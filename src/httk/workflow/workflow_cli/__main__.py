@@ -1,4 +1,4 @@
-"""Run the canonical workflow command when the package is executed directly."""
+"""Run the canonical workflow command when executing the package directly."""
 
 import sys
 from pathlib import Path

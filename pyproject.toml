@@ -56,7 +56,8 @@ dev = [
   "pytest-xdist>=3.6",
   "ruff>=0.16,<0.17",
   "pyright",
-  "mypy"
+  "mypy",
+  "pydoclint>=0.9,<1"
 ]
 docs = [
   "sphinx",
@@ -169,3 +170,11 @@ warn_unused_ignores = true
 [[tool.mypy.overrides]]
 module = ["yaml", "markdown", "docutils", "docutils.*"]
 ignore_missing_imports = true
+
+[tool.pydoclint]
+style = "sphinx"
+arg-type-hints-in-docstring = false
+check-return-types = false
+check-yield-types = false
+check-class-attributes = false
+skip-checking-raises = true

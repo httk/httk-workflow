@@ -1,4 +1,4 @@
-"""The registry of the runners this distribution ships, and how a job names one.
+"""Resolve the runners this distribution ships and how jobs name them.
 
 A packaged runner lives with the science it implements: the four VASP runners are
 modules of :mod:`httk.workflow.vasp.runners`, and that is also the module the
@@ -39,7 +39,12 @@ RUNNERS: Mapping[str, str] = MappingProxyType(
 
 
 def runner_package(name: str) -> str:
-    """Return the module the reserved ``pkg:`` form names one packaged runner in."""
+    """Return the module the reserved ``pkg:`` form names one packaged runner in.
+
+    :param name: Packaged runner filename.
+    :return: Module containing the runner.
+    :raises ValueError: If no packaged runner has that name.
+    """
 
     package = RUNNERS.get(name)
     if package is None:
@@ -48,7 +53,12 @@ def runner_package(name: str) -> str:
 
 
 def runner_path(name: str) -> Path:
-    """Return the installed file of one packaged runner."""
+    """Return the installed file of one packaged runner.
+
+    :param name: Packaged runner filename.
+    :return: Installed runner path.
+    :raises ValueError: If the runner is unknown or has no installed location.
+    """
 
     module = importlib.import_module(runner_package(name))
     location = getattr(module, "__file__", None)
@@ -64,6 +74,11 @@ def runner_reference(name: str, *, source: str = "installed") -> dict[str, objec
     and a freshly published workspace reference must pin. Use ``source``
     ``workspace`` after publishing the same file with
     :meth:`httk.workflow.Workspace.publish_runner`.
+
+    :param name: Packaged runner filename.
+    :param source: Whether the reference targets the installed or workspace runner.
+    :return: Runner configuration for a job document.
+    :raises ValueError: If the runner or source is unsupported.
     """
 
     path = runner_path(name)

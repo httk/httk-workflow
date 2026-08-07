@@ -108,6 +108,18 @@ _CANCELLING_MEMBERS = (
 
 @dataclass
 class RunningAttempt:
+    """Track one locally running job attempt.
+
+    :param marker: Identify the claimed job marker.
+    :param process: Track the launched process group.
+    :param stdout: Hold the captured standard-output stream.
+    :param stderr: Hold the captured standard-error stream.
+    :param attempt_id: Identify the running attempt.
+    :param fenced: Mark an attempt whose marker ownership is already resolved.
+    :param cancelling: Mark an attempt currently being cancelled.
+    :param owner_uid: Record the operating-system owner when known.
+    """
+
     marker: Marker
     process: subprocess.Popen[bytes]
     stdout: BinaryIO
@@ -124,12 +136,38 @@ class RunningAttempt:
     owner_uid: int | None = None
 
     def close_logs(self) -> None:
+        """Close the captured output streams for this attempt."""
+
         self.stdout.close()
         self.stderr.close()
 
 
 class TaskManager:
-    """Execute and recover jobs in one workflow workspace."""
+    """Execute and recover jobs in one workflow workspace.
+
+    :param workspace: Attach the manager to this workspace.
+    :param pools: Accept jobs assigned to these pools.
+    :param capabilities: Advertise these execution capabilities.
+    :param maximum_workers: Limit the number of local attempts.
+    :param lease_seconds: Override the workspace claim lease.
+    :param heartbeat_interval: Set the requested manager heartbeat interval.
+    :param unsafe_persistent_takeover: Permit takeover based on persistent evidence.
+    :param unsafe_isolated_takeover: Permit takeover based on isolated evidence.
+    :param takeover_grace_factor: Multiply the lease to determine takeover grace.
+    :param executors: Add runner executors to the built-in executor.
+    :param allowed_executors: Restrict jobs to these installed executors.
+    :param accept_any_pool: Accept jobs without requiring a configured pool match.
+    :param join_grace_seconds: Wait this long for unresolved join children.
+    :param cancel_grace_seconds: Wait this long after cancellation before killing.
+    :param maximum_pass_markers: Bound markers processed in one scheduling pass.
+    :param discovery_budget: Bound entries visited in one scheduling pass.
+    :param placement_prefixes: Restrict scheduling to these placement subtrees.
+    :param runner_search_paths: Search these locations for installed runners.
+    :param runner_modules: Search these module prefixes for packaged runners.
+    :param gc_interval: Run background collection at this interval when supplied.
+    :raises ValueError: If a manager limit is invalid or executor configuration conflicts.
+    :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace profile is not writable by this manager.
+    """
 
     def __init__(
         self,
@@ -306,6 +344,8 @@ class TaskManager:
         self.close()
 
     def close(self) -> None:
+        """Close local attempt logs and the manager's journal writer."""
+
         for attempt in self._running.values():
             attempt.close_logs()
         self._running.clear()
@@ -313,7 +353,10 @@ class TaskManager:
 
     @property
     def manager_directory(self) -> Path:
-        """Return this manager's own directory below ``managers/``."""
+        """Return this manager's own directory below ``managers/``.
+
+        :return: The manager directory path.
+        """
 
         return self._manager_dir
 
@@ -356,6 +399,8 @@ class TaskManager:
         A configured interval longer than the lease it claims work under would
         let a manager expire its own claims, so the interval is capped at a
         fraction of the lease however it was configured.
+
+        :return: The effective heartbeat interval.
         """
 
         if self.lease_seconds <= 0.0:
@@ -363,6 +408,11 @@ class TaskManager:
         return min(self.heartbeat_interval, self.lease_seconds * _MAXIMUM_HEARTBEAT_LEASE_FRACTION)
 
     def heartbeat(self, *, force: bool = False) -> None:
+        """Publish a manager heartbeat when the effective interval has elapsed.
+
+        :param force: Publish immediately instead of honoring the interval.
+        """
+
         now = time.monotonic()
         if not force and now - self._last_heartbeat < self.heartbeat_period:
             return
@@ -510,7 +560,10 @@ class TaskManager:
         )
 
     def tick(self) -> bool:
-        """Perform one nonblocking scheduling and recovery pass."""
+        """Perform one nonblocking scheduling and recovery pass.
+
+        :return: Whether the pass changed or launched workflow state.
+        """
 
         started = time.monotonic()
         self.heartbeat()
@@ -657,6 +710,10 @@ class TaskManager:
         once. The drain is process-local: everything an interrupted attempt
         needs is already recorded by the transitions it produces, and any
         attempt left behind is recovered from its expired lease.
+
+        :param poll_interval: Wait this long between scheduling passes.
+        :param drain_timeout: Stop draining after this much time.
+        :param drain_grace_seconds: Kill attempts after this much drain grace.
         """
 
         previous: dict[int, Any] = {}
@@ -765,7 +822,12 @@ class TaskManager:
         return signalled
 
     def run_until_idle(self, *, timeout: float = 60.0, poll_interval: float = 0.02) -> None:
-        """Run until no local process or immediately actionable marker remains."""
+        """Run until no local process or immediately actionable marker remains.
+
+        :param timeout: Stop waiting after this many seconds.
+        :param poll_interval: Wait this long between scheduling passes.
+        :raises TimeoutError: If the manager does not become idle before the timeout.
+        """
 
         deadline = time.monotonic() + timeout
         quiet_passes = 0

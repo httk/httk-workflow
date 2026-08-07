@@ -164,6 +164,9 @@ class CwlNotes:
     something an operator should nevertheless be told — a container that will not
     be entered, a hint that was dropped — or something the job must carry, like
     the capabilities a document implies.
+
+    :param warnings: Collect accepted caveats in discovery order.
+    :param capabilities: Collect manager capabilities required by the document.
     """
 
     #: Everything accepted with a caveat, in the order it was found.
@@ -174,7 +177,13 @@ class CwlNotes:
 
 @dataclass(frozen=True)
 class ImportedCwl:
-    """One imported CWL document: the job, the plan, and what was noted."""
+    """One imported CWL document: the job, the plan, and what was noted.
+
+    :param job: Preserve the submitted job.
+    :param document: Preserve the normalized staged plan.
+    :param inputs: Preserve the staged input object.
+    :param warnings: Preserve accepted caveats for the operator.
+    """
 
     #: The submitted job.
     job: ScaffoldedJob
@@ -706,7 +715,15 @@ def _upgraded(path: Path, scratch: Path) -> Path:
 
 
 def load_cwl_plan(workflow_path: str | os.PathLike[str]) -> tuple[dict[str, object], CwlNotes]:
-    """Parse, check and normalize one CWL document into the plan httk executes."""
+    """Parse, check and normalize one CWL document into the plan httk executes.
+
+    :param workflow_path: Read the CWL document at this path.
+    :return: The normalized plan and accepted import notes.
+    :raises httk.workflow.compat.cwl.CwlImportError: If the document cannot be read or parsed.
+    :raises OSError: If accessing the workflow path fails while reading its declared version.
+    :raises UnicodeError: If the workflow path is not valid UTF-8 while reading its declared version.
+    :raises httk.workflow.compat.cwl.UnsupportedCwlError: If the document uses an unsupported CWL feature.
+    """
 
     path = Path(workflow_path).expanduser()
     if not path.is_file():
@@ -747,7 +764,15 @@ def _declared_version(path: Path) -> str | None:
 
 
 def load_cwl_inputs(inputs_path: str | os.PathLike[str]) -> dict[str, object]:
-    """Read one CWL input object, as YAML when a YAML reader is installed."""
+    """Read one CWL input object, as YAML when a YAML reader is installed.
+
+    :param inputs_path: Read the CWL input object at this path.
+    :return: The input values keyed by CWL input name.
+    :raises httk.workflow.compat.cwl.CwlImportError: If the input object cannot be read or is not a mapping.
+    :raises OSError: If the input path cannot be read.
+    :raises UnicodeError: If the input path is not valid UTF-8.
+    :raises json.JSONDecodeError: If a JSON input object is malformed.
+    """
 
     path = Path(inputs_path).expanduser()
     if not path.is_file():
@@ -784,6 +809,14 @@ def stage_cwl_inputs(
     A staged entry carries a payload-relative ``payload`` member instead of a
     ``path``, so the job is self-contained: it travels to another machine with
     the files its first tool reads.
+
+    :param values: Stage these decoded CWL input values.
+    :param base: Resolve relative input paths from this directory.
+    :param documents: Add literal files and normalized documents to this mapping.
+    :param files: Add source files to this mapping for payload staging.
+    :return: The input values rewritten with payload-relative paths.
+    :raises httk.workflow.compat.cwl.CwlImportError: If a local input path is missing or invalid.
+    :raises httk.workflow.compat.cwl.UnsupportedCwlError: If an input uses an unsupported CWL feature.
     """
 
     def stage(value: object, where: str) -> object:
@@ -868,6 +901,20 @@ def import_cwl(
     feature and where it was found; anything accepted with a caveat — a
     ``DockerRequirement``, an ignored hint — is reported in
     :attr:`~httk.workflow.compat.cwl.ImportedCwl.warnings`.
+
+    :param workspace: Submit the imported job to this workspace.
+    :param workflow_path: Read the CWL workflow at this path.
+    :param inputs_path: Read the CWL inputs at this path.
+    :param placement: Submit the job at this workspace placement.
+    :param tag: Set the optional job tag.
+    :param name: Set the optional job display name.
+    :param priority: Set the optional job priority.
+    :param data_mode: Select whether outputs use transactional data.
+    :param maximum_attempts: Set the maximum attempts per activation.
+    :param timeout: Set the per-tool timeout override when supplied.
+    :return: The submitted job, normalized plan, staged inputs, and warnings.
+    :raises httk.workflow.compat.cwl.CwlImportError: If the workflow or inputs cannot be imported.
+    :raises httk.workflow.compat.cwl.UnsupportedCwlError: If the document uses an unsupported CWL feature.
     """
 
     plan, context = load_cwl_plan(workflow_path)

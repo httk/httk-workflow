@@ -1,4 +1,4 @@
-"""Compatibility surface for job introspection and foreground debugging."""
+"""Expose job introspection and foreground debugging compatibility helpers."""
 
 # The imports below deliberately preserve the complete historical module surface.
 # ruff cannot infer names exported by the whitespace-based __all__ assembly.

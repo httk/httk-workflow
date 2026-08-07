@@ -1,4 +1,4 @@
-"""Workspace consistency check and conservative marker repair.
+"""Check workspace consistency and conservatively repair markers.
 
 A marker is the authoritative state of a job, and everything it says beyond its
 kind, priority, and generation lives in the journal frame it references. A lost
@@ -47,7 +47,19 @@ ACTIONS = ("reported", "repaired", "quarantined", "skipped_live")
 
 @dataclass(frozen=True)
 class FsckFinding:
-    """One marker that does not resolve to a readable, matching frame."""
+    """Describe one marker that does not resolve to a readable frame.
+
+    :param entry: Marker entry that failed inspection.
+    :param problem: Stable problem code.
+    :param detail: Human-readable problem detail.
+    :param action: Action taken for the finding.
+    :param job_key: Job key from the marker, when readable.
+    :param job_id: Job identifier from the marker, when readable.
+    :param kind: Marker state kind, when readable.
+    :param generation: Marker generation, when readable.
+    :param record_ref: Record reference named by the marker, when readable.
+    :param repaired_record_ref: Replacement reference, when repaired.
+    """
 
     entry: Path
     problem: str
@@ -61,7 +73,10 @@ class FsckFinding:
     repaired_record_ref: str | None = None
 
     def as_mapping(self) -> dict[str, object]:
-        """Return the JSON representation of this finding."""
+        """Return the JSON representation of this finding.
+
+        :return: JSON-compatible finding members.
+        """
 
         result: dict[str, object] = {
             "entry": str(self.entry),
@@ -78,7 +93,13 @@ class FsckFinding:
 
 @dataclass(frozen=True)
 class FsckReport:
-    """Everything one workspace check found and did."""
+    """Report everything one workspace check found and did.
+
+    :param workspace_id: Identifier of the checked workspace.
+    :param markers_checked: Number of readable markers inspected.
+    :param findings: Marker findings produced by the check.
+    :param counts: Finding counts by action.
+    """
 
     workspace_id: str
     markers_checked: int
@@ -87,18 +108,27 @@ class FsckReport:
 
     @property
     def ok(self) -> bool:
-        """Report whether every marker resolved to its own journal frame."""
+        """Report whether every marker resolved to its own journal frame.
+
+        :return: Whether the check found no findings.
+        """
 
         return not self.findings
 
     @property
     def unresolved(self) -> int:
-        """Return how many findings the run left for an operator to handle."""
+        """Return how many findings the run left for an operator to handle.
+
+        :return: Number of reported or live-skipped findings.
+        """
 
         return sum(1 for finding in self.findings if finding.action in ("reported", "skipped_live"))
 
     def as_mapping(self) -> dict[str, object]:
-        """Return the JSON representation of this report."""
+        """Return the JSON representation of this report.
+
+        :return: JSON-compatible report members.
+        """
 
         return {
             "format": FSCK_REPORT_FORMAT,
@@ -288,6 +318,12 @@ def check_workspace(
     journal writer, which leaves the job loadable and schedulable again. A
     marker with no readable history is left alone unless
     *quarantine_unrepairable* also asks for it to be moved out of the way.
+
+    :param workspace: Workspace whose markers and journal are checked.
+    :param repair: Whether to repair damaged markers with readable history.
+    :param quarantine_unrepairable: Whether to quarantine markers that cannot be repaired.
+    :return: Workspace consistency report.
+    :raises ValueError: If quarantine is requested without repair.
     """
 
     if quarantine_unrepairable and not repair:

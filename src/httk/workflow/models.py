@@ -95,6 +95,13 @@ _UNSAFE_PATH_COMPONENTS = frozenset({"", ".", "..", ".httk-workflow"})
 
 
 def canonical_uuid(value: object, name: str = "id") -> str:
+    """Validate and return a canonical lowercase UUID.
+
+    :param value: The value to validate.
+    :param name: The field name used in validation errors.
+    :return: The canonical UUID text.
+    :raises httk.workflow.errors.FormatError: If the value is not canonical UUID text.
+    """
     text = require_string(value, name)
     try:
         parsed = uuid.UUID(text)
@@ -107,6 +114,13 @@ def canonical_uuid(value: object, name: str = "id") -> str:
 
 
 def validate_label(value: object, name: str) -> str:
+    """Validate and return one protocol label.
+
+    :param value: The label to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated label.
+    :raises httk.workflow.errors.FormatError: If the value is not valid label text.
+    """
     text = require_string(value, name)
     if not _LABEL_PATTERN.fullmatch(text) or "--" in text:
         raise FormatError(f"{name} has invalid component syntax")
@@ -119,6 +133,9 @@ def is_payload_private(name: str) -> bool:
     A runner-private entry is excluded from every payload digest, so publishing
     an outcome or writing job state can never change the digest of a payload
     that a manager, a transfer, or a registration check must still recognize.
+
+    :param name: The payload entry name to classify.
+    :return: Whether the name is runner-private.
     """
 
     return name == JOB_STATE_DIRECTORY or name.startswith(ATTEMPT_CONTROL_PREFIX)
@@ -131,6 +148,11 @@ def validate_attempt_control(value: object, name: str = "attempt_control") -> st
     attempt, so it is exactly one relative component of the canonical
     ``.httk-attempt.<attempt-id>`` shape. Validating it before it is joined is
     what keeps a hostile or damaged frame from naming a path outside the job.
+
+    :param value: The attempt-control name to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated attempt-control name.
+    :raises httk.workflow.errors.FormatError: If the value is not a canonical attempt-control name.
     """
 
     text = require_string(value, name)
@@ -146,6 +168,11 @@ def validate_parameters(value: object, name: str = "parameters") -> dict[str, ob
     The member is opaque to the protocol: only its shape, its key syntax, and
     its serialized size are checked. Its bytes are part of ``job.json`` and are
     therefore covered by the immutable job digest like every other member.
+
+    :param value: The parameters mapping to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated parameters mapping.
+    :raises httk.workflow.errors.FormatError: If the mapping or its serialized contents are invalid.
     """
 
     mapping = require_mapping(value, name)
@@ -170,6 +197,11 @@ def validate_declaration_name(value: object, name: str = "declaration name") -> 
     The name keys the ``declarations`` object of ``job.json`` and is also the
     basename of the runtime-refined document below ``.httk-job/declarations/``,
     so it must be a safe single path component and nothing else.
+
+    :param value: The declaration name to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated declaration name.
+    :raises httk.workflow.errors.FormatError: If the value is not a safe declaration name.
     """
 
     text = require_string(value, name)
@@ -188,6 +220,11 @@ def validate_declarations(value: object, name: str = "declarations") -> dict[str
     exactly that, and an engine that reinterpreted it would only be able to
     disagree with it. The bytes live in ``job.json`` and are therefore covered
     by the immutable job digest like every other member.
+
+    :param value: The declarations mapping to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated declaration documents keyed by name.
+    :raises httk.workflow.errors.FormatError: If a declaration name, document, or size limit is invalid.
     """
 
     mapping = require_mapping(value, name)
@@ -208,7 +245,13 @@ def validate_declarations(value: object, name: str = "declarations") -> dict[str
 
 
 def validate_sha256(value: object, name: str) -> str:
-    """Validate one lowercase hexadecimal SHA-256 digest string."""
+    """Validate one lowercase hexadecimal SHA-256 digest string.
+
+    :param value: The digest to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated digest.
+    :raises httk.workflow.errors.FormatError: If the value is not a lowercase hexadecimal digest.
+    """
 
     text = require_string(value, name)
     if not _SHA256_PATTERN.fullmatch(text):
@@ -222,6 +265,10 @@ def parse_package_runner(value: str) -> tuple[str, PurePosixPath] | None:
     Return ``None`` when *value* is an ordinary relative runner path, so callers
     can treat the reserved form as one alternative spelling of ``runner.path``
     rather than as a separate protocol member.
+
+    :param value: The runner path to inspect.
+    :return: The package module and resource, or ``None`` for an ordinary path.
+    :raises httk.workflow.errors.FormatError: If the reserved package form is malformed.
     """
 
     if not value.startswith(PACKAGE_RUNNER_PREFIX):
@@ -245,6 +292,11 @@ def validate_runner_path(value: object, source: str) -> PurePosixPath:
     payload, the workspace runner store, or one configured installed-runner
     search path. The path must therefore stay below its root under every source,
     and only an installed runner may use the reserved ``pkg:`` form.
+
+    :param value: The runner path to validate.
+    :param source: The runner source that determines the permitted path form.
+    :return: The validated runner path.
+    :raises httk.workflow.errors.FormatError: If the path is absolute, unsafe, or incompatible with its source.
     """
 
     text = require_string(value, "runner.path")
@@ -268,12 +320,22 @@ def job_digest(data: bytes) -> str:
     The digest of a job is the SHA-256 over the ``job.json`` file bytes exactly
     as submitted. Nothing rewrites or renormalizes those bytes, so the digest is
     reproducible by any implementation with only a hash utility.
+
+    :param data: The stored ``job.json`` bytes.
+    :return: The lowercase SHA-256 digest.
     """
 
     return hashlib.sha256(data).hexdigest()
 
 
 def validate_step(value: object, name: str = "step") -> str:
+    """Validate and return one workflow step name.
+
+    :param value: The step name to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated step name.
+    :raises httk.workflow.errors.FormatError: If the value is not a valid step name.
+    """
     text = require_string(value, name)
     if len(text.encode("utf-8")) > 128 or "/" in text or "\x00" in text:
         raise FormatError(f"{name} is not a valid step name")
@@ -281,6 +343,12 @@ def validate_step(value: object, name: str = "step") -> str:
 
 
 def normalize_placement(value: str | PurePosixPath) -> PurePosixPath:
+    """Validate and normalize one relative POSIX placement.
+
+    :param value: The placement to validate.
+    :return: The normalized relative placement.
+    :raises httk.workflow.errors.FormatError: If the placement is absolute, empty, unsafe, or too long.
+    """
     placement = PurePosixPath(value)
     if placement.is_absolute() or not placement.parts:
         raise FormatError("placement must be a nonempty relative POSIX path")
@@ -293,10 +361,22 @@ def normalize_placement(value: str | PurePosixPath) -> PurePosixPath:
 
 
 def make_job_key(job_id: str, tag: str | None) -> str:
+    """Compose the stable job key from an identifier and optional tag.
+
+    :param job_id: The job UUID text.
+    :param tag: The optional job tag.
+    :return: The job key used by workspace markers.
+    """
     return f"{tag}--{job_id}" if tag else job_id
 
 
 def parse_job_key(value: str) -> tuple[str | None, str]:
+    """Split a job key into its optional tag and job identifier.
+
+    :param value: The job key to parse.
+    :return: The tag and job identifier.
+    :raises httk.workflow.errors.FormatError: If the key does not use the protocol syntax.
+    """
     job_id = value[-36:]
     if not _UUID_PATTERN.fullmatch(job_id):
         raise FormatError(f"invalid job key UUID: {value!r}")
@@ -316,6 +396,10 @@ class RetentionPolicy:
     collector that acts on these numbers is a separate concern; the workspace
     only carries them so that every implementation attaching to it agrees on
     what may be removed and when.
+
+    :param attempt_control_days: The retention period for attempt controls.
+    :param journal_days: The retention period for journal history.
+    :param trash_days: The retention period for discarded workspace entries.
     """
 
     attempt_control_days: float | None = None
@@ -324,6 +408,13 @@ class RetentionPolicy:
 
     @classmethod
     def from_mapping(cls, value: object, name: str = "policy.retention") -> "RetentionPolicy":
+        """Validate one retention policy mapping.
+
+        :param value: The policy mapping to validate.
+        :param name: The field name used in validation errors.
+        :return: The validated retention policy.
+        :raises httk.workflow.errors.FormatError: If the mapping contains unsupported or invalid members.
+        """
         mapping = require_mapping(value, name)
         unsupported = sorted(set(mapping) - RETENTION_KEYS)
         if unsupported:
@@ -340,7 +431,10 @@ class RetentionPolicy:
         )
 
     def as_mapping(self) -> dict[str, object]:
-        """Return the JSON representation, omitting unconfigured limits."""
+        """Return the JSON representation, omitting unconfigured limits.
+
+        :return: The JSON policy mapping.
+        """
 
         result: dict[str, object] = {}
         for key in sorted(RETENTION_KEYS):
@@ -359,6 +453,11 @@ class WorkspacePolicy:
     become visible and on how long an unheartbeaten lease means anything. They
     live in ``format.json`` beside the format and profile declarations, and a
     workspace written before this section existed simply reads as the defaults.
+
+    :param visibility_deadline_seconds: The marker visibility deadline.
+    :param lease_seconds: The manager claim lease duration.
+    :param journal_segment_bytes: The journal segment size.
+    :param retention: The workspace retention policy.
     """
 
     visibility_deadline_seconds: float = DEFAULT_VISIBILITY_DEADLINE_SECONDS
@@ -368,7 +467,13 @@ class WorkspacePolicy:
 
     @classmethod
     def from_mapping(cls, value: object, name: str = "policy") -> "WorkspacePolicy":
-        """Validate one complete policy object, filling in absent members."""
+        """Validate one complete policy object, filling in absent members.
+
+        :param value: The policy mapping to validate.
+        :param name: The field name used in validation errors.
+        :return: The validated retention policy.
+        :raises httk.workflow.errors.FormatError: If the mapping contains unsupported or invalid members.
+        """
 
         mapping = require_mapping(value, name)
         unsupported = sorted(set(mapping) - POLICY_KEYS)
@@ -416,7 +521,10 @@ class WorkspacePolicy:
         )
 
     def as_mapping(self) -> dict[str, object]:
-        """Return the complete JSON representation stored in ``format.json``."""
+        """Return the complete JSON representation stored in ``format.json``.
+
+        :return: The JSON workspace policy mapping.
+        """
 
         return {
             "visibility_deadline_seconds": self.visibility_deadline_seconds,
@@ -426,7 +534,13 @@ class WorkspacePolicy:
         }
 
     def updated(self, changes: Mapping[str, object], name: str = "policy") -> "WorkspacePolicy":
-        """Return this policy with *changes* applied and revalidated."""
+        """Return this policy with *changes* applied and revalidated.
+
+        :param changes: Policy members to replace.
+        :param name: The field name used in validation errors.
+        :return: The updated workspace policy.
+        :raises httk.workflow.errors.FormatError: If the changes contain unsupported or invalid members.
+        """
 
         unsupported = sorted(set(changes) - POLICY_KEYS)
         if unsupported:
@@ -454,6 +568,11 @@ class RetryPolicy:
 
     Neither rule can exceed ``maximum_attempts_per_activation`` or
     ``maximum_total_attempts``: an exhausted budget always ends the job.
+
+    :param maximum_attempts_per_activation: The per-activation attempt budget.
+    :param maximum_total_attempts: The total attempt budget.
+    :param maximum_activations: The activation budget.
+    :param retry_on: Failure codes eligible for manager-detected retry.
     """
 
     maximum_attempts_per_activation: int | None
@@ -463,6 +582,12 @@ class RetryPolicy:
 
     @classmethod
     def from_mapping(cls, value: object) -> "RetryPolicy":
+        """Validate one job retry policy mapping.
+
+        :param value: The retry policy mapping to validate.
+        :return: The validated retry policy.
+        :raises httk.workflow.errors.FormatError: If the mapping contains invalid retry settings.
+        """
         mapping = require_mapping(value, "retry_policy")
 
         def optional_limit(name: str) -> int | None:
@@ -488,8 +613,14 @@ class Failure:
     Every failure published by a runner, a bridge, or the manager itself uses
     exactly this shape: a stable machine ``code``, one human ``message``,
     optional structured ``details``, and the advisory ``retryable`` flag. Retry
-    policy is keyed on ``code`` alone; ``retryable`` is recorded evidence and
-    never a manager decision.
+    policy uses ``retry_on`` for manager-detected failures, while a runner-declared
+    ``retryable`` failure is retry-eligible regardless of ``retry_on`` when budget
+    remains.
+
+    :param code: The stable machine failure code.
+    :param message: The human-readable failure message.
+    :param details: Optional structured failure details.
+    :param retryable: Whether repeating the attempt could help.
     """
 
     code: str
@@ -498,7 +629,10 @@ class Failure:
     retryable: bool = False
 
     def as_mapping(self) -> dict[str, object]:
-        """Return the canonical JSON representation of this failure."""
+        """Return the canonical JSON representation of this failure.
+
+        :return: The JSON failure mapping.
+        """
 
         result: dict[str, object] = {"code": self.code, "message": self.message}
         if self.details is not None:
@@ -509,7 +643,13 @@ class Failure:
 
 
 def validate_failure(value: object, name: str = "failure") -> Failure:
-    """Validate one published failure object."""
+    """Validate one published failure object.
+
+    :param value: The failure mapping to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated failure record.
+    :raises httk.workflow.errors.FormatError: If the failure is missing required members or has invalid members.
+    """
 
     mapping = require_mapping(value, name)
     unsupported = sorted(set(mapping) - _FAILURE_MEMBERS)
@@ -587,23 +727,38 @@ class StateFrame:
     The envelope members ``format``, ``workspace_id``, ``job_id``, ``kind``,
     ``state_generation``, and their siblings belong to the transition that
     publishes a frame and are supplied by the workspace, never here.
+
+    :param members: The state members carried by this frame.
     """
 
     members: Mapping[str, Any] = dataclasses.field(default_factory=dict)
 
     @classmethod
     def from_mapping(cls, value: object, name: str = "state frame") -> "StateFrame":
-        """Read one stored state frame, keeping every member verbatim."""
+        """Read one stored state frame, keeping every member verbatim.
+
+        :param value: The state-frame mapping to read.
+        :param name: The field name used in validation errors.
+        :return: The state frame.
+        :raises httk.workflow.errors.FormatError: If the value is not a mapping.
+        """
 
         return cls(dict(require_mapping(value, name)))
 
     def as_mapping(self) -> dict[str, object]:
-        """Return the JSON representation, member for member."""
+        """Return the JSON representation, member for member.
+
+        :return: The state-frame member mapping.
+        """
 
         return dict(self.members)
 
     def has(self, name: str) -> bool:
-        """Report whether the frame carries *name* at all, null included."""
+        """Report whether the frame carries *name* at all, null included.
+
+        :param name: The member name to check.
+        :return: Whether the member is present.
+        """
 
         return name in self.members
 
@@ -656,6 +811,46 @@ class StateFrame:
         vocabulary of a state frame is visible in one signature and no call site
         can invent a member by misspelling one. Passing ``None`` writes the JSON
         null the protocol distinguishes from an absent member.
+
+        :param base: The frame to update, or an empty frame when omitted.
+        :param step: The activation step.
+        :param activation_id: The activation identifier.
+        :param activation_ordinal: The activation ordinal.
+        :param attempt_id: The attempt identifier.
+        :param attempt_ordinal: The attempt ordinal.
+        :param total_attempts: The total attempt count.
+        :param data_generation: The transactional data generation.
+        :param join_summary: The children observed by the activation.
+        :param runner_steps: The runner's registered step names.
+        :param manager_id: The owning manager identifier.
+        :param writer_id: The writer identifier.
+        :param claim_id: The claim identifier.
+        :param attempt_control: The attempt-control directory name.
+        :param lease_seconds: The claim lease duration.
+        :param matched_pool: The pool selected for the claim.
+        :param matched_capabilities: The capabilities matched by the claim.
+        :param started_at: The attempt start timestamp.
+        :param workdir: The attempt workdir.
+        :param outcome_action: The published outcome action.
+        :param child_digests: The child payload digests.
+        :param child_labels: The child labels.
+        :param next_step: The next activation step.
+        :param join: The child join condition.
+        :param pause: The pause record.
+        :param failure: The failure record.
+        :param job_digest: The immutable job digest.
+        :param unclean_restart: Whether the previous attempt ended uncleanly.
+        :param unsafe_persistent_takeover: Whether persistent takeover was unsafe.
+        :param takeover_evidence: Evidence for the persistent takeover.
+        :param cancellation: The cancellation record.
+        :param previous_attempt_id: The previous attempt identifier.
+        :param operator: The operator identity.
+        :param operator_key: The operator key.
+        :param operator_reason: The operator reason.
+        :param request_id: The request identifier.
+        :param revival_hazard: Evidence of a revival hazard.
+        :param reason: The transition reason.
+        :return: The updated state frame.
         """
 
         written: tuple[tuple[str, object], ...] = (
@@ -704,12 +899,19 @@ class StateFrame:
         return cls(members)
 
     def carried(self) -> "StateFrame":
-        """Return only the members every transition of this activation repeats."""
+        """Return only the members every transition of this activation repeats.
+
+        :return: The carried state frame.
+        """
 
         return StateFrame({name: self.members[name] for name in CARRIED_STATE_MEMBERS if name in self.members})
 
     def select(self, names: Sequence[str]) -> "StateFrame":
-        """Return only the named members this frame actually carries."""
+        """Return only the named members this frame actually carries.
+
+        :param names: The member names to retain.
+        :return: A frame containing the selected members.
+        """
 
         return StateFrame({name: self.members[name] for name in names if name in self.members})
 
@@ -734,34 +936,42 @@ class StateFrame:
 
     @property
     def step(self) -> str | None:
+        """Return the activation step, when present."""
         return self._string("step")
 
     @property
     def activation_id(self) -> str | None:
+        """Return the activation identifier, when present."""
         return self._string("activation_id")
 
     @property
     def activation_ordinal(self) -> int | None:
+        """Return the activation ordinal, when present."""
         return self._integer("activation_ordinal")
 
     @property
     def attempt_id(self) -> str | None:
+        """Return the attempt identifier, when present."""
         return self._string("attempt_id")
 
     @property
     def attempt_ordinal(self) -> int | None:
+        """Return the attempt ordinal, when present."""
         return self._integer("attempt_ordinal")
 
     @property
     def total_attempts(self) -> int | None:
+        """Return the total attempt count, when present."""
         return self._integer("total_attempts")
 
     @property
     def data_generation(self) -> int | None:
+        """Return the transactional data generation, when present."""
         return self._integer("data_generation")
 
     @property
     def join_summary(self) -> object:
+        """Return the observed child summary, when present."""
         return self.members.get("join_summary")
 
     @property
@@ -785,6 +995,7 @@ class StateFrame:
 
     @property
     def lease_seconds(self) -> float | None:
+        """Return the claim lease duration, when present."""
         value = self.members.get("lease_seconds")
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             return None
@@ -792,55 +1003,73 @@ class StateFrame:
 
     @property
     def started_at(self) -> str | None:
+        """Return the attempt start timestamp, when present."""
         return self._string("started_at")
 
     @property
     def workdir(self) -> str | None:
+        """Return the attempt workdir, when present."""
         return self._string("workdir")
 
     @property
     def next_step(self) -> str | None:
+        """Return the next activation step, when present."""
         return self._string("next_step")
 
     @property
     def join(self) -> Mapping[str, object] | None:
+        """Return the child join condition, when present."""
         return self._mapping("join")
 
     @property
     def failure(self) -> Mapping[str, object] | None:
+        """Return the failure record, when present."""
         return self._mapping("failure")
 
     @property
     def pause(self) -> object:
+        """Return the pause record, when present."""
         return self.members.get("pause")
 
     @property
     def cancellation(self) -> Mapping[str, object] | None:
+        """Return the cancellation record, when present."""
         return self._mapping("cancellation")
 
     @property
     def child_digests(self) -> Mapping[str, object] | None:
+        """Return the child digests, when present."""
         return self._mapping("child_digests")
 
     @property
     def previous_attempt_id(self) -> str | None:
+        """Return the previous attempt identifier, when present."""
         return self._string("previous_attempt_id")
 
     @property
     def unclean_restart(self) -> bool:
+        """Report whether the previous attempt ended uncleanly."""
         return self._flag("unclean_restart")
 
     @property
     def unsafe_persistent_takeover(self) -> bool:
+        """Report whether persistent takeover was unsafe."""
         return self._flag("unsafe_persistent_takeover")
 
     @property
     def reason(self) -> str | None:
+        """Return the transition reason, when present."""
         return self._string("reason")
 
 
 @dataclass(frozen=True)
 class JobDefinition:
+    """The immutable declaration and execution settings of one job.
+
+    The mapping carried in :attr:`parameters` contains opaque implementation
+    knobs; declared staged objects belong to the SDK's input declarations.
+    """
+
     id: str
     tag: str | None
     name: str
@@ -868,6 +1097,7 @@ class JobDefinition:
 
     @property
     def job_key(self) -> str:
+        """Return the stable key of this job."""
         return make_job_key(self.id, self.tag)
 
     @property
@@ -887,7 +1117,13 @@ class JobDefinition:
 
     @classmethod
     def from_bytes(cls, data: bytes, *, name: str = "job.json") -> "JobDefinition":
-        """Parse stored ``job.json`` bytes, pinning the normative job digest."""
+        """Parse stored ``job.json`` bytes, pinning the normative job digest.
+
+        :param data: The stored job document bytes.
+        :param name: The document name used in validation errors.
+        :return: The parsed job definition.
+        :raises httk.workflow.errors.FormatError: If the bytes do not contain a valid job document.
+        """
 
         try:
             value = json.loads(data.decode("utf-8"))
@@ -900,7 +1136,12 @@ class JobDefinition:
 
     @classmethod
     def from_path(cls, path: Path) -> "JobDefinition":
-        """Read one stored ``job.json``, pinning the normative job digest."""
+        """Read one stored ``job.json``, pinning the normative job digest.
+
+        :param path: The path of the stored job document.
+        :return: The parsed job definition.
+        :raises httk.workflow.errors.FormatError: If the file cannot be read or is invalid.
+        """
 
         try:
             data = path.read_bytes()
@@ -910,6 +1151,12 @@ class JobDefinition:
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, object]) -> "JobDefinition":
+        """Parse one job definition mapping.
+
+        :param value: The job document mapping.
+        :return: The parsed job definition.
+        :raises httk.workflow.errors.FormatError: If the mapping does not satisfy the job protocol.
+        """
         if value.get("format") != "httk-workflow-job" or value.get("format_version") != 1:
             raise FormatError("job format must be httk-workflow-job version 1")
         if "inputs" in value and "parameters" in value:
@@ -991,6 +1238,17 @@ class JobDefinition:
 
 @dataclass(frozen=True)
 class Marker:
+    """The state marker locating one job transition in a workspace.
+
+    :param kind: The state kind encoded by the marker.
+    :param placement: The workspace placement of the job.
+    :param job_key: The stable job key.
+    :param priority: The marker priority.
+    :param generation: The state generation.
+    :param record_ref: The transition record reference.
+    :param path: The marker path.
+    """
+
     kind: str
     placement: PurePosixPath
     job_key: str
@@ -1001,10 +1259,18 @@ class Marker:
 
     @property
     def job_id(self) -> str:
+        """Return the job identifier encoded in this marker."""
         return parse_job_key(self.job_key)[1]
 
     @classmethod
     def from_path(cls, state_root: Path, path: Path) -> "Marker":
+        """Parse one marker path below a workspace state root.
+
+        :param state_root: The workspace state directory.
+        :param path: The marker path to parse.
+        :return: The parsed state marker.
+        :raises httk.workflow.errors.FormatError: If the path does not use marker syntax.
+        """
         relative = path.relative_to(state_root)
         if len(relative.parts) < 3:
             raise FormatError(f"marker has no placement: {path}")
@@ -1025,6 +1291,15 @@ class Marker:
 
 
 def marker_basename(job_key: str, priority: int, generation: int, record_ref: str) -> str:
+    """Build one bounded state-marker basename.
+
+    :param job_key: The stable job key.
+    :param priority: The marker priority.
+    :param generation: The state generation.
+    :param record_ref: The transition record reference.
+    :return: The marker basename.
+    :raises httk.workflow.errors.FormatError: If a component is invalid or the basename exceeds the profile limit.
+    """
     parse_job_key(job_key)
     if not 0 <= priority <= 999:
         raise FormatError("priority must be 0 through 999")
@@ -1038,6 +1313,12 @@ def marker_basename(job_key: str, priority: int, generation: int, record_ref: st
 
 
 def to_base36(value: int) -> str:
+    """Encode a nonnegative integer in lowercase base 36.
+
+    :param value: The integer to encode.
+    :return: The base-36 representation.
+    :raises ValueError: If the value is negative.
+    """
     if value < 0:
         raise ValueError("base-36 values cannot be negative")
     alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"

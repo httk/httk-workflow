@@ -112,6 +112,10 @@ class RunnerRef:
     installed runner on the machine that runs it. :meth:`inherit` copies the
     reference of the spawning job itself, which is what a campaign whose steps all
     live in one published runner wants.
+
+    :param source: The location from which the child runner is loaded.
+    :param path: The workspace or installed runner path when one is selected.
+    :param sha256: The digest pin for a workspace or installed runner.
     """
 
     source: Literal["inherit", "workspace", "installed"] = "inherit"
@@ -120,19 +124,32 @@ class RunnerRef:
 
     @classmethod
     def inherit(cls) -> "RunnerRef":
-        """Reference exactly the runner of the spawning job."""
+        """Reference exactly the runner of the spawning job.
+
+        :return: The inherited runner reference.
+        """
 
         return cls("inherit")
 
     @classmethod
     def workspace(cls, path: str | PurePosixPath, sha256: str) -> "RunnerRef":
-        """Reference one runner published in the workspace runner store."""
+        """Reference one runner published in the workspace runner store.
+
+        :param path: The path within the workspace runner store.
+        :param sha256: The runner digest.
+        :return: The workspace runner reference.
+        """
 
         return cls("workspace", str(PurePosixPath(path)), validate_sha256(sha256, "runner sha256"))
 
     @classmethod
     def installed(cls, path: str | PurePosixPath, sha256: str) -> "RunnerRef":
-        """Reference one runner installed on the machine that runs the child."""
+        """Reference one runner installed on the machine that runs the child.
+
+        :param path: The installed runner path.
+        :param sha256: The runner digest.
+        :return: The installed runner reference.
+        """
 
         return cls("installed", str(PurePosixPath(path)), validate_sha256(sha256, "runner sha256"))
 
@@ -168,6 +185,25 @@ class ChildSpec:
     its priority, its resources, and its runner. The child therefore differs from
     its parent in exactly what the campaign varies, which is normally only *step*
     and *parameters*.
+
+    :param step: The first step the child runs.
+    :param parameters: The opaque implementation knobs given to the child.
+    :param declarations: The workflow declarations carried by the child.
+    :param runner: The runner reference used to execute the child.
+    :param name: The child job name, or a generated name when omitted.
+    :param workflow: The child's workflow identifier, or the parent's when omitted.
+    :param tag: The child's optional job tag, or the spawn label when omitted.
+    :param workdir_mode: Whether the child's workdir persists or is isolated.
+    :param workdir_path: The child's relative workdir path.
+    :param data_mode: Whether the child has transactional data.
+    :param priority: The child's priority, or the parent's when omitted.
+    :param claim_pool: The child's claim pool, or the parent's when omitted.
+    :param required_capabilities: Capabilities required by the child.
+    :param resources: Resources requested by the child, or the parent's when omitted.
+    :param maximum_attempts_per_activation: The child's per-activation attempt budget.
+    :param maximum_total_attempts: The child's total attempt budget.
+    :param maximum_activations: The child's activation budget.
+    :param retry_on: Failure codes eligible for manager-detected retry.
     """
 
     step: str
@@ -307,7 +343,12 @@ class ChildrenView:
         return tuple(child.label for child in self.all if child.label is not None)
 
     def get(self, label: str, default: ChildResult | None = None) -> ChildResult | None:
-        """Return the child spawned under *label*, or *default*."""
+        """Return the child spawned under *label*, or *default*.
+
+        :param label: The unique spawn label to find.
+        :param default: The value to return when no child has that label.
+        :return: The matching child, or the default value.
+        """
 
         for child in self.all:
             if child.label == label:
@@ -339,6 +380,15 @@ class Attempt:
     :meth:`retry`, :meth:`pause`, or :meth:`fail`. Publication is the single
     atomic rename the manager observes, so nothing a step did takes effect until
     the step says how it ended.
+
+    :param context: The manager-written identity and restart context.
+    :param control: The attempt control directory.
+    :param payload: The immutable job payload directory.
+    :param workdir: The directory in which the step works.
+    :param workspace: The workspace root containing the job.
+    :param data: The job's transactional data directory, when enabled.
+    :param step: The step this attempt runs, or the context step when omitted.
+    :param runner: The runner dispatching this attempt, when available.
     """
 
     def __init__(
@@ -387,6 +437,11 @@ class Attempt:
         Recovery replays every workdir batch an earlier attempt sealed but did not
         get to apply, so a handler always starts from a workdir whose sealed
         changes are complete. This is the only constructor a runner needs.
+
+        :param environment: The process environment, or the current environment when omitted.
+        :param runner: The runner dispatching this attempt, when called by :meth:`Runner.main`.
+        :return: The initialized attempt.
+        :raises ValueError: If the manager-written attempt environment or context is invalid.
         """
 
         bound = _read_environment(environment)
@@ -441,6 +496,11 @@ class Attempt:
         Without a *default*, a missing parameter is a :exc:`KeyError`: a step that
         needs a parameter cannot run without it, and saying so immediately is better
         than failing later on a value that was never there.
+
+        :param name: The parameter name to look up.
+        :param default: The value to return when the parameter is absent.
+        :return: The parameter value or the supplied default.
+        :raises KeyError: If the parameter is absent and no default was supplied.
         """
 
         parameters = self.job.parameters
@@ -461,6 +521,10 @@ class Attempt:
         application settings, then *default*. This is how a step reads the VASP
         command a workspace was configured with without the operator exporting it
         for every job, while still letting one job or one shell override it.
+
+        :param name: The dotted application setting name to resolve.
+        :param default: The value to return when no layer defines the setting.
+        :return: The first value found in the resolution layers, or the default.
         """
 
         parameters = self.job.parameters
@@ -489,6 +553,11 @@ class Attempt:
         repeating it overwrites: what a job observed is whatever its last word on
         the subject was. A collect reports the observed document beside the
         declared one and never merges the two.
+
+        :param name: The declaration name to record.
+        :param document: The declaration document to store verbatim.
+        :return: The path of the stored observed declaration.
+        :raises httk.workflow.errors.FormatError: If the declaration name or document is invalid.
         """
 
         declaration = validate_declaration_name(name, "declaration name")
@@ -503,6 +572,10 @@ class Attempt:
 
         The document this job observed is returned when one was written,
         otherwise the one ``job.json`` declared, otherwise ``None``.
+
+        :param name: The declaration name to read.
+        :return: The observed or declared document, or ``None`` when absent.
+        :raises httk.workflow.errors.FormatError: If the declaration name is invalid or its document is malformed.
         """
 
         declaration = validate_declaration_name(name, "declaration name")
@@ -525,7 +598,15 @@ class Attempt:
         environment: Mapping[str, str] | None = None,
         termination_grace: float = 10.0,
     ) -> CommandResult:
-        """Run an argv array in the workdir and reap its process group."""
+        """Run an argv array in the workdir and reap its process group.
+
+        :param argv: The command and its arguments.
+        :param timeout: The maximum runtime before terminating the process group.
+        :param cwd: The working directory, or this attempt's workdir when omitted.
+        :param environment: The complete child environment, or the process environment when omitted.
+        :param termination_grace: The grace period after a timeout before forceful termination.
+        :return: The completed command result.
+        """
 
         return run_command(
             argv,
@@ -536,7 +617,10 @@ class Attempt:
         )
 
     def workdir_batch(self) -> ReplayableWorkdirBatch:
-        """Start a replayable group of workdir changes."""
+        """Start a replayable group of workdir changes.
+
+        :return: A batch that seals changes for replay after interruption.
+        """
 
         return ReplayableWorkdirBatch.create(self.workdir, durable=self.context.durable)
 
@@ -547,6 +631,11 @@ class Attempt:
         exactly once, whatever happens to this process in between. Operation
         identifiers are generated in call order, so replaying the same step
         produces the same manifest.
+
+        :param source: The file or directory to stage.
+        :param destination: The destination path in transactional data.
+        :return: The generated transaction operation identifier.
+        :raises ValueError: If this job has no transactional data.
         """
 
         transaction = self._data_transaction()
@@ -559,7 +648,13 @@ class Attempt:
         return operation_id
 
     def remove(self, destination: str | os.PathLike[str], *, missing_ok: bool = False) -> str:
-        """Remove one path from the job's transactional data."""
+        """Remove one path from the job's transactional data.
+
+        :param destination: The path to remove from transactional data.
+        :param missing_ok: Whether an absent destination is acceptable.
+        :return: The generated transaction operation identifier.
+        :raises ValueError: If this job has no transactional data.
+        """
 
         transaction = self._data_transaction()
         operation_id = self._next_operation()
@@ -579,6 +674,12 @@ class Attempt:
         the path of a prepared payload directory. The label is mandatory and must
         be unique within one attempt: it is how :meth:`gather` and
         :attr:`children` name this child later.
+
+        :param child: The child specification or prepared payload directory.
+        :param label: The unique label used to observe the child later.
+        :param placement: The workspace placement for the child, or this attempt's placement when omitted.
+        :return: The reference to the registered child.
+        :raises ValueError: If the child or label is invalid, or the label is reused.
         """
 
         self._reject_published()
@@ -608,6 +709,12 @@ class Attempt:
 
         *state* is written to :attr:`state` before the outcome is published, so
         the step that runs next always finds the state that decided to run it.
+
+        :param step: The next registered step.
+        :param state: State members to merge before publication.
+        :param priority: The priority of the new activation, when changed.
+        :return: The path of the published outcome.
+        :raises RuntimeError: If this attempt already published an outcome.
         """
 
         self._reject_published()
@@ -632,6 +739,13 @@ class Attempt:
         ``any_succeeded``, or ``at_least`` with *count*. When the condition can no
         longer be met, the job advances to *on_impossible* if one is named and
         fails with ``dependency_failure`` otherwise.
+
+        :param step: The step to run when the join condition is met.
+        :param when: The child completion condition.
+        :param count: The required count when ``when`` is ``at_least``.
+        :param on_impossible: The step to run when the condition cannot be met.
+        :return: The path of the published wait outcome.
+        :raises ValueError: If no children were spawned or a named step is invalid.
         """
 
         self._reject_published()
@@ -645,17 +759,28 @@ class Attempt:
         return self._publish("wait", next_step=step, join=join)
 
     def succeed(self) -> Path:
-        """Publish the successful completion of this job."""
+        """Publish the successful completion of this job.
+
+        :return: The path of the published outcome.
+        """
 
         return self._publish("succeed")
 
     def retry(self, reason: str) -> Path:
-        """Ask for another attempt of this same activation."""
+        """Ask for another attempt of this same activation.
+
+        :param reason: The reason recorded with the retry request.
+        :return: The path of the published outcome.
+        """
 
         return self._publish("retry", retry={"reason": reason})
 
     def pause(self, reason: str) -> Path:
-        """Pause this job until an operator resumes it."""
+        """Pause this job until an operator resumes it.
+
+        :param reason: The reason recorded with the pause request.
+        :return: The path of the published outcome.
+        """
 
         return self._publish("pause", pause={"reason": reason})
 
@@ -672,6 +797,12 @@ class Attempt:
         ``code`` is the token a job lists in ``retry_on``. ``retryable`` declares
         that repeating this attempt could help, which the manager honours within
         the attempt budgets of the job.
+
+        :param code: The stable failure code.
+        :param message: The human-readable failure message.
+        :param details: Optional structured failure details.
+        :param retryable: Whether repeating this attempt could help.
+        :return: The path of the published outcome.
         """
 
         failure = Failure(code, message, details=details, retryable=retryable)
@@ -810,6 +941,9 @@ class Runner:
     invokes. Registration is therefore complete before the first step runs, which
     is what lets every step name in a published outcome be checked against the
     steps that really exist.
+
+    :param workflow: The workflow identifier and registry key implemented by this runner.
+    :param inputs: The immutable creation-time staged-input declarations.
     """
 
     def __init__(self, workflow: str, *, inputs: Mapping[str, str | None] | None = None) -> None:
@@ -848,7 +982,13 @@ class Runner:
         *,
         name: str | None = None,
     ) -> StepHandler | Callable[[StepHandler], StepHandler]:
-        """Register one step handler, named after the function unless *name* is given."""
+        """Register one step handler, named after the function unless *name* is given.
+
+        :param function: The step handler, or ``None`` when used as a decorator factory.
+        :param name: The registered step name, or the handler name when omitted.
+        :return: The handler or a decorator that registers it.
+        :raises ValueError: If the step name is invalid or already registered.
+        """
 
         def register(handler: StepHandler) -> StepHandler:
             step = validate_step(handler.__name__ if name is None else name, "step")
@@ -860,7 +1000,12 @@ class Runner:
         return register if function is None else register(function)
 
     def instantiate(self, function: InstantiateHandler) -> InstantiateHandler:
-        """Register the hook receiving ``httk.workflow.scaffold.InstantiateContext``."""
+        """Register the hook receiving ``httk.workflow.scaffold.InstantiateContext``.
+
+        :param function: The creation-time instantiate handler.
+        :return: The handler, unchanged.
+        :raises ValueError: If an instantiate handler is already registered.
+        """
 
         if self._instantiate is not None:
             raise ValueError(f"an instantiate hook is already registered on the {self.workflow} runner")
@@ -868,7 +1013,10 @@ class Runner:
         return function
 
     def description(self) -> dict[str, object]:
-        """Return the machine-readable description of this runner."""
+        """Return the machine-readable description of this runner.
+
+        :return: The runner description document.
+        """
 
         description = {
             "format": RUNNER_DESCRIPTION_FORMAT,
@@ -894,6 +1042,9 @@ class Runner:
         ``no_outcome``, an unimplemented step as ``unknown_step``, and a step that
         raises leaves an ``error.json`` breadcrumb and lets the exception reach the
         manager, whose retry policy owns what happens next.
+
+        :param argv: Command-line arguments, or the process arguments when omitted.
+        :return: Zero after dispatching or describing the runner.
         """
 
         arguments = sys.argv[1:] if argv is None else list(argv)

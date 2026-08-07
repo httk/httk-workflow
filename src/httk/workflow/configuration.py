@@ -1,4 +1,4 @@
-"""XDG configuration and identity management for workflow commands."""
+"""Manage XDG configuration and identity for workflow commands."""
 
 import base64
 import configparser
@@ -68,7 +68,12 @@ IDENTITY_SIGNATURE_MEMBER = "signature"
 
 @dataclass(frozen=True)
 class ConfigKey:
-    """One member the user configuration is allowed to carry."""
+    """Describe one member the user configuration is allowed to carry.
+
+    :param name: Configuration member name.
+    :param description: Human-readable explanation shown to operators.
+    :param settable: Whether ``config set`` may change the member.
+    """
 
     name: str
     description: str
@@ -90,13 +95,19 @@ CONFIG_KEYS: Mapping[str, ConfigKey] = {
 
 
 def settable_config_keys() -> tuple[str, ...]:
-    """Return the configuration keys ``config set`` accepts, in order."""
+    """Return the configuration keys ``config set`` accepts, in order.
+
+    :return: Settable configuration member names.
+    """
 
     return tuple(sorted(name for name, key in CONFIG_KEYS.items() if key.settable))
 
 
 def config_home() -> Path:
-    """Return the httk configuration directory."""
+    """Return the httk configuration directory.
+
+    :return: Resolved per-user configuration directory.
+    """
 
     override = os.environ.get("HTTK_CONFIG_HOME")
     if override:
@@ -112,6 +123,8 @@ def data_home() -> Path:
     :func:`config_home`; the lazily created default workspace is genuine
     per-user data and lives here. :func:`adopt_legacy_data_home` also uses this
     location to find data left by older releases.
+
+    :return: Resolved per-user data directory.
     """
 
     override = os.environ.get("HTTK_DATA_HOME")
@@ -165,7 +178,10 @@ def _adopt(legacy: Path, current: Path) -> Path:
 
 
 def adopt_legacy_data_home() -> None:
-    """Adopt whatever an earlier release left in the data home, once."""
+    """Adopt whatever an earlier release left in the data home, once.
+
+    :return: ``None``.
+    """
 
     legacy_root = data_home()
     config_root = config_home()
@@ -176,20 +192,30 @@ def adopt_legacy_data_home() -> None:
 
 
 def remotes_home() -> Path:
-    """Return where this user's remote definitions live."""
+    """Return where this user's remote definitions live.
+
+    :return: Per-user remote definition directory.
+    """
 
     adopt_legacy_data_home()
     return config_home() / "remotes"
 
 
 def keys_home() -> Path:
-    """Return where this user's identity keys live."""
+    """Return where this user's identity keys live.
+
+    :return: Per-user identity key directory.
+    """
 
     adopt_legacy_data_home()
     return config_home() / "keys"
 
 
 def config_path() -> Path:
+    """Return the path of this user's configuration file.
+
+    :return: User configuration path.
+    """
     return config_home() / "config.json"
 
 
@@ -200,6 +226,9 @@ def read_config() -> dict[str, object]:
     if its members meant what this implementation means by them. A document with
     no version at all predates versioning and is accepted as legacy, because
     that is what every configuration written before this check looks like.
+
+    :return: Configuration members, or an empty mapping when no file exists.
+    :raises ValueError: If the file is not a supported configuration document.
     """
 
     path = config_path()
@@ -229,7 +258,11 @@ def read_config() -> dict[str, object]:
 
 
 def machine_names() -> frozenset[str]:
-    """Return the configured names by which this machine is addressed."""
+    """Return the configured names by which this machine is addressed.
+
+    :return: Names configured for this machine.
+    :raises ValueError: If ``machine_names`` is not a valid comma-separated value.
+    """
 
     value = read_config().get("machine_names")
     if value is None:
@@ -243,7 +276,11 @@ def machine_names() -> frozenset[str]:
 
 
 def write_config(values: Mapping[str, object]) -> Path:
-    """Write a versioned user configuration."""
+    """Write a versioned user configuration.
+
+    :param values: Configuration members to write.
+    :return: Path of the written configuration file.
+    """
 
     value = dict(values)
     value.setdefault("format", CONFIG_FORMAT)
@@ -269,7 +306,13 @@ def _settable(key: str) -> ConfigKey:
 
 
 def set_config_key(key: str, value: str) -> Path:
-    """Set one registered configuration key and return the written path."""
+    """Set one registered configuration key and return the written path.
+
+    :param key: Settable configuration member name.
+    :param value: New member value.
+    :return: Path of the written configuration file.
+    :raises ValueError: If the key is not settable or its value is invalid.
+    """
 
     _settable(key)
     if key == "machine_names":
@@ -282,7 +325,12 @@ def set_config_key(key: str, value: str) -> Path:
 
 
 def unset_config_key(key: str) -> Path:
-    """Remove one registered configuration key and return the written path."""
+    """Remove one registered configuration key and return the written path.
+
+    :param key: Settable configuration member name.
+    :return: Path of the written configuration file.
+    :raises ValueError: If the key is not settable or is not configured.
+    """
 
     _settable(key)
     values = read_config()
@@ -293,7 +341,12 @@ def unset_config_key(key: str) -> Path:
 
 
 def initialize_config(*, name: str, email: str) -> dict[str, object]:
-    """Create or update the user identity and ensure a signing key exists."""
+    """Create or update the user identity and ensure a signing key exists.
+
+    :param name: Operator name to record in the configuration.
+    :param email: Operator email address to record in the configuration.
+    :return: The resulting configuration members.
+    """
 
     values = read_config()
     values.update(
@@ -310,12 +363,20 @@ def initialize_config(*, name: str, email: str) -> dict[str, object]:
 
 
 def identity_key_paths() -> tuple[Path, Path]:
+    """Return the paths of the local identity seed and public key.
+
+    :return: Seed path followed by public-key path.
+    """
     root = keys_home()
     return root / "identity.seed", root / "identity.pub"
 
 
 def ensure_identity_key() -> tuple[Path, Path]:
-    """Create the user's standard Ed25519 identity key if it is absent."""
+    """Create the user's standard Ed25519 identity key if it is absent.
+
+    :return: Seed path followed by public-key path.
+    :raises ValueError: If an existing seed is not a standard Ed25519 seed.
+    """
 
     private_path, public_path = identity_key_paths()
     if private_path.exists():
@@ -343,6 +404,8 @@ def identity_seed() -> bytes | None:
     Nothing here creates a key. An installation that never ran ``config init``
     simply has no identity, and every caller treats that as *unsigned* rather
     than as an error, which is what keeps a mixed deployment working.
+
+    :return: The local seed, or no value when no valid key exists.
     """
 
     private_path, _ = identity_key_paths()
@@ -354,7 +417,10 @@ def identity_seed() -> bytes | None:
 
 
 def identity_public_key() -> str | None:
-    """Return the recorded local identity public key, or ``None``."""
+    """Return the recorded local identity public key, or ``None``.
+
+    :return: Encoded public key, or ``None`` when no identity exists.
+    """
 
     seed = identity_seed()
     return None if seed is None else "ed25519:" + base64.b64encode(ed25519_public_key(seed)).decode("ascii")
@@ -366,6 +432,9 @@ def signature_digest(document: Mapping[str, object]) -> bytes:
     The digest covers the whole document except the signature itself, in the
     same canonical JSON every other httk document is hashed as, so the signing
     key and the signed members travel together and neither can be swapped.
+
+    :param document: Document whose detached signature is being calculated.
+    :return: Domain-separated digest of the unsigned document.
     """
 
     body = {name: value for name, value in document.items() if name != IDENTITY_SIGNATURE_MEMBER}
@@ -379,6 +448,9 @@ def sign_document(document: Mapping[str, object]) -> dict[str, object]:
     the document unchanged, and a verifier accepts an unsigned document. The
     signature is attribution — it says which identity published this — and never
     authorization: nothing is permitted because a document is signed.
+
+    :param document: Document to copy and optionally sign.
+    :return: Document with identity members when a local key exists.
     """
 
     seed = identity_seed()
@@ -394,7 +466,13 @@ def sign_document(document: Mapping[str, object]) -> dict[str, object]:
 
 @dataclass(frozen=True)
 class DocumentSignature:
-    """What checking one document's optional identity signature established."""
+    """Report what checking one document's optional identity signature established.
+
+    :param present: Whether the document carried a signature block.
+    :param valid: Whether the carried signature verified.
+    :param operator_key: Encoded key from the signature, when present.
+    :param reason: Explanation when the signature is absent or invalid.
+    """
 
     present: bool
     valid: bool
@@ -409,6 +487,9 @@ def verify_document(document: Mapping[str, object]) -> DocumentSignature:
     document published by an installation without an identity key stays usable.
     A signature that is present and does not verify is a failure: it is either
     damaged or forged, and neither is something to act on.
+
+    :param document: Document whose optional signature is checked.
+    :return: Signature presence and verification result.
     """
 
     key = document.get(IDENTITY_KEY_MEMBER)
@@ -434,6 +515,10 @@ def import_v1_configuration(source: str | os.PathLike[str] | None = None) -> dic
     """Import safe metadata and public identity from a legacy ``~/.httk`` tree.
 
     Legacy 64-byte private material is deliberately left untouched.
+
+    :param source: Legacy configuration root, or the default legacy home.
+    :return: Imported configuration members.
+    :raises FileNotFoundError: If the legacy configuration file is absent.
     """
 
     root = Path(source).expanduser().resolve() if source is not None else (Path.home() / ".httk").resolve()

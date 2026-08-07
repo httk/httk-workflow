@@ -49,7 +49,12 @@ _COMPARE: dict[type[ast.AST], Callable[[Any, Any], bool]] = {
 
 
 def evaluate_expression(expression: str) -> int | float | bool:
-    """Evaluate a bounded arithmetic expression without Python ``eval``."""
+    """Evaluate a bounded arithmetic expression without Python ``eval``.
+
+    :param expression: Supply the arithmetic expression to evaluate.
+    :return: The evaluated scalar result.
+    :raises ValueError: If the expression contains an unsupported element.
+    """
 
     tree = ast.parse(expression, mode="eval")
 
@@ -95,7 +100,14 @@ def render_template(
     output_path: str | os.PathLike[str],
     values: Mapping[str, object],
 ) -> Path:
-    """Render ``string.Template`` placeholders from an explicit mapping."""
+    """Render ``string.Template`` placeholders from an explicit mapping.
+
+    :param template_path: Locate the source template.
+    :param output_path: Locate the atomically replaced output file.
+    :param values: Supply placeholder values.
+    :return: The rendered output path.
+    :raises KeyError: If the template names a missing value.
+    """
 
     source = Path(template_path).read_text(encoding="utf-8")
     rendered = string.Template(source).substitute({key: str(value) for key, value in values.items()})
@@ -118,7 +130,14 @@ def compress_files(
     method: str = "bz2",
     remove_source: bool = False,
 ) -> tuple[Path, ...]:
-    """Compress regular files atomically with a stdlib codec."""
+    """Compress regular files atomically with a stdlib codec.
+
+    :param paths: Locate the regular files to compress.
+    :param method: Select ``bz2``, ``gz``, or ``xz`` compression.
+    :param remove_source: Remove each source after successful compression.
+    :return: The compressed output paths.
+    :raises ValueError: If a method or source file is invalid.
+    """
 
     suffixes = {"bz2": ".bz2", "gz": ".gz", "xz": ".xz"}
     openers: dict[str, Callable[..., Any]] = {"bz2": bz2.open, "gz": gzip.open, "xz": lzma.open}
@@ -148,7 +167,14 @@ def decompress_files(
     *,
     remove_source: bool = False,
 ) -> tuple[Path, ...]:
-    """Decompress ``.bz2``, ``.gz``, or ``.xz`` files atomically."""
+    """Decompress ``.bz2``, ``.gz``, or ``.xz`` files atomically.
+
+    :param paths: Locate the compressed files to decompress.
+    :param remove_source: Remove each source after successful decompression.
+    :return: The decompressed output paths.
+    :raises ValueError: If a source is not a supported regular compressed file.
+    :raises FileExistsError: If a decompressed output already exists.
+    """
 
     openers: dict[str, Callable[..., Any]] = {".bz2": bz2.open, ".gz": gzip.open, ".xz": lzma.open}
     results: list[Path] = []

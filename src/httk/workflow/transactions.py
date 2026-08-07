@@ -81,6 +81,15 @@ def replay_transaction(
     destination state frame and renames the marker out of ``committing`` only
     after replay returns, so a committed transaction is on storage before the
     marker that claims it is.
+
+    :param transaction_dir: Locate the published transaction directory.
+    :param data_dir: Locate the workspace data directory to update.
+    :param expected_generation: Require this current data generation.
+    :param durable: Synchronize installed data before returning.
+    :return: Whether the manifest contains operations.
+    :raises httk.workflow.errors.FormatError: If the transaction manifest or an operation is invalid.
+    :raises httk.workflow.errors.TransactionError: If the generation, source, or destination is invalid.
+    :raises httk.workflow.errors.WorkspaceUnavailableError: If an operation cannot be resolved after retries.
     """
 
     manifest = read_json(transaction_dir / "manifest.json")
