@@ -1,9 +1,16 @@
 """Remote and transfer command groups."""
 
+import json
 import os
+import sys
+from collections.abc import Mapping, Sequence
 
 from ..adapters import probe_remote_workspace
-from ..errors import ResolutionMiss
+from ..adapters import run_adapter as read_adapter
+from ..errors import ResolutionMiss, WorkflowError
+from ..models import QUIESCENT_KINDS
+from ..precheck import environment_findings
+from ..transfers import TransferCandidate, select_transfer_jobs
 from ._common import *
 from ._common import (
     _TRANSFER_PROTOCOL,
@@ -286,6 +293,102 @@ def _remote_workspace_probe(
     return probe_remote_workspace(target, name, timeout=timeout, noun=noun, adapter=run_adapter)
 
 
+def _environment_advisory(
+    source: Workspace,
+    jobs: Sequence[str],
+    settings: Mapping[str, object] | None,
+    *,
+    strict: bool,
+    candidates: Sequence[TransferCandidate] | None = None,
+) -> None:
+    """Warn about destination environment gaps before transfer state moves."""
+
+    if settings is None:
+        message = (
+            "warning: destination environment could not be prechecked remotely; "
+            "transfer continues (use --strict-environment to block)"
+        )
+        if strict:
+            print(message, file=sys.stderr)
+            raise ValueError("strict environment mode blocked an unreachable destination precheck")
+        print(message, file=sys.stderr)
+        return
+    problems: list[str] = []
+    selected_candidates = candidates
+    if selected_candidates is None:
+        loaded: list[TransferCandidate] = []
+        for job_id in jobs:
+            marker = source.find_marker_by_id(job_id)
+            if marker is not None:
+                try:
+                    job = source.load_job(marker)
+                    problem = None
+                except (WorkflowError, OSError) as exc:
+                    job = None
+                    problem = str(exc)
+                loaded.append(
+                    TransferCandidate(
+                        marker.job_id,
+                        marker.job_key,
+                        marker.kind,
+                        marker.placement,
+                        None,
+                        marker,
+                        job,
+                        None,
+                        problem,
+                    )
+                )
+        selected_candidates = loaded
+    for candidate in selected_candidates:
+        if candidate.problem is not None:
+            problems.append(f"{candidate.job_id}: {candidate.problem}")
+            continue
+        job = candidate.job
+        if job is None:
+            problems.append(f"{candidate.job_id}: job definition is unreadable")
+            continue
+        finding = environment_findings(job, settings, include_process_environment=False)
+        entries = finding["entries"]
+        assert isinstance(entries, list)
+        names = [
+            str(entry["name"])
+            for entry in entries
+            if isinstance(entry, Mapping) and entry.get("status") == "unresolved"
+        ]
+        problems_found = finding["problems"]
+        assert isinstance(problems_found, list)
+        detail = [str(item) for item in problems_found]
+        if names or detail:
+            problems.append(f"{job.id}: {', '.join(names + detail)}")
+    if not problems:
+        return
+    message = "destination environment unresolved: " + "; ".join(problems)
+    if strict:
+        raise ValueError(f"strict environment precheck blocked transfer: {message}")
+    print(f"warning: {message}", file=sys.stderr)
+
+
+def _remote_workspace_settings(target: Any, name: str, *, timeout: float | None) -> dict[str, object] | None:
+    """Read destination settings through a remote adapter, or report unavailable."""
+
+    result = read_adapter(
+        target.bundle,
+        "invoke",
+        {"argv": [*REMOTE_WORKSPACE_SETTINGS_COMMAND, "show", name, "--json"]},
+        timeout=timeout,
+    )
+    if result.get("returncode") != 0:
+        raise RuntimeError(f"remote destination settings read failed: {result.get('stderr', '')}")
+    try:
+        value = json.loads(str(result.get("stdout", "")))
+    except json.JSONDecodeError as exc:
+        raise ValueError("remote destination settings were not a JSON object") from exc
+    if not isinstance(value, dict):
+        raise ValueError("remote destination settings were not a JSON object")
+    return value
+
+
 def _send_jobs_to_remote(
     source: Workspace,
     target: Any,
@@ -294,6 +397,8 @@ def _send_jobs_to_remote(
     *,
     destination_placement: str | None,
     timeout: float | None,
+    destination_settings: Mapping[str, object] | None = None,
+    strict_environment: bool = False,
 ) -> list[dict[str, object]]:
     """Detach the named jobs from *source* and import them on a remote.
 
@@ -304,6 +409,23 @@ def _send_jobs_to_remote(
     """
 
     destination_workspace_id, destination_root = _remote_workspace_probe(target, destination_name, timeout=timeout)
+    precheck_candidates = select_transfer_jobs(
+        source,
+        destination_workspace_id=destination_workspace_id,
+        states=(*QUIESCENT_KINDS, "transferring"),
+        job_ids=jobs,
+        destination_remote=target.name,
+        include_transferring=True,
+    )
+    if destination_settings is not None:
+        _environment_advisory(
+            source,
+            jobs,
+            destination_settings,
+            strict=strict_environment,
+            candidates=precheck_candidates,
+        )
+    source.recover_transfers()
     acknowledgements: list[dict[str, object]] = []
     for job_id in jobs:
         source.recover_transfers()
@@ -423,10 +545,33 @@ def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) ->
     """Seal the finished jobs of this workspace for one that will fetch them."""
 
     workspace = _protocol_workspace(arguments.workspace, context)
+    offer_states = tuple(arguments.state or DEFAULT_OFFER_STATES)
+    environment_settings = None
+    if arguments.environment_settings:
+        try:
+            environment_settings = json.loads(arguments.environment_settings)
+        except json.JSONDecodeError as exc:
+            raise ValueError("remote offer environment settings are not valid JSON") from exc
+        if not isinstance(environment_settings, dict):
+            raise ValueError("remote offer environment settings must be an object")
+        candidates = select_transfer_jobs(
+            workspace,
+            destination_workspace_id=arguments.destination_workspace_id,
+            states=(*offer_states, "transferring"),
+            placement=arguments.placement,
+            include_transferring=True,
+        )
+        _environment_advisory(
+            workspace,
+            [candidate.job_id for candidate in candidates],
+            environment_settings,
+            strict=arguments.strict_environment,
+            candidates=candidates,
+        )
     offers = offer_transfers(
         workspace,
         destination_workspace_id=arguments.destination_workspace_id,
-        states=arguments.state or DEFAULT_OFFER_STATES,
+        states=offer_states,
         placement=arguments.placement,
     )
     if arguments.json:
@@ -473,6 +618,8 @@ def _remote_offer(
     states: Sequence[str] | None,
     placement: str | None,
     timeout: float | None,
+    environment_settings: Mapping[str, object] | None = None,
+    strict_environment: bool = False,
 ) -> list[dict[str, object]]:
     """Ask a remote to seal its finished jobs and return the offers it made."""
 
@@ -487,9 +634,20 @@ def _remote_offer(
         argv += ["--state", state]
     if placement:
         argv += ["--placement", placement]
+    if environment_settings is not None:
+        argv += ["--environment-settings", json.dumps(environment_settings, sort_keys=True, separators=(",", ":"))]
+    if strict_environment:
+        argv += ["--strict-environment"]
     offered = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=timeout)
     if offered.get("returncode") != 0:
         raise RuntimeError(f"remote offer failed: {offered.get('stderr', '')}")
+    printed: set[str] = set()
+    for field in ("stderr", "diagnostics"):
+        diagnostics = offered.get(field)
+        if diagnostics and str(diagnostics) not in printed:
+            rendered = str(diagnostics)
+            print(rendered, file=sys.stderr, end="" if rendered.endswith("\n") else "\n")
+            printed.add(rendered)
     try:
         document = json.loads(str(offered.get("stdout", "")))
         if document.get("format") != TRANSFER_OFFER_FORMAT or document.get("format_version") != 1:
@@ -546,6 +704,8 @@ def _fetch_jobs_from_remote(
     states: Sequence[str] | None,
     placement: str | None,
     timeout: float | None,
+    destination_settings: Mapping[str, object] | None = None,
+    strict_environment: bool = False,
 ) -> tuple[list[dict[str, object]], list[object]]:
     """Bring the jobs that finished on one remote back into *local*.
 
@@ -563,6 +723,8 @@ def _fetch_jobs_from_remote(
         states=states,
         placement=placement,
         timeout=timeout,
+        environment_settings=destination_settings,
+        strict_environment=strict_environment,
     )
     staging_root = local.control / "transfers" / "incoming"
     acknowledgements: list[dict[str, object]] = []
@@ -594,11 +756,31 @@ def _fetch_jobs_from_remote(
     return acknowledgements, retired
 
 
-def _transfer_local_to_local(source: Workspace, destination: Workspace, jobs: Sequence[str]) -> list[dict[str, object]]:
+def _transfer_local_to_local(
+    source: Workspace,
+    destination: Workspace,
+    jobs: Sequence[str],
+    *,
+    strict_environment: bool = False,
+) -> list[dict[str, object]]:
     """Move explicit jobs from one local workspace into another, directly."""
 
     if not jobs:
         raise ValueError("a local-to-local transfer needs at least one --job JOB_ID")
+    candidates = select_transfer_jobs(
+        source,
+        destination_workspace_id=destination.workspace_id,
+        states=(*QUIESCENT_KINDS, "transferring"),
+        job_ids=jobs,
+        include_transferring=True,
+    )
+    _environment_advisory(
+        source,
+        jobs,
+        destination.read_settings(),
+        strict=strict_environment,
+        candidates=candidates,
+    )
     acknowledgements: list[dict[str, object]] = []
     for job_id in jobs:
         source.recover_transfers()
@@ -621,6 +803,8 @@ def _transfer_remote_to_remote(
     states: Sequence[str] | None,
     placement: str | None,
     timeout: float | None,
+    destination_settings: Mapping[str, object] | None = None,
+    strict_environment: bool = False,
 ) -> tuple[list[dict[str, object]], list[object]]:
     """Relay jobs between two remotes through this client (v1 semantics).
 
@@ -648,6 +832,8 @@ def _transfer_remote_to_remote(
         states=states,
         placement=placement,
         timeout=timeout,
+        environment_settings=destination_settings,
+        strict_environment=strict_environment,
     )
     acknowledgements: list[dict[str, object]] = []
     with tempfile.TemporaryDirectory(prefix="httk-relay-") as relay:
@@ -764,6 +950,11 @@ def _run_transfer_verb(
         help="where the jobs land (default: their placement)",
     )
     _add_adapter_timeout(parser)
+    parser.add_argument(
+        "--strict-environment",
+        action="store_true",
+        help="block before moving state when destination environment precheck is unavailable or unresolved",
+    )
     parser.add_argument("--json", action="store_true", help="print what moved as one JSON document")
     try:
         arguments = parser.parse_args(list(tokens))
@@ -781,6 +972,20 @@ def _run_transfer_verb(
         target = resolve_remote(destination_binding.remote, project=context.cwd)
         if not arguments.jobs:
             raise ValueError("a local-to-remote transfer needs at least one --job JOB_ID")
+        try:
+            destination_settings = _remote_workspace_settings(
+                target, destination_binding.name.split(":", 1)[1], timeout=timeout
+            )
+        except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+            notice = (
+                f"warning: destination environment could not be prechecked remotely: {exc}; "
+                "transfer continues (use --strict-environment to block)"
+            )
+            if arguments.strict_environment:
+                print(notice, file=sys.stderr)
+                raise ValueError("strict environment mode blocked an unreachable destination precheck") from exc
+            print(notice, file=sys.stderr)
+            destination_settings = None
         acknowledgements = _send_jobs_to_remote(
             Workspace(source_binding.path),
             target,
@@ -788,6 +993,8 @@ def _run_transfer_verb(
             arguments.jobs,
             destination_placement=arguments.destination_placement,
             timeout=timeout,
+            destination_settings=destination_settings,
+            strict_environment=arguments.strict_environment,
         )
         return _report_transfer(arguments, {"moved": acknowledgements})
     if destination_local and not source_local:
@@ -800,6 +1007,8 @@ def _run_transfer_verb(
             states=arguments.state,
             placement=arguments.placement,
             timeout=timeout,
+            destination_settings=Workspace(destination_binding.path, mutable=False).read_settings(),
+            strict_environment=arguments.strict_environment,
         )
         return _report_transfer(arguments, {"moved": acknowledgements, "retired": retired})
     if source_local and destination_local:
@@ -808,8 +1017,24 @@ def _run_transfer_verb(
             Workspace(source_binding.path),
             Workspace(destination_binding.path),
             arguments.jobs,
+            strict_environment=arguments.strict_environment,
         )
         return _report_transfer(arguments, {"moved": acknowledgements})
+    destination_target = resolve_remote(destination_binding.remote, project=context.cwd)
+    try:
+        destination_settings = _remote_workspace_settings(
+            destination_target, destination_binding.name.split(":", 1)[1], timeout=timeout
+        )
+    except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+        notice = (
+            f"warning: destination environment could not be prechecked remotely: {exc}; "
+            "transfer continues (use --strict-environment to block)"
+        )
+        if arguments.strict_environment:
+            print(notice, file=sys.stderr)
+            raise ValueError("strict environment mode blocked an unreachable destination precheck") from exc
+        print(notice, file=sys.stderr)
+        destination_settings = None
     acknowledgements, retired = _transfer_remote_to_remote(
         source_binding,
         destination_binding,
@@ -817,6 +1042,8 @@ def _run_transfer_verb(
         states=arguments.state,
         placement=arguments.placement,
         timeout=timeout,
+        destination_settings=destination_settings,
+        strict_environment=arguments.strict_environment,
     )
     return _report_transfer(arguments, {"moved": acknowledgements, "retired": retired})
 
@@ -852,6 +1079,8 @@ def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> i
     offer.add_argument("--state", action="append", metavar="STATE", choices=COLLECTABLE_KINDS)
     offer.add_argument("--placement", metavar="PLACEMENT")
     offer.add_argument("--json", action="store_true")
+    offer.add_argument("--environment-settings", help=argparse.SUPPRESS)
+    offer.add_argument("--strict-environment", action="store_true", help=argparse.SUPPRESS)
     offer.set_defaults(handler=handle_transfer_offer)
 
     retire = protocol.add_parser("retire")

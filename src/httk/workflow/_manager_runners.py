@@ -1,15 +1,22 @@
 """Private runner resolution, staging, and digest verification helpers."""
 
 import shutil
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from ._util import sha256_file, tree_digest
 from .errors import FormatError, RunnerResolutionError
 from .models import JobDefinition, parse_package_runner
 
 RUNNER_TREE_ENTRY = "run"
+
+
+def runner_module_allowed(module: str, runner_modules: Sequence[str] = ("httk.workflow",)) -> bool:
+    """Return whether a packaged runner module is in the manager allowlist."""
+
+    return any(module == allowed or module.startswith(f"{allowed}.") for allowed in runner_modules)
 
 
 def contained(root: Path, parts: Sequence[str]) -> Path | None:
@@ -23,7 +30,7 @@ def contained(root: Path, parts: Sequence[str]) -> Path | None:
 
 
 def resolve_package_runner(module: str, resource: PurePosixPath, runner_modules: Sequence[str]) -> Path:
-    if not any(module == allowed or module.startswith(f"{allowed}.") for allowed in runner_modules):
+    if not runner_module_allowed(module, runner_modules):
         raise RunnerResolutionError(
             "runner_unavailable",
             f"runner module {module} is not in this manager's runner module allowlist "
@@ -42,28 +49,101 @@ def resolve_package_runner(module: str, resource: PurePosixPath, runner_modules:
 
 
 def resolve_shared_runner(manager: Any, job: JobDefinition) -> Path:
+    return resolve_runner_reference(
+        manager.workspace,
+        job,
+        runner_search_paths=manager.runner_search_paths,
+        runner_modules=manager.runner_modules,
+    )
+
+
+def resolve_runner_reference(
+    workspace: Any,
+    job: JobDefinition,
+    *,
+    runner_search_paths: Iterable[str | Path] = (),
+    runner_modules: Sequence[str] = ("httk.workflow",),
+) -> Path:
+    """Resolve one shared runner without changing workspace state.
+
+    :param workspace: Workspace whose runner store is searched.
+    :param job: Job definition carrying the runner reference.
+    :param runner_search_paths: Roots for non-package installed runners.
+    :param runner_modules: Allowed package prefixes.
+    :return: The resolved runner file or tree.
+    """
+
     if job.runner_source == "workspace":
         try:
-            candidate = manager.workspace.runner_store_path(job.runner_path)
+            candidate = workspace.runner_store_path(job.runner_path)
         except FormatError as exc:
             raise RunnerResolutionError("runner_unavailable", str(exc)) from exc
         if not candidate.exists():
             raise RunnerResolutionError(
                 "runner_unavailable",
-                f"workspace runner {job.runner_path.as_posix()} is not published in {manager.workspace.runners}",
+                f"workspace runner {job.runner_path.as_posix()} is not published in {workspace.runners}",
             )
         return candidate
     package = parse_package_runner(job.runner_path.as_posix())
     if package is not None:
-        return resolve_package_runner(*package, manager.runner_modules)
-    for root in manager.runner_search_paths:
+        return resolve_package_runner(*package, runner_modules)
+    for root_value in runner_search_paths:
+        root = Path(root_value)
         installed = contained(root, job.runner_path.parts)
         if installed is not None and installed.exists():
             return installed
-    searched = ", ".join(str(path) for path in manager.runner_search_paths) or "no configured search path"
+    searched = ", ".join(str(path) for path in runner_search_paths) or "no configured search path"
     raise RunnerResolutionError(
         "runner_unavailable", f"installed runner {job.runner_path.as_posix()} was not found in {searched}"
     )
+
+
+def check_runner_reference(
+    workspace: Any,
+    job: JobDefinition,
+    *,
+    runner_search_paths: Iterable[str | Path] = (),
+    runner_modules: Sequence[str] = ("httk.workflow",),
+    tree_entry: str = RUNNER_TREE_ENTRY,
+    placement: PurePosixPath | None = None,
+) -> str | None:
+    """Return a runner-reference problem, or ``None`` when it is sound.
+
+    :param workspace: Workspace whose runner store is searched.
+    :param job: Job definition carrying the runner reference.
+    :param runner_search_paths: Roots for non-package installed runners.
+    :param runner_modules: Allowed package prefixes.
+    :param tree_entry: Executable entry point for a runner tree.
+    :param placement: Payload placement when checking a payload runner.
+    :return: A human-readable problem, or ``None``.
+    """
+
+    try:
+        if job.runner_source == "payload":
+            if placement is None:
+                return "payload runner check needs the job placement"
+            candidate = workspace.payload_path(placement, job.job_key)
+            candidate = candidate.joinpath(*job.runner_path.parts)
+        else:
+            candidate = resolve_runner_reference(
+                workspace,
+                job,
+                runner_search_paths=runner_search_paths,
+                runner_modules=runner_modules,
+            )
+        if candidate.is_dir():
+            if not (candidate / tree_entry).is_file():
+                return f"runner tree {job.runner_path.as_posix()} has no {tree_entry} entry point"
+            actual = tree_digest(candidate)
+        elif candidate.is_file():
+            actual = sha256_file(candidate)
+        else:
+            return f"runner is not a regular file or directory: {candidate}"
+        if job.runner_sha256 is not None and actual != job.runner_sha256:
+            return f"runner digest {actual} does not match pinned {job.runner_sha256}"
+    except (FormatError, OSError, RunnerResolutionError, ValueError) as exc:
+        return str(exc)
+    return None
 
 
 def stage_runner(

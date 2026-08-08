@@ -17,7 +17,7 @@ from typing import Any, cast
 from . import languages
 from ._util import tree_digest, validate_inputs
 from .errors import FormatError
-from .models import validate_declarations
+from .models import RESERVED_WORKFLOW_ENVIRONMENT_PREFIX, environment_variable_name, validate_declarations
 from .scaffold import WorkflowProvider, payload_relative, register_workflow
 
 MANIFEST_NAME = "httk_workflow.toml"
@@ -215,6 +215,14 @@ def _validate_environment(raw: Mapping[str, object], directory: Path) -> dict[st
             and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", setting) is None
         ):
             raise _error(directory, f"{path}.setting must be a nonempty dotted identifier")
+        effective_setting = setting if setting is not None else environment
+        variable = environment_variable_name(effective_setting)
+        if variable.startswith(RESERVED_WORKFLOW_ENVIRONMENT_PREFIX):
+            raise _error(
+                directory,
+                f"{path} derives reserved {RESERVED_WORKFLOW_ENVIRONMENT_PREFIX!r} variable {variable!r}; "
+                "choose a workflow setting outside the manager-owned namespace",
+            )
         entry: dict[str, object] = {}
         if environment_type is not None:
             entry["type"] = environment_type

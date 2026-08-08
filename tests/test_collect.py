@@ -234,8 +234,15 @@ def test_a_default_collect_yields_only_the_succeeded_jobs(
     assert parent.data_path is None and parent.data is None and parent.data_generation is None
     assert parent.failure is None and not parent.gaps
     assert parent.runner_steps == _CAMPAIGN_STEPS
-    # The two members reserved for a later phase are inert and say so.
-    assert parent.declarations == {} and parent.runner_description is None
+    assert parent.declarations["environment"] == {
+        "declared": None,
+        "observed": {
+            "format": "httk-workflow-environment-resolution",
+            "format_version": 1,
+            "values": {"timeout": {"value": 60, "source": "override"}},
+        },
+    }
+    assert parent.runner_description is None
 
 
 def test_a_record_pins_the_job_digest_and_the_runner_that_executed_it(

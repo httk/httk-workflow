@@ -1,7 +1,9 @@
 """The Python authoring SDK: dynamic step graphs, job state, and outcomes."""
 
 import json
+import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +18,7 @@ from httk.workflow import (
     TaskManager,
     Workspace,
 )
+from httk.workflow.models import Marker
 from httk.workflow.protocol import JobDefinition, JobSpec, prepare_job_payload
 
 _SRC = str(Path(__file__).parents[1] / "src")
@@ -330,6 +333,347 @@ def test_attempt_environment_resolves_declared_layers(tmp_path: Path, monkeypatc
         attempt.environment("missing")
 
 
+def test_runner_gates_all_declared_environment_and_records_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = Runner("tests.environment.gate")
+
+    @run.step
+    def start(a: Attempt) -> None:
+        (a.workdir / "ran").write_text("yes", encoding="utf-8")
+        a.succeed()
+
+    monkeypatch.setenv("HTTK_TOOL_VARIABLE", "env")
+    attempt = _attempt(
+        tmp_path,
+        step="start",
+        runner=run,
+        environment={
+            "declared": {
+                "override": {"type": "string", "setting": "tool.override"},
+                "variable": {"type": "string", "setting": "tool.variable"},
+                "setting": {"type": "integer", "setting": "tool.setting"},
+                "defaulted": {"type": "string", "default": "manifest"},
+            },
+            "overrides": {"override": "job"},
+        },
+        settings={"tool.setting": 7},
+    )
+
+    assert _main(run, attempt) == 0
+    assert (attempt.workdir / "ran").read_text(encoding="utf-8") == "yes"
+    observed = attempt.declaration("environment")
+    assert observed == {
+        "format": "httk-workflow-environment-resolution",
+        "format_version": 1,
+        "values": {
+            "defaulted": {"value": "manifest", "source": "default"},
+            "override": {"value": "job", "source": "override"},
+            "setting": {"value": 7, "source": "workspace-setting"},
+            "variable": {"value": "env", "source": "environment-variable"},
+        },
+    }
+    log = (attempt.workdir / ".httk-runner" / "runlog.jsonl").read_text(encoding="utf-8")
+    assert log.count("parameters are in job.json; environment resolved as") == 1
+
+
+def test_environment_gate_does_not_create_a_fresh_workdir_before_the_step(tmp_path: Path) -> None:
+    run = Runner("tests.environment.fresh")
+    seen: list[bool] = []
+
+    @run.step
+    def start(a: Attempt) -> None:
+        seen.append(a.workdir.exists())
+        a.workdir.mkdir()
+        a.succeed()
+
+    attempt = _attempt(
+        tmp_path,
+        step="start",
+        runner=run,
+        environment={"declared": {"value": {"type": "string", "default": "manifest"}}, "overrides": {}},
+    )
+    attempt.workdir.rmdir()
+
+    assert _main(run, attempt) == 0
+    assert seen == [False]
+
+
+def test_unresolved_environment_fails_before_python_step(tmp_path: Path) -> None:
+    run = Runner("tests.environment.unresolved")
+    run.step(name="start")(lambda a: (a.workdir / "ran").write_text("yes", encoding="utf-8"))
+    attempt = _attempt(
+        tmp_path,
+        step="start",
+        runner=run,
+        environment={"declared": {"needed": {"type": "string", "setting": "tool.needed"}}, "overrides": {}},
+    )
+
+    assert _main(run, attempt) == 0
+    failure = _published(attempt)["failure"]
+    assert failure["code"] == "environment_unresolved"
+    assert failure.get("retryable", False) is False
+    assert failure["details"] == {"unresolved": ["needed"]}
+    assert not (attempt.workdir / "ran").exists()
+
+
+def test_environment_resolution_snapshot_and_unchanged_activation_are_stable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = Runner("tests.environment.snapshot")
+    run.step(name="start")(lambda a: a.succeed())
+    monkeypatch.setenv("HTTK_TOOL_VALUE", "first")
+    first = _attempt(
+        tmp_path,
+        step="start",
+        runner=run,
+        environment={"declared": {"value": {"type": "string", "setting": "tool.value"}}, "overrides": {}},
+        name="first",
+    )
+    assert _main(run, first) == 0
+    monkeypatch.setenv("HTTK_TOOL_VALUE", "first")
+    assert first.environment("value") == "first"
+
+    second = _attempt(
+        tmp_path,
+        step="start",
+        runner=run,
+        environment={"declared": {"value": {"type": "string", "setting": "tool.value"}}, "overrides": {}},
+        name="second",
+    )
+    # Model the same payload's previously recorded declaration on a fresh
+    # activation: the unchanged result must not append another declaration note.
+    document = first.declaration("environment")
+    assert document is not None
+    second.declare("environment", document)
+    assert _main(run, second) == 0
+    assert second.declaration("environment") == first.declaration("environment")
+    assert not (second.workdir / ".httk-runner" / "runlog.jsonl").exists()
+
+
+def test_environment_resolution_distinguishes_json_number_and_boolean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("HTTK_TOOL_VALUE", raising=False)
+    run = Runner("tests.environment.json-types")
+    run.step(name="start")(lambda a: a.succeed())
+    first = _attempt(
+        tmp_path,
+        step="start",
+        runner=run,
+        environment={"declared": {"value": {"setting": "tool.value"}}, "overrides": {}},
+        settings={"tool.value": 1},
+        name="number",
+    )
+    assert _main(run, first) == 0
+    document = first.declaration("environment")
+    assert document is not None
+
+    second = _attempt(
+        tmp_path,
+        step="start",
+        runner=run,
+        environment={"declared": {"value": {"setting": "tool.value"}}, "overrides": {}},
+        settings={"tool.value": True},
+        name="boolean",
+    )
+    second.declare("environment", document)
+    assert _main(run, second) == 0
+    updated = second.declaration("environment")
+    assert updated is not None
+    values = updated["values"]
+    assert isinstance(values, Mapping)
+    value = values["value"]
+    assert isinstance(value, Mapping)
+    assert value["value"] is True
+    assert (second.workdir / ".httk-runner" / "runlog.jsonl").is_file()
+
+
+def test_manager_waits_for_deferred_environment_log_before_commit(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload = tmp_path / "payload"
+    runner = payload / "runner.py"
+    runner.parent.mkdir(parents=True)
+    runner.write_text(
+        f'''#!/usr/bin/env python3
+import sys
+import time
+sys.path.insert(0, {_SRC!r})
+from httk.workflow import Runner
+
+run = Runner("tests.environment.race")
+
+@run.step
+def start(a):
+    a.succeed()
+    time.sleep(0.2)
+
+raise SystemExit(run.main())
+''',
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    job = prepare_job_payload(
+        payload,
+        JobSpec(
+            name="Environment race",
+            workflow="tests.environment.race",
+            runner_path="runner.py",
+            environment={
+                "declared": {"value": {"type": "string", "default": "manifest"}},
+                "overrides": {},
+            },
+        ),
+    )
+    workspace.submit(payload, "project/environment-race")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30)
+
+    marker = workspace.find_marker_by_id(job.id)
+    assert marker is not None and marker.kind == "succeeded"
+    workdir = workspace.payload_path(marker.placement, marker.job_key) / "run"
+    runlog = (workdir / ".httk-runner" / "runlog.jsonl").read_text(encoding="utf-8")
+    assert "parameters are in job.json; environment resolved as" in runlog
+
+
+def test_peer_manager_defers_a_live_environment_log_writer(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload = tmp_path / "payload"
+    runner = payload / "runner.py"
+    runner.parent.mkdir(parents=True)
+    runner.write_text(
+        f'''#!/usr/bin/env python3
+import sys
+import time
+sys.path.insert(0, {_SRC!r})
+from httk.workflow import Runner
+
+run = Runner("tests.environment.peer")
+
+@run.step
+def start(a):
+    a.succeed()
+    time.sleep(0.4)
+
+raise SystemExit(run.main())
+''',
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    job = prepare_job_payload(
+        payload,
+        JobSpec(
+            name="Environment peer race",
+            workflow="tests.environment.peer",
+            runner_path="runner.py",
+            environment={"declared": {"value": {"type": "string", "default": "manifest"}}, "overrides": {}},
+        ),
+    )
+    workspace.submit(payload, "project/environment-peer")
+    with (
+        TaskManager(workspace, heartbeat_interval=0.01) as owner,
+        TaskManager(workspace, heartbeat_interval=0.01) as peer,
+    ):
+        deadline = time.monotonic() + 30.0
+        while not owner._running and time.monotonic() < deadline:
+            owner.tick()
+        assert owner._running
+        running = workspace.find_marker_by_id(job.id)
+        assert running is not None and running.kind == "running"
+        state = workspace.read_state(running)
+        control = workspace.payload_path(running.placement, running.job_key) / str(state["attempt_control"])
+        while not (control / "outcome.ready").is_dir() and time.monotonic() < deadline:
+            owner.heartbeat()
+            time.sleep(0.01)
+        assert (control / "outcome.ready").is_dir()
+
+        peer.tick()
+        recorded = json.loads((control / ".httk-environment-resolution.json").read_text(encoding="utf-8"))
+        assert recorded["log_pending"] is True
+        assert isinstance(recorded["log_deadline"], (int, float))
+        assert "log_absent" not in recorded
+        still_running = workspace.find_marker_by_id(job.id)
+        assert still_running is not None and still_running.kind == "running"
+
+        final: Marker | None = None
+        while time.monotonic() < deadline:
+            owner.tick()
+            final = workspace.find_marker_by_id(job.id)
+            if final is not None and final.kind == "succeeded":
+                break
+            time.sleep(0.01)
+        assert final is not None and final.kind == "succeeded"
+
+    workdir = workspace.payload_path(final.placement, final.job_key) / "run"
+    assert "parameters are in job.json; environment resolved as" in (
+        workdir / ".httk-runner" / "runlog.jsonl"
+    ).read_text(encoding="utf-8")
+
+
+def test_environment_log_grace_starts_when_outcome_is_published(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload = tmp_path / "payload"
+    runner = payload / "runner.py"
+    runner.parent.mkdir(parents=True)
+    runner.write_text(
+        f'''#!/usr/bin/env python3
+import sys
+import time
+sys.path.insert(0, {_SRC!r})
+from httk.workflow import Runner
+
+run = Runner("tests.environment.late-publish")
+
+@run.step
+def start(a):
+    time.sleep(1.2)
+    a.succeed()
+    time.sleep(0.2)
+
+raise SystemExit(run.main())
+''',
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    job = prepare_job_payload(
+        payload,
+        JobSpec(
+            name="Late environment publish",
+            workflow="tests.environment.late-publish",
+            runner_path="runner.py",
+            environment={"declared": {"value": {"type": "string", "default": "manifest"}}, "overrides": {}},
+        ),
+    )
+    workspace.submit(payload, "project/environment-late-publish")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30)
+
+    marker = workspace.find_marker_by_id(job.id)
+    assert marker is not None and marker.kind == "succeeded"
+    workdir = workspace.payload_path(marker.placement, marker.job_key) / "run"
+    assert "parameters are in job.json; environment resolved as" in (
+        workdir / ".httk-runner" / "runlog.jsonl"
+    ).read_text(encoding="utf-8")
+
+
+def test_bad_workspace_environment_type_fails_at_attempt_start(tmp_path: Path) -> None:
+    run = Runner("tests.environment.type")
+    run.step(name="start")(lambda a: a.succeed())
+    attempt = _attempt(
+        tmp_path,
+        step="start",
+        runner=run,
+        environment={"declared": {"count": {"type": "integer", "setting": "tool.count"}}, "overrides": {}},
+        settings={"tool.count": "not-an-integer"},
+    )
+
+    assert _main(run, attempt) == 0
+    failure = _published(attempt)["failure"]
+    assert failure["code"] == "environment_unresolved"
+    assert failure["details"] == {"unresolved": ["count"]}
+    assert "workspace setting 'tool.count'" in failure["message"]
+
+
 def _run_manager_environment_job(
     root: Path,
     *,
@@ -468,6 +812,8 @@ def test_gather_can_set_join_priority(tmp_path: Path) -> None:
 def _main(runner: Runner, attempt: Attempt) -> int:
     """Dispatch one prepared attempt exactly as :meth:`Runner.main` does."""
 
+    if not attempt._prepare_environment():
+        return 0
     handler = runner._steps.get(attempt.step)
     if handler is None:
         registered = ", ".join(sorted(runner.steps)) or "none"
@@ -481,6 +827,7 @@ def _main(runner: Runner, attempt: Attempt) -> int:
     except BaseException as exception:
         attempt._abort(exception)
         raise
+    attempt._finish_environment_log()
     if not attempt.published:
         attempt.fail("no_outcome", f"step {attempt.step!r} finished without publishing an outcome")
     return 0

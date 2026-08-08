@@ -152,6 +152,7 @@ _httk_workflow_step_exit() {
     if [ ! -d "${HTTK_WORKFLOW_CONTROL_DIR:-.}/outcome.ready" ]; then
         _httk_workflow_bridge fail-no-outcome || exit 2
     fi
+    _httk_workflow_bridge environment-log || exit 2
     exit 0
 }
 
@@ -175,6 +176,9 @@ httk_workflow_main() {
     step=$(_httk_workflow_bridge begin) || return 2
     HTTK_WORKFLOW_STEP=$step
     export HTTK_WORKFLOW_STEP
+    if [ -d "${HTTK_WORKFLOW_CONTROL_DIR:-.}/outcome.ready" ]; then
+        return 0
+    fi
     if ! _httk_workflow_has_step "$step"; then
         _httk_workflow_bridge fail-unknown-step || return 2
         return 0

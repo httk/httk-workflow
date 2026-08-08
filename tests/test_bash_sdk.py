@@ -80,6 +80,8 @@ def _fixture(
     *,
     step: str,
     parameters: dict[str, object] | None = None,
+    environment: dict[str, object] | None = None,
+    settings: dict[str, object] | None = None,
     children: list[dict[str, object]] | None = None,
     data_generation: int | None = None,
     name: str = "attempt",
@@ -100,6 +102,7 @@ def _fixture(
             initial_step=step,
             data_mode="none" if data_generation is None else "transactional",
             parameters=parameters or {},
+            environment=environment or {},
         ),
     )
     control = payload / f".httk-attempt.{uuid.uuid4()}"
@@ -120,12 +123,13 @@ def _fixture(
                 "attempt_id": str(uuid.uuid4()),
                 "data_generation": data_generation,
                 "children": children or [],
+                "settings": settings or {},
             }
         ),
         encoding="utf-8",
     )
-    environment = os.environ.copy()
-    environment.update(
+    process_environment = os.environ.copy()
+    process_environment.update(
         {
             "HTTK_WORKFLOW_CONTEXT": str(control / "context.json"),
             "HTTK_WORKFLOW_CONTROL_DIR": str(control),
@@ -138,10 +142,63 @@ def _fixture(
         }
     )
     if data_generation is not None:
-        environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
+        process_environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
     for name_to_drop in ("HTTK_WORKFLOW_DESCRIBE", "HTTK_WORKFLOW_RUNNER_WORKFLOW", "HTTK_WORKFLOW_RUNNER_STEPS"):
-        environment.pop(name_to_drop, None)
-    return _Fixture(root, payload, control, workdir, environment)
+        process_environment.pop(name_to_drop, None)
+    return _Fixture(root, payload, control, workdir, process_environment)
+
+
+def test_declared_environment_is_gated_and_recorded_before_a_bash_step(tmp_path: Path) -> None:
+    fixture = _fixture(
+        tmp_path,
+        step="start",
+        environment={
+            "declared": {
+                "override": {"type": "string", "setting": "tool.override"},
+                "variable": {"type": "string", "setting": "tool.variable"},
+                "setting": {"type": "integer", "setting": "tool.setting"},
+                "defaulted": {"type": "string", "default": "manifest"},
+            },
+            "overrides": {"override": "job"},
+        },
+        settings={"tool.setting": 7},
+    )
+    fixture.environment["HTTK_TOOL_VARIABLE"] = "env"
+    completed = fixture.run(
+        _runner(
+            "start", body="step_start() { test ! -e ran-before-gate; touch ran-before-gate; httk_workflow_succeed; }"
+        )
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert (fixture.workdir / "ran-before-gate").is_file()
+    observed = json.loads(
+        (fixture.payload / ".httk-job" / "declarations" / "environment.json").read_text(encoding="utf-8")
+    )
+    assert observed["values"] == {
+        "defaulted": {"value": "manifest", "source": "default"},
+        "override": {"value": "job", "source": "override"},
+        "setting": {"value": 7, "source": "workspace-setting"},
+        "variable": {"value": "env", "source": "environment-variable"},
+    }
+    log = (fixture.workdir / ".httk-runner" / "runlog.jsonl").read_text(encoding="utf-8")
+    assert "parameters are in job.json; environment resolved as" in log
+
+
+def test_an_unresolved_declared_bash_environment_fails_before_the_step(tmp_path: Path) -> None:
+    fixture = _fixture(
+        tmp_path,
+        step="start",
+        environment={"declared": {"needed": {"type": "string", "setting": "tool.needed"}}, "overrides": {}},
+    )
+    completed = fixture.run(_runner("start", body="step_start() { touch ran.txt; httk_workflow_succeed; }"))
+
+    assert completed.returncode == 0, completed.stderr
+    outcome = fixture.outcome()
+    assert outcome["failure"]["code"] == "environment_unresolved"
+    assert outcome["failure"].get("retryable", False) is False
+    assert outcome["failure"]["details"] == {"unresolved": ["needed"]}
+    assert not (fixture.workdir / "ran.txt").exists()
 
 
 def _runner(*steps: str, body: str = "", workflow: str = "tests.bash", main: str = "httk_workflow_main") -> str:

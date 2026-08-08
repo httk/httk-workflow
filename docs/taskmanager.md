@@ -110,6 +110,33 @@ into each attempt environment (`vasp.command` becomes `HTTK_VASP_COMMAND`) and
 snapshots them into `context.json`, so a runner sees the values the workspace
 held when its job was claimed. See {doc}`vasp_runners` and {doc}`sdk_parity`.
 
+## Readiness and transfer environment advisories
+
+Use the read-only precheck before starting managers:
+
+```console
+httk workflow precheck WORKSPACE
+httk workflow precheck WORKSPACE --json
+httk workflow precheck WORKSPACE --runner-search-path PATH
+```
+
+It reports environment entries resolved from the current process environment,
+workspace settings, or declared defaults, plus runner-reference problems, for
+pending jobs. An unresolved entry or broken runner gives exit status `1`. The
+repeatable `--runner-search-path` option checks installed runner references; a
+plain installed reference without a configured path is `indeterminate`, not a
+failure, and does not by itself give exit status `1`. The
+authoritative environment gate is still at attempt start; this report is
+advisory and can become stale. The `HTTK_*` layer is this process's environment,
+not a promise about the environment of a later compute node.
+
+Transfers run the environment check against destination settings, job overrides,
+and declared defaults, without treating the client process environment as the
+destination. They warn about unresolved default-less entries; add
+`--strict-environment` to block before any job state is moved. Remote settings
+are checked through an isolated read when reachable; an unreachable destination
+gets one immediate warning and is only a strict-mode failure.
+
 ## Freeing disk on a quota'd filesystem
 
 A manager frees nothing while it runs, by design: it is never required to
