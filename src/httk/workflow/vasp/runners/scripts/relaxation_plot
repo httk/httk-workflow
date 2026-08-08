@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""Plot the ionic-step energies from a published VASP relaxation."""
+
+import html
+import os
+import re
+from pathlib import Path
+
+_ENERGY = re.compile(r"energy\s*\(\s*sigma\s*[-=]>\s*0\s*\)\s*=\s*([-+0-9.eEdD]+)", re.IGNORECASE)
+_OUTPUT = Path("relaxation_energies.svg")
+
+
+def _energies(path: Path) -> list[float]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    values: list[float] = []
+    for match in _ENERGY.findall(text):
+        try:
+            values.append(float(match.replace("D", "E").replace("d", "e")))
+        except ValueError:
+            continue
+    return values
+
+
+def _preferred_outcar(data_root: Path) -> Path | None:
+    if not data_root.is_dir():
+        return None
+    outcars = sorted(data_root.rglob("OUTCAR"))
+    preferred = [path for path in outcars if "static" in path.parts]
+    return (preferred or outcars)[-1] if (preferred or outcars) else None
+
+
+def _chart(values: list[float]) -> str:
+    width, height = 640, 380
+    left, right, top, bottom = 72, 590, 56, 318
+    x_span, y_span = right - left, bottom - top
+    high = max(values)
+    energy_span = high - min(values) or 1.0
+
+    def x(index: int) -> float:
+        return left + x_span * index / max(len(values) - 1, 1)
+
+    def y(value: float) -> float:
+        return top + y_span * (high - value) / energy_span
+
+    points = " ".join(f"{x(index):.1f},{y(value):.1f}" for index, value in enumerate(values))
+    final = html.escape(f"{values[-1]:.8f} eV")
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
+        f"<title>VASP relaxation, final energy {final}</title>",
+        '<rect width="100%" height="100%" fill="white"/>',
+        f'<text x="{width / 2:.0f}" y="24" text-anchor="middle" font-family="sans-serif" font-size="16">Relaxation energies (final: {final})</text>',
+        f'<line x1="{left}" y1="{top}" x2="{left}" y2="{bottom}" stroke="#333"/>',
+        f'<line x1="{left}" y1="{bottom}" x2="{right}" y2="{bottom}" stroke="#333"/>',
+    ]
+    tick_count = min(5, len(values))
+    for tick in range(tick_count):
+        index = round(tick * (len(values) - 1) / max(tick_count - 1, 1))
+        coordinate = x(index)
+        lines.extend(
+            [
+                f'<line x1="{coordinate:.1f}" y1="{bottom}" x2="{coordinate:.1f}" y2="{bottom + 5}" stroke="#333"/>',
+                f'<text x="{coordinate:.1f}" y="{bottom + 20}" text-anchor="middle" font-family="sans-serif" font-size="11">{index + 1}</text>',
+            ]
+        )
+    for tick in range(5):
+        value = high - tick * energy_span / 4
+        coordinate = y(value)
+        lines.extend(
+            [
+                f'<line x1="{left - 5}" y1="{coordinate:.1f}" x2="{left}" y2="{coordinate:.1f}" stroke="#333"/>',
+                f'<text x="{left - 10}" y="{coordinate + 4:.1f}" text-anchor="end" font-family="sans-serif" font-size="11">{value:.4f}</text>',
+            ]
+        )
+    lines.extend(
+        [
+            f'<text x="{(left + right) / 2:.0f}" y="{height - 12}" text-anchor="middle" font-family="sans-serif" font-size="12">ionic step</text>',
+            f'<text x="16" y="{(top + bottom) / 2:.0f}" transform="rotate(-90 16 {(top + bottom) / 2:.0f})" text-anchor="middle" font-family="sans-serif" font-size="12">energy (eV)</text>',
+            f'<polyline points="{points}" fill="none" stroke="#1769aa" stroke-width="2.5"/>',
+            "</svg>",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def main() -> int:
+    """Write the SVG, or report that the published data has no energies."""
+
+    data_root = Path(os.environ.get("HTTK_WORKFLOW_DATA_DIR") or os.environ.get("HTTK_WORKFLOW_WORKDIR", "."))
+    outcar = _preferred_outcar(data_root)
+    values = _energies(outcar) if outcar is not None else []
+    if not values:
+        _OUTPUT.unlink(missing_ok=True)
+        print("no OUTCAR energies found; no relaxation_energies.svg written")
+        return 0
+    _OUTPUT.write_text(_chart(values), encoding="utf-8")
+    print("wrote relaxation_energies.svg")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

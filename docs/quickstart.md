@@ -5,16 +5,18 @@
 The mock VASP used below lives at `examples/mock_vasp.py` in that checkout; the
 walkthrough does not run from an arbitrary empty directory.
 
-Six commands from a checkout to a finished VASP relaxation whose results
-you can read back. Nothing here needs a runner to be written, a graph to be
-declared, or a database to exist.
+Seven commands from a checkout to a finished VASP relaxation whose results
+are stored and plotted. Nothing here needs a runner to be written or a graph
+to be declared.
 
 ```{admonition} No VASP? Run the mock one
 :class: tip
 
 Every command below works without VASP installed: `examples/mock_vasp.py` writes
 the output files a finished run leaves behind, so the whole path — prepare, run,
-publish, collect — is exercised for real, with meaningless numbers.
+publish, collect — is exercised for real, with meaningless numbers. Install
+`httk-data` for `collect --into results.sqlite`; without it, that command reports
+a teaching error (the shell example skips storage and continues).
 
 The complete sequence of this page is also `examples/quickstart.sh`, which runs
 it in whatever directory you start it in.
@@ -40,7 +42,7 @@ Direct
 END
 ```
 
-## The five commands
+## The seven commands
 
 ```console
 $ httk project init --name quickstart
@@ -48,7 +50,8 @@ $ httk workflow workspace init . --name default
 $ httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
 $ httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
 $ httk workflow run
-$ httk workflow collect
+$ httk workflow collect --into results.sqlite
+$ httk workflow postprocess --script relaxation-plot
 ```
 
 On a VASP machine, set `vasp.command` to a command such as
@@ -85,9 +88,14 @@ override and wins over the workspace setting.
 `prepare`, `run`, and `publish`. With `--idle` the same manager keeps serving
 the workspace, which is how a campaign is run.
 
-**`collect`** printed one JSON summary per finished job: what ran, where its files
-are, and everything that happened on the way. That record is the boundary to a
-data layer — see {doc}`collecting`.
+**`collect --into`** printed one JSON summary per finished job and stored its
+entries, run, and products in the file-backed SQLite database `results.sqlite`.
+The stored results are readable with `httk-data`; the collection record is the
+boundary to that data layer — see {doc}`collecting`.
+
+**`postprocess`** ran the registered `relaxation-plot` script against the
+published OUTCAR and wrote
+`<payload>/run/postprocess/relaxation-plot/relaxation_energies.svg`.
 
 ## Looking at a job
 
