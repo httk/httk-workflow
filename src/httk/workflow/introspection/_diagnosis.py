@@ -407,13 +407,17 @@ def observe_join(workspace: Workspace, join: Mapping[str, Any]) -> list[dict[str
     return observations
 
 
-def _describe_child(observation: Mapping[str, object]) -> str:
+def _describe_child(observation: Mapping[str, object], *, with_failure: bool = False) -> str:
     label = observation.get("label") or "-"
     identity = observation.get("job_key") or observation.get("job_id") or "-"
     kind = observation.get("kind")
     state = "not resolvable in this workspace" if kind is None else str(kind)
     error = observation.get("error")
     suffix = f" ({error})" if isinstance(error, str) and error else ""
+    if with_failure:
+        failure = observation.get("failure")
+        if isinstance(failure, Mapping) and failure.get("code"):
+            suffix += f" [{failure.get('code')}]"
     return f"{label}: {identity} is {state}{suffix}"
 
 
@@ -1067,7 +1071,14 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
             summary = f"this job failed with {failure.get('code')} and stays failed until an operator resumes it"
         else:
             summary = "this job failed without a readable failure record"
+        join_summary = state.get("join_summary")
+        if isinstance(join_summary, Sequence) and not isinstance(join_summary, (str, bytes)):
+            for item in join_summary:
+                if isinstance(item, Mapping) and item.get("kind") != "succeeded":
+                    report.check("dependency child", False, _describe_child(item, with_failure=True))
         _breadcrumb_check(control, report)
+        if control is not None:
+            report.check("attempt logs", None, f"the failed attempt wrote {control / 'stderr.log'}")
         _continue_checks(job, state, report)
         _attempt_history_check(workspace, marker, state, report)
         _flapping_check(job, state, report)

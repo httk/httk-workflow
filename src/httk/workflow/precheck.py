@@ -270,6 +270,38 @@ def _input_problems(workspace: Workspace, marker: Marker, job: JobDefinition) ->
     return problems
 
 
+def _step_finding(workspace: Workspace, marker: Marker, job: JobDefinition) -> str | None:
+    """Return a step problem when the job's step is outside its recorded step set.
+
+    A runner records the steps it actually implements in the job's state frame as
+    ``runner_steps`` after its first attempt. When that list is present and the
+    step this job would run next is not in it, the next attempt cannot succeed.
+    This is frame-based only: the runner is never executed, so a job that has not
+    recorded its steps yet is never faulted here. The frame reflects the last
+    attempt's runner, so the finding is advisory — a mutated payload runner may
+    implement a different set by the next attempt.
+
+    :param workspace: The workspace holding the job's state frame.
+    :param marker: Identify the job to check.
+    :param job: The job's immutable definition, for its initial step.
+    :return: A step problem message, or ``None`` when nothing can be faulted.
+    """
+
+    try:
+        state = workspace.read_state(marker)
+    except (WorkflowError, OSError):
+        return None
+    runner_steps = state.get("runner_steps")
+    if not isinstance(runner_steps, list) or not runner_steps:
+        return None
+    known = [str(item) for item in runner_steps]
+    step = state.get("step")
+    step = str(step) if isinstance(step, str) and step else job.initial_step
+    if step in known:
+        return None
+    return f"step {step!r} is not one of the runner's recorded steps: {', '.join(known)}"
+
+
 def _finding(
     workspace: Workspace,
     marker: Marker,
@@ -294,6 +326,7 @@ def _finding(
             "claim": None,
             "language": None,
             "inputs": [],
+            "step": None,
         }
     environment = environment_findings(job, settings)
     runner_problem = _runner_problem(workspace, marker, job, runner_search_paths)
@@ -313,6 +346,7 @@ def _finding(
         "claim": _claim_finding(marker, job, managers),
         "language": _language_finding(job, managers),
         "inputs": _input_problems(workspace, marker, job),
+        "step": _step_finding(workspace, marker, job),
     }
 
 
@@ -387,6 +421,12 @@ def has_input_problem(finding: Mapping[str, object]) -> bool:
     """Return whether a finding names a missing required input destination."""
 
     return bool(finding.get("inputs"))
+
+
+def has_step_problem(finding: Mapping[str, object]) -> bool:
+    """Return whether a finding names a step outside the runner's recorded set."""
+
+    return bool(finding.get("step"))
 
 
 def has_environment_problem(finding: Mapping[str, object]) -> bool:

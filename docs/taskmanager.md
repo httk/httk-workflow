@@ -463,6 +463,17 @@ httk workflow job request WORKSPACE JOB_UUID continue \
   --operator "$USER" --reason "inputs repaired"
 ```
 
+An `override_step --step X` request is pre-validated on the client: when the
+job's state frame already records the runner's `runner_steps` (written after its
+first attempt), a step outside that set is refused before the request is
+published, listing the recorded steps. `--force` downgrades that refusal to a
+stderr note and publishes anyway — a payload runner is mutable, so an operator
+may have edited it to add the step. Before the first attempt nothing is
+recorded, so the request is allowed with a note on stderr that it could not be
+pre-validated; in either allow case the runner, not the manager, refuses the
+step at the next attempt if it does not implement it (the manager only
+shape-checks the request).
+
 Requests capture the exact current marker generation and record reference.
 A delayed request therefore cannot mutate a newer job state. One that can never
 apply again — because the job has moved on — is moved to

@@ -42,6 +42,7 @@ job and never materializes a list of them.
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import importlib
 import json
@@ -70,6 +71,7 @@ from .errors import FormatError
 from .models import (
     ATTEMPT_CONTROL_PREFIX,
     JOB_STATE_DIRECTORY,
+    ensure_step_known,
     normalize_placement,
     validate_parameters,
 )
@@ -94,6 +96,7 @@ __all__ = [
     "payload_relative",
     "register_workflow",
     "registered_workflow",
+    "registered_workflow_labels",
     "registered_workflows",
     "resolve_workflow",
     "structure_files",
@@ -276,6 +279,34 @@ def registered_workflows() -> tuple[str, ...]:
     return tuple(_WORKFLOW_PROVIDERS)
 
 
+#: File suffixes that make an argument path-shaped: a runner file or a language
+#: document, versus a dotted registered id like ``domain.family.step``.
+_RUNNER_SUFFIXES = frozenset({".py", ".cwl", ".json", ".yaml", ".yml"})
+
+
+def registered_workflow_labels() -> tuple[str, ...]:
+    """Return each registered workflow as an ``id (alias)`` label, ids without an alias bare.
+
+    :return: The registered workflow labels, in registration order.
+    """
+
+    return tuple(
+        f"{workflow_id} ({provider.alias})" if provider.alias else workflow_id
+        for workflow_id, provider in _WORKFLOW_PROVIDERS.items()
+    )
+
+
+def _registered_names() -> list[str]:
+    """Return every registered id and alias, for close-match suggestions."""
+
+    names: list[str] = []
+    for workflow_id, provider in _WORKFLOW_PROVIDERS.items():
+        names.append(workflow_id)
+        if provider.alias:
+            names.append(provider.alias)
+    return names
+
+
 def workflow_provider(name: str) -> WorkflowProvider | None:
     """Return the provider selected by canonical id or alias.
 
@@ -447,6 +478,7 @@ class ScaffoldedJob:
     :param workflow: Name the workflow the job runs.
     :param initial_step: Name the step the job starts at.
     :param runner: Describe the pinned runner.
+    :param warnings: Preserve the preparation warnings raised for this workflow.
     """
 
     job_id: str
@@ -458,6 +490,7 @@ class ScaffoldedJob:
     workflow: str
     initial_step: str
     runner: Mapping[str, object]
+    warnings: tuple[str, ...] = ()
 
     def as_mapping(self) -> dict[str, object]:
         """Return the machine-readable report of this job.
@@ -497,6 +530,7 @@ class _Prepared:
     documents: Mapping[str, str | bytes] = field(default_factory=dict)
     files: Mapping[str, Path] = field(default_factory=dict)
     parameters: Mapping[str, object] = field(default_factory=dict)
+    warnings: tuple[str, ...] = ()
     instantiate: Callable[[InstantiateContext], object] | None = None
     instantiate_exec: tuple[Path, str, str] | None = None
     finalize: Callable[[JobSpec], JobSpec] | None = None
@@ -855,19 +889,20 @@ def resolve_workflow(
                 )
             else:
                 raise ValueError(f"unknown workflow path {text!r}: it is not a workflow package or language document")
+        elif _has_path_separator(text) or Path(text).suffix in _RUNNER_SUFFIXES:
+            # A path-shaped argument that does not exist is a mistyped file, not a
+            # mistyped workflow name; the registry listing would only mislead.
+            raise ValueError(f"no such file: {text}")
         else:
-            known = ", ".join(registered_workflows()) or "none registered"
-            raise ValueError(
-                f"unknown workflow {text!r}: it is neither a registered workflow ({known}) nor an existing runner file"
-            )
+            labels = ", ".join(registered_workflow_labels()) or "none registered"
+            match = difflib.get_close_matches(text, _registered_names(), n=1)
+            hint = f"did you mean {match[0]!r}? " if match else ""
+            raise ValueError(f"unknown workflow {text!r}; {hint}registered: {labels}")
     if workflow_id is not None:
         resolved = replace(resolved, workflow_id=workflow_id)
     if step is not None:
-        if resolved.steps and step not in resolved.steps:
-            raise ValueError(
-                f"the runner {resolved.source} does not implement the step {step!r}; "
-                f"its steps: {', '.join(resolved.steps)}"
-            )
+        if resolved.steps:
+            ensure_step_known(step, resolved.steps, f"the runner {resolved.source}")
         resolved = replace(resolved, initial_step=step)
     if data_mode is not None:
         resolved = replace(resolved, data_mode=data_mode)
@@ -878,7 +913,7 @@ def _initial_step(path: Path, steps: tuple[str, ...], requested: str | None) -> 
     """Return the step a job of this runner starts at."""
 
     if requested is not None:
-        return requested
+        return ensure_step_known(requested, steps, f"the runner {path}")
     if "start" in steps:
         return "start"
     if len(steps) == 1:
@@ -1168,6 +1203,7 @@ def _prepare(
             documents=scaffolded.documents,
             files=scaffolded.files,
             parameters=parameters,
+            warnings=scaffolded.warnings,
             instantiate=scaffolded.instantiate,
             finalize=scaffolded.finalize,
         )
@@ -1536,6 +1572,7 @@ def _submit(
             "path": prepared.runner_path,
             "sha256": prepared.runner_sha256,
         },
+        warnings=prepared.warnings,
     )
 
 
@@ -1775,7 +1812,16 @@ def _stage_inputs(
     for name, value in inputs.items():
         if name not in declared:
             names = ", ".join(declared) or "none"
-            raise ValueError(f"unknown workflow input {name!r}; declared inputs: {names}")
+            hint = ""
+            if not declared and workflow.language is not None and workflow.directory is None:
+                from . import languages
+
+                if languages.language(workflow.language).open_ports:
+                    hint = (
+                        f"; this bare {workflow.language} document declares no ports — "
+                        "declare inputs in an httk_workflow.toml package to pass them"
+                    )
+            raise ValueError(f"unknown workflow input {name!r}; declared inputs: {names}{hint}")
         destination_name = declared[name]
         if destination_name is None:
             if not instantiate:

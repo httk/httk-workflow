@@ -304,6 +304,27 @@ def test_collect_into_twice_is_idempotent(tmp_path: Path, capsys) -> None:
     assert run is not None
 
 
+def test_collect_into_a_store_with_a_different_layout_teaches(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("httk.data")
+    pytest.importorskip("httk.atomistic")
+    from httk.core.register import resolve_entry_family, resolve_entry_record
+    from httk.data.db import Database, SqlStore
+
+    workspace, _ = _finished(tmp_path)
+    context = CLIContext("httk", tmp_path)
+    workspace_name = register_ws(context, workspace.root, "collect-mismatch")
+    store_path = tmp_path / "results.sqlite"
+    # A store created for an unrelated entry-type layout cannot absorb this sweep.
+    with Database.sqlite(store_path) as database:
+        SqlStore(database, entry_records={resolve_entry_family("runs"): (resolve_entry_record("core-run"),)})
+
+    assert command(["collect", workspace_name, "--allow-job-collector", "--into", str(store_path)], context) == 2
+    err = capsys.readouterr().err
+    assert str(store_path) in err
+    assert "different set of entry types" in err
+    assert "Collect into a new store file" in err
+
+
 def test_collect_into_reports_an_unknown_entry_type_per_job(tmp_path: Path, capsys) -> None:
     pytest.importorskip("httk.data")
     pytest.importorskip("httk.atomistic")

@@ -13,9 +13,28 @@ from ..scaffold import registered_workflow
 from ..workspace import Workspace
 from ._common import _leaf, _local_root, add_workspace_argument
 
+#: How much of a failing script's stderr to keep in a report, from its tail.
+_STDERR_TAIL_LIMIT = 2000
+
+
+def _stderr_tail(stderr: str) -> str:
+    """Return the trailing portion of *stderr*, bounded to :data:`_STDERR_TAIL_LIMIT`."""
+
+    stripped = stderr.strip()
+    if len(stripped) <= _STDERR_TAIL_LIMIT:
+        return stripped
+    return "…" + stripped[-_STDERR_TAIL_LIMIT:]
+
+
+def _stderr_last_line(stderr: str) -> str:
+    """Return the last non-blank line of *stderr*, or the empty string."""
+
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
 
 def _result_mapping(result: PostprocessResult, record: Any) -> dict[str, object]:
-    return {
+    mapping: dict[str, object] = {
         "format": "httk-workflow-postprocess",
         "format_version": 1,
         "workspace_id": result.workspace_id,
@@ -25,6 +44,9 @@ def _result_mapping(result: PostprocessResult, record: Any) -> dict[str, object]
         "returncode": result.returncode,
         "output_dir": str(result.output_dir),
     }
+    if result.returncode != 0 and result.stderr.strip():
+        mapping["stderr"] = _stderr_tail(result.stderr)
+    return mapping
 
 
 def _error_mapping(record: Any, script: str, error: str) -> dict[str, object]:
@@ -72,7 +94,12 @@ def handle_postprocess(arguments: argparse.Namespace, context: Any) -> int:
         if arguments.json:
             print(json.dumps(_result_mapping(result, record), sort_keys=True, separators=(",", ":")))
         else:
-            print(f"{record.job_key}\t{result.script}\t{result.returncode}\t{result.output_dir}")
+            line = f"{record.job_key}\t{result.script}\t{result.returncode}\t{result.output_dir}"
+            if result.returncode != 0:
+                tail = _stderr_last_line(result.stderr)
+                if tail:
+                    line = f"{line}\t{tail}"
+            print(line)
     return 1 if failed else 0
 
 

@@ -279,13 +279,26 @@ def test_every_packaged_runner_has_a_workflow_that_says_what_it_implements() -> 
     assert workflow.source == runner_path("vasp_relax.py")
     assert workflow.workflow_id == "httk.vasp.relax" and workflow.initial_step == "prepare"
     assert workflow.data_mode == "transactional"
-    with pytest.raises(ValueError, match="unknown workflow"):
+    with pytest.raises(ValueError, match="no such file: vasp_relax.py"):
         resolve_workflow("vasp_relax.py")
     assert resolve_workflow("vasp-relax-static", step="static").initial_step == "static"
     with pytest.raises(ValueError, match="does not implement the step 'prepear'"):
         resolve_workflow("vasp-relax", step="prepear")
     with pytest.raises(ValueError, match="unknown workflow"):
         resolve_workflow("vasp-nonexistent")
+
+
+def test_unknown_workflow_suggests_a_close_match_and_lists_aliases() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        resolve_workflow("vasp-relx")
+    message = str(excinfo.value)
+    assert "did you mean 'vasp-relax'?" in message
+    assert "httk.vasp.relax (vasp-relax)" in message
+
+
+def test_path_shaped_unknown_workflow_reports_no_such_file() -> None:
+    with pytest.raises(ValueError, match="no such file: does/not/exist.py"):
+        resolve_workflow("does/not/exist.py")
 
 
 def test_workflow_declarations_are_forwarded_and_digest_covered(

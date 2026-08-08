@@ -283,10 +283,13 @@ def start(a: Attempt) -> None:
     except Exception as exc:
         a.fail("jobflow.make_failed", f"Maker.make failed: {type(exc).__name__}: {exc}")
         return
-    try:
-        from jobflow.core.flow import Flow
-        from jobflow.core.job import Job
+    from jobflow.core.flow import Flow
+    from jobflow.core.job import Job
 
+    if not isinstance(flow, (Flow, Job)):
+        a.fail("jobflow.make_failed", f"Maker.make returned {type(flow).__name__}, not a jobflow Flow or Job")
+        return
+    try:
         from httk.workflow.languages.jobflow._driver import DriverState
 
         root = a.workdir / "jobflow"
@@ -294,7 +297,7 @@ def start(a: Attempt) -> None:
         (root / SPOOL_DIRECTORY).mkdir(parents=True, exist_ok=True)
         store = _open_store()
         _persist_store(store, root / STORE_FILE)
-        state = DriverState.from_flow(cast(Flow | Job, flow))
+        state = DriverState.from_flow(flow)
         _write_json(root / STATE_FILE, state.to_mapping())
         a.state.merge({"jobflow_children": {}, "jobflow_processed": [], "jobflow_ordinal": 0})
     except Exception as exc:
@@ -438,10 +441,14 @@ def enter(a: Attempt) -> None:
             a.fail("jobflow.job_unloadable", str(exc))
             return
         store = _open_store()
-        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
-        if not isinstance(snapshot, list):
-            raise ValueError("jobflow store snapshot is not an array")
-        merge_documents(store, [item for item in snapshot if isinstance(item, Mapping)])
+        try:
+            snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            if not isinstance(snapshot, list):
+                raise ValueError("jobflow store snapshot is not an array")
+            merge_documents(store, [item for item in snapshot if isinstance(item, Mapping)])
+        except (OSError, UnicodeError, ValueError) as exc:
+            a.fail("jobflow.snapshot_invalid", f"cannot load the jobflow store snapshot: {exc}")
+            return
         baseline = {(str(item.get("uuid")), int(item.get("index", 0))) for item in store.query()}
         baseline_blobs: set[tuple[str, str]] = set()
         for name, blob_store in store.additional_stores.items():

@@ -69,19 +69,31 @@ def declared_runner_steps(marker: Marker, outcome: Mapping[str, Any], log: Any) 
         return None
 
 
+# A malformed or partial outcome is the signature of an outcome assembled in
+# place instead of published by an atomic rename, so the remedy is attached to
+# the parse and shape errors — not to the identity comparisons, where the
+# outcome is well-formed but stale or foreign and the remedy would mislead.
+_ASSEMBLY_REMEDY = (
+    "; an outcome must be published by renaming a staged directory onto outcome.ready, never assembled in place"
+)
+
+
 def read_outcome(path: Path, marker: Marker, state: StateFrame) -> dict[str, Any]:
-    outcome = read_json(path)
+    try:
+        outcome = read_json(path)
+    except FormatError as exc:
+        raise FormatError(f"{exc}{_ASSEMBLY_REMEDY}") from exc
     if outcome.get("format") != "httk-workflow-outcome" or outcome.get("format_version") != 1:
-        raise FormatError("outcome must use httk-workflow-outcome version 1")
+        raise FormatError(f"outcome must use httk-workflow-outcome version 1{_ASSEMBLY_REMEDY}")
     for key, expected in (
         ("job_id", marker.job_id),
         ("activation_id", state.activation_id),
         ("attempt_id", state.attempt_id),
     ):
         if outcome.get(key) != expected:
-            raise FormatError(f"outcome {key} disagrees with current attempt")
+            raise FormatError(f"outcome {key} is {outcome.get(key)!r} but this attempt is {expected!r}")
     if not isinstance(outcome.get("action"), str):
-        raise FormatError("outcome action must be a string")
+        raise FormatError(f"outcome action must be a string{_ASSEMBLY_REMEDY}")
     return outcome
 
 
@@ -437,6 +449,11 @@ def resume(manager: Any, logger: Any) -> bool:
         except TransitionLostError:
             pass
         except (FormatError, TransactionError) as exc:
+            # A replay that fails midway is transaction corruption; a manifest or
+            # outcome the manager cannot parse is a protocol violation of the
+            # runner. Both used to be reported as corruption, which lied about a
+            # malformed outcome.
+            code = "transaction_corruption" if isinstance(exc, TransactionError) else "protocol_error"
             logger.error("commit of %s failed: %s", marker.job_key, exc, extra=manager._event("commit_failed", marker))
             try:
                 manager._transition(
@@ -444,7 +461,7 @@ def resume(manager: Any, logger: Any) -> bool:
                     "failed",
                     StateFrame.of(
                         state.carried(),
-                        failure=manager._failure("transaction_corruption", str(exc)),
+                        failure=manager._failure(code, str(exc)),
                         reason="commit_failed",
                     ),
                 )

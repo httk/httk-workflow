@@ -195,6 +195,14 @@ and returned 0; any resolution error or nonzero script return exits 1.
 | --- | --- | --- |
 | `describe TARGET` | describe a registered id/alias, runner file, or package directory | `--json` |
 
+Resolving a workflow trusts a directory package's manifest and never executes
+anything. `describe` is a report, so for a directory package it additionally
+runs the runner entry's `--describe` (with any surrounding attempt context
+stripped) and prints a prominent `WARNING: step drift` line — and a
+`manifest_step_drift` field in `--json` — when the manifest's declared `steps`
+disagree with what the runner reports. The drift is reported, not gated:
+`describe` still exits `0`.
+
 Directory package authoring, manifest validation, publication, and hook trust
 tiers are documented in {doc}`workflow_packages`.
 
@@ -240,12 +248,19 @@ against the **live managers** the workspace actually publishes:
 - **required inputs** — a declared required input with a staged `destination`
   must still be a member of the payload; a relocated or removed one is a
   problem.
+- **step** — a job whose next step is not one of the runner's recorded
+  `runner_steps` (written into the state frame after the runner's first attempt)
+  is a problem. This is frame-based only; the runner is never executed, so a job
+  that has not recorded its steps yet is never faulted. The frame reflects the
+  last attempt's runner, so the check is advisory: a mutated payload runner may
+  implement a different set by the next attempt.
 
 The command exits `1` for an unresolved environment, a broken runner reference,
-an unclaimable job, a missing-and-unserved language engine, or a missing required
-input; the `indeterminate` cases stay non-failing. The JSON summary carries
-`claim_problems`, `language_problems`, `language_indeterminate`, and
-`input_problems` alongside the environment and runner counts.
+an unclaimable job, a missing-and-unserved language engine, a missing required
+input, or a step outside the runner's recorded set; the `indeterminate` cases
+stay non-failing. The JSON summary carries `claim_problems`,
+`language_problems`, `language_indeterminate`, `input_problems`, and
+`step_problems` alongside the environment and runner counts.
 
 ### `manager` — the process that runs the jobs
 
@@ -449,10 +464,16 @@ directory file with no registered reader whose name is a structure convention
 (`POSCAR*`, `*.vasp`) is read as POSCAR; any remaining unreadable files are
 skipped, and one stderr line names them:
 `httk workflow: skipped N of M files in DIR (no registered reader): …`. After a
-batch, one final stderr line reports `submitted N jobs`. `--file
+batch, one final stderr line reports `submitted N jobs`; if a batch fails partway
+it instead reports `submitted N of M jobs before failing` and exits `2`. In a
+batch, `--tag` becomes a *prefix* combined with each item's derived tag
+(`run7-si2o`) rather than replacing it; for a single job `--tag` is the whole
+tag. `--file
 NAME=PATH` stages anything else, `--input NAME=PATH` stages one declared input,
 and the command prints one
-tab-separated `job_key<TAB>payload` line per job, or `--json` reports. The runner
+tab-separated `job_key<TAB>payload` line per job, or `--json` reports. Any
+preparation warning a language raises (for example a CWL `DockerRequirement`) is
+printed once as `httk workflow: warning: …` on stderr. The runner
 file is published into the workspace runner store and pinned by digest unless
 `--publish installed` names a packaged runner where it is installed. See
 {doc}`quickstart`.

@@ -140,7 +140,9 @@ or the sole step is selected. Otherwise `initial_step` is required.
 For a document language, each effective input and output port must exist in the
 document and may occur only once. `port` defaults to the manifest name. Jobflow
 has open ports because Maker `make()` signatures are not inspected during
-manifest preparation.
+manifest preparation. Preparing a `maker`-form job imports the named module on
+the submitting machine to verify the class exists, so submit where the Maker is
+installed; merely describing or resolving the package never imports it.
 
 ### Hook tables
 

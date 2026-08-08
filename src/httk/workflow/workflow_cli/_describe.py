@@ -7,10 +7,42 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from ..scaffold import ResolvedWorkflow, resolve_workflow, workflow_provider
+from ..scaffold import ResolvedWorkflow, describe_runner, resolve_workflow, workflow_provider
 from ._common import _leaf
 
 WORKFLOW_DESCRIPTION_FORMAT = "httk-workflow-workflow-description"
+
+
+def _manifest_step_drift(workflow: ResolvedWorkflow) -> str | None:
+    """Return a warning when a directory package's runner describes other steps.
+
+    Resolving a package trusts the manifest and never executes anything. Describe
+    is a report, not a parser, so here — and only here — the directory package's
+    runner entry is run with ``--describe`` (which strips any surrounding attempt
+    context) and its actual steps are compared to the manifest's. A disagreement
+    is surfaced but does not change describe's exit status.
+
+    :param workflow: The resolved workflow to check.
+    :return: A drift warning, or ``None`` when nothing can be compared or they agree.
+    """
+
+    if workflow.directory is None or workflow.language is not None:
+        return None
+    entry = workflow.directory / workflow.entry
+    try:
+        described = describe_runner(entry)
+    except (ValueError, OSError):
+        # A runner that will not describe itself is not a steps disagreement;
+        # describe stays a manifest report and leaves that to precheck/run.
+        return None
+    steps = described.get("steps")
+    described_steps = [str(item) for item in steps] if isinstance(steps, list) else []
+    if list(workflow.steps) == described_steps:
+        return None
+    return (
+        f"the manifest declares steps {list(workflow.steps)} but the runner entry "
+        f"{workflow.entry!r} describes {described_steps}"
+    )
 
 
 def _source_kind(target: str, workflow: ResolvedWorkflow) -> str:
@@ -90,6 +122,7 @@ def _workflow_description(target: str, format: str | None = None) -> dict[str, o
         "summary": workflow.summary,
         "description": workflow.summary,
         "steps": [{"name": step, "initial": step == workflow.initial_step} for step in workflow.steps],
+        "manifest_step_drift": _manifest_step_drift(workflow),
         "initial_step": workflow.initial_step,
         "data_mode": workflow.data_mode,
         "workdir_mode": workflow.workdir_mode,
@@ -155,6 +188,9 @@ def _render_text(description: Mapping[str, object]) -> str:
     for step in steps:
         assert isinstance(step, Mapping)
         lines.append(f"  {'*' if step['initial'] else '-'} {step['name']}")
+    drift = description.get("manifest_step_drift")
+    if isinstance(drift, str) and drift:
+        lines.append(f"WARNING: step drift: {drift}")
     for title, key in (
         ("inputs", "inputs"),
         ("parameters", "parameters"),

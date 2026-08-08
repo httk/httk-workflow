@@ -128,6 +128,7 @@ from ..scaffold import (
     _sanitize_tag,
     new_job,
     new_jobs,
+    registered_workflow_labels,
     registered_workflows,
     structure_tag,
     workflow_provider,

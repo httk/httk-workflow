@@ -130,15 +130,42 @@ def test_validate_runner_rejects_bad_options(options: dict[str, object], message
         jobflow._validate_runner(options, tmp_path)
 
 
-def test_validate_runner_accepts_maker(tmp_path: Path) -> None:
+def test_validate_runner_accepts_maker_without_importing_it(tmp_path: Path) -> None:
+    # validate_runner runs on every manifest load (describe/resolve of an untrusted
+    # package), so it only checks the spec syntax and never imports the module — a
+    # bogus class name is accepted here and caught later, at submission.
     jobflow._validate_runner({"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"}, tmp_path)
+    jobflow._validate_runner({"maker": "json:NoSuchMaker"}, tmp_path)
+
+
+def test_prepare_rejects_a_missing_maker_class(tmp_path: Path) -> None:
+    # ``json`` is importable on the preparing machine, but defines no such class,
+    # so the typo is caught at submission (in _prepare) rather than at run time.
+    with pytest.raises(ValueError, match="names class 'NoSuchMaker'.*module 'json' does not define"):
+        jobflow._prepare(_request(tmp_path, runner_options={"maker": "json:NoSuchMaker"}))
+
+
+def test_prepare_accepts_a_run_machine_only_maker(tmp_path: Path) -> None:
+    # A Maker module not installed on the preparing machine (staged onto PYTHONPATH
+    # only at run time) stays accepted; precheck and the runner report a truly
+    # missing module.
+    prepared = jobflow._prepare(_request(tmp_path, runner_options={"maker": "not_installed_anywhere_xyz:Maker"}))
+    assert prepared.parameters["jobflow_maker"] == "not_installed_anywhere_xyz:Maker"
+
+
+def test_bare_jobflow_document_input_teaches_to_use_a_package(tmp_path: Path) -> None:
+    document = tmp_path / "maker.json"
+    document.write_text(json.dumps({"@module": "atomate2", "@class": "Maker"}), encoding="utf-8")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(ValueError, match="this bare jobflow document declares no ports"):
+        new_job(workspace, document, inputs={"structure": 1})
 
 
 @pytest.mark.parametrize(
     ("document", "options"),
     [
         (None, {}),
-        (Path("maker.json"), {"maker": "atomate2:Maker"}),
+        (Path("maker.json"), {"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"}),
     ],
 )
 def test_prepare_requires_exactly_one_source(tmp_path: Path, document: Path | None, options: dict[str, object]) -> None:
@@ -168,9 +195,11 @@ def test_prepare_document_stages_maker_and_sets_parameters(tmp_path: Path, monke
 
 def test_prepare_maker_sets_spec_without_declared_parameters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(jobflow, "runner_reference", lambda package, name: {"path": name})
-    prepared = jobflow._prepare(_request(tmp_path, runner_options={"maker": "atomate2:Maker"}))
+    prepared = jobflow._prepare(
+        _request(tmp_path, runner_options={"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"})
+    )
     assert prepared.documents == {}
-    assert prepared.parameters["jobflow_maker"] == "atomate2:Maker"
+    assert prepared.parameters["jobflow_maker"] == "atomate2.vasp.flows.core:DoubleRelaxMaker"
     assert "jobflow_maker_parameters" not in prepared.parameters
 
 
@@ -178,7 +207,7 @@ def test_prepare_records_declared_maker_parameters(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(jobflow, "runner_reference", lambda package, name: {"path": name})
     request = _request(
         tmp_path,
-        runner_options={"maker": "atomate2:Maker"},
+        runner_options={"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"},
         parameters={"relax_steps": {"type": "integer", "default": 300}},
     )
 
@@ -188,7 +217,7 @@ def test_prepare_records_declared_maker_parameters(tmp_path: Path, monkeypatch: 
 
 
 def test_prepare_uses_the_packaged_runner_reference(tmp_path: Path) -> None:
-    jobflow._prepare(_request(tmp_path, runner_options={"maker": "atomate2:Maker"}))
+    jobflow._prepare(_request(tmp_path, runner_options={"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"}))
 
 
 def test_jobflow_runner_describes_without_importing_jobflow() -> None:
@@ -744,7 +773,7 @@ def test_instantiate_stages_paths_and_preserves_values(tmp_path: Path, monkeypat
     prepared = jobflow._prepare(
         _request(
             tmp_path,
-            runner_options={"maker": "atomate2:Maker"},
+            runner_options={"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"},
             inputs={"structure": {"port": "maker_structure"}, "settings": {}},
         )
     )
@@ -774,7 +803,11 @@ def test_jobflow_input_path_typo_is_refused_but_plain_literal_passes(
     root = tmp_path / "pkg"
     root.mkdir()
     prepared = jobflow._prepare(
-        _request(root, runner_options={"maker": "atomate2:Maker"}, inputs={"structure": {}, "label": {}})
+        _request(
+            root,
+            runner_options={"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"},
+            inputs={"structure": {}, "label": {}},
+        )
     )
     payload = tmp_path / "payload"
     payload.mkdir()

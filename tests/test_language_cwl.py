@@ -1,6 +1,5 @@
 import hashlib
 import json
-import logging
 import re
 from collections.abc import Iterator
 from dataclasses import replace
@@ -22,6 +21,7 @@ from httk.workflow.languages.cwl import (
     PACKAGE,
     CwlImportError,
     UnsupportedCwlError,
+    load_cwl_inputs,
     load_cwl_plan,
 )
 from httk.workflow.models import JobDefinition
@@ -717,15 +717,12 @@ def test_cwl_language_tool_failure_is_terminal_with_stderr(tmp_path: Path, works
     assert workspace.read_state(marker)["attempt_ordinal"] == 1
 
 
-def test_cwl_language_docker_requirement_is_recorded_and_warned(
-    tmp_path: Path, workspace: Workspace, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_cwl_language_docker_requirement_is_recorded_and_warned(tmp_path: Path, workspace: Workspace) -> None:
     document = _ECHO_TOOL.replace(
         "baseCommand: echo",
         "requirements:\n  DockerRequirement:\n    dockerPull: debian:stable\nbaseCommand: echo",
     )
     package = _package(tmp_path / "docker", "docker.cwl", document, "message", "spoken")
-    caplog.set_level(logging.WARNING, logger="httk.workflow.languages.cwl")
     job = new_job(workspace, package, inputs={"message": "contained"}, tag="docker")
 
     definition = JobDefinition.from_path(job.payload / "job.json")
@@ -733,9 +730,35 @@ def test_cwl_language_docker_requirement_is_recorded_and_warned(
         DOCKER_CAPABILITY
     ]
     assert definition.required_capabilities == frozenset({DOCKER_CAPABILITY})
-    messages = [record.getMessage() for record in caplog.records]
-    assert any("DockerRequirement is recorded as the required capability 'docker'" in item for item in messages)
-    assert any("never pulls or enters an image" in item for item in messages)
+    # The DockerRequirement warning is carried structurally on the scaffolded job.
+    assert any("DockerRequirement is recorded as the required capability 'docker'" in item for item in job.warnings)
+    assert any("never pulls or enters an image" in item for item in job.warnings)
+
+
+def test_load_cwl_inputs_teaches_on_malformed_json(tmp_path: Path) -> None:
+    inputs = tmp_path / "inputs.json"
+    inputs.write_text("{not valid json", encoding="utf-8")
+    with pytest.raises(CwlImportError, match="cannot read the CWL input object .* as JSON"):
+        load_cwl_inputs(inputs)
+
+
+def test_cli_job_new_surfaces_preparation_warnings_on_stderr(tmp_path: Path, workspace: Workspace, capsys) -> None:
+    document = _ECHO_TOOL.replace(
+        "baseCommand: echo",
+        "requirements:\n  DockerRequirement:\n    dockerPull: debian:stable\nbaseCommand: echo",
+    )
+    package = _package(tmp_path / "docker-cli", "docker.cwl", document, "message", "spoken")
+    name = register_ws(CLIContext("httk", tmp_path), workspace.root, "docker-cli")
+    assert (
+        command(
+            ["job", "new", name, "--workflow-dir", str(package), "--input", "message=contained"],
+            CLIContext("httk", tmp_path),
+        )
+        == 0
+    )
+    err = capsys.readouterr().err
+    assert "httk workflow: warning:" in err
+    assert "DockerRequirement is recorded as the required capability 'docker'" in err
 
 
 def test_cwl_language_campaign_prepares_once_and_runs_each_job(

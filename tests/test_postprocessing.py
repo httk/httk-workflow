@@ -169,3 +169,27 @@ def test_postprocess_cli_streams_results_errors_and_workflow_dir(tmp_path: Path,
     )
     failed = json.loads(capsys.readouterr().out)
     assert failed["returncode"] == 4
+
+
+def test_postprocess_cli_surfaces_failing_script_stderr(tmp_path: Path, capsys) -> None:
+    package, _provider, workspace, _job, _record = _finished(tmp_path)
+    context = CLIContext("httk", tmp_path)
+    workspace_name = register_ws(context, workspace.root, "postprocess-stderr")
+    script = package / "scripts" / "report.sh"
+    script.write_text("#!/bin/sh\necho 'boom: it failed' 1>&2\nexit 5\n", encoding="utf-8")
+    script.chmod(0o755)
+
+    # The JSON report carries the failing script's stderr tail.
+    assert (
+        command(
+            ["postprocess", workspace_name, "--script", "report", "--workflow-dir", str(package), "--json"], context
+        )
+        == 1
+    )
+    failed = json.loads(capsys.readouterr().out)
+    assert failed["returncode"] == 5
+    assert "boom: it failed" in failed["stderr"]
+
+    # The human form appends the last stderr line to the row.
+    assert command(["postprocess", workspace_name, "--script", "report", "--workflow-dir", str(package)], context) == 1
+    assert "boom: it failed" in capsys.readouterr().out

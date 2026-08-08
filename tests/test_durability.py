@@ -264,6 +264,32 @@ raise SystemExit(run.main())
 '''
 
 
+_REPUT_TREE_RUNNER = f'''#!/usr/bin/env python3
+import sys
+
+sys.path.insert(0, {_SRC!r})
+
+from httk.workflow import Runner
+
+run = Runner("tests.durable")
+
+
+@run.step
+def start(a):
+    bundle = a.workdir / "bundle"
+    bundle.mkdir(exist_ok=True)
+    (bundle / "value.txt").write_text("v1", encoding="utf-8")
+    a.put(str(bundle), "results/bundle")
+    if a.state.get("again"):
+        a.succeed()
+    else:
+        a.advance("start", state={{"again": True}})
+
+
+raise SystemExit(run.main())
+'''
+
+
 _DURABLE_RUNNER = f'''#!/usr/bin/env python3
 import json
 import os
@@ -346,6 +372,19 @@ def test_a_durable_commit_syncs_the_transaction_before_the_committing_marker_mov
     ]
     assert left_committing, "the marker must leave committing by a rename"
     assert max(committed) < min(left_committing)
+
+
+def test_reputting_a_tree_onto_committed_data_replaces_it_instead_of_failing(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _prepare(tmp_path / "source", _REPUT_TREE_RUNNER, data_mode="transactional")
+    workspace.submit(payload, "project/jobs")
+
+    _run(workspace)
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    data = workspace.payload_path(marker.placement, marker.job_key) / "data"
+    assert (data / "results" / "bundle" / "value.txt").read_text(encoding="utf-8") == "v1"
 
 
 def test_a_nondurable_commit_does_not_sync_the_committed_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
