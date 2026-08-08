@@ -193,10 +193,16 @@ def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path:
         "relaxation-report": {
             "file": "scripts/relaxation_report",
             "description": "write a relaxation summary (text + JSON) into the job's postprocess directory",
-        }
+        },
+        "relaxation-plot": {
+            "file": "scripts/relaxation_plot",
+            "description": "plot ionic-step energies into the job's postprocess directory",
+        },
     }
     assert command(["describe", "vasp-relax"], context) == 0
-    assert "relaxation-report: scripts/relaxation_report" in capsys.readouterr().out
+    described = capsys.readouterr().out
+    assert "relaxation-report: scripts/relaxation_report" in described
+    assert "relaxation-plot: scripts/relaxation_plot" in described
 
     no_hooks = _package(
         tmp_path / "no-hooks",
