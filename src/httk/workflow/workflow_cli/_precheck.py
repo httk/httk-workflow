@@ -9,8 +9,12 @@ from httk.core.cli import CLIContext
 from ..precheck import (
     DEFAULT_PRECHECK_STATES,
     ENVIRONMENT_VARIABLE_CAVEAT,
+    has_claim_problem,
     has_environment_problem,
+    has_input_problem,
+    has_language_problem,
     has_runner_problem,
+    manager_availability_notice,
     precheck_jobs,
 )
 from ..workspace import Workspace
@@ -20,15 +24,19 @@ from ._common import _leaf, _local_root, add_workspace_argument
 def _summary(findings: list[dict[str, object]]) -> dict[str, int]:
     """Count the readiness problems in findings."""
 
-    def runner_status(item: Mapping[str, object]) -> str | None:
-        runner = item.get("runner")
-        return runner.get("status") if isinstance(runner, Mapping) else None
+    def status_of(item: Mapping[str, object], member: str) -> str | None:
+        value = item.get(member)
+        return value.get("status") if isinstance(value, Mapping) else None
 
     return {
         "checked": len(findings),
         "unresolved": sum(has_environment_problem(item) for item in findings),
         "runner_problems": sum(has_runner_problem(item) for item in findings),
-        "runner_indeterminate": sum(runner_status(item) == "indeterminate" for item in findings),
+        "runner_indeterminate": sum(status_of(item, "runner") == "indeterminate" for item in findings),
+        "claim_problems": sum(has_claim_problem(item) for item in findings),
+        "language_problems": sum(has_language_problem(item) for item in findings),
+        "language_indeterminate": sum(status_of(item, "language") == "indeterminate" for item in findings),
+        "input_problems": sum(has_input_problem(item) for item in findings),
     }
 
 
@@ -44,6 +52,7 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
         )
     )
     summary = _summary(findings)
+    notice = manager_availability_notice(workspace)
     if arguments.json:
         print(
             json.dumps(
@@ -54,6 +63,7 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
                     "states": list(DEFAULT_PRECHECK_STATES),
                     "jobs": findings,
                     "summary": summary,
+                    "manager_notice": notice,
                 },
                 indent=2,
                 sort_keys=True,
@@ -61,6 +71,8 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
         )
     else:
         print(f"environment caveat: {ENVIRONMENT_VARIABLE_CAVEAT}")
+        if notice is not None:
+            print(f"notice: {notice}")
         for finding in findings:
             environment = finding["environment"]
             assert isinstance(environment, list)
@@ -85,13 +97,33 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
                 problems.append(f"runner: {runner.get('problem')}")
             elif isinstance(runner, Mapping) and runner.get("status") == "indeterminate":
                 problems.append(f"runner indeterminate: {runner.get('problem')}")
+            claim = finding.get("claim")
+            if isinstance(claim, Mapping) and claim.get("status") == "problem":
+                problems.append(f"claim: {claim.get('problem')}")
+            language = finding.get("language")
+            if isinstance(language, Mapping) and language.get("status") == "problem":
+                problems.append(f"language: {language.get('problem')}")
+            elif isinstance(language, Mapping) and language.get("status") == "indeterminate":
+                problems.append(f"language indeterminate: {language.get('problem')}")
+            inputs = finding.get("inputs")
+            if isinstance(inputs, list):
+                problems.extend(f"input: {problem}" for problem in inputs)
             suffix = f"; problems: {'; '.join(problems)}" if problems else "; ok"
             print(f"{finding['job_key']}\t{finding['workflow'] or '-'}\tenv: {statuses}{suffix}")
         print(
             f"checked {summary['checked']}, unresolved {summary['unresolved']}, "
-            f"runner problems {summary['runner_problems']}"
+            f"runner problems {summary['runner_problems']}, unclaimable {summary['claim_problems']}, "
+            f"language problems {summary['language_problems']}, input problems {summary['input_problems']}"
         )
-    return 1 if summary["unresolved"] or summary["runner_problems"] else 0
+    return (
+        1
+        if summary["unresolved"]
+        or summary["runner_problems"]
+        or summary["claim_problems"]
+        or summary["language_problems"]
+        or summary["input_problems"]
+        else 0
+    )
 
 
 def build_precheck_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:

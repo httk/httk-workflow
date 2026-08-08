@@ -5,10 +5,13 @@ from dataclasses import replace
 from importlib.machinery import ModuleSpec, PathFinder
 from pathlib import Path, PurePosixPath
 
+from . import languages
 from ._manager_runners import check_runner_reference, contained, runner_module_allowed
 from ._util import sha256_file, tree_digest
 from .errors import WorkflowError
+from .introspection._diagnosis import ManagerRecord, claim_requirements, manager_refusals, read_managers
 from .models import STATE_KINDS, JobDefinition, Marker, parse_package_runner
+from .scaffold import payload_relative
 from .sdk import resolve_declared_environment
 from .workspace import Workspace
 
@@ -147,11 +150,132 @@ def _runner_problem(
     return None if problem is None else ("problem", problem)
 
 
+def _claim_finding(
+    marker: Marker,
+    job: JobDefinition,
+    managers: Sequence[ManagerRecord],
+) -> dict[str, object] | None:
+    """Return a claimability problem when no live manager could claim *job*.
+
+    Every live manager is measured against the same refusal checks ``job why``
+    renders — executor, pool, capabilities, placement, ownership, and runner
+    reachability — and the closest manager's unmet requirements name what to
+    fix. When no manager is live at all, claimability cannot be judged here, so
+    this is left to the workspace-level notice.
+
+    :param marker: The authoritative marker of the job.
+    :param job: The parsed job definition.
+    :param managers: Every manager registered in the workspace.
+    :return: A claim finding, or ``None`` when a live manager could claim it.
+    """
+
+    live = [record for record in managers if record.alive()]
+    if not live:
+        return None
+    requirements = claim_requirements(job)
+    placement = marker.placement.as_posix()
+    try:
+        owner_uid: int | None = marker.path.lstat().st_uid
+    except OSError:
+        owner_uid = None
+    closest: list[str] | None = None
+    for record in live:
+        reasons = manager_refusals(record, requirements, placement=placement, owner_uid=owner_uid, job=job)
+        if not reasons:
+            return None
+        if closest is None or len(reasons) < len(closest):
+            closest = reasons
+    return {"status": "problem", "problem": "no live manager can claim this job: " + "; ".join(closest or ())}
+
+
+def _language_finding(job: JobDefinition, managers: Sequence[ManagerRecord]) -> dict[str, object] | None:
+    """Return an engine-importability finding for a language job, if any.
+
+    A language job is the one the collect gate recognizes: ``workflow_realization``
+    is ``language`` and ``workflow_language`` names the engine. The engine is
+    resolved without importing its runtime; only the non-importing spec finder
+    checks that each module is present, and the pip extra is named. Because the
+    extras belong on the machine that runs the job, a missing module is only a
+    problem when no live manager serves this job's executor; when one does, its
+    environment may differ from this process's, so it is reported as
+    ``indeterminate`` and does not fail the run.
+
+    :param job: The parsed job definition.
+    :param managers: Every manager registered in the workspace.
+    :return: A language finding, or ``None`` when nothing is missing.
+    """
+
+    if job.parameters.get("workflow_realization") != "language":
+        return None
+    name = job.parameters.get("workflow_language")
+    if not isinstance(name, str):
+        return None
+    try:
+        language = languages.language(name)
+    except ValueError:
+        problem = f"workflow language {name!r} is not available in this installation"
+        return {"status": "problem", "problem": problem}
+    missing = [module for module in language.required_modules if _find_module_spec_without_import(module) is None]
+    if not missing:
+        return None
+    problem = (
+        f"workflow language {language.name} needs Python module(s) {', '.join(missing)}; "
+        f"install them with 'pip install httk-workflow[{language.name}]'"
+    )
+    if language.name == "jobflow":
+        problem += " (pymatgen is additionally required when the workflow has structure inputs)"
+    served = any(record.alive() and job.runner_executor in record.executors for record in managers)
+    if served:
+        return {
+            "status": "indeterminate",
+            "problem": problem
+            + "; the engine could not be found in this process, but the serving manager's environment may "
+            "differ — this is verified only at run time",
+        }
+    return {"status": "problem", "problem": problem}
+
+
+def _input_problems(workspace: Workspace, marker: Marker, job: JobDefinition) -> list[str]:
+    """Return one problem per required declared input missing from the payload.
+
+    A declared required input with a staged ``destination`` must still be a
+    member of the payload; an absent one is a tamper or relocation the runner
+    would only discover mid-attempt.
+
+    :param workspace: The workspace holding the payload.
+    :param marker: The authoritative marker of the job.
+    :param job: The parsed job definition.
+    :return: Human-readable problems, one per missing required destination.
+    """
+
+    declared_inputs = job.declared.get("inputs", {})
+    if not declared_inputs:
+        return []
+    payload = workspace.payload_path(marker.placement, marker.job_key)
+    problems: list[str] = []
+    for name in sorted(declared_inputs):
+        metadata = declared_inputs[name]
+        if not (isinstance(metadata, Mapping) and metadata.get("required")):
+            continue
+        destination = metadata.get("destination")
+        if not isinstance(destination, str):
+            continue
+        try:
+            member = payload.joinpath(*payload_relative(destination).parts)
+        except (WorkflowError, ValueError):
+            problems.append(f"required input {name!r} declares an invalid destination {destination!r}")
+            continue
+        if not member.exists():
+            problems.append(f"required input {name!r} is missing its staged destination {destination}")
+    return problems
+
+
 def _finding(
     workspace: Workspace,
     marker: Marker,
     settings: Mapping[str, object],
     runner_search_paths: Iterable[str | Path],
+    managers: Sequence[ManagerRecord],
 ) -> dict[str, object]:
     """Build one finding from one current marker."""
 
@@ -167,6 +291,9 @@ def _finding(
             "environment": [],
             "environment_problems": [str(exc)],
             "runner": {"problem": str(exc)},
+            "claim": None,
+            "language": None,
+            "inputs": [],
         }
     environment = environment_findings(job, settings)
     runner_problem = _runner_problem(workspace, marker, job, runner_search_paths)
@@ -183,6 +310,9 @@ def _finding(
         "environment": environment["entries"],
         "environment_problems": environment["problems"],
         "runner": runner,
+        "claim": _claim_finding(marker, job, managers),
+        "language": _language_finding(job, managers),
+        "inputs": _input_problems(workspace, marker, job),
     }
 
 
@@ -211,12 +341,52 @@ def precheck_jobs(
     prefix = None if placement is None else PurePosixPath(placement).parts
     current_settings = workspace.read_settings() if settings is None else settings
     search_paths = tuple(runner_search_paths)
+    managers = read_managers(workspace)
     for entry in workspace.scan_marker_entries(selected):
         if not isinstance(entry, Marker):
             continue
         if prefix is not None and entry.placement.parts[: len(prefix)] != prefix:
             continue
-        yield _finding(workspace, entry, current_settings, search_paths)
+        yield _finding(workspace, entry, current_settings, search_paths, managers)
+
+
+def manager_availability_notice(workspace: Workspace) -> str | None:
+    """Return one workspace-level manager-availability notice, or ``None``.
+
+    Per-job claimability can only be judged against a live manager. When none is
+    live, one notice replaces per-job claim spam: whether no manager ever
+    registered, or every registered one has a stale heartbeat.
+
+    :param workspace: The workspace to inspect.
+    :return: The notice, or ``None`` when a live manager exists.
+    """
+
+    managers = read_managers(workspace)
+    if any(record.alive() for record in managers):
+        return None
+    if not managers:
+        return "no manager has ever registered in this workspace; claimability was not checked"
+    return f"{len(managers)} manager(s) registered here, but none has a live heartbeat; claimability was not checked"
+
+
+def has_claim_problem(finding: Mapping[str, object]) -> bool:
+    """Return whether a finding names a job no live manager can claim."""
+
+    claim = finding.get("claim")
+    return isinstance(claim, Mapping) and claim.get("status") == "problem"
+
+
+def has_language_problem(finding: Mapping[str, object]) -> bool:
+    """Return whether a finding names an unimportable language engine."""
+
+    language = finding.get("language")
+    return isinstance(language, Mapping) and language.get("status") == "problem"
+
+
+def has_input_problem(finding: Mapping[str, object]) -> bool:
+    """Return whether a finding names a missing required input destination."""
+
+    return bool(finding.get("inputs"))
 
 
 def has_environment_problem(finding: Mapping[str, object]) -> bool:

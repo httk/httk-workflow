@@ -8,9 +8,11 @@ spools the script it was handed and prints a Slurm-shaped receipt.
 """
 
 import json
+import logging
 import os
 import shutil
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -40,6 +42,25 @@ def _isolated_httk_config(tmp_path_factory: pytest.TempPathFactory, monkeypatch:
 
     monkeypatch.setenv("HTTK_CONFIG_HOME", str(tmp_path_factory.mktemp("httk-config")))
     monkeypatch.setenv("HTTK_DATA_HOME", str(tmp_path_factory.mktemp("httk-data")))
+
+
+@pytest.fixture(autouse=True)
+def _isolated_workflow_logging() -> Iterator[None]:
+    """Restore the ``httk.workflow`` logger after every test.
+
+    CLI entry points deliberately set ``propagate = False`` and install handlers
+    on ``httk.workflow`` for their own process; inside one pytest worker that
+    state would leak into later tests and starve ``caplog``, which captures on
+    the root logger."""
+
+    logger = logging.getLogger("httk.workflow")
+    propagate = logger.propagate
+    handlers = list(logger.handlers)
+    level = logger.level
+    yield
+    logger.propagate = propagate
+    logger.handlers[:] = handlers
+    logger.setLevel(level)
 
 
 def register_ws(

@@ -20,6 +20,7 @@ installed than the machine that composed them.
 # ruff: noqa: F401
 
 import argparse
+import fnmatch
 import json
 import logging
 import sys
@@ -121,6 +122,7 @@ from ..registry import (
 )
 from ..scaffold import (
     DEFAULT_PLACEMENT,
+    STRUCTURE_PATTERNS,
     JobItem,
     ScaffoldedJob,
     _sanitize_tag,
@@ -356,14 +358,72 @@ def _pairs(values: Sequence[str], label: str) -> list[tuple[str, str]]:
     return result
 
 
+def _has_input_reader(name: str) -> bool:
+    """Report whether a directory file is one this scanner will load.
+
+    A file is loadable when a reader is registered for its name, or — matching
+    the SDK's own :func:`~httk.workflow.scaffold.structure_files` — when its name
+    is one of the structure conventions, which are then read as POSCAR even where
+    ``POSCAR.Si2O`` registers no reader of its own.
+    """
+
+    return httk.core.has_reader_for(name) or any(fnmatch.fnmatch(name, pattern) for pattern in STRUCTURE_PATTERNS)
+
+
+def _load_input_file(path: Path) -> object:
+    """Load one input file, forcing the POSCAR reader for a bare structure name.
+
+    :param path: Locate the input file to read.
+    :return: The loaded input value.
+    :raises ValueError: If the file cannot be read; the message names the file.
+    """
+
+    force_poscar = not httk.core.has_reader_for(path.name) and any(
+        fnmatch.fnmatch(path.name, pattern) for pattern in STRUCTURE_PATTERNS
+    )
+    try:
+        if force_poscar:
+            return httk.core.load_source(str(path), "POSCAR")
+        return httk.core.load(str(path))
+    except Exception as exc:
+        raise ValueError(f"cannot read input source {path}: {exc}") from exc
+
+
+def _scan_input_directory(path: Path) -> tuple[list[Path], list[str]]:
+    """Return the loadable files of a directory and the names it skips."""
+
+    files = sorted(
+        (child for child in path.iterdir() if child.is_file() and not child.is_symlink()),
+        key=lambda child: child.name,
+    )
+    loadable = [child for child in files if _has_input_reader(child.name)]
+    skipped = [child.name for child in files if not _has_input_reader(child.name)]
+    if skipped:
+        shown = ", ".join(skipped[:5])
+        suffix = f", … (+{len(skipped) - 5} more)" if len(skipped) > 5 else ""
+        print(
+            f"httk workflow: skipped {len(skipped)} of {len(files)} files in {path} "
+            f"(no registered reader): {shown}{suffix}",
+            file=sys.stderr,
+        )
+    return loadable, skipped
+
+
 def _load_inputs(
     values: Sequence[str], occurrences: Sequence[Sequence[str]]
 ) -> tuple[dict[str, object], list[JobItem], str | None]:
-    """Load staged input sources and split shared values from a batch source."""
+    """Load staged input sources and split shared values from a batch source.
+
+    A directory expands to its loadable files; unreadable files are skipped with
+    one stderr note, and a structure-named file with no reader of its own is read
+    as POSCAR. The batch — a directory or a multi-file occurrence — is returned
+    as a list so both the single-shot ``job new`` submitter and the campaign
+    submitter, which re-reads and re-tags it, see one stable result.
+    """
 
     shared: dict[str, object] = {name: text for name, text in _pairs(values, "a staged workflow input")}
     batch: list[JobItem] = []
-    batch_occurrence: Sequence[str] | None = None
+    batch_present = False
     single_files: list[Path] = []
     single_tags: list[str | None] = []
     for occurrence in occurrences:
@@ -374,33 +434,25 @@ def _load_inputs(
         for source in occurrence[1:]:
             path = Path(source).expanduser()
             if path.is_dir():
-                children = sorted(
-                    (
-                        child
-                        for child in path.iterdir()
-                        if child.is_file() and not child.is_symlink() and httk.core.has_reader_for(child.name)
-                    ),
-                    key=lambda child: child.name,
-                )
-                if not children:
+                loadable, _skipped = _scan_input_directory(path)
+                if not loadable:
                     raise ValueError(f"no readable input files in {path}")
-                found.extend(children)
+                found.extend(loadable)
             else:
                 if not path.is_file():
                     raise ValueError(f"input source does not exist: {path}")
                 found.append(path)
-        loaded = [(path, httk.core.load(str(path))) for path in found]
-        if len(loaded) > 1:
-            if batch_occurrence is not None:
+        if len(found) > 1:
+            if batch_present:
                 raise ValueError("only one --input-from occurrence may contain multiple files")
-            batch_occurrence = occurrence
+            batch_present = True
             batch = [
-                {"inputs": {name: value}, "tag": structure_tag(path) or _sanitize_tag(path.stem)}
-                for path, value in loaded
+                {"inputs": {name: _load_input_file(path)}, "tag": structure_tag(path) or _sanitize_tag(path.stem)}
+                for path in found
             ]
         else:
-            path, value = loaded[0]
-            shared[name] = value
+            path = found[0]
+            shared[name] = _load_input_file(path)
             single_files.append(path)
             single_tags.append(structure_tag(path) or _sanitize_tag(path.stem))
     tag = single_tags[0] if len(single_files) == 1 else None

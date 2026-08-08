@@ -214,6 +214,7 @@ Every input table accepts these keys:
 | `entry_type` | Optional declaration entry type. |
 | `ref` | Optional declaration reference. |
 | `role` | Optional declaration role; defaults to the input key. |
+| `required` | Optional boolean. Defaults to `true` when the input declares `entry_type` and `false` otherwise. A required input must be supplied at submission — for an input with a `destination`, staging that destination (including a directly staged file) satisfies it; for a hook-consumed input, the value must be supplied. Language workflows satisfy their own inputs, so the check does not apply to them. |
 
 ```toml
 [workflow.inputs.structure]
@@ -222,6 +223,7 @@ entry_type = "structures"
 ref = "https://example.org/types/structure"
 description = "The starting structure."
 role = "initial_structure"
+# required defaults to true here because entry_type is declared.
 
 [workflow.inputs.settings]
 description = "Values consumed by instantiate.py."
@@ -240,6 +242,17 @@ type = "number"
 default = 30.0
 description = "Sampling density."
 ```
+
+When a workflow declares any parameters, three rules apply at submission — and
+only then, because a workflow that declares no parameters leaves the channel
+fully open. A `default` is applied for a declared name nobody supplied, so it
+is recorded verbatim in `job.json`. A supplied value whose declared `type`
+mismatches is an error, exactly like the environment channel. A supplied name
+outside the declaration is *not* an error — parameters are deliberately open —
+but it prints one warning on stderr naming it and the declared names, and the
+value is kept. The declared parameter and input metadata are also carried in
+`job.json`'s optional `declared` member (sections `parameters` and `inputs`),
+mirroring the environment member's shape, so a later precheck can read them.
 
 ### `[workflow.environment.<NAME>]`
 

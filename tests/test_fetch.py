@@ -426,8 +426,10 @@ def test_a_fetched_job_collects_locally_as_an_ordinary_result(
     # The same thing through the command, which is the documented pipeline.
     assert command(["collect", "home", "--state", "succeeded", "--state", "failed", "--raw"], pair.context) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 2
-    assert {JobRecord.from_mapping(json.loads(line)).job_id for line in lines} == set(records)
+    assert json.loads(lines[-1])["format"] == "httk-workflow-collect-summary"
+    record_lines = lines[:-1]
+    assert len(record_lines) == 2
+    assert {JobRecord.from_mapping(json.loads(line)).job_id for line in record_lines} == set(records)
 
 
 def test_the_runner_the_remote_pinned_travels_with_the_fetched_jobs(

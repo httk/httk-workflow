@@ -13,9 +13,8 @@ def handle_v1_collect(arguments: argparse.Namespace, context: CLIContext) -> int
     """Collect finished directories from a pre-existing httk v1 tree."""
 
     del context
-    if arguments.into is not None and arguments.json:
-        raise ValueError("--into cannot be combined with --json")
-    items = list(collect_finished_tree(arguments.root, workflow_dir=arguments.workflow_dir))
+    stats: dict[str, object] = {}
+    items = list(collect_finished_tree(arguments.root, workflow_dir=arguments.workflow_dir, stats=stats))
     reports = (
         _store_collected(items, arguments.into)
         if arguments.into is not None
@@ -23,6 +22,20 @@ def handle_v1_collect(arguments: argparse.Namespace, context: CLIContext) -> int
     )
     for report in reports:
         print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+    unfinished = stats.get("unfinished_by_status")
+    print(
+        json.dumps(
+            {
+                "format": "httk-workflow-v1-collect-summary",
+                "format_version": 1,
+                "finished": len(items),
+                "unfinished_by_status": dict(sorted(unfinished.items())) if isinstance(unfinished, dict) else {},
+                "skipped_no_rundir": stats.get("skipped_no_rundir", 0),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
     return 0
 
 
@@ -37,7 +50,6 @@ def add_v1_collect_arguments(parser: argparse.ArgumentParser) -> None:
         help="the directory workflow package providing the collect hook",
     )
     parser.add_argument("--into", metavar="PATH", help="save collected entries, runs, and products to SQLite")
-    parser.add_argument("--json", action="store_true", help="print collected summaries as JSON lines")
 
 
 def build_v1_parser(

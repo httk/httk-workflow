@@ -122,13 +122,30 @@ httk workflow precheck WORKSPACE --runner-search-path PATH
 
 It reports environment entries resolved from the current process environment,
 workspace settings, or declared defaults, plus runner-reference problems, for
-pending jobs. An unresolved entry or broken runner gives exit status `1`. The
-repeatable `--runner-search-path` option checks installed runner references; a
-plain installed reference without a configured path is `indeterminate`, not a
-failure, and does not by itself give exit status `1`. The
-authoritative environment gate is still at attempt start; this report is
-advisory and can become stale. The `HTTK_*` layer is this process's environment,
-not a promise about the environment of a later compute node.
+pending jobs. It also measures each pending job against the workspace's live
+managers: a job **no live manager can claim** names the closest manager's unmet
+requirements (the same wording `job why` uses, including a runner-module
+allowlist a manager does not carry), a **language job** (the collect gate's
+`workflow_realization = language` pair) whose engine modules are absent names the
+pip extra to install (for example `pip install httk-workflow[jobflow]`) — a
+failure only when no live manager serves its executor, since the extras belong on
+the machine that runs the job; when one does, it is `indeterminate` and
+non-failing. A declared **required input** whose staged destination has gone
+missing from the payload is flagged. When no manager is live, one workspace-level
+notice replaces per-job claim findings. An unresolved entry, broken runner,
+unclaimable job, missing-and-unserved engine, or missing required input gives
+exit status `1`. The repeatable `--runner-search-path`
+option checks installed runner references; a plain installed reference without a
+configured path is `indeterminate`, not a failure, and does not by itself give
+exit status `1`. The authoritative environment gate is still at attempt start;
+this report is advisory and can become stale. The `HTTK_*` layer is this
+process's environment, not a promise about the environment of a later compute
+node.
+
+`httk workflow workspace managers WORKSPACE` answers "what serves this
+workspace?" directly — one line per registered manager, live or stale, with its
+pools, capabilities, executors, and runner modules — rather than by reading it
+off a `job why` on an arbitrary job.
 
 Transfers run the environment check against destination settings, job overrides,
 and declared defaults, without treating the client process environment as the
@@ -293,6 +310,22 @@ A manager claims work under the workspace's `lease_seconds` unless
 The default until-idle behavior is useful for batch invocations and tests;
 pass `--idle` to keep serving.
 
+**One banner, then one summary.** Whatever the console log level, `run` and
+`manager run` print one line on startup — the manager id, the workspace, the log
+file path, and the pools, capabilities, and executors this manager serves — so a
+normal run is never silent about which manager is doing what and where its log
+is. When it exits idle it prints one closing summary line that classifies every
+remaining job: how many succeeded and failed, how many are *not claimable here*
+— ready or unregisterable-submitted jobs broken down by the pool, capability,
+or executor this manager does not serve — how many are waiting on children, how
+many are paused, and how many committing or cancelling jobs have an unreadable
+definition. A job this manager cannot progress — including one whose `job.json`
+is corrupt — no longer keeps it awake to the idle timeout; it is reported
+instead. If the manager does hit `--idle-timeout`, the advice names the actual
+pool, capability, and executor mismatches, the flags that would clear the pool
+and capability ones, and points an unreadable definition at `workspace fsck`,
+rather than a bare suggestion to raise the timeout.
+
 **Taking over another manager's attempt.** An expired lease says that a manager
 stopped heartbeating, which is not the same as its attempt having stopped, so
 neither workdir mode relaunches on lease expiry alone:
@@ -305,6 +338,24 @@ neither workdir mode relaunches on lease expiry alone:
 Both unsafe options and the evidence of every takeover — which rule admitted
 it and how old the heartbeat was — are recorded in the new attempt's state
 frame, so `job log` shows exactly why a job was relaunched.
+
+A persistent-workdir attempt whose recorded process ran on *another host* can
+never be proven stopped from here — only the launching host can ask its kernel
+about that process — so a manager on a different host leaves it alone and logs
+that decision (an info-level line, not a buried debug one). `job why` says the
+same truthfully: it reports the job as blocked, names the host the writer ran
+on, and tells you to run a manager on that host or pass
+`--unsafe-persistent-takeover`, rather than claiming the expired lease will be
+recovered here.
+
+**Unresolvable join children.** A job `waiting` on a child that cannot be
+resolved in this workspace does not wait forever: after `--join-grace-seconds`
+(default `3600`) it fails with `dependency_failure`. The grace is measured from
+the instant a manager *first* records the child as unresolvable, and that
+instant is persisted into the waiting job's state frame, so the deadline
+survives a manager restart instead of resetting to zero each time a new manager
+takes over. `job why` on the waiting job shows the recorded instant and what the
+grace will do.
 
 **Long scans.** A manager heartbeats between its scheduling passes and inside
 long ones, and bounds how many markers of one kind it processes per pass,
@@ -389,7 +440,11 @@ the other's trees. The assignment is deployment policy and not a protocol
 change — placement values remain project-owned semantics that the engine only
 validates and filters on — and it is recorded in the manager's manifest, so `job
 why` reports a prefix mismatch when a live manager's placement prefixes exclude
-the placement of the job being diagnosed.
+the placement of the job being diagnosed. A configured prefix that currently
+matches no job — whether a typo or simply a manager started before its jobs are
+submitted — is logged as one honest warning at manager start, naming the prefix
+and noting that the manager will serve that subtree once work arrives there, so
+a scan-nothing prefix is a diagnosable condition rather than a silent one.
 
 Laying out placements across a large campaign and assigning their subtrees to
 managers by a written recipe rather than by hand is out of scope here; the
@@ -530,12 +585,25 @@ remains readable is still shown.
   recorded lease, and whether an expired lease means recovery rather than a stuck
   job;
 - `committing`: that a published outcome is being committed and any manager
-  serving the executor resumes it;
+  serving the executor resumes it — unless a commit anomaly has repeated for the
+  same attempt, in which case the recorded error is surfaced and the job is
+  reported as a blocked, wedged commit rather than as needing no action;
 - `waiting`: the join condition, every child with its label and state, which
   children block, and which cannot be resolved in this workspace;
 - `failed`: the failure, whether an operator `continue` still fits inside the
   retry budget, and the `error.json` breadcrumb of the last attempt;
 - `paused`, `succeeded`, and `cancelled`: the state and how to proceed.
+
+For `ready`, `running`, and `failed` jobs, `job why` also folds the journal into
+one attempt-history line — `N attempts across M activations at step 'X'; K after
+unclean exits` — and, when a job under an unlimited retry budget has attempted
+well past a small threshold, flags it as flapping rather than progressing. A
+runner-allowlist refusal is reported whenever a live manager's `runner_modules`
+or search paths cannot reach the job's runner, so a repeating
+`runner_unavailable` claim loop is named rather than shown as a manager that
+"offers everything this job requires". Any operator request still pending in
+`requests/ready`, and the reason recorded for the most recent retired one, are
+surfaced on the states where they apply.
 
 The job side of every precondition comes from `job.json` and cannot drift. The
 other side — pools, capabilities, and served executors — is deployment policy of

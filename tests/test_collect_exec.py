@@ -113,7 +113,7 @@ def test_executable_outputs_resolve_core_records(tmp_path: Path) -> None:
         directory=tmp_path,
         outputs={"value": {"role": "value"}, "file": {"role": "file"}, "entry": {"role": "entry"}},
     )
-    resolved, failures = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert failures == {}
     assert isinstance(resolved[0]["value"], DataRecord)
     assert isinstance(resolved[0]["file"], FileRecord)
@@ -133,7 +133,7 @@ def test_non_utf8_response_degrades_only_that_job(tmp_path: Path) -> None:
         "    seen += 1",
     )
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
-    resolved, failures = _run_executable_collector(
+    resolved, failures, _ = _run_executable_collector(
         [_record(tmp_path, "job-1"), _record(tmp_path, "job-2")], provider, tmp_path
     )
     assert 0 in failures and 1 in resolved
@@ -149,7 +149,7 @@ def test_oversized_response_line_degrades_that_job(tmp_path: Path) -> None:
         "        sys.stdout.buffer.write(b'{' + b'x' * (8 * 1024 * 1024) + b'\\n'); sys.stdout.buffer.flush()\n",
     )
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
-    resolved, failures = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert resolved == {}
     assert "exceeded" in failures[0]
 
@@ -168,7 +168,7 @@ def test_response_line_boundary_excludes_newline(tmp_path: Path) -> None:
         "        sys.stdout.buffer.write(encoded + b'\\n'); sys.stdout.buffer.flush()\n",
     )
     provider = SimpleNamespace(collector_exec=exact.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
-    resolved, failures = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert failures == {} and 0 in resolved
 
     oversized = _hook(
@@ -184,7 +184,7 @@ def test_response_line_boundary_excludes_newline(tmp_path: Path) -> None:
         "        sys.stdout.buffer.write(encoded + b'\\n'); sys.stdout.buffer.flush()\n",
     )
     provider.collector_exec = oversized.name
-    resolved, failures = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert resolved == {} and "exceeded" in failures[0]
 
 
@@ -199,7 +199,7 @@ def test_oversized_stderr_degrades_the_group(tmp_path: Path) -> None:
         "        print(json.dumps({'job_id': request['record']['job_id'], 'outputs': {'answer': {'value': 1}}}), flush=True)\n",
     )
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
-    resolved, failures = _run_executable_collector(
+    resolved, failures, _ = _run_executable_collector(
         [_record(tmp_path, "job-1"), _record(tmp_path, "job-2")], provider, tmp_path
     )
     assert resolved == {} and set(failures) == {0, 1}
@@ -217,7 +217,7 @@ def test_stderr_line_boundary_excludes_newline(tmp_path: Path) -> None:
         "        print(json.dumps({'job_id': request['record']['job_id'], 'outputs': {'answer': {'value': 1}}}), flush=True)\n",
     )
     provider = SimpleNamespace(collector_exec=exact.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
-    resolved, failures = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert failures == {} and 0 in resolved
 
     oversized = _hook(
@@ -230,7 +230,7 @@ def test_stderr_line_boundary_excludes_newline(tmp_path: Path) -> None:
         "        print(json.dumps({'job_id': request['record']['job_id'], 'outputs': {'answer': {'value': 1}}}), flush=True)\n",
     )
     provider.collector_exec = oversized.name
-    resolved, failures = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert resolved == {} and "stderr line exceeded" in failures[0]
 
 
@@ -242,7 +242,7 @@ def test_descendant_holding_pipes_does_not_hang_collection(monkeypatch: pytest.M
     )
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
     started = time.monotonic()
-    resolved, failures = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert time.monotonic() - started < 2
     assert resolved == {} and "timed out" in failures[0]
 
@@ -252,7 +252,7 @@ def test_unlaunchable_executable_degrades_the_group(tmp_path: Path) -> None:
     hook.write_text("#!/definitely/missing/interpreter\n", encoding="utf-8")
     hook.chmod(0o755)
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
-    resolved, failures = _run_executable_collector(
+    resolved, failures, _ = _run_executable_collector(
         [_record(tmp_path, "job-1"), _record(tmp_path, "job-2")], provider, tmp_path
     )
     assert resolved == {} and set(failures) == {0, 1}
@@ -262,7 +262,7 @@ def test_non_executable_registered_collector_degrades_the_group(tmp_path: Path) 
     hook = _hook(tmp_path, "raise SystemExit(0)")
     hook.chmod(0o644)
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
-    resolved, failures = _run_executable_collector(
+    resolved, failures, _ = _run_executable_collector(
         [_record(tmp_path, "job-1"), _record(tmp_path, "job-2")], provider, tmp_path
     )
     assert resolved == {} and set(failures) == {0, 1}
@@ -278,7 +278,7 @@ def test_unicode_line_separator_inside_json_survives(tmp_path: Path) -> None:
         "    if 'record' in request: print(json.dumps({'job_id': request['record']['job_id'], 'outputs': {'answer': {'value': 'left\\u2028right'}}}, ensure_ascii=False), flush=True)",
     )
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
-    resolved, failures = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert failures == {}
     answer = resolved[0]["answer"]
     assert isinstance(answer, DataRecord)
@@ -296,7 +296,7 @@ def test_surplus_response_degrades_the_group(tmp_path: Path) -> None:
         "        print(json.dumps(response), flush=True); print(json.dumps(response), flush=True)",
     )
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
-    resolved, failures = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert resolved == {}
     assert "surplus" in failures[0]
 
@@ -375,9 +375,13 @@ def test_in_process_and_executable_collectors_have_identical_results(
         }
 
     def prepared_records(
-        _workspace: Workspace, *, states: Iterable[str], placement: str | PurePosixPath | None
+        _workspace: Workspace,
+        *,
+        states: Iterable[str],
+        placement: str | PurePosixPath | None,
+        on_skipped: Callable[[str], None] | None = None,
     ) -> Iterator[JobRecord]:
-        del states, placement
+        del states, placement, on_skipped
         yield record
 
     provider = WorkflowProvider(
@@ -451,7 +455,7 @@ def test_executable_response_failures_degrade_the_job(tmp_path: Path, mode: str)
         "    print(json.dumps({'job_id': job_id, 'outputs': {'answer': value}}), flush=True)",
     )
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
-    resolved, failures = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert resolved == {}
     assert 0 in failures
 
@@ -467,7 +471,7 @@ def test_executable_midstream_exit_degrades_only_unanswered_jobs(tmp_path: Path)
         "    raise SystemExit(1)",
     )
     provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={"answer": {"role": "answer"}})
-    resolved, failures = _run_executable_collector(
+    resolved, failures, _ = _run_executable_collector(
         [_record(tmp_path, "job-1"), _record(tmp_path, "job-2")], provider, tmp_path
     )
     assert 0 in resolved and 1 in failures
@@ -535,3 +539,29 @@ def test_collect_manifest_rejects_non_executable_non_python(tmp_path: Path) -> N
     (tmp_path / "collect-hook").write_text("exit 0\n", encoding="utf-8")
     with pytest.raises(ValueError, match=r"\.py member or an executable member"):
         parse_workflow_manifest(tmp_path)
+
+
+def test_truncated_outputs_document_degrades_the_job(tmp_path: Path) -> None:
+    from httk.workflow.languages import LanguageOutputsMissingError, _load_outputs
+
+    # A published-but-truncated JSON document must degrade this one job, not
+    # abort the whole sweep with a bare JSONDecodeError.
+    (tmp_path / "outputs.json").write_text('{"a":', encoding="utf-8")
+    with pytest.raises(LanguageOutputsMissingError, match="missing or unreadable"):
+        _load_outputs(_record(tmp_path), "outputs.json", "prefix")
+
+
+def test_executable_exit_status_is_surfaced_after_complete_responses(tmp_path: Path) -> None:
+    hook = _hook(
+        tmp_path,
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    request = json.loads(line)\n"
+        "    if 'record' not in request: continue\n"
+        "    print(json.dumps({'job_id': request['record']['job_id'], 'outputs': {}}), flush=True)\n"
+        "sys.exit(3)",
+    )
+    provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={})
+    resolved, failures, exit_status = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    assert failures == {} and resolved[0] == {}
+    assert exit_status == 3

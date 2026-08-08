@@ -142,18 +142,7 @@ def evaluate(manager: Any, marker: Any, parent_job: Any, state: Any) -> bool:
     join = require_mapping(state.join, "state.join")
     observations, unresolved = manager._observe_join_children(children(join))
     if unresolved is not None:
-        if not manager._join_child_grace_expired(marker, unresolved):
-            _LOGGER.debug("join child %s of %s is not yet visible", unresolved, marker.job_key)
-            return False
-        manager._fail_waiting(
-            marker,
-            state,
-            "dependency_failure",
-            f"join child {unresolved} cannot be resolved in this workspace",
-            "join_unresolvable",
-        )
-        return True
-    manager._join_unresolved.pop(marker.job_key, None)
+        return manager._handle_unresolved_join(marker, state, unresolved)
     condition = str(join.get("condition", ""))
     kinds = [str(item["kind"]) for item in observations]
     result = classify(condition, join, kinds)

@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import logging
 import math
 import os
 import re
@@ -57,6 +58,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
+
+from httk.core.report import context_logger
 
 if TYPE_CHECKING:
     from .collecting import JobRecord
@@ -72,6 +75,8 @@ from .models import (
 )
 from .runtime_builders import JobSpec, prepare_job_payload
 from .workspace import Workspace
+
+_LOGGER = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_PLACEMENT",
@@ -1292,6 +1297,34 @@ def _resolve_instantiate(workflow: ResolvedWorkflow, runner_sha256: str) -> Call
     return runner._instantiate
 
 
+def _input_required(metadata: Mapping[str, object]) -> bool:
+    """Report whether one declared input must be supplied at submission.
+
+    A boolean ``required`` in the metadata decides it outright; absent one, an
+    input is required exactly when it declares an ``entry_type``.
+
+    :param metadata: Supply the declared input metadata.
+    :return: Whether the input is required.
+    """
+
+    required = metadata.get("required")
+    if isinstance(required, bool):
+        return required
+    return "entry_type" in metadata
+
+
+def _declared_inputs(workflow: ResolvedWorkflow) -> dict[str, dict[str, object]]:
+    """Return the declared input metadata, each stamped with its required flag.
+
+    :param workflow: Supply the resolved workflow whose inputs to describe.
+    :return: The input metadata keyed by input name.
+    """
+
+    return {
+        name: {**metadata, "required": _input_required(metadata)} for name, metadata in workflow._input_metadata.items()
+    }
+
+
 def _submit(
     workspace: Workspace,
     prepared: _Prepared,
@@ -1367,6 +1400,45 @@ def _submit(
         if collisions:
             raise ValueError(f"user parameter collides with reserved language parameter {collisions[0]!r}")
         job_parameters = {**supplied_parameters, **prepared.parameters}
+        declared_parameters = workflow.parameters
+        if declared_parameters:
+            from .packages import _matches_input_type
+
+            # A workflow that declares a name the language realization reserves
+            # would smuggle its default straight into the reserved wiring, so the
+            # collision is refused here — before any default is applied — exactly
+            # as a supplied value colliding with a reserved name is refused above.
+            reserved_declared = sorted(set(declared_parameters) & reserved_parameters)
+            if reserved_declared:
+                raise ValueError(
+                    f"workflow declares parameter {reserved_declared[0]!r}, which collides with a reserved "
+                    f"{workflow.language or 'runner'} parameter; rename the declared parameter"
+                )
+            # A declared type is enforced, exactly like the environment channel;
+            # an undeclared name only warns, because parameters are deliberately
+            # open, and a declared default fills in for a name nobody supplied.
+            for parameter_name, value in supplied_parameters.items():
+                if parameter_name not in declared_parameters:
+                    continue
+                parameter_type = declared_parameters[parameter_name].get("type")
+                if isinstance(parameter_type, str) and not _matches_input_type(value, parameter_type):
+                    raise ValueError(
+                        f"workflow parameter {parameter_name!r} does not match type {parameter_type!r}; "
+                        f"got {type(value).__name__}. Supply a matching value — note that a command-line "
+                        f"NAME=VALUE parses VALUE as JSON when it can, so quote a literal string as "
+                        f'NAME=\'"text"\''
+                    )
+            declared_names = ", ".join(sorted(declared_parameters))
+            logger = context_logger(_LOGGER, workflow.workflow_id)
+            for parameter_name in sorted(set(supplied_parameters) - set(declared_parameters)):
+                logger.warning(
+                    "job parameter %r is not declared by this workflow; declared: %s",
+                    parameter_name,
+                    declared_names,
+                )
+            for parameter_name, metadata in declared_parameters.items():
+                if "default" in metadata and parameter_name not in job_parameters:
+                    job_parameters[parameter_name] = metadata["default"]
         if prepared.instantiate_exec is not None:
             hook_inputs = _serialize_executable_inputs(staging, workflow, supplied_inputs)
             hook_parameters, hook_tag = _run_executable_instantiate(
@@ -1391,6 +1463,31 @@ def _submit(
             prepared.instantiate(context)
             job_parameters = context.parameters
             tag = caller_tag if caller_tag is not None else context.tag
+        declared_input_metadata = _declared_inputs(workflow)
+        # A language workflow satisfies its own inputs — a document value, a
+        # maker default, a supplied override — so the generic required check is
+        # scoped to packaged and directory-hook workflows, whose destinations
+        # this scaffold stages itself.
+        if workflow.language is None:
+            for input_name, metadata in declared_input_metadata.items():
+                if not metadata["required"]:
+                    continue
+                input_destination = workflow.inputs.get(input_name)
+                if input_destination is None:
+                    satisfied = input_name in supplied_inputs
+                else:
+                    satisfied = staging.joinpath(*payload_relative(str(input_destination)).parts).exists()
+                if not satisfied:
+                    declared_names = ", ".join(workflow.inputs) or "none"
+                    raise ValueError(
+                        f"workflow input {input_name!r} is required and was not supplied; "
+                        f"declared inputs: {declared_names}"
+                    )
+        declared_member: dict[str, object] = {}
+        if declared_parameters:
+            declared_member["parameters"] = {name: dict(metadata) for name, metadata in declared_parameters.items()}
+        if declared_input_metadata:
+            declared_member["inputs"] = declared_input_metadata
         spec = JobSpec(
             name=name or f"{workflow.workflow_id}: {tag or 'job'}",
             workflow=workflow.workflow_id,
@@ -1415,6 +1512,7 @@ def _submit(
                 else {}
             ),
             declarations=workflow.declarations,
+            declared=declared_member,
         )
         if prepared.finalize is not None:
             spec = prepared.finalize(spec)
@@ -1464,11 +1562,68 @@ def _serialize_executable_inputs(
             shutil.copyfile(source, destination)
             descriptors[name] = {"kind": "file", "path": relative.as_posix()}
             continue
+        message = _missing_file_input_message(name, value)
+        if message is not None:
+            raise ValueError(message)
         if _is_json_native(value):
             descriptors[name] = {"kind": "value", "value": value}
         else:
             descriptors[name] = _save_executable_input(payload, name, value)
     return descriptors
+
+
+def _has_path_separator(text: str) -> bool:
+    """Report whether one input value carries a filesystem path separator."""
+
+    return "/" in text or os.sep in text or (os.altsep is not None and os.altsep in text)
+
+
+def _path_input_message(name: str, text: str, candidate: Path) -> str | None:
+    """Return a teaching message when *candidate* names no usable file, or ``None``.
+
+    *candidate* is where the caller resolved *text* — the caller's own root, not
+    necessarily the current directory. A directory says so; a value that carries
+    a separator or that resolves to something that exists but is not a file is a
+    mistyped path. A bare identifier that resolves to nothing is a literal and
+    passes through — an entry-typed id like ``mp-149`` is not a path.
+
+    :param name: Name the workflow input the value was supplied for.
+    :param text: Supply the raw input text.
+    :param candidate: Supply the path the value resolved to.
+    :return: The teaching message, or ``None`` when the value passes through.
+    """
+
+    if candidate.is_file():
+        return None
+    if candidate.is_dir():
+        return f"workflow input {name!r} is a directory, not a file: {candidate}; supply a regular file"
+    if not _has_path_separator(text) and not candidate.exists():
+        return None
+    return (
+        f"workflow input {name!r} looks like a file path but nothing exists at {candidate}; "
+        "supply an existing file, or a literal value without path separators"
+    )
+
+
+def _missing_file_input_message(name: str, value: object) -> str | None:
+    """Return a teaching message for a mistyped current-directory path input.
+
+    This is the current-directory-consistent probe used by the executable-hook
+    and PWD input paths, which resolve their string values against the current
+    directory. A runner that resolves against a different root decides from its
+    own resolved path with :func:`_path_input_message` instead.
+
+    :param name: Name the workflow input the value was supplied for.
+    :param value: Supply the raw input value.
+    :return: The teaching message, or ``None`` when the value passes through.
+    """
+
+    if not isinstance(value, (str, os.PathLike)):
+        return None
+    text = os.fspath(value)
+    if not text:
+        return None
+    return _path_input_message(name, text, Path(text).expanduser())
 
 
 def _is_json_native(value: object, active: set[int] | None = None) -> bool:

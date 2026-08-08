@@ -47,7 +47,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 from importlib import metadata
 from pathlib import Path, PurePosixPath
@@ -143,13 +143,21 @@ class CollectedJob:
 
     :param workflow_id: Identify the workflow that produced the job.
     :param outputs: Map declared output roles to collector results.
-    :param unfulfilled: Name declared output roles omitted after a collector
-        ran; leave empty for degraded jobs.
+    :param unfulfilled: Name declared output roles that carry no output. After a
+        collector ran this is the roles it omitted; a degraded job (see
+        ``missing_collector``) lists every declared output role, because none of
+        them was produced.
     :param run: Carry the framework-assembled run provenance.
     :param products: Carry the framework-assembled product links.
     :param record: Preserve the mechanical job readout behind the collection.
     :param missing_collector: Explain why collecting was unavailable,
         or leave it unset when collection completed.
+    :param products_unlinked: Name the declared ``product_of`` links skipped
+        because the observed provenance held no matching input or output edge.
+    :param collector_exit_status: Report a nonzero executable-collector exit
+        status observed after complete responses, or leave it unset.
+    :param identity_stable: Report whether a v1-harvested job's identity is
+        manifest-backed, or leave it unset for live collection.
     """
 
     workflow_id: str
@@ -159,6 +167,9 @@ class CollectedJob:
     products: tuple[httk.core.ProductLink, ...]
     record: JobRecord
     missing_collector: str | None = None
+    products_unlinked: tuple[str, ...] = ()
+    collector_exit_status: int | None = None
+    identity_stable: bool | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -820,6 +831,7 @@ def job_records(
     *,
     states: Iterable[str] = DEFAULT_COLLECT_STATES,
     placement: str | PurePosixPath | None = None,
+    on_skipped: Callable[[str], None] | None = None,
 ) -> Iterator[JobRecord]:
     """Yield one :class:`~httk.workflow.collecting.JobRecord` per finished job of *workspace*.
 
@@ -838,6 +850,8 @@ def job_records(
     :param workspace: Read jobs from this workspace.
     :param states: Select the stopped state kinds to report.
     :param placement: Restrict results to this placement and its descendants.
+    :param on_skipped: Receive the job key of every selected job dropped for an
+        unreadable ``job.json``, so a caller can count skips it never sees.
     :yields: Mechanical job records, one for each readable selected job.
     :raises ValueError: If ``states`` contains no collectable state.
     """
@@ -848,8 +862,11 @@ def job_records(
         if prefix is not None and marker.placement.parts[: len(prefix)] != prefix:
             continue
         record = record_of(workspace, marker)
-        if record is not None:
-            yield record
+        if record is None:
+            if on_skipped is not None:
+                on_skipped(marker.job_key)
+            continue
+        yield record
 
 
 def _overlay_edges(
@@ -1061,8 +1078,13 @@ def _resolve_executable_output(record: JobRecord, provider: object, role: str, v
 
 def _run_executable_collector(
     records: Sequence[JobRecord], provider: object, root: Path
-) -> tuple[dict[int, Mapping[str, object]], dict[int, str]]:
-    """Run one executable collector and resolve its ordered responses."""
+) -> tuple[dict[int, Mapping[str, object]], dict[int, str], int | None]:
+    """Run one executable collector and resolve its ordered responses.
+
+    The third element is the collector's exit status when it is nonzero after a
+    complete set of responses, so that a stored result can surface a collector
+    that answered every record but still exited nonzero; it is ``None`` otherwise.
+    """
 
     def group_failures(reason: str) -> dict[int, str]:
         return {index: reason for index in range(len(records))}
@@ -1070,7 +1092,7 @@ def _run_executable_collector(
     try:
         executable = _executable_path(provider, root)
     except (OSError, RuntimeError, ValueError) as exc:
-        return {}, group_failures(f"executable collector cannot be resolved: {exc}")
+        return {}, group_failures(f"executable collector cannot be resolved: {exc}"), None
     environment = dict(os.environ)
     for variable in tuple(environment):
         if variable.startswith("HTTK_WORKFLOW_"):
@@ -1096,8 +1118,12 @@ def _run_executable_collector(
             start_new_session=True,
         )
     except OSError as exc:
-        return {}, group_failures(
-            f"executable collector could not be launched: {exc}; check its shebang and executable permissions"
+        return (
+            {},
+            group_failures(
+                f"executable collector could not be launched: {exc}; check its shebang and executable permissions"
+            ),
+            None,
         )
 
     stdin = process.stdin
@@ -1250,7 +1276,7 @@ def _run_executable_collector(
             thread.join(timeout=0.1)
     close_pipes()
     if timed_out:
-        return {}, group_failures("executable collector timed out before responding")
+        return {}, group_failures("executable collector timed out before responding"), None
     if breach_reason is not None:
         _LOGGER.warning(
             "%s; stderr capture truncated to %d bytes: %s",
@@ -1258,7 +1284,7 @@ def _run_executable_collector(
             MAX_COLLECT_STDERR_BYTES,
             bytes(stderr_capture).decode("utf-8", errors="replace"),
         )
-        return {}, group_failures(breach_reason)
+        return {}, group_failures(breach_reason), None
 
     responses = response_lines
     resolved: dict[int, Mapping[str, object]] = {}
@@ -1295,11 +1321,13 @@ def _run_executable_collector(
             failures[index] = f"{identity}: executable collector response failed: {exc}"
         except TypeError as exc:
             failures[index] = f"{identity}: executable collector response is malformed: {exc}"
+    exit_status: int | None = None
     if len(responses) == len(records) and process.returncode:
+        exit_status = process.returncode
         _LOGGER.warning(
             "executable collector %s exited with status %s after complete responses", executable, process.returncode
         )
-    return resolved, failures
+    return resolved, failures, exit_status
 
 
 def _job_collector(
@@ -1395,16 +1423,20 @@ def _assemble_collected(
         last_modified=run.last_modified,
     )
     products: list[httk.core.ProductLink] = []
+    products_unlinked: list[str] = []
     input_edges = {edge.label: edge for edge in run.inputs}
     owned_edges = {edge.label: edge for edge in owned}
     for role, curation in _provider_output_roles(provider).items():
         source_role = curation.get("product_of")
+        if not isinstance(source_role, str):
+            continue
         output_edge = owned_edges.get(role)
-        if isinstance(source_role, str):
-            source_edge = input_edges.get(source_role) or owned_edges.get(source_role)
-        else:
-            source_edge = None
-        if output_edge is not None and source_edge is not None:
+        if output_edge is None:
+            # The output role itself is unfulfilled; that is already reported
+            # through ``unfulfilled``, so do not double-count it here.
+            continue
+        source_edge = input_edges.get(source_role) or owned_edges.get(source_role)
+        if source_edge is not None:
             products.append(
                 core.ProductLink(
                     source_type=source_edge.entry_type,
@@ -1415,7 +1447,37 @@ def _assemble_collected(
                     workflow_declaration_uri=run.workflow_declaration_uri,
                 )
             )
-    return CollectedJob(workflow_id, dict(outputs), unfulfilled, run, tuple(products), record)
+        else:
+            products_unlinked.append(f"{role} -> {source_role} (source edge absent in observed provenance)")
+    return CollectedJob(
+        workflow_id,
+        dict(outputs),
+        unfulfilled,
+        run,
+        tuple(products),
+        record,
+        products_unlinked=tuple(products_unlinked),
+    )
+
+
+def _degraded_job(record: JobRecord, provider: object | None, run: httk.core.Run, reason: str) -> CollectedJob:
+    """Represent one job that could not be collected, naming every unmet role.
+
+    A degraded job produced no output, so every declared output role is
+    unfulfilled — the caller must be able to tell a degradation apart from a
+    complete collection that happened to declare no outputs.
+
+    :param record: Supply the mechanical readout of the job that degraded.
+    :param provider: Supply the workflow provider, when one resolved.
+    :param run: Supply the run assembled for the job, empty when unavailable.
+    :param reason: Explain, in teaching-error style, why collecting failed.
+    :return: The degraded collected job with all declared roles unfulfilled.
+    """
+
+    workflow_id = record.job.get("workflow")
+    workflow_id = workflow_id if isinstance(workflow_id, str) else ""
+    unfulfilled = tuple(_output_roles(_job_workflow_document(record, provider)))
+    return CollectedJob(workflow_id, {}, unfulfilled, run, (), record, reason)
 
 
 def collect(
@@ -1424,19 +1486,23 @@ def collect(
     states: Iterable[str] = DEFAULT_COLLECT_STATES,
     placement: str | PurePosixPath | None = None,
     allow_job_collector: bool = False,
+    on_skipped: Callable[[str], None] | None = None,
 ) -> Iterator[CollectedJob]:
     """Collect records through registered or explicitly allowed job collectors.
 
     A fallback reads and verifies the package manifest from the pinned runner
     tree itself. A changed pinned tree raises ``_PinnedTreeError``, which degrades
     that job and does not stop the rest of the sweep; other hook-loading errors
-    propagate and stop iteration.
+    propagate and stop iteration. An unusable observed provenance document
+    degrades only its own job, exactly like every other per-job failure.
 
     :param workspace: Read jobs from this workspace.
     :param states: Select the stopped state kinds to report.
     :param placement: Restrict results to this placement and its descendants.
     :param allow_job_collector: Permit digest-verified collectors from
         job-pinned workspace package trees.
+    :param on_skipped: Receive the job key of every selected job dropped for an
+        unreadable ``job.json``, forwarded to :func:`job_records`.
     :yields: Framework-assembled collected jobs, including degraded jobs.
     :raises ValueError: If a registered collector fails to resolve or
         returns invalid output roles.
@@ -1445,7 +1511,7 @@ def collect(
     from .provenance import run_record
     from .scaffold import workflow_provider
 
-    records = list(job_records(workspace, states=states, placement=placement))
+    records = list(job_records(workspace, states=states, placement=placement, on_skipped=on_skipped))
     results: list[CollectedJob | None] = [None] * len(records)
     executable_groups: dict[str, list[tuple[int, JobRecord, WorkflowProvider, httk.core.Run]]] = {}
 
@@ -1454,7 +1520,25 @@ def collect(
         workflow_id = record.job.get("workflow")
         workflow_id = workflow_id if isinstance(workflow_id, str) else ""
         provider = workflow_provider(workflow_id)
-        run = run_record(record)
+        try:
+            run = run_record(record)
+        except ValueError as exc:
+            empty_run = _core().Run(
+                workflow_declaration_uri=None,
+                inputs=(),
+                artifacts=(),
+                outputs=(),
+                immutable_id=identity,
+                last_modified=None,
+            )
+            results[index] = _degraded_job(
+                record,
+                provider,
+                empty_run,
+                f"{identity}: provenance declaration is unusable: {exc}; "
+                f"inspect {record.payload}/.httk-job/declarations/provenance.json",
+            )
+            continue
         fallback = False
         if provider is not None and provider.collector_exec is not None:
             if provider.directory is None:
@@ -1466,7 +1550,6 @@ def collect(
             adapter = _collector(provider.collector if provider is not None else None)
         except Exception as exc:
             raise ValueError(f"{identity}: collector resolution failed: {exc}") from exc
-        language_fallback = False
         if adapter is None:
             parameters = record.job.get("parameters")
             language_realization = False
@@ -1480,13 +1563,10 @@ def collect(
                 and parameters.get("workflow_collect") == "package"
             )
             if provider is None and package_collect:
-                results[index] = CollectedJob(
-                    workflow_id,
-                    {},
-                    (),
-                    run,
-                    (),
+                results[index] = _degraded_job(
                     record,
+                    provider,
+                    run,
                     f"{identity}: workflow package collect hook is unavailable without its registered provider; "
                     "collect while the package is registered",
                 )
@@ -1495,30 +1575,23 @@ def collect(
                 try:
                     lang = languages.language(language_name)
                     if not lang.has_default_collector:
-                        results[index] = CollectedJob(
-                            workflow_id,
-                            {},
-                            (),
-                            run,
-                            (),
+                        results[index] = _degraded_job(
                             record,
+                            provider,
+                            run,
                             f"{identity}: workflow language {language_name!r} has no default collector; "
                             "its package declares [workflow.collect]",
                         )
                         continue
                     adapter = lang.collect
                 except Exception as exc:
-                    results[index] = CollectedJob(
-                        workflow_id,
-                        {},
-                        (),
-                        run,
-                        (),
+                    results[index] = _degraded_job(
                         record,
+                        provider,
+                        run,
                         f"{identity}: workflow language {language_name!r} collector unavailable: {exc}",
                     )
                     continue
-                language_fallback = True
         if adapter is None:
             if not allow_job_collector:
                 reason = (
@@ -1528,7 +1601,7 @@ def collect(
                     else f"no collector registered for workflow {workflow_id!r}; pass "
                     "allow_job_collector=True to use a pinned workspace workflow tree"
                 )
-                results[index] = CollectedJob(workflow_id, {}, (), run, (), record, reason)
+                results[index] = _degraded_job(record, provider, run, reason)
                 continue
             adapter, fallback_provider, fallback_reason = _job_collector(workspace, record, workflow_id)
             if fallback_provider is not None and fallback_provider.collector_exec is not None:
@@ -1538,8 +1611,8 @@ def collect(
                 executable_groups.setdefault(key, []).append((index, record, fallback_provider, run))
                 continue
             if adapter is None or fallback_provider is None:
-                results[index] = CollectedJob(
-                    workflow_id, {}, (), run, (), record, fallback_reason or "job collector unavailable"
+                results[index] = _degraded_job(
+                    record, fallback_provider or provider, run, fallback_reason or "job collector unavailable"
                 )
                 continue
             provider = fallback_provider
@@ -1553,18 +1626,14 @@ def collect(
             from .packages import _PinnedTreeError
 
             if fallback and isinstance(exc, _PinnedTreeError):
-                results[index] = CollectedJob(
-                    workflow_id,
-                    {},
-                    (),
-                    run,
-                    (),
-                    record,
-                    f"pinned runner tree was modified: {exc}",
-                )
+                results[index] = _degraded_job(record, provider, run, f"pinned runner tree was modified: {exc}")
                 continue
-            if language_fallback and isinstance(exc, languages.LanguageOutputsMissingError):
-                results[index] = CollectedJob(workflow_id, {}, (), run, (), record, str(exc))
+            if isinstance(exc, languages.LanguageOutputsMissingError):
+                # A missing/unreadable published outputs document is inherently a
+                # per-job condition whichever collector surfaced it — registered
+                # language package, language fallback, or pinned tree — so it
+                # degrades this one job and never aborts the sweep.
+                results[index] = _degraded_job(record, provider, run, str(exc))
                 continue
             if str(exc).startswith(identity + ":"):
                 raise
@@ -1574,25 +1643,22 @@ def collect(
         group_records = [entry[1] for entry in entries]
         provider = entries[0][2]
         assert provider.directory is not None
-        resolved, failures = _run_executable_collector(group_records, provider, provider.directory.resolve())
+        resolved, failures, exit_status = _run_executable_collector(
+            group_records, provider, provider.directory.resolve()
+        )
         for local_index, (index, record, group_provider, run) in enumerate(entries):
             identity = f"{record.workspace_id}:{record.job_id}"
             failure_reason = failures.get(local_index)
             if failure_reason is not None:
-                results[index] = CollectedJob(group_provider.workflow_id, {}, (), run, (), record, failure_reason)
-                continue
-            try:
-                results[index] = _assemble_collected(identity, record, group_provider, run, resolved[local_index])
-            except Exception as exc:
-                results[index] = CollectedJob(
-                    group_provider.workflow_id,
-                    {},
-                    (),
-                    run,
-                    (),
-                    record,
-                    f"{identity}: executable collector output failed: {exc}",
-                )
+                built = _degraded_job(record, group_provider, run, failure_reason)
+            else:
+                try:
+                    built = _assemble_collected(identity, record, group_provider, run, resolved[local_index])
+                except Exception as exc:
+                    built = _degraded_job(
+                        record, group_provider, run, f"{identity}: executable collector output failed: {exc}"
+                    )
+            results[index] = built if exit_status is None else replace(built, collector_exit_status=exit_status)
 
     for result in results:
         assert result is not None

@@ -113,6 +113,154 @@ def _setting_variable_name(key: str) -> str:
     return "HTTK_" + key.upper().replace(".", "_")
 
 
+@dataclass(frozen=True)
+class WorkCensus:
+    """What one manager's scan found, tagged by why each job is or is not its work.
+
+    ``ready_blocked`` groups the ready and unregisterable-submitted jobs this
+    manager cannot progress by the requirement it lacks — ``executor``, ``pool``,
+    or ``capability`` — mapping each requirement to the count of jobs it would
+    turn away. Every such job is attributed to exactly one requirement, so the
+    grouped counts sum to :attr:`ready_blocked_total`.
+
+    :param succeeded: Terminal jobs that succeeded.
+    :param failed: Terminal jobs that failed.
+    :param ready_claimable: Ready jobs this manager could claim right now.
+    :param ready_blocked: Requirement kind to requirement to blocked job count.
+    :param waiting: Jobs waiting on their join children.
+    :param paused: Jobs paused for an operator.
+    :param actionable_count: Jobs this manager can still make progress on.
+    :param unreadable: Committing or cancelling jobs whose definition cannot be read.
+    """
+
+    succeeded: int
+    failed: int
+    ready_claimable: int
+    ready_blocked: Mapping[str, Mapping[str, int]]
+    waiting: int
+    paused: int
+    actionable_count: int
+    unreadable: int = 0
+
+    @property
+    def actionable(self) -> bool:
+        """Whether this manager still has work it can make progress on.
+
+        :return: Whether any counted job is this manager's to progress.
+        """
+
+        return self.actionable_count > 0
+
+    @property
+    def ready_blocked_total(self) -> int:
+        """The number of jobs no requirement of this manager can claim here.
+
+        :return: The total blocked job count.
+        """
+
+        return sum(sum(group.values()) for group in self.ready_blocked.values())
+
+    def _blocked_groups(self) -> list[str]:
+        groups: list[str] = []
+        for kind in ("executor", "pool", "capability"):
+            for name, count in sorted(self.ready_blocked.get(kind, {}).items()):
+                groups.append(f"{kind}={name}: {count}")
+        return groups
+
+    def summary_line(self) -> str:
+        """Render the one-line idle summary an operator reads on exit.
+
+        :return: The idle summary line.
+        """
+
+        total = self.ready_blocked_total
+        blocked = f"{total} not claimable here"
+        if total:
+            blocked += f" ({', '.join(self._blocked_groups())})"
+        line = (
+            "idle: "
+            f"{self.succeeded} succeeded, {self.failed} failed, {blocked}, "
+            f"{self.waiting} waiting on children, {self.paused} paused"
+        )
+        if self.unreadable:
+            line += f", {self.unreadable} with an unreadable definition"
+        return line
+
+    def mismatch_advice(self) -> str | None:
+        """Name the requirements blocked jobs need that this manager lacks.
+
+        :return: The mismatch advice, or ``None`` when nothing is blocked.
+        """
+
+        pools = sorted(self.ready_blocked.get("pool", {}))
+        capabilities = sorted(self.ready_blocked.get("capability", {}))
+        executors = sorted(self.ready_blocked.get("executor", {}))
+        if not (pools or capabilities or executors):
+            return None
+        lacks: list[str] = []
+        remedies: list[str] = []
+        flags: list[str] = []
+        if pools:
+            lacks.append("pool(s) " + ",".join(pools))
+            flags += [f"--pool {name}" for name in pools]
+        if capabilities:
+            lacks.append("capability(ies) " + ",".join(capabilities))
+            flags += [f"--capability {name}" for name in capabilities]
+        if flags:
+            remedies.append("start a manager with " + " ".join(flags))
+        # An executor is installed, not passed as a flag, so it gets its own
+        # remedy clause rather than being dropped when a pool or capability also
+        # mismatches.
+        if executors:
+            lacks.append("executor(s) " + ",".join(executors))
+            remedies.append("run a manager that has executor(s) " + ",".join(executors) + " installed")
+        remedy = "; ".join(remedies) if remedies else "start a manager that serves them"
+        return (
+            f"{self.ready_blocked_total} job(s) cannot be claimed here because this manager does not serve "
+            f"{'; '.join(lacks)}; {remedy}, or pass --idle to keep serving"
+        )
+
+    def timeout_message(self, seconds: float) -> str:
+        """Render the not-idle advice, naming mismatches when there are any.
+
+        :param seconds: The idle timeout that elapsed.
+        :return: The not-idle advice line.
+        """
+
+        base = f"workspace is not idle after {seconds:.0f}s"
+        parts: list[str] = []
+        advice = self.mismatch_advice()
+        if advice is not None:
+            parts.append(advice)
+        if self.unreadable:
+            parts.append(
+                f"{self.unreadable} job(s) have an unreadable definition — "
+                "repair them with 'httk workflow workspace fsck'"
+            )
+        if not parts:
+            parts.append(
+                "jobs are still running or claimable — rerun, raise --idle-timeout, or pass --idle to keep serving"
+            )
+        return f"{base}; {'; '.join(parts)}"
+
+
+class NotIdleError(TimeoutError):
+    """A manager did not become idle within its timeout.
+
+    It carries the :class:`~httk.workflow.manager.WorkCensus` of the final
+    scan so a caller can turn the failure into advice that names the actual
+    pool, capability, or executor mismatches rather than a generic hint. It
+    subclasses :class:`TimeoutError`, so existing ``except TimeoutError``
+    callers keep working.
+
+    :param census: The work census of the manager's last scan.
+    """
+
+    def __init__(self, census: WorkCensus) -> None:
+        super().__init__("workflow manager did not become idle")
+        self.census = census
+
+
 @dataclass
 class RunningAttempt:
     """Track one locally running job attempt.
@@ -276,8 +424,10 @@ class TaskManager:
         # Running markers whose ownership could not be checked this pass are
         # preserved from orphan sweeping until the next pass can retry them.
         self._indeterminate_ownership: set[str] = set()
-        # Parent job key -> (unresolvable child job id, monotonic first-seen).
-        self._join_unresolved: dict[str, tuple[str, float]] = {}
+        # Anomaly keys whose committing-wedge sidecar has already been written,
+        # so a permanently stuck commit records its error into the attempt
+        # control directory once rather than on every poll.
+        self._commit_wedge_recorded: set[str] = set()
         # Bounded pass name -> its streaming walker. Each keeps a per-root cursor
         # and rotation in memory so the next tick resumes where this one stopped
         # and no placement subtree starves; nothing is written to disk.
@@ -343,6 +493,33 @@ class TaskManager:
                     extra=self._event("executor_error", executor=name),
                 )
                 continue
+        self._warn_unmatched_placement_prefixes()
+
+    def _warn_unmatched_placement_prefixes(self) -> None:
+        """Warn once for each configured prefix that matches no state subtree.
+
+        A prefix that names nothing may be a typo, or simply a manager started
+        before its jobs are submitted. The wording covers both honestly — the
+        manager will serve that subtree once work arrives there — while still
+        surfacing the common typo as one diagnosable line per empty prefix.
+        """
+
+        for prefix in self.placement_prefixes:
+            # ponytail: short-circuit on the first marker below the prefix; a
+            # populated subtree costs one directory read, an empty one a full
+            # (bounded, one-time) walk.
+            try:
+                found = next(iter(self.workspace.walk_markers(roots=(prefix,))), None)
+            except (WorkflowError, OSError) as exc:
+                _LOGGER.debug("cannot check placement prefix %s: %s", prefix.as_posix(), exc)
+                continue
+            if found is None:
+                _LOGGER.warning(
+                    "placement prefix %s currently matches no job in this workspace; this manager will serve that "
+                    "subtree when work arrives there, and claim nothing until then — check it if this is unexpected",
+                    prefix.as_posix(),
+                    extra=self._event("placement_prefix_empty", placement_prefix=prefix.as_posix()),
+                )
 
     def __enter__(self) -> Self:
         return self
@@ -376,6 +553,7 @@ class TaskManager:
                 {
                     "job_key": marker.job_key,
                     "job_id": marker.job_id,
+                    "placement": marker.placement.as_posix(),
                     "kind": marker.kind,
                     "generation": marker.generation,
                 }
@@ -395,9 +573,45 @@ class TaskManager:
 
         if self._reported.get(key) == text:
             _LOGGER.debug("%s (unchanged)", text, extra=dict(fields))
+            # A commit anomaly that repeats unchanged is a wedge, not a
+            # transient: the first pass reports it loudly, and once it recurs
+            # its text is persisted where 'job why' can surface it.
+            if key.startswith("resume_committing:"):
+                self._record_commit_wedge(key, text, fields)
             return
         self._reported[key] = text
         _LOGGER.log(level, "%s", text, extra=dict(fields))
+
+    def _record_commit_wedge(self, key: str, text: str, fields: Mapping[str, object]) -> None:
+        """Persist a repeating commit anomaly into the newest attempt control dir."""
+
+        if key in self._commit_wedge_recorded:
+            return
+        job_key = fields.get("job_key")
+        placement = fields.get("placement")
+        if not isinstance(job_key, str) or not isinstance(placement, str):
+            return
+        try:
+            marker = self.workspace.find_marker_at(job_key, normalize_placement(placement))
+            if marker is None or marker.kind != "committing":
+                return
+            control = self._attempt_control_path(marker, self._read_frame(marker))
+            control.mkdir(parents=True, exist_ok=True)
+            write_json_atomic(
+                control / "commit-wedge.json",
+                {
+                    "format": "httk-workflow-commit-wedge",
+                    "format_version": 1,
+                    "error": text,
+                    "manager_id": self.manager_id,
+                    "recorded_at": utc_now(),
+                },
+                durable=self.workspace.durable,
+            )
+        except (FormatError, WorkflowError, OSError) as exc:
+            _LOGGER.debug("cannot record the commit wedge of %s: %s", job_key, exc)
+            return
+        self._commit_wedge_recorded.add(key)
 
     @property
     def heartbeat_period(self) -> float:
@@ -828,30 +1042,40 @@ class TaskManager:
             )
         return signalled
 
-    def run_until_idle(self, *, timeout: float = 60.0, poll_interval: float = 0.02) -> None:
-        """Run until no local process or immediately actionable marker remains.
+    def run_until_idle(self, *, timeout: float = 60.0, poll_interval: float = 0.02) -> WorkCensus:
+        """Run until no local process or claimable marker remains, and report it.
+
+        A job this manager cannot progress — one whose pool, capability, or
+        executor it does not serve, or one waiting on children or paused for an
+        operator — does not keep it awake: it is counted in the returned census
+        instead. The census is what the caller prints as the idle summary.
 
         :param timeout: Stop waiting after this many seconds.
         :param poll_interval: Wait this long between scheduling passes.
-        :raises TimeoutError: If the manager does not become idle before the timeout.
+        :return: The work census of the settled workspace.
+        :raises httk.workflow.manager.NotIdleError: If the manager does not become idle before the timeout.
         """
 
         deadline = time.monotonic() + timeout
         quiet_passes = 0
         while time.monotonic() < deadline:
             changed = self.tick()
-            actionable = self._has_actionable_work()
-            if not changed and not self._running and not actionable:
+            if changed or self._running:
+                quiet_passes = 0
+                time.sleep(poll_interval)
+                continue
+            census = self._work_census()
+            if census.actionable:
+                quiet_passes = 0
+            else:
                 quiet_passes += 1
                 if quiet_passes >= 2:
-                    return
-            else:
-                quiet_passes = 0
+                    return census
             time.sleep(poll_interval)
-        raise TimeoutError("workflow manager did not become idle")
+        raise NotIdleError(self._work_census())
 
-    def _has_actionable_work(self) -> bool:
-        return _manager_scheduling.has_actionable_work(self)
+    def _work_census(self) -> WorkCensus:
+        return _manager_scheduling.work_census(self)
 
     def _load_job_and_state(self, marker: Marker, pass_name: str) -> tuple[JobDefinition, StateFrame] | None:
         """Load one job and its state frame, skipping and reporting damage.
@@ -1384,9 +1608,20 @@ class TaskManager:
         if job.workdir_mode == "persistent":
             if self.unsafe_persistent_takeover:
                 return {"evidence": "unsafe_persistent_takeover", "heartbeat_age_seconds": age, "unsafe": True}
-            _LOGGER.debug(
-                "leaving %s to its persistent writer: takeover is not proven safe",
-                marker.job_key,
+            writer_host = self._recorded_writer_host(marker, state)
+            where = f" on host {writer_host}" if writer_host and writer_host != self.hostname else ""
+            self._report_anomaly(
+                f"persistent_takeover:{marker.job_key}",
+                f"leaving persistent-workdir job {marker.job_key} to its writer{where}: an expired lease alone "
+                "cannot prove the writer stopped, and a second writer would corrupt the shared directory. "
+                f"Run a manager on that host, or pass --unsafe-persistent-takeover to override.",
+                self._event(
+                    "persistent_takeover_deferred",
+                    marker,
+                    previous_manager=state.manager_id,
+                    writer_host=writer_host,
+                ),
+                level=logging.INFO,
             )
             return None
         if self.unsafe_isolated_takeover:
@@ -1697,6 +1932,16 @@ class TaskManager:
         age = self._heartbeat_age(manager_id)
         return age is not None and age <= lease_seconds
 
+    def _recorded_writer_host(self, marker: Marker, state: StateFrame) -> str | None:
+        """Return the host that launched the recorded attempt, when it named one."""
+
+        try:
+            process = read_json(self._attempt_control_path(marker, state) / "process.json")
+        except (FormatError, WorkflowError, OSError):
+            return None
+        host = process.get("hostname")
+        return host if isinstance(host, str) and host else None
+
     def _attempt_writer_dead(self, marker: Marker, state: StateFrame) -> bool:
         """Report whether the process of the recorded attempt is provably gone.
 
@@ -1744,15 +1989,62 @@ class TaskManager:
     ) -> str | None:
         return _manager_joins.child_workdir_path(self, marker, state, payload)
 
-    def _join_child_grace_expired(self, marker: Marker, child_id: str) -> bool:
-        now = time.monotonic()
-        recorded = self._join_unresolved.get(marker.job_key)
-        if recorded is None or recorded[0] != child_id:
-            recorded = (child_id, now)
-            self._join_unresolved[marker.job_key] = recorded
-        if now - recorded[1] < self.join_grace_seconds:
+    def _handle_unresolved_join(self, marker: Marker, state: StateFrame, child_id: str) -> bool:
+        """Persist or apply the grace for a waiting job with an unresolvable child.
+
+        The first instant a child is found unresolvable is written into the
+        waiting frame, so the grace is measured from that instant and survives a
+        manager restart instead of resetting to zero the way an in-memory clock
+        did. When the grace has elapsed the join fails; otherwise the frame is
+        left recording when the wait began.
+
+        :param marker: The waiting job whose join child is unresolvable.
+        :param state: The waiting job's current state frame.
+        :param child_id: The identifier of the unresolvable child.
+        :return: Whether this pass changed state.
+        """
+
+        now = time.time()
+        recorded = state.join_unresolved
+        # The instant is stored as an ISO timestamp like every other frame time,
+        # not a raw epoch float, so 'job why' can render it readably; it is
+        # parsed back to seconds only for the grace comparison.
+        first_at_iso: str | None = None
+        if isinstance(recorded, Mapping) and recorded.get("child_id") == child_id:
+            candidate = recorded.get("first_unresolved_at")
+            if isinstance(candidate, str) and candidate:
+                first_at_iso = candidate
+        already_recorded = first_at_iso is not None
+        try:
+            first_at = timestamp_seconds(first_at_iso) if first_at_iso is not None else now
+        except ValueError:
+            first_at, first_at_iso, already_recorded = now, None, False
+        if now - first_at >= self.join_grace_seconds:
+            self._fail_waiting(
+                marker,
+                state,
+                "dependency_failure",
+                f"join child {child_id} cannot be resolved in this workspace",
+                "join_unresolvable",
+            )
+            return True
+        if already_recorded:
+            _LOGGER.debug("join child %s of %s is still within the grace", child_id, marker.job_key)
             return False
-        del self._join_unresolved[marker.job_key]
+        # Record the first-unresolved instant exactly once, rewriting the waiting
+        # frame in place so a restart reads the same deadline. The members a
+        # waiting frame legitimately holds — the carried activation, its join,
+        # and its next step — are preserved verbatim.
+        base = state.select([*CARRIED_STATE_MEMBERS, "next_step", "join"])
+        self._transition(
+            marker,
+            "waiting",
+            StateFrame.of(
+                base,
+                join_unresolved={"child_id": child_id, "first_unresolved_at": utc_now()},
+                reason="join_child_unresolved",
+            ),
+        )
         return True
 
     def _fail_waiting(
@@ -1763,7 +2055,6 @@ class TaskManager:
         message: str,
         reason: str,
     ) -> None:
-        self._join_unresolved.pop(marker.job_key, None)
         try:
             self._transition(
                 marker,

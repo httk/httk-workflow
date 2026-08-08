@@ -490,7 +490,7 @@ def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: W
     workspace_name = register_ws(context, workspace.root, "language-collect-into")
     store_path = tmp_path / "results.sqlite"
     assert command(["collect", workspace_name, "--into", str(store_path)], context) == 0
-    report = json.loads(capsys.readouterr().out)
+    report = json.loads(capsys.readouterr().out.splitlines()[0])
     assert report["outputs"]["spoken"]["type"] == "files"
     assert report["stored"]["entries"]
     assert report["stored"]["run"]

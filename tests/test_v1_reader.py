@@ -3,6 +3,7 @@
 import bz2
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -136,14 +137,19 @@ def test_v1_collect_cli_json_lines(tmp_path: Path, capsys: pytest.CaptureFixture
     package = _package(tmp_path / "package")
     assert (
         command(
-            ["v1", "collect", str(root), "--workflow-dir", str(package), "--json"],
+            ["v1", "collect", str(root), "--workflow-dir", str(package)],
             CLIContext("httk", tmp_path),
         )
         == 0
     )
-    report = json.loads(capsys.readouterr().out)
+    lines = capsys.readouterr().out.splitlines()
+    report = json.loads(lines[0])
     assert report["workflow"] == "tests.v1.finished"
     assert report["outputs"]["result"]["type"] == "_httk_records"
+    assert report["identity_stable"] is False
+    summary = json.loads(lines[-1])
+    assert summary["format"] == "httk-workflow-v1-collect-summary"
+    assert summary["finished"] == 1 and summary["skipped_no_rundir"] == 0
 
 
 def test_synthesized_ids_are_canonical_and_path_distinct(tmp_path: Path) -> None:
@@ -184,3 +190,24 @@ def test_manifest_ids_survive_relocation_but_path_ids_do_not(tmp_path: Path) -> 
         (task / "ht.manifest.bz2").unlink()
     without_manifest = [next(finished_tasks(root)) for root in roots]
     assert without_manifest[0].immutable_id != without_manifest[1].immutable_id
+
+
+def test_collect_finished_tree_reports_harvest_stats_and_stable_identity(tmp_path: Path) -> None:
+    root = tmp_path / "Runs"
+    root.mkdir()
+    good = _task(root, "ht.task.default.good.cleanup.0.unclaimed.3.finished", ("2021-06-07_08.09.10",))
+    (good / "ht.manifest.bz2").write_bytes(bz2.compress(b"project-key\n\nbody\nsignature\n"))
+    _task(root, "ht.task.default.bad.cleanup.0.unclaimed.3.broken", ("2021-01-01_00.00.00",))
+    _task(root, "ht.task.default.gone.cleanup.0.unclaimed.3.timeout", ("2021-01-01_00.00.00",))
+    _task(root, "ht.task.default.empty.cleanup.0.unclaimed.3.finished", ())
+    package = _package(tmp_path / "package")
+
+    stats: dict[str, object] = {}
+    collected = list(collect_finished_tree(root, workflow_dir=package, stats=stats))
+
+    assert len(collected) == 1
+    assert collected[0].identity_stable is True
+    unfinished = stats["unfinished_by_status"]
+    assert isinstance(unfinished, Mapping)
+    assert dict(unfinished) == {"broken": 1, "timeout": 1}
+    assert stats["skipped_no_rundir"] == 1

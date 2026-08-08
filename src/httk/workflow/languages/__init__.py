@@ -66,8 +66,13 @@ def _load_outputs(record: "JobRecord", filename: str, prefix: str) -> Mapping[st
             continue
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-        except OSError:
-            continue
+        except (OSError, ValueError) as exc:
+            # A published-but-unreadable document (truncated JSON, permission
+            # loss) degrades this one job through the per-job path rather than
+            # aborting the whole sweep.
+            raise LanguageOutputsMissingError(
+                f"{_identity(record)}: outputs document is missing or unreadable; path {path!s}: {exc}"
+            ) from exc
         if not isinstance(value, Mapping):
             raise ValueError(f"{_identity(record)}: outputs document {path} must be a JSON object")
         return value
@@ -214,6 +219,7 @@ class WorkflowLanguage:
     :param has_default_collector: Provide a default collector path.
     :param allows_modes: Permit manifest data and workdir mode overrides.
     :param environment: Declare language-provided environment metadata.
+    :param required_modules: Name the importable modules a job of this language needs at run time.
     """
 
     name: str
@@ -229,6 +235,7 @@ class WorkflowLanguage:
     has_default_collector: bool = True
     allows_modes: bool = True
     environment: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    required_modules: tuple[str, ...] = ()
 
 
 def available_languages() -> tuple[str, ...]:

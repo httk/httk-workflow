@@ -160,6 +160,35 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
     return 0
 
 
+def handle_workspace_managers(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """List the managers registered to serve one workspace.
+
+    Answers "what serves this workspace?" directly, rather than by running
+    ``job why`` on an arbitrary job: one line per registered manager, its
+    live-or-stale liveness against the default lease, and what it serves.
+    """
+
+    workspace = Workspace(_local_root(arguments, context, action="list its managers"), mutable=False)
+    managers = read_managers(workspace)
+    if arguments.json:
+        print(json.dumps([manager.as_mapping() for manager in managers], indent=2, sort_keys=True))
+        return 0
+    if not managers:
+        print("no manager has ever registered in this workspace")
+        return 0
+    for manager in managers:
+        live = "live" if manager.alive(lease_seconds=DEFAULT_LEASE_SECONDS) else "stale"
+        age = "no heartbeat" if manager.heartbeat_age_seconds is None else f"{manager.heartbeat_age_seconds:.0f}s ago"
+        pools = "any" if manager.accept_any_pool else ",".join(sorted(manager.pools)) or "-"
+        print(
+            f"{manager.manager_id}\t{live}\t{age}\t{manager.hostname or '-'}\t"
+            f"pools={pools}\tcapabilities={','.join(sorted(manager.capabilities)) or '-'}\t"
+            f"executors={','.join(sorted(manager.executors)) or '-'}\t"
+            f"runner-modules={','.join(manager.runner_modules) or '-'}"
+        )
+    return 0
+
+
 def _policy_value(key: str, text: str) -> object:
     """Parse one command-line policy value as the JSON it denotes."""
 
@@ -545,6 +574,15 @@ def build_workspace_parser(
             handler=handle_workspace_status,
         )
     )
+    managers = _leaf(
+        group,
+        "managers",
+        summary="list the managers serving this workspace",
+        description="List every manager registered to serve one workspace, live or stale",
+        handler=handle_workspace_managers,
+    )
+    add_workspace_argument(managers, help_text="the workspace whose managers to list")
+    managers.add_argument("--json", action="store_true", help="print the managers as one JSON array")
 
     _, policy_actions = _group(
         group,

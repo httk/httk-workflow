@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import uuid
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -23,7 +24,7 @@ from typing import TYPE_CHECKING
 
 import httk.core
 
-from ...collecting import CollectedJob, JobRecord, _assemble_collected
+from ...collecting import CollectedJob, JobRecord, _assemble_collected, _degraded_job
 from ...models import make_job_key
 from ...packages import load_workflow_package
 
@@ -72,6 +73,17 @@ class V1FinishedTask:
 
         fallback = self._stable_path or f"{self.directory.name}/{self.rundir.name}"
         return "httk-v1:" + (self.manifest_hash or hashlib.sha256(fallback.encode()).hexdigest())
+
+    @property
+    def identity_stable(self) -> bool:
+        """Whether this task's identity is manifest-backed and relocation-stable.
+
+        A task without a readable ``ht.manifest`` falls back to a path-derived
+        identity that changes when the tree moves, so its collected result cannot
+        be de-duplicated across machines; this is ``False`` for those tasks.
+        """
+
+        return self.manifest_hash is not None
 
 
 def _dated_runs(directory: Path) -> list[tuple[datetime, Path]]:
@@ -170,29 +182,46 @@ def _finished_task(directory: Path, parsed: Mapping[str, str], root: Path) -> V1
     )
 
 
-def finished_tasks(root: str | os.PathLike[str]) -> Iterator[V1FinishedTask]:
+def finished_tasks(root: str | os.PathLike[str], *, stats: dict[str, object] | None = None) -> Iterator[V1FinishedTask]:
     """Lazily yield finished v1 tasks in deterministic walk order.
 
     Every ht.task.* directory is a walk boundary, so nested subtasks are not
     scanned. ht.run.current is intentionally ignored because only dated run
     names define a computation date.
+
+    When *stats* is supplied it is populated, once the walk is exhausted, with
+    ``unfinished_by_status`` (a status-keyed :class:`collections.Counter` of the
+    tasks the regex matched that were not ``.finished``) and ``skipped_no_rundir``
+    (the count of finished tasks dropped for lacking a dated run directory).
+
+    :param root: Walk this finished result tree.
+    :param stats: Receive the finished-tree counters, or leave unpopulated.
+    :yields: One finished, run-bearing task per readable directory.
     """
 
     base = Path(root)
+    unfinished: Counter[str] = Counter()
+    skipped_no_rundir = 0
     for walk_root, dirs, _files in os.walk(base, topdown=True):
         dirs[:] = sorted(dirs)
         for name in tuple(dirs):
             if not name.startswith("ht.task."):
                 continue
             dirs.remove(name)
-            if not name.endswith(".finished"):
-                continue
             parsed = parse_v1_task_name(name)
             if parsed is None:
                 continue
+            if parsed["status"] != "finished":
+                unfinished[parsed["status"]] += 1
+                continue
             task = _finished_task(Path(walk_root) / name, parsed, base)
-            if task is not None:
-                yield task
+            if task is None:
+                skipped_no_rundir += 1
+                continue
+            yield task
+    if stats is not None:
+        stats["unfinished_by_status"] = unfinished
+        stats["skipped_no_rundir"] = skipped_no_rundir
 
 
 def run_directory(record: JobRecord) -> Path:
@@ -263,12 +292,22 @@ def collect_finished_tree(
     workflow_dir: str | os.PathLike[str] | None = None,
     extract: Callable[[V1FinishedTask], Mapping[str, object]] | None = None,
     workflow_id: str = "httk.v1.finished",
+    stats: dict[str, object] | None = None,
 ) -> Iterator[CollectedJob]:
     """Collect old finished trees through a package hook or direct extractor.
 
     Exactly one of workflow_dir and extract is required. Unlike live
     collection, a hook/extractor failure degrades only that task and the sweep
     continues: old trees are expected to contain uneven historical results.
+
+    :param root: Collect the finished tree rooted here.
+    :param workflow_dir: Locate the directory workflow package, when used.
+    :param extract: Supply a direct per-task extractor, when used.
+    :param workflow_id: Name the synthesized workflow, for the extractor path.
+    :param stats: Receive the finished-tree counters from :func:`finished_tasks`.
+    :yields: One collected job per finished task, degraded ones included.
+    :raises ValueError: If not exactly one of ``workflow_dir``/``extract`` is
+        given, or the package declares no collector.
     """
 
     if (workflow_dir is None) == (extract is None):
@@ -284,7 +323,10 @@ def collect_finished_tree(
         workflow_id = provider.workflow_id
         declaration = provider.declarations.get("workflow")
     base = Path(root).resolve()
-    for task in finished_tasks(base):
+    unstable = 0
+    for task in finished_tasks(base, stats=stats):
+        if not task.identity_stable:
+            unstable += 1
         record = _record(base, task, workflow_id, declaration)
         run = httk.core.Run(
             workflow_declaration_uri=None if provider is None else provider.declaration_uri,
@@ -304,6 +346,15 @@ def collect_finished_tree(
                 raise ValueError("collector must return a mapping of output roles")
             if provider is None:
                 record = _infer_record(record, raw_outputs)
-            yield _assemble_collected(f"{record.workspace_id}:{record.job_id}", record, provider, run, raw_outputs)
+            collected = _assemble_collected(
+                f"{record.workspace_id}:{record.job_id}", record, provider, run, raw_outputs
+            )
         except Exception as exc:
-            yield CollectedJob(workflow_id, {}, (), run, (), record, str(exc))
+            collected = _degraded_job(record, provider, run, f"{task.directory}: {exc}")
+        yield replace(collected, identity_stable=task.identity_stable)
+    if unstable:
+        _LOGGER.warning(
+            "v1 finished-tree collect: %d task(s) have path-derived (unstable) identities without a manifest hash; "
+            "moving the tree changes their collected identity",
+            unstable,
+        )

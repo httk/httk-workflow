@@ -32,7 +32,7 @@ from .errors import (
     WorkspaceCorruptionError,
     WorkspaceUnavailableError,
 )
-from .manager import TaskManager
+from .manager import NotIdleError, TaskManager, WorkCensus
 from .runtime_builders import JobState
 from .scaffold import ScaffoldedJob, new_job, new_jobs
 from .sdk import (
@@ -56,6 +56,7 @@ __all__ = [
     "InstantiateHandler",
     "JobRecord",
     "JobState",
+    "NotIdleError",
     # Execution / authoring surface.
     "Runner",
     "RunnerRef",
@@ -65,9 +66,10 @@ __all__ = [
     "TransactionError",
     "TransitionLostError",
     "UnsupportedExtensionError",
+    # Orchestration and management entry points.
+    "WorkCensus",
     # The public exception family.
     "WorkflowError",
-    # Orchestration and management entry points.
     "Workspace",
     "WorkspaceCorruptionError",
     "WorkspaceUnavailableError",

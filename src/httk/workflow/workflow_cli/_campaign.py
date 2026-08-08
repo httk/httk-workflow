@@ -83,33 +83,69 @@ def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -
 def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Collect every partition of this campaign, one workspace after another."""
 
-    records = campaign_collect(
-        states=arguments.state or DEFAULT_COLLECT_STATES,
-        placement=arguments.placement,
-        partitions=arguments.partition or None,
-        project=context.cwd,
-    )
-    if arguments.raw:
-        for record in records:
-            print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
-        return 0
+    from ..collecting import CollectedJob, job_records
     from ..collecting import collect as collect_jobs
-    from ._collect import _collected_mapping
+    from ._collect import _collected_mapping, _emit_collect_summary, _store_collected
 
+    if arguments.into is not None and arguments.raw:
+        raise ValueError("--into cannot be combined with --raw")
     config = read_campaign(context.cwd)
     selected = sorted(arguments.partition or config.partitions)
-    for partition in selected:
+    states = arguments.state or DEFAULT_COLLECT_STATES
+    skipped = 0
+
+    def _skip(_job_key: str) -> None:
+        nonlocal skipped
+        skipped += 1
+
+    def _workspace(partition: str) -> Workspace:
         binding = resolve_workspace(config.partitions[partition], project=context.cwd)
         if binding.remote != LOCAL_REMOTE:
-            raise ValueError(f"campaign partition {partition!r} is remote; collect it at its workspace first")
+            raise ValueError(
+                f"campaign partition {partition!r} is the remote workspace {config.partitions[partition]!r} on "
+                f"{binding.remote!r}; fetch it home with `httk workflow transfer` before collecting the campaign"
+            )
         assert binding.path is not None
-        for item in collect_jobs(
-            Workspace(binding.path, mutable=False),
-            states=arguments.state or DEFAULT_COLLECT_STATES,
-            placement=arguments.placement,
-        ):
-            print(json.dumps(_collected_mapping(item), sort_keys=True, separators=(",", ":")))
-    return 0
+        return Workspace(binding.path, mutable=False)
+
+    if arguments.raw:
+        collected = 0
+        for partition in selected:
+            for record in job_records(
+                _workspace(partition), states=states, placement=arguments.placement, on_skipped=_skip
+            ):
+                print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
+                collected += 1
+        return _emit_collect_summary(
+            collected=collected, degraded=0, unfulfilled_roles=0, storage_errors=0, skipped_unreadable=skipped
+        )
+
+    items: list[CollectedJob] = []
+    for partition in selected:
+        items.extend(
+            collect_jobs(
+                _workspace(partition),
+                states=states,
+                placement=arguments.placement,
+                allow_job_collector=arguments.allow_job_collector,
+                on_skipped=_skip,
+            )
+        )
+    reports = (
+        _store_collected(items, arguments.into)
+        if arguments.into is not None
+        else [_collected_mapping(item) for item in items]
+    )
+    for report in reports:
+        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+    degraded = sum(1 for item in items if item.missing_collector is not None)
+    return _emit_collect_summary(
+        collected=len(items) - degraded,
+        degraded=degraded,
+        unfulfilled_roles=sum(len(item.unfulfilled) for item in items),
+        storage_errors=sum(1 for report in reports if report.get("storage_error") is not None),
+        skipped_unreadable=skipped,
+    )
 
 
 def handle_campaign_start_managers(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -264,6 +300,16 @@ def build_campaign_parser(
         help="collect only jobs at or below this placement",
     )
     collect_parser.add_argument("--raw", action="store_true", help="print raw collect records")
+    collect_parser.add_argument(
+        "--allow-job-collector",
+        action="store_true",
+        help="allow collectors loaded and verified from a pinned workspace workflow tree",
+    )
+    collect_parser.add_argument(
+        "--into",
+        metavar="PATH",
+        help="save collected entries, runs, and products into a file-backed SQLite store",
+    )
 
     managers = _leaf(
         group,

@@ -473,9 +473,13 @@ def test_the_command_streams_one_record_per_line_and_round_trips(
 
     assert command(["collect", ws, "--raw"], context) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 3
+    summary = json.loads(lines[-1])
+    assert summary["format"] == "httk-workflow-collect-summary" and summary["format_version"] == 1
+    assert summary["collected"] == 3 and summary["skipped_unreadable"] == 0
+    record_lines = lines[:-1]
+    assert len(record_lines) == 3
     labels = []
-    for line in lines:
+    for line in record_lines:
         mapping = json.loads(line)
         assert mapping["format"] == COLLECT_FORMAT and mapping["format_version"] == 1
         record = JobRecord.from_mapping(mapping)
@@ -515,8 +519,10 @@ def test_the_command_selects_states_and_placements(
         == 0
     )
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 1
-    record = JobRecord.from_mapping(json.loads(lines[0]))
+    assert json.loads(lines[-1])["format"] == "httk-workflow-collect-summary"
+    record_lines = lines[:-1]
+    assert len(record_lines) == 1
+    record = JobRecord.from_mapping(json.loads(record_lines[0]))
     assert record.job_id == identifiers["beta"] and record.state == "failed"
 
     # An unusable state is refused by the parser rather than silently ignored.

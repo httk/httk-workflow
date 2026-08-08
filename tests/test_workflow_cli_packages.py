@@ -104,7 +104,39 @@ def test_job_new_accepts_workflow_dir_and_batches_parameter_sources(tmp_path: Pa
         assert report["runner"]["sha256"] == tree_digest(package)
         assert report["placement"] == "project/screening"
         job = json.loads((Path(report["payload_path"]) / "job.json").read_text(encoding="utf-8"))
-        assert job["parameters"] == {"kpoint_density": 30.0}
+        # The declared 'label' default is applied for the name nobody supplied,
+        # and the undeclared 'kpoint_density' is kept (it only warns on stderr).
+        assert job["parameters"] == {"kpoint_density": 30.0, "label": "test"}
+
+
+def test_job_new_batch_reconciles_structure_names_and_reports_skips_and_count(tmp_path: Path, capsys) -> None:
+    context = _context(tmp_path)
+    workspace = _workspace(tmp_path, context)
+    package = _cli_package(tmp_path / "package")
+    structures = tmp_path / "structures"
+    structures.mkdir()
+    # POSCAR.Si2O registers no reader of its own but is a structure name, so the
+    # scanner keeps it and reads it as POSCAR — matching the SDK's structure_files.
+    (structures / "POSCAR.Si2O").write_text(_POSCAR, encoding="utf-8")
+    (structures / "mp-1.vasp").write_text(_POSCAR, encoding="utf-8")
+    for index in range(7):
+        (structures / f"notes-{index}.txt").write_text("skip me", encoding="utf-8")
+
+    assert (
+        command(
+            ["job", "new", workspace, "--workflow-dir", str(package), "--input-from", "structure", str(structures)],
+            context,
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    # Two jobs were submitted, one per structure the reconciled scanner kept.
+    assert len(captured.out.splitlines()) == 2
+    # One skip note names the unreadable files, truncated with a (+K more) tail.
+    assert "skipped 7 of 9 files in" in captured.err
+    assert "notes-0.txt" in captured.err and "(+2 more)" in captured.err
+    # And one submission count closes the batch.
+    assert "submitted 2 jobs" in captured.err
 
 
 def test_job_new_accepts_a_package_path_and_rejects_workflow_selection_errors(tmp_path: Path, capsys) -> None:
