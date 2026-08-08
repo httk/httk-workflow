@@ -40,6 +40,8 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`native_c_api` — the same surface in C, and the foundation for Fortran bindings
 - {doc}`native_fortran_api` — the same surface in modern Fortran, over the C bindings
 - {doc}`native_rust_api` — the same surface in safe, std-only Rust
+- {doc}`native_perl_api` — the same surface in pure, core-only Perl
+- {doc}`native_ada_api` — the same surface in Ada 2012, over the C bindings
 - {doc}`sdk_parity` — the normative table the language SDKs must agree with
 - {doc}`vasp_runners` — the packaged runners and relaxation report, for campaigns that write none
 - {doc}`workflow_packages` — authoring directory packages and their manifest
@@ -107,6 +109,8 @@ native_bash_api
 native_c_api
 native_fortran_api
 native_rust_api
+native_perl_api
+native_ada_api
 sdk_parity
 vasp_runners
 workflow_packages

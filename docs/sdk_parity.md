@@ -35,11 +35,22 @@ invocation of one {py:mod}`httk.workflow.shell_bridge` subcommand, so a Rust
 runner publishes the same bytes too; its Rust-to-C mapping lives in
 {doc}`native_rust_api`.
 
+A sixth SDK, {doc}`in pure Perl <native_perl_api>`, is another thin bridge client:
+its object-shaped `Runner` and `Attempt` surface uses core Perl only, and each
+bridge-backed method invokes the same {py:mod}`httk.workflow.shell_bridge`
+subcommand. Its Perl-to-Python/Bash mapping lives in {doc}`native_perl_api`.
+
+A seventh SDK, {doc}`in Ada <native_ada_api>`, is another thin binding client:
+its `Interfaces.C` package wraps the existing C library, whose bridge-backed
+methods invoke the same {py:mod}`httk.workflow.shell_bridge` subcommand. The C
+library owns Ada registration and dispatch, so its Ada-to-C mapping lives in
+{doc}`native_ada_api` and no Ada protocol implementation is introduced.
+
 One thing the SDKs do *not* share is the `error.json` breadcrumb's `exception`
 label for a handler that ends abnormally: Bash records `ShellError`, C records
-`CError`, Rust records `RustError`, and the Fortran bindings inherit `CError`
-because they end through the C library. The label names the language a handler
-died in; the outcome the manager acts on is identical.
+`CError`, Rust records `RustError`, Perl records `PerlError`, and the Fortran
+and Ada bindings inherit `CError` because they end through the C library. The label names
+the language a handler died in; the outcome the manager acts on is identical.
 
 Both languages perform their work through exactly one implementation — the Bash
 functions are thin calls into {py:mod}`httk.workflow.shell_bridge`, which drives
