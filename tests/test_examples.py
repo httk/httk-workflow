@@ -144,13 +144,15 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     assert (published / "INCAR").is_file() and (published / "KPOINTS").is_file()
     assert (payload / "files" / "POSCAR").read_text(encoding="utf-8").splitlines()[0] == "silicon"
 
-    # And the last documented command printed exactly one collected summary.
+    # And the last documented command printed one collected record and the sweep summary.
     records = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{")]
-    assert len(records) == 1
+    assert len(records) == 2
     assert records[0]["format"] == "httk-workflow-collected"
     assert records[0]["workflow"] == "httk.vasp.relax"
     assert records[0]["missing_collector"] is None
     assert records[0]["job_key"].startswith("silicon--")
+    assert records[1]["format"] == "httk-workflow-collect-summary"
+    assert records[1]["collected"] == 1 and records[1]["degraded"] == 0
     assert (work / "results.sqlite").is_file()
     assert (payload / "run" / "postprocess" / "relaxation-plot" / "relaxation_energies.svg").is_file()
 

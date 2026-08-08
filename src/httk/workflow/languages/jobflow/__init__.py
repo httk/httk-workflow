@@ -114,7 +114,7 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
     def instantiate(ctx: object) -> object:
         """Stage file inputs and preserve literal JSON inputs for jobflow."""
 
-        from httk.workflow.scaffold import InstantiateContext
+        from httk.workflow.scaffold import InstantiateContext, _has_path_separator
 
         assert isinstance(ctx, InstantiateContext)
         inputs: dict[str, dict[str, object]] = {}
@@ -122,12 +122,32 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
             metadata = request.inputs.get(name, {})
             label = str(metadata.get("port", name))
             source: Path | None = None
+            resolved: Path | None = None
+            text: str | None = None
             if isinstance(value, (str, os.PathLike)):
-                candidate = Path(os.fspath(value))
-                source = (candidate if candidate.is_absolute() else root / candidate).resolve()
-                if not source.is_file():
-                    source = None
+                text = os.fspath(value)
+                candidate = Path(text)
+                resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+                if resolved.is_file():
+                    source = resolved
             if source is None:
+                # jobflow resolves file inputs against the package/document root,
+                # so the mistyped-path decision is made from that resolved path —
+                # not the current directory. A value that carries a separator, or
+                # that exists as a file somewhere the run can see (but not under
+                # the root), is a real file the run cannot reach, not a literal;
+                # the message names where jobflow actually looked.
+                if resolved is not None and text is not None:
+                    probe = Path(text).expanduser()
+                    if resolved.is_dir() or probe.is_dir():
+                        raise ValueError(
+                            f"workflow input {name!r} is a directory, not a file: {resolved}; supply a regular file"
+                        )
+                    if _has_path_separator(text) or probe.exists():
+                        raise ValueError(
+                            f"workflow input {name!r} looks like a file path but no file exists under the workflow "
+                            f"root at {resolved}; supply an existing file, or a literal value without path separators"
+                        )
                 try:
                     json.dumps(value)
                 except (TypeError, ValueError) as exc:
@@ -210,4 +230,7 @@ LANGUAGE = WorkflowLanguage(
     validate_runner=_validate_runner,
     prepare=_prepare,
     collect=collect,
+    # pymatgen is required only when a job supplies structure inputs, so it is
+    # named in the precheck finding text rather than checked unconditionally.
+    required_modules=("jobflow", "maggma", "monty"),
 )

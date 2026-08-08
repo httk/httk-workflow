@@ -194,8 +194,10 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     # (e) An ordinary collect of the local workspace reports it.
     assert command(["collect", "home", "--state", "succeeded", "--raw"], campaign.context) == 0
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 1
-    record = JobRecord.from_mapping(json.loads(lines[0]))
+    assert json.loads(lines[-1])["format"] == "httk-workflow-collect-summary"
+    record_lines = lines[:-1]
+    assert len(record_lines) == 1
+    record = JobRecord.from_mapping(json.loads(record_lines[0]))
     assert record.job_id == campaign.job_id
     assert record.workspace_id == campaign.local.workspace_id
     assert record.workdir is not None

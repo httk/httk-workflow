@@ -2,7 +2,8 @@
 
 import logging
 import uuid
-from typing import Any
+from collections import Counter
+from typing import TYPE_CHECKING, Any
 
 from .errors import (
     FormatError,
@@ -11,6 +12,9 @@ from .errors import (
     WorkflowError,
 )
 from .models import JobDefinition, Marker, StateFrame
+
+if TYPE_CHECKING:
+    from .manager import WorkCensus
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
 
@@ -194,14 +198,90 @@ def claim_pass(manager: Any, changed: bool, logger: Any) -> bool:
     return changed
 
 
-def has_actionable_work(manager: Any) -> bool:
-    for marker in manager._walk(("submitted", "ready", "committing", "cancelling")):
+def _classify_pending(manager: Any, marker: Marker, blocked: dict[str, Counter[str]]) -> bool:
+    """Classify one submitted or ready marker, returning whether it is actionable.
+
+    A submitted job only needs its executor served to register; a ready job must
+    also match the pool and capabilities. A job this manager cannot progress is
+    attributed to exactly one missing requirement, in the same order
+    :func:`eligible_ready` checks them.
+    """
+
+    try:
+        job = manager.workspace.load_job(marker)
+    except (WorkflowError, OSError):
+        # An unreadable submitted job may still register once repaired; an
+        # unreadable ready job is a local defect the scheduler already reports.
+        return marker.kind == "submitted"
+    if manager._executor_for(job) is None:
+        blocked["executor"][job.runner_executor] += 1
+        return False
+    if marker.kind == "submitted":
+        return True
+    if not manager.accept_any_pool and job.claim_pool not in manager.pools:
+        blocked["pool"][job.claim_pool] += 1
+        return False
+    missing = job.required_capabilities - manager.capabilities
+    if missing:
+        blocked["capability"][min(missing)] += 1
+        return False
+    return True
+
+
+def work_census(manager: Any) -> "WorkCensus":
+    """Scan the workspace once and tag every job by why it is this manager's work.
+
+    Actionability applies exactly the claim predicates of :func:`eligible_ready`:
+    a ready job counts as actionable only if this manager could claim it. A
+    wrong-pool, missing-capability, or unserved-executor job is not actionable
+    — the manager can do nothing about it — so it is reported for the operator
+    instead of silently keeping the manager awake or silently letting it exit.
+    """
+
+    from .manager import WorkCensus
+
+    # ponytail: succeeded/failed are counted by an exhaustive marker walk. It is
+    # cheap per entry and runs only on a settled tick or at idle exit, never in
+    # the hot claim path, so no cursor or cache is warranted.
+    succeeded = failed = waiting = paused = 0
+    for marker in manager._walk(("succeeded", "failed", "waiting", "paused")):
+        if marker.kind == "succeeded":
+            succeeded += 1
+        elif marker.kind == "failed":
+            failed += 1
+        elif marker.kind == "waiting":
+            waiting += 1
+        else:
+            paused += 1
+    blocked: dict[str, Counter[str]] = {"executor": Counter(), "pool": Counter(), "capability": Counter()}
+    ready_claimable = 0
+    actionable = 0
+    for marker in manager._walk(("submitted", "ready")):
+        if _classify_pending(manager, marker, blocked):
+            actionable += 1
+            if marker.kind == "ready":
+                ready_claimable += 1
+    unreadable = 0
+    for marker in manager._walk(("committing", "cancelling")):
         try:
             job = manager.workspace.load_job(marker)
         except (WorkflowError, OSError):
-            if marker.kind == "submitted":
-                return True
+            # A committing/cancelling job whose definition cannot be read is not
+            # this manager's work: no pass can advance it, so counting it
+            # actionable used to spin the manager to its idle timeout. The
+            # scheduler already reports the damage as an anomaly; here it is a
+            # named census bucket so the operator sees it and idle exit is prompt.
+            unreadable += 1
             continue
         if manager._executor_for(job) is not None:
-            return True
-    return False
+            actionable += 1
+    return WorkCensus(
+        succeeded=succeeded,
+        failed=failed,
+        ready_claimable=ready_claimable,
+        ready_blocked={kind: dict(counter) for kind, counter in blocked.items() if counter},
+        waiting=waiting,
+        paused=paused,
+        actionable_count=actionable,
+        unreadable=unreadable,
+    )

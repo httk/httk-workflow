@@ -262,6 +262,35 @@ def test_pwd_language_collects_scalar_records_and_degrades_when_unregistered(
     assert "pwd-outputs.json" in degraded.missing_collector
 
 
+def test_registered_pwd_package_degrades_on_truncated_outputs_and_continues(
+    tmp_path: Path, workspace: Workspace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from httk.core.cli import CLIContext
+
+    from conftest import register_ws
+    from httk.workflow.workflow_cli import command
+
+    # The provider stays REGISTERED, so provider.collector IS the language
+    # collect. A truncated published outputs document must degrade only that job
+    # and let the sweep finish, not abort the whole sweep.
+    package = _package(tmp_path / "collect", _ARITHMETIC)
+    new_job(workspace, package, inputs={"x": 1})
+    bad = new_job(workspace, package, inputs={"x": 2})
+    _drive(workspace)
+    (bad.payload / "run" / "pwd-outputs.json").write_text('{"result":', encoding="utf-8")
+
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "pwd-degrade")
+    assert command(["collect", name], context) == 1
+    lines = capsys.readouterr().out.splitlines()
+    reports = [json.loads(line) for line in lines[:-1]]
+    summary = json.loads(lines[-1])
+    assert summary["collected"] == 1 and summary["degraded"] == 1
+    degraded = [report for report in reports if report["missing_collector"] is not None]
+    assert len(degraded) == 1 and "missing or unreadable" in degraded[0]["missing_collector"]
+    assert [report for report in reports if report["missing_collector"] is None]
+
+
 def test_pwd_manifest_collect_override_wins(
     tmp_path: Path, workspace: Workspace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -429,11 +458,42 @@ def test_pwd_language_rejects_non_json_input_at_submit(tmp_path: Path, workspace
         new_job(workspace, _package(tmp_path / "non-json", _ARITHMETIC), inputs={"x": object()})
 
 
+def test_pwd_missing_input_node_is_refused_at_submission(tmp_path: Path, workspace: Workspace) -> None:
+    document: dict[str, object] = {
+        "version": "0.1.0",
+        "nodes": [
+            {"id": 0, "type": "function", "value": "workflow.get_square"},
+            {"id": 1, "type": "input", "name": "x"},
+            {"id": 2, "type": "output", "name": "result"},
+        ],
+        "edges": [
+            {"target": 0, "targetPort": "x", "source": 1, "sourcePort": None},
+            {"target": 2, "targetPort": None, "source": 0, "sourcePort": None},
+        ],
+    }
+    package = _package(tmp_path / "missing-input", document)
+    with pytest.raises(ValueError, match="input node 'x' has neither a document value nor a supplied input"):
+        new_job(workspace, package)
+    # Supplying the input makes exactly the same document submissible.
+    job = new_job(workspace, package, inputs={"x": 5})
+    assert job.workflow.endswith("missing-input")
+
+
 def test_pwd_language_reserved_parameter_collision_fails(tmp_path: Path, workspace: Workspace) -> None:
+    # Supplied-value collision.
     with pytest.raises(ValueError, match="pwd_document"):
         new_job(workspace, _package(tmp_path / "collision", _ARITHMETIC), parameters={"pwd_document": "other.json"})
     with pytest.raises(ValueError, match="pwd_inputs"):
         new_job(workspace, _package(tmp_path / "input-collision", _ARITHMETIC), parameters={"pwd_inputs": {}})
+    # Declared-default collision: a manifest parameter named after reserved
+    # language wiring is refused before its default could reach that wiring.
+    declared = _package(
+        tmp_path / "declared-collision",
+        _ARITHMETIC,
+        runner_extra='\n[workflow.parameters.pwd_inputs]\ntype = "object"\ndefault = {x = 1}\n',
+    )
+    with pytest.raises(ValueError, match="collides with a reserved pwd parameter"):
+        new_job(workspace, declared)
 
 
 def test_the_packaged_pwd_runner_describes_one_step() -> None:

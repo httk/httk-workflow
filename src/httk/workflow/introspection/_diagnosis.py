@@ -1,6 +1,7 @@
 """Claim-precondition and job-progress diagnosis."""
 
 import json
+import socket
 import stat
 import time
 from collections.abc import Mapping, Sequence
@@ -8,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .._manager_runners import runner_module_allowed
 from .._util import read_json, timestamp_seconds
 from ..errors import WorkflowError
 from ..manifests import read_maintenance_lock
@@ -19,6 +21,7 @@ from ..models import (
     JobDefinition,
     Marker,
     normalize_placement,
+    parse_package_runner,
 )
 from ..workspace import Workspace
 from ._reading import (
@@ -28,8 +31,17 @@ from ._reading import (
     _optional_int,
     _optional_string,
     _state_of,
+    job_frames,
     read_error_breadcrumb,
 )
+
+#: The default packaged-runner module allowlist a manager publishes if its
+#: manifest names none, matching :data:`~httk.workflow.manager.DEFAULT_RUNNER_MODULES`.
+DEFAULT_RUNNER_MODULES = ("httk.workflow",)
+
+#: Attempts under an unlimited budget beyond which ``job why`` calls a job
+#: flapping rather than progressing.
+FLAPPING_ATTEMPTS = 10
 
 JOB_DIAGNOSIS_FORMAT = "httk-workflow-job-diagnosis"
 
@@ -50,6 +62,8 @@ class ManagerRecord:
     heartbeat_at: str | None
     heartbeat_age_seconds: float | None
     uid: int | None = None
+    runner_modules: tuple[str, ...] = DEFAULT_RUNNER_MODULES
+    runner_search_paths: tuple[str, ...] = ()
 
     def alive(self, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> bool:
         """Whether this manager's heartbeat is still inside *lease_seconds*."""
@@ -86,6 +100,8 @@ class ManagerRecord:
             "executors": sorted(self.executors),
             "accept_any_pool": self.accept_any_pool,
             "uid": self.uid,
+            "runner_modules": list(self.runner_modules),
+            "runner_search_paths": list(self.runner_search_paths),
             "started_at": self.started_at,
             "heartbeat_at": self.heartbeat_at,
             "heartbeat_age_seconds": self.heartbeat_age_seconds,
@@ -143,6 +159,12 @@ def read_managers(workspace: Workspace) -> list[ManagerRecord]:
                 executors=_label_set(manifest.get("executors")),
                 accept_any_pool=bool(manifest.get("accept_any_pool", False)),
                 uid=_optional_int(manifest.get("uid")),
+                runner_modules=(
+                    DEFAULT_RUNNER_MODULES
+                    if manifest.get("runner_modules") is None
+                    else _label_sequence(manifest.get("runner_modules"))
+                ),
+                runner_search_paths=_label_sequence(manifest.get("runner_search_paths")),
                 started_at=_optional_string(manifest.get("started_at")),
                 heartbeat_at=heartbeat_at,
                 heartbeat_age_seconds=age,
@@ -212,14 +234,52 @@ def _payload_ownership_issue(workspace: Workspace, marker: Marker) -> str | None
     return None
 
 
+def _runner_refusal(record: ManagerRecord, job: JobDefinition | None) -> str | None:
+    """Return why *record* could never resolve *job*'s runner, or ``None``.
+
+    Only a shared installed runner can be refused on the manifest alone: a
+    ``pkg:`` runner outside the manager's module allowlist can never resolve
+    there, and a plain installed runner needs at least one search path. A
+    workspace or payload runner is resolvable by any manager, and a plain
+    installed runner with a search path can only be judged on the manager's own
+    host, so neither is refused here.
+
+    :param record: The manager whose runner reach is checked.
+    :param job: The job whose runner reference is checked, when readable.
+    :return: A refusal reason, or ``None`` when the runner is not refused.
+    """
+
+    if job is None or job.runner_source != "installed":
+        return None
+    package = parse_package_runner(job.runner_path.as_posix())
+    if package is not None:
+        module = package[0]
+        if not runner_module_allowed(module, record.runner_modules):
+            allowed = ",".join(record.runner_modules) or "none"
+            return f"does not allow runner module {module} (allows {allowed})"
+        return None
+    if not record.runner_search_paths:
+        return f"has no runner search path for installed runner {job.runner_path.as_posix()}"
+    return None
+
+
 def manager_refusals(
     record: ManagerRecord,
     requirements: ClaimRequirements,
     *,
     placement: str | None = None,
     owner_uid: int | None = None,
+    job: JobDefinition | None = None,
 ) -> list[str]:
-    """Return why *record* would not claim a job with *requirements*."""
+    """Return why *record* would not claim a job with *requirements*.
+
+    :param record: The manager whose claim preconditions are checked.
+    :param requirements: The executor, pool, and capabilities the job demands.
+    :param placement: The job placement, when a placement restriction applies.
+    :param owner_uid: The job owner uid, when ownership is checked.
+    :param job: The job definition, when its runner reachability is checked.
+    :return: One human-readable reason per unmet precondition.
+    """
 
     reasons: list[str] = []
     if owner_uid is not None and record.uid is not None and record.uid != owner_uid:
@@ -233,6 +293,9 @@ def manager_refusals(
         reasons.append(f"lacks capabilities {','.join(sorted(missing))}")
     if placement is not None and record.placement_prefixes and not _placement_covered(record, placement):
         reasons.append(f"does not scan placement {placement} (restricted to {','.join(record.placement_prefixes)})")
+    runner = _runner_refusal(record, job)
+    if runner is not None:
+        reasons.append(runner)
     return reasons
 
 
@@ -468,6 +531,7 @@ def _manager_checks(
     executor_only: bool,
     placement: str | None = None,
     owner_uid: int | None = None,
+    job: JobDefinition | None = None,
 ) -> None:
     """Record which registered managers would accept one job, and why not."""
 
@@ -493,7 +557,7 @@ def _manager_checks(
         return
     accepting: list[ManagerRecord] = []
     for record in live:
-        reasons = manager_refusals(record, requirements, placement=placement, owner_uid=owner_uid)
+        reasons = manager_refusals(record, requirements, placement=placement, owner_uid=owner_uid, job=job)
         if executor_only:
             reasons = [
                 reason
@@ -636,6 +700,130 @@ def _continue_checks(job: JobDefinition | None, state: Mapping[str, Any], report
     report.hint("resume it with 'httk workflow job request WORKSPACE JOB continue --operator NAME --reason WHY'")
 
 
+def _attempt_history_check(workspace: Workspace, marker: Marker, state: Mapping[str, Any], report: _Diagnosing) -> None:
+    """Fold this job's journal into one attempt-history line.
+
+    Every attempt is claimed with a fresh ``attempt_id`` and every activation
+    with a fresh ``activation_id``, so distinct identifiers count attempts and
+    activations across the whole history; the ``unclean_restart`` frame member,
+    otherwise unread, counts how many attempts followed an unclean exit.
+
+    :param workspace: The workspace holding the job's journal.
+    :param marker: The authoritative marker of the job.
+    :param state: The current state frame, used only for the current step.
+    :param report: The diagnosis being accumulated.
+    """
+
+    attempts: set[str] = set()
+    activations: set[str] = set()
+    unclean = 0
+    step: str | None = None
+    for frame in job_frames(workspace, marker):
+        attempt_id = _optional_string(frame.get("attempt_id"))
+        if attempt_id is not None:
+            attempts.add(attempt_id)
+        activation_id = _optional_string(frame.get("activation_id"))
+        if activation_id is not None:
+            activations.add(activation_id)
+        frame_step = _optional_string(frame.get("step"))
+        if frame_step is not None:
+            step = frame_step
+        if frame.get("unclean_restart") is True:
+            unclean += 1
+    if not attempts:
+        return
+    step = step or _optional_string(state.get("step")) or "-"
+    report.check(
+        "attempt history",
+        None,
+        f"{len(attempts)} attempts across {len(activations)} activations at step {step!r}; "
+        f"{unclean} after unclean exits",
+    )
+
+
+def _flapping_check(job: JobDefinition | None, state: Mapping[str, Any], report: _Diagnosing) -> None:
+    """Warn when an unlimited-budget job keeps attempting without progressing.
+
+    :param job: The job definition, when readable.
+    :param state: The current state frame.
+    :param report: The diagnosis being accumulated.
+    """
+
+    if job is None:
+        return
+    budgets = budget_status(job, state)
+    unlimited = budgets.maximum_attempts_per_activation is None and budgets.maximum_total_attempts is None
+    attempts = max(budgets.total_attempts, budgets.attempts_this_activation)
+    if not unlimited or attempts <= FLAPPING_ATTEMPTS:
+        return
+    report.check(
+        "flapping",
+        False,
+        f"this job has attempted {attempts} times under an unlimited budget; it is flapping, not progressing "
+        "— consider maximum_attempts_per_activation or retry_on",
+    )
+
+
+def _read_request(path: Path) -> dict[str, Any] | None:
+    """Return one request or retirement document, or ``None`` when unreadable."""
+
+    try:
+        return read_json(path)
+    except WorkflowError:
+        return None
+
+
+def _request_checks(workspace: Workspace, marker: Marker, job: JobDefinition | None, report: _Diagnosing) -> None:
+    """Surface a pending operator request and the most recent retirement.
+
+    A request in ``requests/ready`` has not been applied by any manager yet, and
+    is applied only by one serving this job's runner executor; a request in
+    ``requests/retired`` can never apply again, and the reason recorded beside it
+    is the last operator action's fate.
+
+    :param workspace: The workspace holding the request flow.
+    :param marker: The authoritative marker of the job.
+    :param job: The job definition, used for the serving executor.
+    :param report: The diagnosis being accumulated.
+    """
+
+    requests = workspace.control / "requests"
+    executor = "-" if job is None else job.runner_executor
+    ready = requests / "ready"
+    for path in sorted(ready.iterdir()) if ready.is_dir() else ():
+        if not path.is_file():
+            continue
+        request = _read_request(path)
+        if request is None or request.get("job_key") != marker.job_key:
+            continue
+        action = _optional_string(request.get("action")) or "?"
+        operator = _optional_string(request.get("operator")) or "-"
+        report.check(
+            "pending request",
+            None,
+            f"a {action} request from {operator} is pending; it is applied by a manager serving executor {executor!r}",
+        )
+    retired = requests / "retired"
+    latest: tuple[str, str] | None = None
+    for path in sorted(retired.iterdir()) if retired.is_dir() else ():
+        if path.suffix != ".retirement":
+            continue
+        retirement = _read_request(path)
+        request = _read_request(retired / path.name[: -len(".retirement")])
+        if retirement is None or request is None or request.get("job_key") != marker.job_key:
+            continue
+        retired_at = _optional_string(retirement.get("retired_at")) or ""
+        reason = _optional_string(retirement.get("reason")) or "unknown"
+        if latest is None or retired_at > latest[0]:
+            latest = (retired_at, reason)
+    if latest is not None:
+        report.check(
+            "retired request",
+            None,
+            f"the most recent operator request for this job was retired: {latest[1]}",
+        )
+
+
 def _breadcrumb_check(control: Path | None, report: _Diagnosing) -> None:
     """Record the runner error breadcrumb of the last attempt, when it left one."""
 
@@ -650,6 +838,41 @@ def _breadcrumb_check(control: Path | None, report: _Diagnosing) -> None:
     )
     if control is not None:
         report.hint(f"read the complete traceback in {control / 'error.json'}")
+
+
+def _persistent_writer_host(control: Path | None) -> str | None:
+    """Return the foreign host that launched a persistent attempt, if any.
+
+    A persistent-workdir attempt whose writer ran on another host cannot be
+    recovered from here: no manager on this host can prove the foreign writer
+    stopped, so taking the workdir over would risk two writers in one shared
+    directory. This returns that host only when it is neither absent nor this
+    one.
+    """
+
+    if control is None:
+        return None
+    try:
+        process = read_json(control / "process.json")
+    except WorkflowError:
+        return None
+    host = _optional_string(process.get("hostname"))
+    if host is None or host == socket.gethostname():
+        return None
+    return host
+
+
+def _commit_wedge(control: Path | None) -> str | None:
+    """Return a persisted committing-wedge error, when a manager recorded one."""
+
+    if control is None:
+        return None
+    try:
+        recorded = read_json(control / "commit-wedge.json")
+    except WorkflowError:
+        return None
+    error = recorded.get("error")
+    return error if isinstance(error, str) and error else None
 
 
 def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
@@ -695,6 +918,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 executor_only=True,
                 placement=marker.placement.as_posix(),
                 owner_uid=owner_uid,
+                job=job,
             )
     elif kind == "ready":
         summary = "this job is ready and waiting to be claimed; every claim precondition is listed below"
@@ -708,11 +932,15 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 executor_only=False,
                 placement=marker.placement.as_posix(),
                 owner_uid=owner_uid,
+                job=job,
             )
             _budget_checks(job, state, report)
         paused = _maintenance_check(workspace, report)
         if paused:
             summary = "this job is ready, but a live maintenance lock stops every manager from launching work"
+        _attempt_history_check(workspace, marker, state, report)
+        _flapping_check(job, state, report)
+        _request_checks(workspace, marker, job, report)
     elif kind in {"claimed", "running"}:
         alive = _owner_checks(workspace, state, report)
         summary = (
@@ -721,17 +949,49 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
             else f"this job is {kind} by a manager whose lease expired; it is recovered rather than stuck"
         )
         blocked = not alive
+        foreign_host = (
+            _persistent_writer_host(control)
+            if kind == "running" and not alive and job is not None and job.workdir_mode == "persistent"
+            else None
+        )
+        if foreign_host is not None:
+            blocked = True
+            summary = (
+                f"this job is running a persistent workdir whose writer was last seen on {foreign_host}; its lease "
+                "expired, but recovery cannot happen from this host"
+            )
+            report.check(
+                "persistent takeover",
+                False,
+                f"the recorded writer ran on {foreign_host}, not this host, so no manager here can prove it stopped",
+            )
+            report.hint(
+                f"no manager on another host can prove the writer stopped; run a manager on {foreign_host}, "
+                "or pass --unsafe-persistent-takeover"
+            )
         if kind == "running" and control is not None:
             report.check(
                 "attempt logs",
                 None,
                 f"the live attempt writes {control / 'stdout.log'}",
             )
+        _attempt_history_check(workspace, marker, state, report)
+        _flapping_check(job, state, report)
     elif kind == "committing":
-        summary = (
-            "this job published an outcome and its commit is pending; any manager that serves its runner "
-            "executor resumes the commit, so no operator action is needed"
-        )
+        wedge = _commit_wedge(control)
+        if wedge is not None:
+            blocked = True
+            summary = f"this job's commit is wedged and keeps failing: {wedge}"
+            report.check("commit", False, wedge)
+            report.hint(
+                "the commit is not making progress; inspect the outcome in the attempt control directory and "
+                "repair the payload, then a manager can resume it"
+            )
+        else:
+            summary = (
+                "this job published an outcome and its commit is pending; any manager that serves its runner "
+                "executor resumes the commit, so no operator action is needed"
+            )
         _owner_checks(workspace, state, report)
         if job is not None:
             _manager_checks(
@@ -741,6 +1001,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 executor_only=True,
                 placement=marker.placement.as_posix(),
                 owner_uid=owner_uid,
+                job=job,
             )
     elif kind == "waiting":
         join = state.get("join")
@@ -756,9 +1017,25 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
         for item in observations:
             report.check("join child", bool(item.get("terminal")), _describe_child(item))
         if unresolvable:
+            recorded = state.get("join_unresolved")
+            since = (
+                str(recorded.get("first_unresolved_at"))
+                if isinstance(recorded, Mapping) and recorded.get("first_unresolved_at") is not None
+                else None
+            )
+            grace_clause = (
+                f"the join grace is counting from when a manager first recorded it unresolvable ({since}), "
+                "is persisted in the state frame so it survives a manager restart, and once it elapses "
+                "the job fails with dependency_failure"
+                if since is not None
+                else (
+                    "the join grace starts when a manager first records the child unresolvable and is persisted "
+                    "in the state frame; once it elapses the job fails with dependency_failure"
+                )
+            )
             summary = (
                 f"this job waits on {len(unresolvable)} child(ren) that cannot be resolved in this workspace; "
-                "after the manager's join grace expires it fails with dependency_failure"
+                f"{grace_clause}"
             )
         elif blocking:
             summary = f"this job waits for {len(blocking)} of {len(observations)} child(ren) to become terminal"
@@ -778,6 +1055,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 executor_only=True,
                 placement=marker.placement.as_posix(),
                 owner_uid=owner_uid,
+                job=job,
             )
     elif kind == "failed":
         failure = state.get("failure")
@@ -791,6 +1069,9 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
             summary = "this job failed without a readable failure record"
         _breadcrumb_check(control, report)
         _continue_checks(job, state, report)
+        _attempt_history_check(workspace, marker, state, report)
+        _flapping_check(job, state, report)
+        _request_checks(workspace, marker, job, report)
     elif kind == "paused":
         summary = "this job is paused and only an operator request moves it"
         pause = state.get("pause")
@@ -798,6 +1079,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
             report.check("pause", None, json.dumps(pause, sort_keys=True))
         _breadcrumb_check(control, report)
         _continue_checks(job, state, report)
+        _request_checks(workspace, marker, job, report)
     elif kind == "cancelling":
         # Cancelling is neither stuck nor finished: the fence is already in
         # place, and what remains is proving that the fenced process stopped.
@@ -841,6 +1123,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 executor_only=True,
                 placement=marker.placement.as_posix(),
                 owner_uid=owner_uid,
+                job=job,
             )
         if alive:
             blocked = False

@@ -1,6 +1,7 @@
 """Manager command group."""
 
 from ..adapters import submit_remote_managers
+from ..manager import NotIdleError
 from ._common import *
 from ._common import (
     _LOGGER,
@@ -94,6 +95,16 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
         help="without --idle, give up after this long if the workspace never becomes idle (default: 3600)",
     )
     parser.add_argument(
+        "--join-grace-seconds",
+        type=float,
+        default=3600.0,
+        metavar="SECONDS",
+        help=(
+            "how long a waiting job tolerates an unresolvable join child before it fails; measured from when a "
+            "manager first records it and persisted in the state frame, so it survives a restart (default: 3600)"
+        ),
+    )
+    parser.add_argument(
         "--unsafe-persistent-takeover",
         action="store_true",
         help="take over a persistent workdir on lease expiry alone, without proving the old writer stopped",
@@ -158,6 +169,20 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="POOL",
         help="claim only jobs of this pool (repeatable, default: default)",
     )
+    parser.add_argument(
+        "--capability",
+        action="append",
+        default=[],
+        metavar="CAPABILITY",
+        help="advertise this capability to the scheduler, so capability-gated jobs become claimable (repeatable)",
+    )
+    parser.add_argument(
+        "--placement-prefix",
+        action="append",
+        default=[],
+        metavar="PREFIX",
+        help="restrict every scheduling scan to jobs at or below this placement subtree (repeatable)",
+    )
     parser.add_argument("--idle", action="store_true", help="keep serving the workspace when nothing is left to do")
     parser.add_argument(
         "--idle-timeout",
@@ -185,11 +210,10 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(
         handler=handle_manager_run,
         by_path=False,
-        capability=[],
-        placement_prefix=[],
         lease_seconds=None,
         heartbeat_interval=30.0,
         poll_interval=1.0,
+        join_grace_seconds=3600.0,
         unsafe_persistent_takeover=False,
         unsafe_isolated_takeover=False,
         takeover_grace_factor=DEFAULT_TAKEOVER_GRACE_FACTOR,
@@ -228,6 +252,8 @@ def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namesp
         manager_argv += ["--heartbeat-interval", str(arguments.heartbeat_interval)]
     if arguments.poll_interval != 1.0:
         manager_argv += ["--poll-interval", str(arguments.poll_interval)]
+    if arguments.join_grace_seconds != 3600.0:
+        manager_argv += ["--join-grace-seconds", str(arguments.join_grace_seconds)]
     # Left off unless asked for, so a remote configured with workers=N is not
     # permanently shadowed by a command-line default.
     if arguments.workers is not None:
@@ -286,6 +312,7 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
         maximum_workers=arguments.workers if arguments.workers is not None else 1,
         lease_seconds=arguments.lease_seconds,
         heartbeat_interval=arguments.heartbeat_interval,
+        join_grace_seconds=arguments.join_grace_seconds,
         unsafe_persistent_takeover=arguments.unsafe_persistent_takeover,
         unsafe_isolated_takeover=arguments.unsafe_isolated_takeover,
         takeover_grace_factor=arguments.takeover_grace_factor,
@@ -294,6 +321,17 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
     ) as manager:
         log_file = Path(arguments.log_file) if arguments.log_file else manager.manager_directory / "log"
         add_log_file(log_file, level=arguments.log_level or "info", json_logs=arguments.json_logs)
+        # One unconditional line, whatever the console log level: which manager
+        # is serving what, where its log is, and what it serves. Without it a
+        # normal run prints nothing at all, and a job that no configured pool,
+        # capability, or executor matches looks identical to an idle workspace.
+        print(
+            f"manager {manager.manager_id} serving {workspace.root} "
+            f"(pools={','.join(sorted(manager.pools)) or '-'}, "
+            f"capabilities={','.join(sorted(manager.capabilities)) or '-'}, "
+            f"executors={','.join(sorted(manager.allowed_executors))}); log {log_file}",
+            file=sys.stderr,
+        )
         _LOGGER.info(
             "manager %s serving workspace %s; logging to %s",
             manager.manager_id,
@@ -307,14 +345,11 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
             )
         else:
             try:
-                manager.run_until_idle(timeout=arguments.idle_timeout, poll_interval=arguments.poll_interval)
-            except TimeoutError:
-                print(
-                    f"workspace is not idle after {arguments.idle_timeout:.0f}s; jobs are still running or "
-                    "claimable — rerun, raise --idle-timeout, or pass --idle to keep serving",
-                    file=sys.stderr,
-                )
+                census = manager.run_until_idle(timeout=arguments.idle_timeout, poll_interval=arguments.poll_interval)
+            except NotIdleError as exc:
+                print(exc.census.timeout_message(arguments.idle_timeout), file=sys.stderr)
                 return 2
+            print(census.summary_line(), file=sys.stderr)
     return 0
 
 

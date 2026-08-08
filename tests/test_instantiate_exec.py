@@ -252,6 +252,16 @@ def test_executable_input_without_writer_cleans_staging(tmp_path: Path) -> None:
     assert not list(workspace.scan_markers())
 
 
+def test_executable_input_path_typo_is_refused(tmp_path: Path) -> None:
+    package = _package(tmp_path / "package", _EXEC_HOOK)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    # A separator-bearing value that resolves to no file is a mistyped path, so
+    # the submission is refused before the hook ever runs.
+    with pytest.raises(ValueError, match="input 'file' looks like a file path but nothing exists at no/such/path.txt"):
+        new_job(workspace, package, inputs={"file": "no/such/path.txt", "value": "literal"})
+    assert list((workspace.control / "tmp").iterdir()) == []
+
+
 @pytest.mark.parametrize("output", ["exit", "malformed"])
 def test_executable_instantiate_failure_cleans_staging(tmp_path: Path, output: str) -> None:
     body = "import sys; print('hook stderr', file=sys.stderr); sys.exit(1)" if output == "exit" else "print('{')"

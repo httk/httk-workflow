@@ -329,7 +329,9 @@ default = 2
         "retries": {"type": "integer", "default": 2},
     }
     workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, package, environment={"command": "echo"})
+    structure = tmp_path / "POSCAR"
+    structure.write_text("structure", encoding="utf-8")
+    job = new_job(workspace, package, inputs={"structure": structure}, environment={"command": "echo"})
     definition = JobDefinition.from_path(job.payload / "job.json")
     assert definition.environment == {
         "declared": provider.environment,
@@ -370,12 +372,64 @@ def test_environment_overrides_are_validated_at_submission(tmp_path: Path) -> No
         _MANIFEST + '\n[workflow.environment.retries]\ntype = "integer"\n',
     )
     workspace = Workspace.initialize(tmp_path / "workspace")
+    structure = tmp_path / "POSCAR"
+    structure.write_text("structure", encoding="utf-8")
     with pytest.raises(ValueError, match="declared names: retries"):
-        new_job(workspace, package, environment={"missing": 1})
+        new_job(workspace, package, inputs={"structure": structure}, environment={"missing": 1})
     with pytest.raises(ValueError, match="does not match type 'integer'"):
-        new_job(workspace, package, environment={"retries": "bad"})
-    job = new_job(workspace, package, environment={"retries": 3})
+        new_job(workspace, package, inputs={"structure": structure}, environment={"retries": "bad"})
+    job = new_job(workspace, package, inputs={"structure": structure}, environment={"retries": 3})
     assert JobDefinition.from_path(job.payload / "job.json").environment["overrides"] == {"retries": 3}
+
+
+def test_declared_parameters_apply_defaults_enforce_types_and_warn_on_undeclared(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    package = _package(tmp_path / "parameters")
+    structure = tmp_path / "POSCAR"
+    structure.write_text("structure", encoding="utf-8")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+
+    # A declared default is applied for the name nobody supplied, and the
+    # declared parameter and input metadata ride along in job.json's 'declared'.
+    job = new_job(workspace, package, inputs={"structure": structure})
+    definition = JobDefinition.from_path(job.payload / "job.json")
+    assert definition.parameters["label"] == "test"
+    assert definition.declared["parameters"]["label"] == {"type": "string", "default": "test"}
+    assert definition.declared["inputs"]["structure"]["required"] is True
+
+    # A declared type mismatch is an error that names the remedy.
+    with pytest.raises(ValueError, match="parameter 'label' does not match type 'string'"):
+        new_job(workspace, package, inputs={"structure": structure}, parameters={"label": 5})
+
+    # An undeclared name only warns, through the logging channel, and is kept.
+    with caplog.at_level(logging.WARNING, logger="httk.workflow.scaffold"):
+        warned = new_job(workspace, package, inputs={"structure": structure}, parameters={"kpont_density": 1})
+    assert "job parameter 'kpont_density' is not declared by this workflow; declared: label" in caplog.text
+    assert JobDefinition.from_path(warned.payload / "job.json").parameters["kpont_density"] == 1
+
+
+def test_required_input_is_enforced_and_entry_type_defaults_required(tmp_path: Path) -> None:
+    # A distinct workflow id keeps this package's tree digest distinct from the
+    # shared _MANIFEST package: the hook-module cache is content-addressed, and
+    # byte-identical trees deliberately share one loaded module.
+    package = _package(
+        tmp_path / "required", _MANIFEST.replace('id = "tests.package"', 'id = "tests.package.required"')
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    # The structure input declares entry_type, so it defaults to required.
+    with pytest.raises(ValueError, match="workflow input 'structure' is required and was not supplied"):
+        new_job(workspace, package)
+
+    # An explicit required = false makes the same entry-typed input optional.
+    optional = _package(
+        tmp_path / "optional",
+        _MANIFEST.replace('destination = "POSCAR"', 'destination = "POSCAR"\nrequired = false'),
+    )
+    job = new_job(workspace, optional)
+    assert JobDefinition.from_path(job.payload / "job.json").declared["inputs"]["structure"]["required"] is False
 
 
 def test_format_rejects_manifest_package_directory(tmp_path: Path) -> None:
@@ -845,7 +899,14 @@ def test_directory_workflow_scaffolds_from_the_published_tree_and_pins_declarati
     assert definition.runner_source == "workspace"
     assert definition.runner_sha256 == tree_digest(package)
     assert definition.declarations["workflow"]["$id"] == "https://example.test/workflows/package"
-    assert str(workspace.runners) in (job.payload / "instantiated.txt").read_text(encoding="utf-8")
+    # The hook module cache is content-addressed: byte-identical package trees
+    # share one loaded module, so __file__ may name any identical published
+    # tree. Assert the hook ran from a published runner store, not which one.
+    instantiated = (job.payload / "instantiated.txt").read_text(encoding="utf-8")
+    assert instantiated.endswith("instantiate.py")
+    assert "/.httk-workflow/runners/" in instantiated
+    digest = str(job.runner["path"]).rsplit(".", 1)[-1]
+    assert Path(instantiated).parent.name.endswith(digest)
     assert workspace.runner_store_path(job.runner["path"]).is_dir()  # type: ignore[arg-type]
 
     stored = workspace.runner_store_path(str(job.runner["path"]))

@@ -767,6 +767,36 @@ def test_instantiate_stages_paths_and_preserves_values(tmp_path: Path, monkeypat
     }
 
 
+def test_jobflow_input_path_typo_is_refused_but_plain_literal_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(jobflow, "runner_reference", lambda package, name: {"path": name})
+    root = tmp_path / "pkg"
+    root.mkdir()
+    prepared = jobflow._prepare(
+        _request(root, runner_options={"maker": "atomate2:Maker"}, inputs={"structure": {}, "label": {}})
+    )
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    assert prepared.instantiate is not None
+
+    # A file that exists in the current directory but not under the package root
+    # is a real file the run cannot reach — the refusal names the root location
+    # jobflow actually resolved to, not the current-directory path.
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    (cwd / "POSCAR").write_text("structure", encoding="utf-8")
+    monkeypatch.chdir(cwd)
+    typo = InstantiateContext(payload=payload, inputs={"structure": "POSCAR"}, parameters={}, tag=None)
+    with pytest.raises(ValueError, match=r"no file exists under the workflow root at .*pkg.*POSCAR"):
+        prepared.instantiate(typo)
+
+    # A bare identifier that names nothing — even an entry-typed id — is a literal.
+    literal = InstantiateContext(payload=payload, inputs={"label": "mp-149"}, parameters={}, tag=None)
+    prepared.instantiate(literal)
+    assert literal.parameters["jobflow_inputs"] == {"label": {"kind": "value", "value": "mp-149"}}
+
+
 def test_document_from_maker() -> None:
     pytest.importorskip("monty")
 

@@ -7,7 +7,11 @@ Collecting is the read-only counterpart of running work. The low-level
 where the files are, what produced them, and what happened on the way. The
 framework-level `collect()` iterator dispatches each record through its
 registered workflow collector and yields a `CollectedJob` with role-keyed
-outputs, provenance, products, and any unfulfilled roles.
+outputs, provenance, products, and any unfulfilled roles. A job that could not
+be collected at all is a *degraded* `CollectedJob`: `missing_collector` explains
+why, `outputs` is empty, and `unfulfilled` names **every** declared output role,
+so a degradation is never mistaken for a complete collection that happened to
+declare no outputs.
 
 When a collected output role is a file-valued single result, its run edge points
 to a standard `files` entry (`type = "files"`); file lists remain values within
@@ -138,6 +142,53 @@ The workspace is attached read-only. The default `collect` command prints one
 `CollectedJob` summary per line. `--raw` prints one `JobRecord` per line, while
 the hidden compatibility `--json` form materializes those raw records as an
 array.
+
+### Summary line and exit codes
+
+Every `collect` invocation except the pure-array `--json` form ends with one
+trailing JSONL summary line:
+
+```text
+{"format":"httk-workflow-collect-summary","format_version":1,
+ "collected":N,"degraded":N,"unfulfilled_roles":N,
+ "storage_errors":N,"skipped_unreadable":N}
+```
+
+`collected` counts the jobs collected without degradation; `degraded` counts the
+degraded ones; `unfulfilled_roles` sums the declared roles left unfulfilled
+across all jobs; `storage_errors` counts jobs a `--into` store could not persist;
+`skipped_unreadable` counts jobs dropped because their `job.json` could not be
+read (these never appear as records — the count is the only place they surface).
+
+The command exits `0` only when `degraded`, `storage_errors`, and
+`skipped_unreadable` are all zero. Unfulfilled roles alone do **not** fail the
+sweep — a partially fulfilled job is a normal, honestly reported result. This
+makes `collect` usable as a gate: a nonzero exit means a job could not be
+collected, stored, or even read, and the summary counts say which.
+
+Per-job triage lives on each summary line: `missing_collector` explains a
+degradation, `products_unlinked` lists `product_of` links skipped because the
+output *was* produced but its curated source edge is absent from the observed
+provenance (`"<role> -> <source> (source edge absent in observed provenance)"`) —
+a product whose own output role went unfulfilled is reported through
+`unfulfilled` only, never here. `collector_exit_status` reports an executable
+collector that answered every record but still exited nonzero.
+
+### `--into` partial state
+
+With `--into PATH`, each collected job's entries, run, and product links are
+saved into a file-backed SQLite store, and its report gains
+`"stored": {...}`. A degraded job stores nothing — its report carries
+`"stored": null, "skipped": "degraded"` and **no** empty `Run` is written, so the
+store never fills with contentless provenance. A job whose entries cannot be
+stored keeps a `"storage_error"` and fails the exit code.
+
+Re-collection is safe because it is stateless: `collect --into` reads the
+workspace afresh every time and writes whatever it finds. Re-storing an
+already-stored job is de-duplicated on its stable entry, run, and product ids, so
+running the same collect twice into the same store changes nothing. A store built
+under a different entry-family layout is not migrated in place; point `--into` at
+a new store file when the layout changes.
 
 ```console
 $ httk workflow collect workflow-workspace | head -1

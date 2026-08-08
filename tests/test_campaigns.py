@@ -8,6 +8,7 @@ partition is just a name pointing at a registered workspace a manager serves and
 a collect reads exactly as any other.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -227,6 +228,38 @@ def test_collect_crosses_the_partitions_lazily_in_stable_order(tmp_path: Path) -
     # A subset selection collects only the named partition.
     south_only = list(campaign_collect(states=["succeeded"], partitions=["south"], project=root))
     assert [record.workspace_id for record in south_only] == [workspaces["south"].workspace_id]
+
+
+def test_campaign_collect_into_skips_degraded_jobs_and_exits_nonzero(tmp_path: Path, capsys) -> None:
+    """Campaign collect passes --into and --allow-job-collector through, stores no
+    empty Run for a degraded job, and exits nonzero with an aggregated summary."""
+
+    pytest.importorskip("httk.data")
+    root, workspaces = _campaign_project(tmp_path, "explicit")
+    runner = _runner(tmp_path, _SUCCEED, "succeed.py")
+    for partition in ("north", "south"):
+        campaign_submit(str(runner), key=partition, project=root, step="only", tag=partition)
+        with TaskManager(workspaces[partition], heartbeat_interval=0.01) as manager:
+            manager.run_until_idle(timeout=120.0)
+
+    store = tmp_path / "campaign.sqlite"
+    context = CLIContext("httk", root)
+    assert command(["campaign", "collect", "--allow-job-collector", "--into", str(store)], context) == 1
+
+    lines = capsys.readouterr().out.splitlines()
+    reports = [json.loads(line) for line in lines[:-1]]
+    summary = json.loads(lines[-1])
+    assert len(reports) == 2
+    assert all(report["stored"] is None and report["skipped"] == "degraded" for report in reports)
+    assert summary["format"] == "httk-workflow-collect-summary"
+    assert summary["degraded"] == 2 and summary["collected"] == 0 and summary["storage_errors"] == 0
+
+
+def test_campaign_collect_rejects_into_with_raw(tmp_path: Path, capsys) -> None:
+    root, _ = _campaign_project(tmp_path, "explicit")
+    context = CLIContext("httk", root)
+    assert command(["campaign", "collect", "--raw", "--into", str(tmp_path / "x.sqlite")], context) == 2
+    assert "--into cannot be combined with --raw" in capsys.readouterr().err
 
 
 def test_collect_refuses_and_names_a_remote_partition(tmp_path: Path) -> None:

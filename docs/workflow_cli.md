@@ -41,7 +41,7 @@ carries the same switch on the leaf that acts on it, so both spellings work.
 ## The complete tree
 
 ```text
-httk workflow workspace  init | list | default | move | forget | delete | status | settings show | settings set | settings unset | policy show | policy set | fsck | gc | unlock
+httk workflow workspace  init | list | default | move | forget | delete | status | managers | settings show | settings set | settings unset | policy show | policy set | fsck | gc | unlock
 httk workflow runner     publish | describe
 httk workflow job        new | submit | request | list | show | log | why | debug
 httk workflow describe   TARGET [--json]
@@ -85,6 +85,7 @@ them to a remote workspace for execution.
 | `workspace forget NAME` | deregister a name, leaving the workspace on disk | |
 | `workspace delete NAME` | destroy the workspace and deregister it | `--force` (required) |
 | `workspace status NAME` | summarize the authoritative markers (remote: over the adapter) | `--json` |
+| `workspace managers NAME` | list the managers serving the workspace, live or stale | `--json` |
 | `workspace settings show NAME [KEY]` | print the application settings, or one | `--json` |
 | `workspace settings set NAME KEY VALUE` | store one application setting | |
 | `workspace settings unset NAME KEY` | remove one application setting | |
@@ -140,6 +141,15 @@ the marker is an honest inference rather than provenance metadata.
 
 `JOB` is a job UUID, a `tag--uuid` job key, or any unique prefix of either.
 
+Besides the per-state claim preconditions, `job why` also folds in, where they
+apply: a **runner-allowlist refusal** when a live manager's `runner_modules` or
+search paths cannot reach the job's runner (so a claim would fail with
+`runner_unavailable`); an **attempt-history** line — `N attempts across M
+activations at step 'X'; K after unclean exits` — summarizing the journal; a
+**flapping** flag when an unlimited-budget job has attempted well past a small
+threshold without progressing; and any **pending** operator request still in
+`requests/ready`, or the reason recorded for the most recent **retired** one.
+
 Language documents use `job new --workflow DOCUMENT`; see
 {doc}`workflow_languages` for PWD, CWL, jobflow, and httk-v1 details.
 
@@ -147,7 +157,18 @@ Language documents use `job new --workflow DOCUMENT`; see
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--raw`, `--allow-job-collector`, `--into PATH` |
+| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--degraded`, `--raw`, `--allow-job-collector`, `--into PATH` |
+
+`--degraded` prints only the degraded per-job lines; the trailing summary still
+counts the whole sweep, so a filtered listing never hides how many jobs ran. It
+cannot be combined with `--raw`.
+
+Every form except the pure-array `--json` ends with one
+`httk-workflow-collect-summary` line counting `collected`, `degraded`,
+`unfulfilled_roles`, `storage_errors`, and `skipped_unreadable`. The command
+exits nonzero when any job was degraded, failed to store, or was skipped for an
+unreadable `job.json`; unfulfilled roles alone keep the exit at `0`. See
+{doc}`collecting` for the triage members and `--into` partial-state semantics.
 
 ### postprocess — run a curated script
 
@@ -189,8 +210,7 @@ This read-only report checks `submitted`, `ready`, `waiting`, and `paused` jobs:
 each declared environment entry is shown as `resolved`, `default`, or
 `unresolved`, with its source and setting name, and each runner reference is
 checked for availability and its pinned digest. `--placement` restricts the
-scan. The command exits `1` for an unresolved environment or broken runner
-reference. The authoritative environment gate remains at attempt start;
+scan. The authoritative environment gate remains at attempt start;
 precheck is advisory and can become stale. Its `HTTK_*` environment layer is
 the current process environment, which may differ on compute nodes; JSON also
 carries this caveat once as `environment_variable_caveat`.
@@ -199,24 +219,64 @@ references. A plain installed reference without one is reported as
 `indeterminate`, not as a broken runner, and does not by itself produce exit
 status `1`.
 
+Beyond the environment and runner reference, precheck measures each pending job
+against the **live managers** the workspace actually publishes:
+
+- **claimability** — a job no live manager can claim is a problem naming the
+  closest manager's unmet requirements exactly as `job why` renders them (for
+  example `lacks capabilities docker`, or `does not allow runner module …`).
+  Runner modules are validated against each manager's real `runner_modules`
+  allowlist, not a fixed default. When no manager is live at all, one
+  workspace-level `manager_notice` replaces per-job claim findings, and does not
+  fail the run;
+- **language engine** — a language job (the collect gate's pair,
+  `workflow_realization = language` with a `workflow_language`) has each module
+  that language needs checked (without importing it) and names the pip extra to
+  install, for example `pip install httk-workflow[jobflow]`. Because the extras
+  belong on the machine that runs the job, an absent module is only a problem
+  when no live manager serves the job's executor; when one does, the check is
+  `indeterminate` (the serving manager's environment may differ, verified only
+  at run time) and does not fail the run;
+- **required inputs** — a declared required input with a staged `destination`
+  must still be a member of the payload; a relocated or removed one is a
+  problem.
+
+The command exits `1` for an unresolved environment, a broken runner reference,
+an unclaimable job, a missing-and-unserved language engine, or a missing required
+input; the `indeterminate` cases stay non-failing. The JSON summary carries
+`claim_problems`, `language_problems`, `language_indeterminate`, and
+`input_problems` alongside the environment and runner counts.
+
 ### `manager` — the process that runs the jobs
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `run [WORKSPACE]` | run a manager until idle, or keep serving with `--idle` | `--workers`, `--count`, `--pool`, `--idle`, `--idle-timeout`, `--adapter-timeout`, `--log-level` |
-| `manager run WORKSPACE` | run a manager locally, or submit managers to a remote workspace's scheduler | `--workers`, `--count`, `--pool`, `--capability`, `--idle`, `--idle-timeout`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `run [WORKSPACE]` | run a manager until idle, or keep serving with `--idle` | `--workers`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--adapter-timeout`, `--log-level` |
+| `manager run WORKSPACE` | run a manager locally, or submit managers to a remote workspace's scheduler | `--workers`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
 `manager run` follows the binding: a local workspace runs the manager in this
 process as before, and a remote workspace submits managers through the remote's
 scheduler over its adapter — `--count N` managers, `--workers N` workers each.
-Both manager commands run until idle by default; `--idle` keeps serving. This is
-the command that subsumed the old `transfer start-manager`.
+Both manager commands run until idle by default; `--idle` keeps serving. The
+top-level `run` takes `--capability` and `--placement-prefix` too, so the quickstart command can
+claim a capability-gated job and scope its scan; without them a gated job would
+stay unclaimable. Both print one startup banner and, on idle exit, one summary
+line that names any jobs left not claimable by the pools, capabilities, or
+executors this manager serves, or left committing with an unreadable definition. This is the command that subsumed the old
+`transfer start-manager`.
 
 ### `v1` — harvesting finished *httk* v1 trees
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `v1 collect ROOT` | harvest a pre-existing v1 result tree | `--workflow-dir PKG`, `--into PATH`, `--json` |
+| `v1 collect ROOT` | harvest a pre-existing v1 result tree | `--workflow-dir PKG`, `--into PATH` |
+
+`v1 collect` ends with one `httk-workflow-v1-collect-summary` line reporting
+`finished`, `unfinished_by_status` (tasks the name regex matched that were not
+`.finished`, keyed by status), and `skipped_no_rundir` (finished tasks with no
+dated run directory). Each collected report carries `identity_stable`: `false`
+for a task whose identity is path-derived because it has no `ht.manifest`, and a
+warning names how many such tasks a harvest saw.
 
 ### `config` — the per-user configuration and identity
 
@@ -358,7 +418,7 @@ job again, or edit the one `runner.path` member.
 | `campaign init` | define the project's partition map and assignment policy | `--partition NAME=WORKSPACE`, `--assignment` |
 | `campaign show` | show the partition map | `--json` |
 | `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
-| `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--json` |
+| `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--raw`, `--allow-job-collector`, `--into PATH` |
 | `campaign start-managers` | start a manager per selected partition | `--partition`, `--workers`, `--count`, `--adapter-timeout` |
 
 A campaign is a thin convention over the *registered workspaces* above: a
@@ -384,7 +444,12 @@ httk workflow job new WORKSPACE --workflow ./my_runner.py --step characterize --
 and `--format LANG` selects the language of a bare document or directory.
 `--input-from
 NAME SOURCE...` loads a file or the readable files in a directory, realizes the
-declared payload destination, and creates one job per file for a batch. `--file
+declared payload destination, and creates one job per file for a batch. A
+directory file with no registered reader whose name is a structure convention
+(`POSCAR*`, `*.vasp`) is read as POSCAR; any remaining unreadable files are
+skipped, and one stderr line names them:
+`httk workflow: skipped N of M files in DIR (no registered reader): …`. After a
+batch, one final stderr line reports `submitted N jobs`. `--file
 NAME=PATH` stages anything else, `--input NAME=PATH` stages one declared input,
 and the command prints one
 tab-separated `job_key<TAB>payload` line per job, or `--json` reports. The runner

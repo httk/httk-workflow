@@ -2,6 +2,8 @@
 
 import os
 
+from ..introspection import read_managers
+from ..models import Marker
 from ._common import *
 from ._common import (
     _durable,
@@ -167,6 +169,7 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
         "format": arguments.format,
         "name": arguments.name,
     }
+    is_batch = bool(items)
     if items:
         for item in items:
             item["tag"] = arguments.tag or item.get("tag")
@@ -176,12 +179,21 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
     if arguments.json:
         # One self-describing report per job, as an array, exactly as `job_records
         # --json` prints one array of records.
-        print(json.dumps([job.as_mapping() for job in results], indent=2))
+        jobs = list(results)
+        print(json.dumps([job.as_mapping() for job in jobs], indent=2))
+        if is_batch:
+            # A batch submission ends with one count on stderr, so a scripted
+            # submission of a directory can confirm how many jobs it created.
+            print(f"submitted {len(jobs)} jobs", file=sys.stderr)
         return 0
+    submitted = 0
     for job in results:
         # One tab-separated line per job, so a shell reads the key of one job with
         # cut and a campaign streams as it is submitted.
         print(f"{job.job_key}\t{job.payload}")
+        submitted += 1
+    if is_batch:
+        print(f"submitted {submitted} jobs", file=sys.stderr)
     return 0
 
 
@@ -286,7 +298,29 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     # Attribution, when this installation has an identity key: the manager
     # verifies a signature that is there and accepts a request that has none.
     print(workspace.publish_request(sign_document(request)))
+    _warn_if_no_live_manager(workspace, marker)
     return 0
+
+
+def _warn_if_no_live_manager(workspace: Workspace, marker: Marker) -> None:
+    """Warn when no live manager serves the executor a published request needs.
+
+    A request only takes effect when a manager applies it, so a request against
+    a job whose executor nothing serves waits indefinitely with no error. The
+    warning is advisory: the request is already published and stays valid until
+    a manager starts.
+    """
+
+    try:
+        executor = workspace.load_job(marker).runner_executor
+    except (WorkflowError, OSError):
+        return
+    if any(executor in record.executors for record in read_managers(workspace) if record.alive()):
+        return
+    print(
+        f"no live manager currently serves executor {executor!r}; the request will wait until one starts",
+        file=sys.stderr,
+    )
 
 
 def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:

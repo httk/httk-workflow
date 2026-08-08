@@ -283,21 +283,36 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
     parameters["pwd_output_roles"] = {
         str(metadata.get("port", name)): str(metadata.get("role", name)) for name, metadata in request.outputs.items()
     }
+    # An input node with no document ``value`` runs as ``None`` unless the run
+    # supplies it, which is almost never what the author meant; the names are
+    # captured here so the instantiate hook can refuse such a submission by name.
+    inputs_without_value = tuple(
+        str(node["name"]) for node in loaded.nodes.values() if node.get("type") == "input" and "value" not in node
+    )
 
     def instantiate(ctx: object) -> object:
         """Apply supplied inputs as literal JSON values for PWD input nodes."""
 
-        from httk.workflow.scaffold import InstantiateContext
+        from httk.workflow.scaffold import InstantiateContext, _missing_file_input_message
 
         assert isinstance(ctx, InstantiateContext)
         overrides: dict[str, object] = {}
         for name, value in ctx.inputs.items():
+            metadata = request.inputs.get(name, {})
+            message = _missing_file_input_message(name, value)
+            if message is not None:
+                raise ValueError(message)
             try:
                 json.dumps(value)
             except (TypeError, ValueError) as exc:
                 raise ValueError(f"workflow input {name!r} must be JSON-serializable") from exc
-            metadata = request.inputs.get(name, {})
             overrides[str(metadata.get("port", name))] = value
+        for node_name in inputs_without_value:
+            if node_name not in overrides:
+                raise ValueError(
+                    f"pwd document input node {node_name!r} has neither a document value nor a supplied input; "
+                    f"supply it with inputs={{{node_name!r}: ...}}, or give the node a value in the document"
+                )
         if overrides:
             ctx.parameters["pwd_inputs"] = overrides
         return None

@@ -18,7 +18,7 @@ def _edge_counts(run: Run) -> dict[str, int]:
 
 def _collected_mapping(item: CollectedJob) -> dict[str, object]:
     outputs = item.outputs
-    return {
+    mapping: dict[str, object] = {
         "format": "httk-workflow-collected",
         "format_version": 1,
         "job_id": item.record.job_id,
@@ -46,6 +46,48 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
             for product in item.products
         ],
     }
+    if item.products_unlinked:
+        mapping["products_unlinked"] = list(item.products_unlinked)
+    if item.collector_exit_status is not None:
+        mapping["collector_exit_status"] = item.collector_exit_status
+    if item.identity_stable is not None:
+        mapping["identity_stable"] = item.identity_stable
+    return mapping
+
+
+def _emit_collect_summary(
+    *, collected: int, degraded: int, unfulfilled_roles: int, storage_errors: int, skipped_unreadable: int
+) -> int:
+    """Print the trailing collect-summary line and return the sweep exit code.
+
+    The exit code is ``0`` only when nothing was degraded, no store failed, and
+    nothing was skipped for an unreadable ``job.json``; unfulfilled roles alone
+    do not fail the sweep, they are reported for triage.
+
+    :param collected: Count the jobs collected without degradation.
+    :param degraded: Count the degraded jobs.
+    :param unfulfilled_roles: Count the declared output roles left unfulfilled.
+    :param storage_errors: Count the jobs a ``--into`` store could not persist.
+    :param skipped_unreadable: Count the jobs dropped for an unreadable payload.
+    :return: ``0`` on a fully clean sweep, ``1`` otherwise.
+    """
+
+    print(
+        json.dumps(
+            {
+                "format": "httk-workflow-collect-summary",
+                "format_version": 1,
+                "collected": collected,
+                "degraded": degraded,
+                "unfulfilled_roles": unfulfilled_roles,
+                "storage_errors": storage_errors,
+                "skipped_unreadable": skipped_unreadable,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    return 0 if degraded == 0 and storage_errors == 0 and skipped_unreadable == 0 else 1
 
 
 def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, ...]], dict[int, str]]:
@@ -115,6 +157,13 @@ def _store_collected(items: list[CollectedJob], path: str) -> list[dict[str, obj
         store = SqlStore(database, entry_records=layout)
         for index, item in enumerate(items):
             report = _collected_mapping(item)
+            if item.missing_collector is not None:
+                # A degraded job produced no outputs: store nothing, and never a
+                # bare Run, so the store cannot fill with empty provenance.
+                report["stored"] = None
+                report["skipped"] = "degraded"
+                reports.append(report)
+                continue
             error = failures.get(index)
             if error is not None:
                 report["storage_error"] = error
@@ -142,22 +191,39 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
     workspace = Workspace(_local_root(arguments, context, action="collect from"), mutable=False)
     if arguments.into is not None and (arguments.raw or arguments.json):
         raise ValueError("--into cannot be combined with --raw")
+    if arguments.degraded and (arguments.raw or arguments.json):
+        raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
+    skipped = 0
+
+    def _skip(_job_key: str) -> None:
+        nonlocal skipped
+        skipped += 1
+
     if arguments.raw or arguments.json:
         records = job_records(
-            workspace, states=arguments.state or DEFAULT_COLLECT_STATES, placement=arguments.placement
+            workspace,
+            states=arguments.state or DEFAULT_COLLECT_STATES,
+            placement=arguments.placement,
+            on_skipped=_skip,
         )
         if arguments.json:
+            # The hidden pure-array compatibility form stays a single JSON value.
             print(json.dumps([record.as_mapping() for record in records], indent=2, sort_keys=True))
             return 0
+        collected = 0
         for record in records:
             print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
-        return 0
+            collected += 1
+        return _emit_collect_summary(
+            collected=collected, degraded=0, unfulfilled_roles=0, storage_errors=0, skipped_unreadable=skipped
+        )
     items = list(
         collect(
             workspace,
             states=arguments.state or DEFAULT_COLLECT_STATES,
             placement=arguments.placement,
             allow_job_collector=arguments.allow_job_collector,
+            on_skipped=_skip,
         )
     )
     reports = (
@@ -165,9 +231,20 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
         if arguments.into is not None
         else [_collected_mapping(item) for item in items]
     )
-    for report in reports:
+    for item, report in zip(items, reports):
+        # --degraded prints only the degraded lines; the summary below still
+        # reflects the whole sweep, so the counts do not silently shrink.
+        if arguments.degraded and item.missing_collector is None:
+            continue
         print(json.dumps(report, sort_keys=True, separators=(",", ":")))
-    return 0
+    degraded = sum(1 for item in items if item.missing_collector is not None)
+    return _emit_collect_summary(
+        collected=len(items) - degraded,
+        degraded=degraded,
+        unfulfilled_roles=sum(len(item.unfulfilled) for item in items),
+        storage_errors=sum(1 for report in reports if report.get("storage_error") is not None),
+        skipped_unreadable=skipped,
+    )
 
 
 def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
@@ -187,6 +264,11 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
         help=f"state kind to collect (repeatable, default: {', '.join(DEFAULT_COLLECT_STATES)})",
     )
     parser.add_argument("--placement", metavar="PLACEMENT", help="collect only jobs at or below this placement")
+    parser.add_argument(
+        "--degraded",
+        action="store_true",
+        help="print only the degraded per-job lines; the summary still counts the whole sweep",
+    )
     parser.add_argument("--raw", action="store_true", help="print raw collect records instead of summaries")
     parser.add_argument("--jsonl", action="store_true", dest="raw", help=argparse.SUPPRESS)
     parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)

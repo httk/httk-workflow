@@ -324,7 +324,9 @@ def test_the_scaffold_workflow_ids_and_aliases_are_registered(tmp_path: Path) ->
         "httk.vasp.relax-static",
     )
     workspace = Workspace.initialize(tmp_path / "workspace")
-    job = new_job(workspace, "vasp-relax", publish="installed", tag="silicon")
+    structure = tmp_path / "POSCAR"
+    structure.write_text("structure", encoding="utf-8")
+    job = new_job(workspace, "vasp-relax", publish="installed", tag="silicon", inputs={"structure": structure})
     assert job.runner["path"] == "pkg:httk.workflow.vasp.runners/vasp_relax.py"
     assert job.workflow == "httk.vasp.relax"
 

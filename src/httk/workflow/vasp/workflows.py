@@ -145,6 +145,18 @@ _RELAX_STATIC_OUTPUTS = {
         "product_of": "relaxed_structure",
     },
 }
+# Every VASP workflow relaxes or evaluates a supplied structure, so its
+# ``structure`` input is required: a job scaffolded without one cannot run. The
+# role and entry_type mirror the workflow declaration so the description reads
+# the same whether it comes from here or from the declaration fallback.
+_STRUCTURE_INPUT_METADATA = {
+    "structure": {
+        "role": "initial_structure",
+        "entry_type": "structures",
+        "destination": "POSCAR",
+        "required": True,
+    },
+}
 _RELAX_POSTPROCESS_SCRIPTS = {
     "relaxation-report": {
         "file": "scripts/relaxation_report",
@@ -166,6 +178,7 @@ PROVIDERS = (
         steps=("publish", "prepare", "run"),
         data_mode="transactional",
         inputs={"structure": "POSCAR"},
+        _input_metadata=_STRUCTURE_INPUT_METADATA,
         outputs=_RELAX_OUTPUTS,
         summary="relax one structure with the reviewed remedy ladder",
         declarations={"workflow": _RELAX_DECLARATION},
@@ -181,6 +194,7 @@ PROVIDERS = (
         steps=("publish", "prepare", "run"),
         data_mode="transactional",
         inputs={"structure": "POSCAR"},
+        _input_metadata=_STRUCTURE_INPUT_METADATA,
         outputs=_RELAX_OUTPUTS,
         summary="the same relaxation, authored in Bash",
         declarations={"workflow": _RELAX_DECLARATION},
@@ -196,6 +210,7 @@ PROVIDERS = (
         steps=("publish", "prepare", "run"),
         data_mode="transactional",
         inputs={"structure": "POSCAR"},
+        _input_metadata=_STRUCTURE_INPUT_METADATA,
         outputs=_STATIC_OUTPUTS,
         summary="one single-point calculation of one structure",
         declarations={"workflow": _STATIC_DECLARATION},
@@ -210,6 +225,7 @@ PROVIDERS = (
         steps=("publish", "prepare", "promote", "run", "static"),
         data_mode="transactional",
         inputs={"structure": "POSCAR"},
+        _input_metadata=_STRUCTURE_INPUT_METADATA,
         outputs=_RELAX_STATIC_OUTPUTS,
         summary="relax, promote the relaxed structure, then run it statically",
         declarations={"workflow": _RELAX_STATIC_DECLARATION},

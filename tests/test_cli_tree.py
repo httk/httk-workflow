@@ -27,6 +27,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "workspace": (
         "init",
         "status",
+        "managers",
         "list",
         "default",
         "move",

@@ -74,6 +74,30 @@ def _runner_path(workspace: Workspace, record: JobRecord) -> Path:
     return workspace.runner_store_path(str(runner["path"]))
 
 
+def test_collect_degraded_filters_to_the_degraded_lines_only(tmp_path: Path, capsys) -> None:
+    """--degraded prints only degraded lines while the summary counts the whole sweep (item 9)."""
+
+    workspace, _ = _finished(tmp_path)
+    context = CLIContext("httk", workspace.root)
+    name = register_ws(context, workspace.root, "degraded")
+
+    # Without --allow-job-collector the pinned-tree collector is not run, so the
+    # one job degrades: --degraded therefore prints its single line.
+    assert command(["collect", name, "--degraded"], context) == 1
+    lines = capsys.readouterr().out.splitlines()
+    summary = json.loads(lines[-1])
+    assert summary["format"] == "httk-workflow-collect-summary" and summary["degraded"] == 1
+    assert len(lines) == 2 and json.loads(lines[0])["missing_collector"] is not None
+
+    # Allowed, the job collects cleanly, so --degraded filters it out entirely
+    # while the summary still reports the whole sweep.
+    assert command(["collect", name, "--degraded", "--allow-job-collector"], context) == 0
+    lines = capsys.readouterr().out.splitlines()
+    summary = json.loads(lines[-1])
+    assert summary["collected"] == 1 and summary["degraded"] == 0
+    assert len(lines) == 1
+
+
 def test_collect_uses_a_pinned_tree_collector_when_allowed(tmp_path: Path) -> None:
     workspace, package = _finished(tmp_path)
     record = next(job_records(workspace))
@@ -239,7 +263,11 @@ def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_pa
         )
         == 0
     )
-    report = json.loads(capsys.readouterr().out)
+    lines = capsys.readouterr().out.splitlines()
+    report = json.loads(lines[0])
+    summary = json.loads(lines[-1])
+    assert summary["format"] == "httk-workflow-collect-summary"
+    assert summary["collected"] == 1 and summary["degraded"] == 0 and summary["storage_errors"] == 0
     assert report["stored"]["entries"]
     assert report["stored"]["run"]
     with Database.sqlite(store_path) as database:
@@ -247,6 +275,32 @@ def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_pa
         entry = store.fetch_entry(DataRecordEntry, report["stored"]["entries"][0])
         run = store.fetch_entry(RunEntry, report["stored"]["run"])
     assert isinstance(entry, DataRecord)
+    assert run is not None
+
+
+def test_collect_into_twice_is_idempotent(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("httk.data")
+    pytest.importorskip("httk.atomistic")
+    from httk.core import RunEntry
+    from httk.data.db import Database, SqlStore
+
+    workspace, _ = _finished(tmp_path)
+    context = CLIContext("httk", tmp_path)
+    workspace_name = register_ws(context, workspace.root, "collect-twice")
+    store_path = tmp_path / "results.sqlite"
+    argv = ["collect", workspace_name, "--allow-job-collector", "--into", str(store_path)]
+
+    assert command(argv, context) == 0
+    first = json.loads(capsys.readouterr().out.splitlines()[0])["stored"]
+    # Re-collection is stateless and de-duplicated on the stable ids, so a second
+    # store into the same file exits clean and stores the very same entries.
+    assert command(argv, context) == 0
+    second = json.loads(capsys.readouterr().out.splitlines()[0])["stored"]
+    assert first == second
+
+    # The run is present exactly once — the re-store neither errored nor forked it.
+    with Database.sqlite(store_path) as database:
+        run = SqlStore(database).fetch_entry(RunEntry, first["run"])
     assert run is not None
 
 
@@ -258,12 +312,73 @@ def test_collect_into_reports_an_unknown_entry_type_per_job(tmp_path: Path, caps
     workspace, _ = _finished(tmp_path, manifest=manifest, collect=_FAKE_POSTPROCESS)
     context = CLIContext("httk", tmp_path)
     workspace_name = register_ws(context, workspace.root, "collect-unknown")
+    # A storage failure is a nonzero exit under the honest exit-code policy: the
+    # per-job storage_error is reported, and the sweep no longer claims success.
     assert (
         command(
             ["collect", workspace_name, "--allow-job-collector", "--into", str(tmp_path / "unknown.sqlite")],
             context,
         )
-        == 0
+        == 1
     )
-    report = json.loads(capsys.readouterr().out)
+    lines = capsys.readouterr().out.splitlines()
+    report = json.loads(lines[0])
     assert "fake_entries" in report["storage_error"]
+    summary = json.loads(lines[-1])
+    assert summary["storage_errors"] == 1 and summary["collected"] == 1
+
+
+def test_malformed_provenance_document_degrades_only_its_job(tmp_path: Path) -> None:
+    from httk.workflow.models import JOB_STATE_DIRECTORY
+
+    workspace, _ = _finished(tmp_path)
+    record = next(job_records(workspace))
+    declarations = record.payload / JOB_STATE_DIRECTORY / "declarations"
+    declarations.mkdir(parents=True, exist_ok=True)
+    # An observed provenance edge missing its 'id' makes run_record raise; the
+    # sweep must degrade this job rather than abort on runner-written data.
+    (declarations / "provenance.json").write_text(json.dumps({"inputs": {"x": {"type": "a"}}}), encoding="utf-8")
+
+    items = list(collect(workspace, allow_job_collector=True))
+
+    assert len(items) == 1
+    assert items[0].missing_collector is not None
+    assert "provenance declaration is unusable" in items[0].missing_collector
+    assert "declarations/provenance.json" in items[0].missing_collector
+
+
+def test_degraded_job_reports_all_declared_roles_as_unfulfilled(tmp_path: Path) -> None:
+    workspace, _ = _finished(tmp_path)
+    without = next(collect(workspace))
+    assert without.missing_collector is not None
+    # A degraded job produced nothing, so every declared role is unfulfilled and
+    # can be told apart from a complete collection that declared no outputs.
+    assert without.unfulfilled == ("relaxed_structure",)
+
+
+def test_unlinked_product_of_is_reported_but_unfulfilled_roles_are_not(tmp_path: Path) -> None:
+    # relaxed_structure is a product of the input role initial_structure, which
+    # has no edge in the observed provenance, so its skipped link surfaces.
+    # total_energy also declares a product but is never produced: it belongs in
+    # unfulfilled, and must NOT be double-reported as an unlinked product.
+    manifest = (
+        _DATA_MANIFEST
+        + '''
+
+[workflow.outputs.total_energy]
+entry_type = "records"
+product_of = "relaxed_structure"
+role = "total_energy"
+'''
+    )
+    workspace, _ = _finished(tmp_path, manifest=manifest)
+    scaffold_module._WORKFLOW_PROVIDERS.pop("tests.fallback.package", None)
+
+    item = next(collect(workspace, allow_job_collector=True))
+
+    assert item.missing_collector is None
+    assert item.products == ()
+    assert item.unfulfilled == ("total_energy",)
+    assert item.products_unlinked == (
+        "relaxed_structure -> initial_structure (source edge absent in observed provenance)",
+    )

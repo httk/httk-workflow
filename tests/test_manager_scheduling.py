@@ -1003,7 +1003,7 @@ def test_marker_ownership_filters_scheduling_and_recovery(tmp_path: Path) -> Non
         manager.uid += 1
         assert manager._eligible_ready() == []
         assert manager._register_submissions() is False
-        assert not manager._has_actionable_work()
+        assert not manager._work_census().actionable
         assert workspace.find_marker_by_id(job_id).kind == "submitted"  # type: ignore[union-attr]
 
         manager.uid -= 1
@@ -1011,7 +1011,7 @@ def test_marker_ownership_filters_scheduling_and_recovery(tmp_path: Path) -> Non
         ready = workspace.find_marker_by_id(job_id)
         assert ready is not None and ready.kind == "ready"
         assert manager._eligible_ready() == [ready]
-        assert manager._has_actionable_work()
+        assert manager._work_census().actionable
 
         manager._transition(
             ready,

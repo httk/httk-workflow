@@ -34,6 +34,7 @@ from .models import (
     JobDefinition,
     normalize_placement,
     validate_declarations,
+    validate_declared,
     validate_environment,
     validate_failure,
     validate_label,
@@ -166,6 +167,7 @@ class JobSpec:
     :param parameters: Supply opaque job parameters.
     :param environment: Supply declared environment metadata and overrides.
     :param declarations: Supply workflow declarations.
+    :param declared: Supply the declared parameter and input metadata sections.
     :param compatibility: Supply an optional compatibility profile.
     """
 
@@ -194,6 +196,9 @@ class JobSpec:
     environment: Mapping[str, object] = field(default_factory=dict)
     #: Workflow declarations carried verbatim into ``job.json``, keyed by name.
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    #: The declared parameter and input metadata, keyed by section, mirroring
+    #: the shape of the environment member.
+    declared: Mapping[str, object] = field(default_factory=dict)
     compatibility: Mapping[str, object] | None = None
 
     def as_mapping(self, *, parent: Mapping[str, object] | None = None) -> dict[str, object]:
@@ -249,6 +254,8 @@ class JobSpec:
             result["environment"] = validate_environment(self.environment)
         if self.declarations:
             result["declarations"] = validate_declarations(self.declarations)
+        if self.declared:
+            result["declared"] = validate_declared(self.declared)
         if self.compatibility is not None:
             result["compatibility"] = copy.deepcopy(dict(self.compatibility))
         return result

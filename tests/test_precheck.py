@@ -9,7 +9,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
-from httk.workflow import Workspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow import precheck as precheck_module
 from httk.workflow.models import QUIESCENT_KINDS
 from httk.workflow.projects import initialize_project
@@ -62,12 +62,198 @@ def test_precheck_reports_resolution_sources_and_exit_code(tmp_path: Path, capsy
         "runner_indeterminate": 0,
         "runner_problems": 0,
         "unresolved": 1,
+        "claim_problems": 0,
+        "language_problems": 0,
+        "language_indeterminate": 0,
+        "input_problems": 0,
     }
     statuses = sorted(
         (entry["environment"][0]["status"], entry["environment"][0]["source"]) for entry in report["jobs"]
     )
     assert statuses == [("default", "default"), ("resolved", "workspace-setting"), ("unresolved", None)]
     assert "environment_variable_caveat" in report
+
+
+def _rewrite_job(payload: Path, **members: object) -> None:
+    """Overwrite named members of a prepared job.json."""
+
+    definition = json.loads((payload / "job.json").read_text(encoding="utf-8"))
+    definition.update(members)
+    (payload / "job.json").write_text(json.dumps(definition), encoding="utf-8")
+
+
+def test_precheck_flags_a_job_no_live_manager_can_claim(tmp_path: Path, capsys) -> None:
+    """A capability no live manager offers is a claim problem naming it (item 1)."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload = _job(tmp_path, "gated", {"declared": {}, "overrides": {}})
+    _rewrite_job(payload, claim={"pool": "default", "required_capabilities": ["docker"]})
+    workspace.submit(payload, "ready")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "claim")
+
+    with TaskManager(workspace, heartbeat_interval=0.01):
+        assert command(["precheck", name, "--json"], context) == 1
+        report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["claim_problems"] == 1
+    assert "lacks capabilities docker" in report["jobs"][0]["claim"]["problem"]
+
+
+def test_precheck_uses_the_actual_manager_runner_module_allowlist(tmp_path: Path, capsys) -> None:
+    """A pkg module the live manager's real allowlist excludes is refused (item 2)."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload = _job(tmp_path, "modules", {"declared": {}, "overrides": {}})
+    # httk.workflow would pass the DEFAULT precheck allowlist; the actual manager
+    # publishes ('acme.runners',), so it is the manager's allowlist that decides.
+    _rewrite_job(
+        payload,
+        runner={
+            "executor": "path",
+            "source": "installed",
+            "path": "pkg:httk.workflow/precheck.py",
+            "sha256": "0" * 64,
+            "arguments": [],
+        },
+    )
+    workspace.submit(payload, "ready")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "modules")
+
+    with TaskManager(workspace, runner_modules=("acme.runners",), heartbeat_interval=0.01):
+        assert command(["precheck", name, "--json"], context) == 1
+        report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["claim_problems"] == 1
+    problem = report["jobs"][0]["claim"]["problem"]
+    assert "does not allow runner module httk.workflow" in problem and "acme.runners" in problem
+
+
+def _language_job(tmp_path: Path, name: str) -> Path:
+    """Prepare a jobflow language job (the pair the collect gate recognizes)."""
+
+    payload = _job(tmp_path, name, {"declared": {}, "overrides": {}})
+    _rewrite_job(payload, parameters={"workflow_realization": "language", "workflow_language": "jobflow"})
+    return payload
+
+
+def test_precheck_flags_a_missing_language_engine_when_nothing_serves_it(tmp_path: Path, capsys, monkeypatch) -> None:
+    """A jobflow job whose engine is absent and unserved is a problem (item 3)."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    workspace.submit(_language_job(tmp_path, "jobflow"), "ready")
+    monkeypatch.setattr(
+        precheck_module,
+        "_find_module_spec_without_import",
+        lambda module: None if module == "maggma" else object(),
+    )
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "jobflow")
+
+    assert command(["precheck", name, "--json"], context) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["language_problems"] == 1
+    problem = report["jobs"][0]["language"]["problem"]
+    assert "maggma" in problem
+    assert "pip install httk-workflow[jobflow]" in problem
+    assert "pymatgen" in problem
+
+
+def test_precheck_language_engine_is_indeterminate_when_a_manager_serves_it(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """The check reads this process, so a serving manager's env makes it indeterminate, not a failure."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    workspace.submit(_language_job(tmp_path, "jobflow-served"), "ready")
+    monkeypatch.setattr(
+        precheck_module,
+        "_find_module_spec_without_import",
+        lambda module: None if module == "maggma" else object(),
+    )
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "jobflow-served")
+
+    with TaskManager(workspace, heartbeat_interval=0.01):
+        assert command(["precheck", name, "--json"], context) == 0
+        report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["language_problems"] == 0
+    assert report["summary"]["language_indeterminate"] == 1
+    assert report["jobs"][0]["language"]["status"] == "indeterminate"
+    assert "verified only at run time" in report["jobs"][0]["language"]["problem"]
+
+
+def test_precheck_ignores_a_bare_workflow_language_parameter(tmp_path: Path, capsys) -> None:
+    """The open parameters channel alone is not a language job; the realization must say so."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload = _job(tmp_path, "not-language", {"declared": {}, "overrides": {}})
+    _rewrite_job(payload, parameters={"workflow_language": "jobflow"})
+    workspace.submit(payload, "ready")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "not-language")
+
+    assert command(["precheck", name, "--json"], context) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["jobs"][0]["language"] is None
+
+
+def test_precheck_treats_an_empty_manager_allowlist_as_empty(tmp_path: Path, capsys) -> None:
+    """An explicit empty runner_modules allows nothing, not the default (finding 7)."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload = _job(tmp_path, "empty-allowlist", {"declared": {}, "overrides": {}})
+    _rewrite_job(
+        payload,
+        runner={
+            "executor": "path",
+            "source": "installed",
+            "path": "pkg:httk.workflow/precheck.py",
+            "sha256": "0" * 64,
+            "arguments": [],
+        },
+    )
+    workspace.submit(payload, "ready")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "empty-allowlist")
+
+    with TaskManager(workspace, runner_modules=[], heartbeat_interval=0.01):
+        assert command(["precheck", name, "--json"], context) == 1
+        report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["claim_problems"] == 1
+    problem = report["jobs"][0]["claim"]["problem"]
+    assert "does not allow runner module httk.workflow" in problem and "allows none" in problem
+
+
+def test_precheck_flags_a_missing_required_input_destination(tmp_path: Path, capsys) -> None:
+    """A declared required input absent from the payload is an input problem (item 4)."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload = _job(tmp_path, "inputs", {"declared": {}, "overrides": {}})
+    _rewrite_job(payload, declared={"inputs": {"structure": {"required": True, "destination": "files/POSCAR"}}})
+    workspace.submit(payload, "ready")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "inputs")
+
+    assert command(["precheck", name, "--json"], context) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["input_problems"] == 1
+    assert "files/POSCAR" in report["jobs"][0]["inputs"][0]
+
+
+def test_precheck_notice_when_no_manager_has_registered(tmp_path: Path, capsys) -> None:
+    """With no manager registered, claimability is one workspace notice, not per-job spam."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    for index in range(2):
+        workspace.submit(_job(tmp_path, f"orphan-{index}", {"declared": {}, "overrides": {}}), "ready")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "orphan")
+
+    assert command(["precheck", name, "--json"], context) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["claim_problems"] == 0
+    assert report["manager_notice"] is not None and "no manager" in report["manager_notice"]
+    assert all(finding["claim"] is None for finding in report["jobs"])
 
 
 def test_precheck_flags_a_deleted_workspace_runner(tmp_path: Path, capsys) -> None:

@@ -79,6 +79,11 @@ MAXIMUM_PARAMETERS_BYTES = 262144
 # reason: a declaration describes one job, it is not a place for bulk content.
 MAXIMUM_DECLARATIONS_BYTES = 262144
 MAXIMUM_ENVIRONMENT_BYTES = 262144
+# The serialized budget of the optional ``declared`` object, which mirrors the
+# environment member: it carries the declared parameter and input metadata a
+# workflow announced, so a later precheck can consume it. Same allowance, same
+# reason — it describes one job rather than carrying bulk content.
+MAXIMUM_DECLARED_BYTES = 262144
 
 _UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _TAG_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,47}")
@@ -277,6 +282,46 @@ def validate_environment(value: object, name: str = "environment") -> dict[str, 
         raise FormatError(f"{name} must contain only JSON values: {exc}") from exc
     if size > MAXIMUM_ENVIRONMENT_BYTES:
         raise FormatError(f"{name} exceeds the {MAXIMUM_ENVIRONMENT_BYTES}-byte limit")
+    return result
+
+
+def validate_declared(value: object, name: str = "declared") -> dict[str, dict[str, dict[str, object]]]:
+    """Validate the optional ``declared`` object of a job.
+
+    The member mirrors the environment member's shape: it carries the parameter
+    and input metadata a workflow announced at submission — under the optional
+    ``parameters`` and ``inputs`` sections — so a later precheck can consume the
+    declaration without re-resolving the workflow. The protocol only checks its
+    structure, key syntax, and serialized size; the meaning of each metadata
+    entry is owned by the scaffold that wrote it.
+
+    :param value: The declared mapping to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated declared sections keyed by ``parameters``/``inputs``.
+    :raises httk.workflow.errors.FormatError: If the mapping, its keys, or its size limit are invalid.
+    """
+
+    mapping = require_mapping(value, name)
+    unsupported = sorted(set(mapping) - {"parameters", "inputs"})
+    if unsupported:
+        raise FormatError(f"{name} has unsupported members: {', '.join(unsupported)}")
+    result: dict[str, dict[str, dict[str, object]]] = {}
+    for section in ("parameters", "inputs"):
+        if section not in mapping:
+            continue
+        raw = require_mapping(mapping[section], f"{name}.{section}")
+        entries: dict[str, dict[str, object]] = {}
+        for key, metadata in raw.items():
+            if not isinstance(key, str) or not key:
+                raise FormatError(f"{name}.{section} keys must be nonempty strings")
+            entries[key] = dict(require_mapping(metadata, f"{name}.{section}.{key}"))
+        result[section] = entries
+    try:
+        size = len(json_bytes(result))
+    except (TypeError, ValueError) as exc:
+        raise FormatError(f"{name} must contain only JSON values: {exc}") from exc
+    if size > MAXIMUM_DECLARED_BYTES:
+        raise FormatError(f"{name} exceeds the {MAXIMUM_DECLARED_BYTES}-byte limit")
     return result
 
 
@@ -882,6 +927,7 @@ class StateFrame:
         pause: object = _UNSET,
         failure: Mapping[str, object] = _UNSET,
         job_digest: str = _UNSET,
+        join_unresolved: Mapping[str, object] = _UNSET,
         unclean_restart: bool = _UNSET,
         unsafe_persistent_takeover: bool = _UNSET,
         takeover_evidence: Mapping[str, object] = _UNSET,
@@ -928,6 +974,7 @@ class StateFrame:
         :param pause: The pause record.
         :param failure: The failure record.
         :param job_digest: The immutable job digest.
+        :param join_unresolved: The persisted first-unresolved child and timestamp of a waiting join.
         :param unclean_restart: Whether the previous attempt ended uncleanly.
         :param unsafe_persistent_takeover: Whether persistent takeover was unsafe.
         :param takeover_evidence: Evidence for the persistent takeover.
@@ -969,6 +1016,7 @@ class StateFrame:
             ("pause", pause),
             ("failure", failure),
             ("job_digest", job_digest),
+            ("join_unresolved", join_unresolved),
             ("unclean_restart", unclean_restart),
             ("unsafe_persistent_takeover", unsafe_persistent_takeover),
             ("takeover_evidence", takeover_evidence),
@@ -1062,6 +1110,16 @@ class StateFrame:
     def join_summary(self) -> object:
         """Return the observed child summary, when present."""
         return self.members.get("join_summary")
+
+    @property
+    def join_unresolved(self) -> Mapping[str, object] | None:
+        """Return the persisted first-unresolved join child and timestamp.
+
+        A waiting frame records this once, the first time a manager finds a
+        join child unresolvable, so the grace before the join fails is measured
+        from that instant and survives a manager restart rather than resetting.
+        """
+        return self._mapping("join_unresolved")
 
     @property
     def manager_id(self) -> str | None:
@@ -1182,6 +1240,8 @@ class JobDefinition:
     environment: Mapping[str, object]
     #: The workflow declarations of this job, carried verbatim, keyed by name.
     declarations: Mapping[str, Mapping[str, object]]
+    #: The parameter and input metadata the workflow declared, keyed by section.
+    declared: Mapping[str, Mapping[str, Mapping[str, object]]]
     parent: Mapping[str, object] | None
     raw: Mapping[str, object]
     stored_digest: str | None = None
@@ -1301,6 +1361,8 @@ class JobDefinition:
         environment = {} if environment_raw is None else validate_environment(environment_raw)
         declarations_raw = value.get("declarations")
         declarations = {} if declarations_raw is None else validate_declarations(declarations_raw)
+        declared_raw = value.get("declared")
+        declared = {} if declared_raw is None else validate_declared(declared_raw)
         parent_raw = value.get("parent")
         parent = None if parent_raw is None else require_mapping(parent_raw, "parent")
         return cls(
@@ -1325,6 +1387,7 @@ class JobDefinition:
             parameters=parameters,
             environment=environment,
             declarations=declarations,
+            declared=declared,
             parent=None if parent is None else dict(parent),
             raw=dict(value),
         )

@@ -121,7 +121,7 @@ def _validate_input_table(
     allow_port: bool = False,
 ) -> tuple[dict[str, object], str | None]:
     path = f"[workflow.inputs.{name}]"
-    _unknown(raw, {"destination", "description", "entry_type", "ref", "role", "port"}, path, directory)
+    _unknown(raw, {"destination", "description", "entry_type", "ref", "role", "port", "required"}, path, directory)
     destination = raw.get("destination")
     if language and destination is not None:
         raise _error(directory, f"{path}.destination is implied by the language")
@@ -147,6 +147,16 @@ def _validate_input_table(
         value = _optional_string(raw, key, path, directory)
         if value is not None:
             result[key] = value
+    # A required input must be supplied at submission. It defaults to required
+    # exactly when the input declares an entry_type — a typed object a job cannot
+    # run without — and to optional otherwise; a boolean overrides either way.
+    if "required" in raw:
+        required = raw["required"]
+        if not isinstance(required, bool):
+            raise _error(directory, f"{path}.required must be a boolean")
+    else:
+        required = "entry_type" in result
+    result["required"] = required
     return result, None if destination is None else str(destination)
 
 
