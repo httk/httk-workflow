@@ -1,7 +1,7 @@
 # Native C runner API
 
 *For authors writing a workflow runner in C.* The C SDK is the same authoring
-surface as the {doc}`Python <runtime_helpers>` and {doc}`Bash <native_bash_api>`
+surface as the {doc}`Python <../runtime_helpers>` and {doc}`Bash <native_bash_api>`
 ones, in a clean C-idiomatic ABI. Like the Bash library it is a **bridge
 client**: every verb execs `$HTTK_WORKFLOW_PYTHON -m httk.workflow._shell_bridge
 <verb> …`, which drives the same `Attempt` object the Python SDK exposes, so a C

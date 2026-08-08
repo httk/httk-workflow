@@ -110,11 +110,11 @@ namespaces = true
   "native/c/*.h",
   "native/c/*.c",
   # The native Fortran SDK is one module wrapping that C pair over iso_c_binding;
-  # it ships beside it, compiled with a runner and the C source (see native_fortran_api).
+  # it ships beside it, compiled with a runner and the C source (see docs/sdks/native_fortran_api).
   "native/fortran/*.f90",
   # The native Rust SDK is a std-only crate (no crates.io deps), a bridge client
   # like the Bash and C ones rather than FFI over them; it ships as its Cargo
-  # manifest and single source file, path-depended or vendored (see native_rust_api).
+  # manifest and single source file, path-depended or vendored (see docs/sdks/native_rust_api).
   "native/rust/Cargo.toml",
   "native/rust/src/*.rs",
   # The native Perl SDK is one pure-core module, loaded directly by interpreted runners.

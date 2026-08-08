@@ -3,7 +3,7 @@
 *For runner authors in either language.* One table, below, is the **normative**
 list of the authoring surface: every operation a step can perform, spelled in
 Python and in Bash, with the protocol artifact it produces. The prose guides —
-{doc}`runtime_helpers` for Python and {doc}`native_bash_api` for Bash — teach the
+{doc}`../runtime_helpers` for Python and {doc}`native_bash_api` for Bash — teach the
 two languages; this page is what they must both agree with.
 
 The table is enforced. `tests/test_docs_parity.py` parses it and fails the build

@@ -108,7 +108,7 @@ job's inputs, a real `HTTK_VASP_COMMAND` deployment override, the workspace
 setting, then the runner's default. The manager exports scalar workspace settings
 into each attempt environment (`vasp.command` becomes `HTTK_VASP_COMMAND`) and
 snapshots them into `context.json`, so a runner sees the values the workspace
-held when its job was claimed. See {doc}`vasp_runners` and {doc}`sdk_parity`.
+held when its job was claimed. See {doc}`vasp_runners` and {doc}`sdks/sdk_parity`.
 
 ## Readiness and transfer environment advisories
 
@@ -662,7 +662,7 @@ the context named by `HTTK_WORKFLOW_CONTEXT` and publishes
 `outcome.tmp.<nonce>/` as `outcome.ready/` beneath
 `HTTK_WORKFLOW_CONTROL_DIR`. See the
 {doc}`workflow_filesystem_api` for the complete protocol, and
-{doc}`runtime_helpers`, {doc}`native_bash_api`, or the {doc}`sdk_parity` table
+{doc}`runtime_helpers`, {doc}`sdks/native_bash_api`, or the {doc}`sdks/sdk_parity` table
 for the two authoring SDKs that implement it.
 
 The local executor starts runners behind a one-byte launch gate. It records

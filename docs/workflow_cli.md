@@ -735,7 +735,7 @@ resolved in layers, most specific first: the job's own parameters, a real
 default. The manager exports scalar workspace settings into each attempt
 environment (`vasp.command` becomes `HTTK_VASP_COMMAND`) and snapshots them into
 `context.json`, so a runner sees the values the workspace held when its job was
-claimed. See {doc}`vasp_runners` and {doc}`sdk_parity`.
+claimed. See {doc}`vasp_runners` and {doc}`sdks/sdk_parity`.
 
 ## Workspace policy and integrity
 

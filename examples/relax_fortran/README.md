@@ -46,5 +46,5 @@ finished calculation lands in `jobs/*/data/vasp/`; because every language SDK
 publishes through the one bridge, those files are the same bytes the Python, Bash,
 and C relaxation runners publish.
 
-See `docs/native_fortran_api.md` for the module surface, the string-ownership
+See `docs/sdks/native_fortran_api.md` for the module surface, the string-ownership
 rules across the C boundary, and how a Fortran step handler is dispatched.

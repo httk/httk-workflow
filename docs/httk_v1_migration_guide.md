@@ -897,5 +897,5 @@ still needs it.
 - [ ] Every `ht.instantiate.py` is converted to declared parameters or `@run.instantiate`.
 - [ ] New production submissions use native payloads and new UUIDs.
 
-For API details, continue with {doc}`native_bash_api`,
+For API details, continue with {doc}`sdks/native_bash_api`,
 {doc}`runtime_helpers`, and {doc}`workflow_filesystem_api`.

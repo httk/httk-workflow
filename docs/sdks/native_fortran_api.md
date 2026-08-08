@@ -1,7 +1,7 @@
 # Native modern-Fortran runner API
 
 *For authors writing a workflow runner in Fortran.* The Fortran SDK is the same
-authoring surface as the {doc}`Python <runtime_helpers>`, {doc}`Bash
+authoring surface as the {doc}`Python <../runtime_helpers>`, {doc}`Bash
 <native_bash_api>`, and {doc}`C <native_c_api>` ones. It adds **no new bridge
 protocol**: it is `iso_c_binding` bindings over the native C library
 (`native/c/httk_workflow.{h,c}`) plus one idiomatic Fortran module, so the C

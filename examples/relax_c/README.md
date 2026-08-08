@@ -37,5 +37,5 @@ httk workflow collect
 
 The finished calculation lands in `jobs/*/data/vasp/`.
 
-See `docs/native_c_api.md` for the full function table, the memory-ownership
+See `docs/sdks/native_c_api.md` for the full function table, the memory-ownership
 rules, and how the C surface maps to the Python and Bash SDKs.

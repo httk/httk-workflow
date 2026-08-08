@@ -1,7 +1,7 @@
 # Native runner helpers
 
 *For authors writing a workflow runner in Python.* The complete authoring
-surface, Python beside its Bash equivalent, is the table in {doc}`sdk_parity`,
+surface, Python beside its Bash equivalent, is the table in {doc}`sdks/sdk_parity`,
 which is normative and enforced by the test suite; this page teaches it.
 
 A native *httk₂* runner is one program that implements the steps of one workflow.
@@ -326,7 +326,7 @@ JSON lines and emits `httk-workflow-checker-result` version 1 JSON lines.
 Commands and checker commands are always argument arrays: this API deliberately
 does not reproduce the *httk* v1 exit-code and `ht.nextstep` interface.
 
-Native Bash runners use the same protocol through {doc}`native_bash_api`.
+Native Bash runners use the same protocol through {doc}`sdks/native_bash_api`.
 
 ## VASP files
 

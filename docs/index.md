@@ -36,15 +36,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 **The execution API** — writing and running workflow steps
 
 - {doc}`runtime_helpers` — the Python authoring SDK: `Runner`, `Attempt`, steps
-- {doc}`native_bash_api` — the same surface in Bash
-- {doc}`native_c_api` — the same surface in C, and the foundation for Fortran bindings
-- {doc}`native_fortran_api` — the same surface in modern Fortran, over the C bindings
-- {doc}`native_rust_api` — the same surface in safe, std-only Rust
-- {doc}`native_perl_api` — the same surface in pure, core-only Perl
-- {doc}`native_ada_api` — the same surface in Ada 2012, over the C bindings
-- {doc}`native_cpp_api` — the same surface in C++17, over the C bindings
-- {doc}`native_java_api` — the same surface in Java 17, over the Python bridge
-- {doc}`sdk_parity` — the normative table the language SDKs must agree with
+- {doc}`sdks/index` — the same authoring surface in eight more languages
 - {doc}`vasp_runners` — the packaged runners and relaxation report, for campaigns that write none
 - {doc}`workflow_packages` — authoring directory packages and their manifest
 - {doc}`declarations` — saying what a workflow *is*, for a data layer
@@ -107,15 +99,7 @@ httk workflow job submit workflow-workspace prepared-job --placement project/00
 quickstart
 workflow_protocol_api
 runtime_helpers
-native_bash_api
-native_c_api
-native_fortran_api
-native_rust_api
-native_perl_api
-native_ada_api
-native_cpp_api
-native_java_api
-sdk_parity
+sdks/index
 vasp_runners
 workflow_packages
 declarations

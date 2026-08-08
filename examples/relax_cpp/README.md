@@ -31,5 +31,5 @@ httk workflow run
 httk workflow collect
 ```
 
-See `docs/native_cpp_api.md` for the C++ surface, C string ownership, and the
+See `docs/sdks/native_cpp_api.md` for the C++ surface, C string ownership, and the
 plain-function-pointer handler contract.

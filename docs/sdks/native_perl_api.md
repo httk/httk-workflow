@@ -1,7 +1,7 @@
 # Native Perl runner API
 
 *For authors writing a workflow runner in Perl.* The Perl SDK is the same
-authoring surface as the {doc}`Python <runtime_helpers>`, {doc}`Bash
+authoring surface as the {doc}`Python <../runtime_helpers>`, {doc}`Bash
 <native_bash_api>`, {doc}`C <native_c_api>`, {doc}`Fortran
 <native_fortran_api>`, and {doc}`Rust <native_rust_api>` ones. It is a pure-core
 Perl **bridge client**: every bridge-backed `Attempt` method invokes
