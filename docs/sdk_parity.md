@@ -13,6 +13,34 @@ defined in the packaged library, or when a public member of `Runner` or
 authoring feature that is not in this table does not exist as far as the
 documentation is concerned, and adding one to the code means adding a row here.
 
+A third language SDK, {doc}`in C <native_c_api>`, is a bridge client of this same
+surface: like the Bash functions, each `httk_workflow_*` C function is one
+invocation of one {py:mod}`httk.workflow.shell_bridge` subcommand, so a C runner
+publishes the same bytes too. Its own function-by-function mapping to the Python
+and Bash columns below lives in {doc}`native_c_api`, which is the reference and
+the foundation the Fortran bindings build on.
+
+A fourth SDK, {doc}`in modern Fortran <native_fortran_api>`, adds no new bridge
+protocol at all: it is `iso_c_binding` bindings over that C library plus an
+idiomatic Fortran module, so the C `httk_workflow_main` owns dispatch and every
+verb reaches the same subcommand. A Fortran runner therefore publishes the same
+bytes as the C, Bash, and Python runners; its Fortran-to-C mapping lives in
+{doc}`native_fortran_api`.
+
+A fifth SDK, {doc}`in safe Rust <native_rust_api>`, is a bridge client of this
+same surface, but — unlike the Fortran one — it is not FFI over the C library: it
+is a std-only, dependency-free reimplementation of the same thin pattern in safe
+Rust, so `cargo build --offline` needs no network. Each `Attempt` method is one
+invocation of one {py:mod}`httk.workflow.shell_bridge` subcommand, so a Rust
+runner publishes the same bytes too; its Rust-to-C mapping lives in
+{doc}`native_rust_api`.
+
+One thing the SDKs do *not* share is the `error.json` breadcrumb's `exception`
+label for a handler that ends abnormally: Bash records `ShellError`, C records
+`CError`, Rust records `RustError`, and the Fortran bindings inherit `CError`
+because they end through the C library. The label names the language a handler
+died in; the outcome the manager acts on is identical.
+
 Both languages perform their work through exactly one implementation — the Bash
 functions are thin calls into {py:mod}`httk.workflow.shell_bridge`, which drives
 the same `Attempt` object the Python SDK exposes — so a Bash runner and a Python
