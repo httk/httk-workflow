@@ -1390,6 +1390,63 @@ rather than as a protocol violation. The ones this implementation exports are:
 HTTK_WORKFLOW_VASP_BASH_API=<absolute native VASP Bash library>
 ```
 
+### Executable workflow-hook wire formats
+
+Directory-package instantiate and collect hooks that are not `.py` use these
+UTF-8 JSON subprocess formats. The package manifest and hook trust rules are
+specified in {doc}`workflow_packages`; these are the wire-format catalogue.
+
+An executable instantiate hook receives one document on stdin, with its current
+working directory set to the staging payload:
+
+```json
+{
+  "format": "httk-workflow-instantiate",
+  "format_version": 1,
+  "workflow": "example.relax",
+  "tag": "silicon",
+  "parameters": {"cutoff": 520},
+  "inputs": {
+    "structure": {"kind": "file", "path": "files/inputs/structure/POSCAR"},
+    "settings": {"kind": "value", "value": {"kpoints": [4, 4, 4]}}
+  }
+}
+```
+
+Its stdout is one JSON object containing `parameters` and, optionally, `tag`.
+An executable collect hook receives JSONL: the first line is exactly
+
+```json
+{"format": "httk-workflow-collect-stream", "format_version": 1}
+```
+
+and each later line is exactly one request envelope:
+
+```json
+{"record": {"workspace_id": "workspace", "job_id": "job-1", "state": "succeeded", "job": {}}}
+```
+
+The record value is the complete `JobRecord.as_mapping()` mapping; the example
+shows only the envelope shape. The hook writes one ordered response per record,
+using either:
+
+```json
+{"job_id": "job-1", "outputs": {"energy": {"value": 3.14}}}
+```
+
+or:
+
+```json
+{"job_id": "job-1", "error": "could not read the result"}
+```
+
+The Python hook fast paths do not cross this subprocess boundary, but preserve
+the same successful-path hook and assembly semantics. Collector failure handling
+is intentionally different: registered Python collector exceptions abort
+iteration, while executable responses can degrade jobs independently.
+`httk.workflow.hookapi` provides `instantiate_main()` and `collect_main()` for
+Python executables implementing these formats.
+
 An unclean persistent retry context is:
 
 ```json

@@ -154,14 +154,15 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
     assert "outputs:" in text and "relaxed_structure" in text
     assert "postprocess scripts:" in text and "report: scripts/report.sh — write a report" in text
     assert "generated from manifest" in text
-    assert "instantiate hook: yes" in text and "collect hook: yes" in text
+    assert "instantiate hook: yes (instantiate.py)" in text
+    assert "collect hook: yes (collect.py), kind=python" in text
     assert not before.exists()
 
     assert command(["describe", str(package), "--json"], context) == 0
     directory = json.loads(capsys.readouterr().out)
     assert directory["hooks"] == {
-        "instantiate": {"present": True, "file": "instantiate.py", "packaged": False},
-        "collect": {"present": True, "file": "collect.py", "packaged": False},
+        "instantiate": {"present": True, "file": "instantiate.py", "kind": "python", "packaged": False},
+        "collect": {"present": True, "file": "collect.py", "kind": "python", "packaged": False},
     }
     assert directory["postprocess"] == {"report": {"file": "scripts/report.sh", "description": "write a report"}}
 
@@ -185,8 +186,8 @@ def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path:
     context = _context(tmp_path)
     assert command(["describe", "vasp-relax", "--json"], context) == 0
     packaged = json.loads(capsys.readouterr().out)
-    assert packaged["hooks"]["collect"] == {"present": True, "file": None, "packaged": True}
-    assert packaged["hooks"]["instantiate"] == {"present": False, "file": None, "packaged": True}
+    assert packaged["hooks"]["collect"] == {"present": True, "file": None, "kind": None, "packaged": True}
+    assert packaged["hooks"]["instantiate"] == {"present": False, "file": None, "kind": None, "packaged": True}
     assert packaged["inputs"]["structure"]["role"] == "initial_structure"
     assert packaged["inputs"]["structure"]["entry_type"] == "structures"
     assert packaged["postprocess"] == {
@@ -213,8 +214,8 @@ def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path:
     assert command(["describe", str(no_hooks), "--json"], context) == 0
     directory = json.loads(capsys.readouterr().out)
     assert directory["hooks"] == {
-        "instantiate": {"present": False, "file": None, "packaged": False},
-        "collect": {"present": False, "file": None, "packaged": False},
+        "instantiate": {"present": False, "file": None, "kind": None, "packaged": False},
+        "collect": {"present": False, "file": None, "kind": None, "packaged": False},
     }
     assert directory["postprocess"] == {}
     assert command(["describe", str(no_hooks)], context) == 0

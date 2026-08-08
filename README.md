@@ -14,6 +14,14 @@ the normal manager in the same *httk₂* workspace. Jobs communicate through ato
 published filesystem state, so interrupted managers and calculations can be
 recovered without cleanup hooks.
 
+*httk₂* workflows are language-independent: runners, hooks, and postprocess
+scripts can be written in any language; a workflow is a manifest plus the
+members it references. Python hooks remain first-class, with an in-process fast
+path. Successful hook outputs use the same assembly semantics as executable
+hooks; collector failures differ deliberately: registered `.py` exceptions
+abort iteration, while executable-hook errors degrade per job and continue the
+sweep.
+
 From nothing to a finished VASP relaxation, without writing a runner:
 
 ```console

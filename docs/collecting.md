@@ -182,6 +182,30 @@ can inspect the job-pinned package tree, validate its own manifest and digest,
 and load that tree's collect hook; refusals degrade only that job. See
 {doc}`workflow_packages` for the trust tiers and package hook contract.
 
+An executable `[workflow.collect]` member is run once for the matching sweep
+from its package tree. For direct package paths and the opt-in job-pinned
+fallback, that tree is published and digest-checked; a registered-directory
+provider is the explicit-consent current-source exception. The first stdin line is
+`{"format":"httk-workflow-collect-stream","format_version":1}`; each
+following line is `{"record": <JobRecord mapping>}`. The hook must return one
+JSONL response per record, in order: `{"job_id": ..., "outputs": {role:
+value}}` or `{"job_id": ..., "error": ...}`. Output values use exactly one
+wrapper: `{"entry": {...}}` for a registered entry record,
+`{"value": <json>}` for a `DataRecord`, or exactly `{"file": "<path>"}` for a
+workspace-confined `FileRecord`. A malformed, errored, missing, wrong-id, or
+unresolvable response degrades that job and does not stop the sweep. Response
+lines are drained as binary newline-delimited data and decoded as UTF-8 one line
+at a time. The limits are enforced during draining: a 1 MiB response line, a
+64 KiB stderr line, and 1 MiB total stderr; any limit breach terminates and
+degrades the affected executable collector group. Surplus blank response lines
+are ignored; a nonblank surplus response line likewise degrades the whole group. Other
+malformed or non-UTF-8 responses degrade only their individual job. A declared output
+`ref` makes `httk-data` validation hard-required at collect time; without a
+`ref`, the framework creates a `_httk_custom_*` property definition. Python
+`.py` hooks keep the in-process path and the same successful assembled-output
+semantics, but a registered Python collector exception aborts iteration rather
+than degrading the job.
+
 ### Language fallback and degradation
 
 For a language job, provider dispatch is followed by the job's own

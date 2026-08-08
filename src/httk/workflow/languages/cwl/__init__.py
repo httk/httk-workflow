@@ -74,7 +74,6 @@ from urllib.parse import unquote, urlparse
 
 from httk.core import FileRecord
 
-from httk.workflow._util import sha256_file
 from httk.workflow.languages import (
     LanguageOutputsMissingError,
     LanguagePorts,
@@ -837,55 +836,26 @@ def _file_record(record: "JobRecord", value: Mapping[str, object], prefix: str, 
     recorded = value.get("path")
     if not isinstance(recorded, str):
         raise ValueError(f"{record.workspace_id}:{record.job_id}: CWL File output {port!r} has no string path")
-    root = record.workspace_root.resolve()
-    recorded_path = Path(recorded)
-    actual: Path | None = None
-    invalid_absolute = False
     try:
-        if recorded_path.is_absolute():
-            resolved = recorded_path.resolve()
-            if not resolved.is_relative_to(root):
-                invalid_absolute = True
-            elif resolved.is_file():
-                actual = resolved
-        else:
-            if record.workdir is not None:
-                workdir = record.workdir.resolve()
-                candidate = (workdir / recorded_path).resolve()
-                if candidate.is_relative_to(workdir) and candidate.is_relative_to(root) and candidate.is_file():
-                    actual = candidate
-        if actual is None and not invalid_absolute and record.data is not None:
-            data_root = record.data.resolve()
-            published = (data_root / prefix / port).resolve()
-            if published.is_relative_to(data_root) and published.is_relative_to(root) and published.is_dir():
-                candidate = (published / f"{index:04d}-{recorded_path.name}").resolve()
-                if candidate.is_relative_to(published) and candidate.is_relative_to(root) and candidate.is_file():
-                    actual = candidate
-    except (OSError, RuntimeError):
-        actual = None
-    if actual is None:
+        from ...collecting import _workspace_file_record
+
+        basename = value.get("basename")
+        return cast(
+            FileRecord,
+            _workspace_file_record(
+                record,
+                recorded,
+                published_prefix=prefix,
+                port=port,
+                index=index,
+                name=basename if isinstance(basename, str) else None,
+            ),
+        )
+    except ValueError as exc:
         raise LanguageOutputsMissingError(
             f"{record.workspace_id}:{record.job_id}: CWL File output {port!r} path {recorded!r} "
             "is missing or outside the workspace/workdir/data roots"
-        )
-    descriptor_path = actual.relative_to(root).as_posix()
-    basename = value.get("basename")
-    name = basename if isinstance(basename, str) else recorded_path.name
-    size: int | None = None
-    digest: str | None = None
-    if actual is not None:
-        digest = sha256_file(actual)
-        size = actual.stat().st_size
-    elif isinstance(value.get("size"), int) and not isinstance(value.get("size"), bool):
-        size = value["size"]
-    return FileRecord(
-        url=descriptor_path,
-        name=name,
-        size=size,
-        # Host MIME databases would make the identity host-dependent; guessing is banned.
-        media_type=None,
-        sha256=digest,
-    )
+        ) from exc
 
 
 def _file_value(record: "JobRecord", value: object, prefix: str, port: str, index: int = 0) -> object:

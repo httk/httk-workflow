@@ -9,8 +9,27 @@ same shape as a Python runner: `httk_workflow_runner` declares the workflow and
 its steps, one `step_<name>` function implements each of them, and
 `httk_workflow_main` dispatches the step the manager asked for.
 
-Bash runners cannot declare the Python-only instantiate hook; the describe field
-is absent unless a Python runner declares it.
+Directory-package hooks are language-independent too. A Bash executable can be
+the manifest's instantiate or collect hook; it consumes the JSON contract in
+{doc}`workflow_packages` rather than the runner SDK. For example, an
+instantiate hook can use `jq` to read the envelope, stage a file from the
+payload-relative descriptor, and return the required response:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+request=$(cat)
+input_path=$(jq -r '.inputs.structure.path' <<<"$request")
+cp -- "$input_path" files/structure-from-hook
+parameters=$(jq '.parameters + {"prepared_by": "bash"}' <<<"$request")
+jq -n --argjson parameters "$parameters" '{parameters: $parameters}'
+```
+
+This example is deliberately honest about JSON-in-Bash: general JSON needs a
+parser such as `jq`; any language with JSON support can implement the same
+contract. Python authors can use `httk.workflow.hookapi`'s `instantiate_main()`
+and `collect_main()` helpers.
 
 Nothing declares the shape of the workflow up front. A step decides *at run time*
 which children to spawn and which step runs next, so the graph of a job is

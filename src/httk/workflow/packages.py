@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 import tomllib
@@ -91,6 +92,18 @@ def _member(directory: Path, value: object, path: str, *, python: bool = False) 
         if directory.joinpath(*relative.parts[:index]).is_symlink():
             raise _error(directory, f"{path} must not traverse a symlink: {value!r}")
     return relative.as_posix()
+
+
+def _collect_member(directory: Path, value: object, path: str) -> tuple[str, bool]:
+    """Validate a Python or executable collect member and return its kind."""
+
+    if isinstance(value, str) and PurePosixPath(value).suffix == ".py":
+        return _member(directory, value, path, python=True), False
+    member = _member(directory, value, path)
+    candidate = directory.joinpath(*PurePosixPath(member).parts)
+    if not os.access(candidate, os.X_OK):
+        raise _error(directory, f"{path} must name a .py member or an executable member (chmod +x): {value!r}")
+    return member, True
 
 
 def _validate_name(name: object, path: str, directory: Path) -> str:
@@ -595,20 +608,34 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         inputs[input_name] = destination
 
     instantiate_file: str | None = None
+    instantiate_exec: str | None = None
     if "instantiate" in workflow:
         instantiate = _table(workflow["instantiate"], "[workflow.instantiate]", root)
         _unknown(instantiate, {"file"}, "[workflow.instantiate]", root)
-        instantiate_file = _member(root, instantiate.get("file"), "[workflow.instantiate].file", python=True)
+        value = instantiate.get("file")
+        if isinstance(value, str) and PurePosixPath(value).suffix == ".py":
+            instantiate_file = _member(root, value, "[workflow.instantiate].file", python=True)
+        else:
+            instantiate_file = _member(root, value, "[workflow.instantiate].file")
+            candidate = root.joinpath(*PurePosixPath(instantiate_file).parts)
+            if not os.access(candidate, os.X_OK):
+                raise _error(
+                    root,
+                    f"[workflow.instantiate].file must name a .py member or an executable member (chmod +x): {value!r}",
+                )
+            instantiate_exec = instantiate_file
     if lang is not None:
         instantiate_file = None
     if lang is None and any(destination is None for destination in inputs.values()) and instantiate_file is None:
         raise _error(root, "hook-consumed workflow inputs require [workflow.instantiate]")
 
     collect_file: str | None = None
+    collector_exec: str | None = None
     if "collect" in workflow:
         collect = _table(workflow["collect"], "[workflow.collect]", root)
         _unknown(collect, {"file"}, "[workflow.collect]", root)
-        collect_file = _member(root, collect.get("file"), "[workflow.collect].file", python=True)
+        collect_file, executable = _collect_member(root, collect.get("file"), "[workflow.collect].file")
+        collector_exec = collect_file if executable else None
 
     postprocess_scripts: dict[str, dict[str, object]] = {}
     if "postprocess" in workflow:
@@ -705,7 +732,9 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         directory=root.resolve(),
         entry=entry,
         instantiate_file=instantiate_file,
+        instantiate_exec=instantiate_exec,
         collect_file=collect_file,
+        collector_exec=collector_exec,
         postprocess_scripts=postprocess_scripts,
         parameters=parameters,
         environment=environment,
@@ -736,7 +765,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     provider = replace(provider, declarations=validated)
     if declaration_member is not None:
         provider = replace(provider, declaration_file=declaration_member)
-    if collect_file is not None:
+    if collect_file is not None and collector_exec is None:
         provider = replace(provider, collector=cast(Any, _source_hook(root, collect_file, "collect")))
     return provider
 

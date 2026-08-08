@@ -191,6 +191,7 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.sdk",
         "httk.workflow.runtime",
         "httk.workflow.runtime_utils",
+        "httk.workflow.hookapi",
         "httk.workflow.scaffold",
         "httk.workflow.executors",
         "httk.workflow.shell_bridge",

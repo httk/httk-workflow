@@ -103,11 +103,25 @@ def _workflow_description(target: str, format: str | None = None) -> dict[str, o
             "instantiate": {
                 "present": workflow.instantiate or workflow.instantiate_file is not None,
                 "file": workflow.instantiate_file,
+                "kind": (
+                    "executable"
+                    if workflow.instantiate_exec is not None
+                    else "python"
+                    if workflow.instantiate_file is not None
+                    else None
+                ),
                 "packaged": workflow.packaged is not None,
             },
             "collect": {
                 "present": workflow.collect_file is not None or workflow.collector is not None,
                 "file": workflow.collect_file,
+                "kind": (
+                    "executable"
+                    if workflow.collector_exec is not None
+                    else "python"
+                    if workflow.collect_file is not None
+                    else None
+                ),
                 "packaged": workflow.packaged is not None,
             },
         },
@@ -181,7 +195,8 @@ def _render_text(description: Mapping[str, object]) -> str:
         hook = hooks[name]
         assert isinstance(hook, Mapping)
         location = f" ({hook['file']})" if hook["file"] else ""
-        lines.append(f"{name} hook: {'yes' if hook['present'] else 'no'}{location}")
+        kind = f", kind={hook['kind']}" if hook.get("kind") else ""
+        lines.append(f"{name} hook: {'yes' if hook['present'] else 'no'}{location}{kind}")
     return "\n".join(lines)
 
 
