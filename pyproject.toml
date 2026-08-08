@@ -125,6 +125,7 @@ namespaces = true
 "httk.workflow.vasp.runners" = [
   "*.sh",
   "scripts/relaxation_report",
+  "scripts/relaxation_plot",
 ]
 # httk.workflow.languages.cwl and httk.workflow.languages.pwd follow the same rule and
 # need no entry of their own: cwl_runner.py and pwd_runner.py are modules of those

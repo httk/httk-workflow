@@ -149,7 +149,11 @@ _RELAX_POSTPROCESS_SCRIPTS = {
     "relaxation-report": {
         "file": "scripts/relaxation_report",
         "description": "write a relaxation summary (text + JSON) into the job's postprocess directory",
-    }
+    },
+    "relaxation-plot": {
+        "file": "scripts/relaxation_plot",
+        "description": "plot ionic-step energies into the job's postprocess directory",
+    },
 }
 
 PROVIDERS = (

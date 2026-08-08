@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The five commands of docs/quickstart.md, runnable.
+# The seven commands of docs/quickstart.md, runnable.
 #
 # Run it in an empty directory:
 #
@@ -62,7 +62,15 @@ httk_workflow workspace settings set vasp.command "$here/mock_vasp.py"
 # 4. Run every ready job until nothing is left to do.
 httk_workflow run
 
-# 5. What happened, and what it produced.
-httk_workflow collect
+# 5. What happened, and store entries, runs, and products when httk-data is installed.
+if python3 -c 'import httk.data.db' >/dev/null 2>&1; then
+    httk_workflow collect --into results.sqlite
+else
+    echo 'httk-data is not installed; skipping results.sqlite storage' >&2
+    httk_workflow collect
+fi
+
+# 6. Make a plot from the published OUTCAR.
+httk_workflow postprocess --script relaxation-plot
 
 printf '\nthe published result is in jobs/*/data/vasp/\n'

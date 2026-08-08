@@ -124,8 +124,8 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
 ) -> None:
     commands = [line.replace(" --remote local", "") for line in _documented_commands(_QUICKSTART)]
 
-    # The page really is six commands, including explicit workspace setup.
-    assert sum(1 for line in commands if line.startswith("httk")) == 6
+    # The page really is seven commands, including explicit workspace setup.
+    assert sum(1 for line in commands if line.startswith("httk")) == 7
     assert "httk project init --name quickstart" in commands
     assert any(line.startswith("httk workflow job new --workflow vasp-relax") for line in commands)
 
@@ -151,6 +151,8 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     assert records[0]["workflow"] == "httk.vasp.relax"
     assert records[0]["missing_collector"] is None
     assert records[0]["job_key"].startswith("silicon--")
+    assert (work / "results.sqlite").is_file()
+    assert (payload / "run" / "postprocess" / "relaxation-plot" / "relaxation_energies.svg").is_file()
 
 
 def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) -> None:
@@ -167,6 +169,8 @@ def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) ->
     kind, payload = _finished(work)
     assert kind == "succeeded"
     assert (payload / "data" / "vasp" / "OUTCAR").is_file()
+    assert (work / "results.sqlite").is_file()
+    assert (payload / "run" / "postprocess" / "relaxation-plot" / "relaxation_energies.svg").is_file()
     assert '"workflow":"httk.vasp.relax"' in completed.stdout
 
 

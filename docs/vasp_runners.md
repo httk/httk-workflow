@@ -157,6 +157,21 @@ files, and writes relaxation_report.txt and relaxation_report.json into
 workdir/postprocess/relaxation-report/. Missing files are reported as
 unavailable and do not make the script fail.
 
+## relaxation-plot
+
+The same three packaged workflows also declare the relaxation-plot postprocess
+script. Run it after collection:
+
+~~~console
+httk workflow postprocess WS --script relaxation-plot
+~~~
+
+It reads the preferred published OUTCAR from HTTK_WORKFLOW_DATA_DIR (or
+HTTK_WORKFLOW_WORKDIR when no transactional data directory exists), plots every
+ionic-step energy, and writes
+workdir/postprocess/relaxation-plot/relaxation_energies.svg. Missing OUTCAR
+data or energies are reported and do not make the script fail.
+
 ## Failure codes
 
 | Code | Meaning |
