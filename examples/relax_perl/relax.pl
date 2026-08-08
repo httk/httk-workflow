@@ -6,7 +6,7 @@ use FindBin;
 use File::Copy qw(copy);
 use File::Spec;
 
-use lib "$FindBin::Bin/../../src/httk/workflow/native/perl";
+use lib $ENV{HTTK_WORKFLOW_PERL_API} // "$FindBin::Bin/../../src/httk/workflow/native/perl";
 use HttkWorkflow;
 
 my @collect = qw(INCAR KPOINTS OUTCAR CONTCAR OSZICAR vasprun.xml vasp-run-report.json);

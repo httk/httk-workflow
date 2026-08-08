@@ -1,0 +1,9 @@
+[workflow]
+id = "httk.vasp.relax-java"
+description = "A minimal Java VASP relaxation runner."
+
+[workflow.runner]
+entry = "run"
+steps = ["prepare", "run", "publish"]
+initial_step = "prepare"
+data_mode = "transactional"

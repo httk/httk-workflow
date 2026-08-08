@@ -1335,6 +1335,7 @@ class TaskManager:
                 "HTTK_WORKFLOW_STEP": str(context["step"]),
                 "HTTK_WORKFLOW_PYTHON": sys.executable,
                 "HTTK_WORKFLOW_BASH_API": str(Path(__file__).with_name("shell") / "httk-workflow.sh"),
+                "HTTK_WORKFLOW_PERL_API": str(Path(__file__).with_name("native") / "perl"),
                 "HTTK_WORKFLOW_VASP_BASH_API": str(Path(__file__).with_name("shell") / "httk-vasp.sh"),
             }
         )

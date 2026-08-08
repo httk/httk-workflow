@@ -17,7 +17,7 @@ answered natively. The normative cross-language semantics are in
 use strict;
 use warnings;
 use FindBin;
-use lib "$FindBin::Bin/../../src/httk/workflow/native/perl";
+use lib $ENV{HTTK_WORKFLOW_PERL_API} // "$FindBin::Bin/../../src/httk/workflow/native/perl";
 use HttkWorkflow;
 
 my $runner = HttkWorkflow::Runner->new(
@@ -50,8 +50,12 @@ trailing newline:
 {"format": "httk-workflow-runner-description", "format_version": 1, "steps": ["prepare", "run"], "workflow": "my.workflow"}
 ```
 
-`HTTK_WORKFLOW_DESCRIBE=1` has the same effect. The runner is interpreted; the
-module is one `HttkWorkflow.pm` file and has no CPAN dependencies.
+`HTTK_WORKFLOW_DESCRIBE=1` has the same effect. Managers and the describe
+helper export `HTTK_WORKFLOW_PERL_API` as the installed `native/perl` directory;
+use that environment variable in `use lib` so published and transferred
+single-file runners find the SDK. An in-source-tree runner may fall back to a
+script-relative path. The runner is interpreted; the module is one
+`HttkWorkflow.pm` file and has no CPAN dependencies.
 
 ## Values and errors
 
@@ -117,4 +121,6 @@ httk workflow run
 httk workflow collect
 ```
 
-The example uses `use lib` relative to its script and needs no compile step.
+The example resolves the SDK through `HTTK_WORKFLOW_PERL_API` under a manager
+and falls back to its script-relative `use lib` path for a bare in-source-tree
+invocation. It needs no compile step.

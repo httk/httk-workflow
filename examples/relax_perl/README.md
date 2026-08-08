@@ -9,8 +9,10 @@ httk.workflow._shell_bridge`, so it publishes the same protocol bytes as a
 Python, Bash, C, Fortran, or Rust runner and works with the mock VASP beside
 `examples/mock_vasp.py`.
 
-Perl is interpreted, so there is no build step. The example loads the SDK with
-`use lib` relative to the script:
+Perl is interpreted, so there is no build step. Under a manager, the runner
+resolves the SDK through the exported `HTTK_WORKFLOW_PERL_API` directory; for a
+bare in-tree invocation it falls back to the `use lib` path relative to the
+script:
 
 ```console
 perl relax.pl --describe

@@ -46,10 +46,23 @@ methods invoke the same {py:mod}`httk.workflow.shell_bridge` subcommand. The C
 library owns Ada registration and dispatch, so its Ada-to-C mapping lives in
 {doc}`native_ada_api` and no Ada protocol implementation is introduced.
 
+An eighth SDK, {doc}`in C++ <native_cpp_api>`, is a header-only C++17 binding
+client over the same C library. Its RAII string wrapper and `Runner` builder add
+no bridge protocol or dispatch implementation: the C library owns registration
+and `httk_workflow_main`, while every verb reaches the same
+{py:mod}`httk.workflow.shell_bridge` subcommand. Its C++-to-C mapping lives in
+{doc}`native_cpp_api`.
+
+A ninth SDK, {doc}`in Java <native_java_api>`, is a standalone `java.base`-only
+reimplementation of the same thin bridge-client pattern. Its `ProcessBuilder`
+argv is list-form and never uses JNI, C linkage, or a shell; only `--describe`
+is native. Its Java-to-Python/Bash mapping lives in {doc}`native_java_api`.
+
 One thing the SDKs do *not* share is the `error.json` breadcrumb's `exception`
 label for a handler that ends abnormally: Bash records `ShellError`, C records
-`CError`, Rust records `RustError`, Perl records `PerlError`, and the Fortran
-and Ada bindings inherit `CError` because they end through the C library. The label names
+`CError`, Rust records `RustError`, Perl records `PerlError`, Java records
+`JavaError`, and the Fortran, Ada, and C++ bindings inherit `CError` because
+they end through the C library. The label names
 the language a handler died in; the outcome the manager acts on is identical.
 
 Both languages perform their work through exactly one implementation — the Bash

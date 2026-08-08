@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ._util import read_json, sha256_file, utc_now, write_json_atomic
+from ._util import read_json, sha256_file, tree_digest, utc_now, write_json_atomic
 from .configuration import sign_document, verify_document
 from .errors import FormatError, WorkflowError, WorkspaceCorruptionError
 from .models import (
@@ -175,6 +175,25 @@ def _payload_digest(payload: Path) -> str:
     return digest.hexdigest()
 
 
+def _runner_digest(path: Path) -> str:
+    """Digest one published runner file or tree with the workspace rule."""
+
+    if path.is_symlink() or not (path.is_file() or path.is_dir()):
+        raise FormatError(f"referenced workspace runner is not a regular file or tree: {path}")
+    return sha256_file(path) if path.is_file() else tree_digest(path)
+
+
+def _remove_tree(path: Path) -> None:
+    """Remove a bundle tree even when a copied runner tree is read-only."""
+
+    for entry in path.rglob("*"):
+        if entry.is_symlink():
+            continue
+        entry.chmod(0o755 if entry.is_dir() else 0o644)
+    path.chmod(0o755)
+    shutil.rmtree(path)
+
+
 def _bundled_runners(workspace: Workspace, payload: Path, transfer_dir: Path) -> list[dict[str, str]]:
     """Copy the workspace runners one job references into its bundle.
 
@@ -189,16 +208,24 @@ def _bundled_runners(workspace: Workspace, payload: Path, transfer_dir: Path) ->
         return []
     relative = job.runner_path
     source = workspace.runner_store_path(relative)
-    if not source.is_file():
-        raise FormatError(f"referenced workspace runner is not published: {relative.as_posix()}")
-    digest = sha256_file(source)
+    digest = _runner_digest(source)
     if digest != job.runner_sha256:
         raise WorkspaceCorruptionError(
             f"workspace runner {relative.as_posix()} has digest {digest}, but the job pinned {job.runner_sha256}"
         )
     embedded = transfer_dir / TRANSFER_RUNNERS / Path(*relative.parts)
     embedded.parent.mkdir(parents=True, exist_ok=True)
-    if not embedded.is_file() or sha256_file(embedded) != digest:
+    if not embedded.is_symlink() and (embedded.is_file() or embedded.is_dir()):
+        same_shape = source.is_file() == embedded.is_file()
+        if same_shape and _runner_digest(embedded) == digest:
+            return [{"path": relative.as_posix(), "sha256": digest}]
+        if embedded.is_dir():
+            _remove_tree(embedded)
+        else:
+            embedded.unlink()
+    if source.is_dir():
+        shutil.copytree(source, embedded)
+    else:
         shutil.copyfile(source, embedded)
         embedded.chmod(0o555)
     return [{"path": relative.as_posix(), "sha256": digest}]
@@ -218,15 +245,15 @@ def _install_bundled_runners(workspace: Workspace, bundle: Path, manifest: Mappi
         digest = entry["sha256"]
         source = bundle / TRANSFER_DIRECTORY / TRANSFER_RUNNERS / Path(*relative.parts)
         target = workspace.runner_store_path(relative)
-        if target.is_file():
-            existing = sha256_file(target)
+        if target.is_file() or target.is_dir():
+            existing = _runner_digest(target)
             if existing == digest:
                 continue
             raise WorkspaceCorruptionError(
                 f"destination workspace runner {relative.as_posix()} holds digest {existing}, "
                 f"but the transfer carries {digest}"
             )
-        if not source.is_file():
+        if not source.is_file() and not source.is_dir():
             raise FormatError(f"transfer bundle does not carry the runner it declares: {relative.as_posix()}")
         workspace.publish_runner(source, name=relative)
 
@@ -421,9 +448,9 @@ def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
     # each one is verified against its own declared digest.
     for entry in _manifest_runners(manifest):
         carried = payload / TRANSFER_DIRECTORY / TRANSFER_RUNNERS / Path(*PurePosixPath(entry["path"]).parts)
-        if not carried.is_file():
+        if not carried.is_file() and not carried.is_dir():
             raise FormatError(f"transfer bundle does not carry the runner it declares: {entry['path']}")
-        if sha256_file(carried) != entry["sha256"]:
+        if _runner_digest(carried) != entry["sha256"]:
             raise FormatError(f"bundled runner digest mismatch: {entry['path']}")
     return manifest
 
@@ -487,7 +514,7 @@ def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[
         )
         transfer_dir = workspace.payload_path(duplicates[0].placement, duplicates[0].job_key) / TRANSFER_DIRECTORY
         if transfer_dir.exists():
-            shutil.rmtree(transfer_dir)
+            _remove_tree(transfer_dir)
         write_json_atomic(acknowledgement_path, duplicate_ack, durable=workspace.durable)
         return duplicate_ack
     placement = normalize_placement(str(manifest["destination_placement"]))
@@ -573,7 +600,7 @@ def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[
         imported_record,
         durable=workspace.durable,
     )
-    shutil.rmtree(transfer_dir)
+    _remove_tree(transfer_dir)
     # The acknowledgement is what retires a sealed source, so it carries the
     # optional identity signature of whoever imported the bundle: the source can
     # then say which identity claimed the payload, not merely that somebody did.
@@ -991,6 +1018,6 @@ def discard_staged_bundle(workspace: Workspace, staging: Path) -> None:
     consumed = workspace.control / "tmp" / f"consumed.{staging.name}"
     consumed.parent.mkdir(parents=True, exist_ok=True)
     if consumed.exists():
-        shutil.rmtree(consumed)
+        _remove_tree(consumed)
     os.rename(staging, consumed)
-    shutil.rmtree(consumed)
+    _remove_tree(consumed)
