@@ -68,9 +68,12 @@ stay serial within their group while the rest of the suite runs in parallel.
 - **Runs workflows without a graph.** A step decides at run time which children
   to spawn and which step runs next, so a two-step relaxation and a
   partitioned child campaign are the same engine —
-  [runners in Python](docs/runtime_helpers.md) or
-  [in Bash](docs/native_bash_api.md), with a
-  [normative parity table](docs/sdk_parity.md) between the two.
+  [runners in Python](docs/runtime_helpers.md),
+  [in Bash](docs/native_bash_api.md),
+  [in C](docs/native_c_api.md),
+  [in modern Fortran](docs/native_fortran_api.md), or
+  [in safe Rust](docs/native_rust_api.md), with a
+  [normative parity table](docs/sdk_parity.md) between the language SDKs.
 - **Recovers instead of cleaning up.** One atomically renamed state marker per
   job is the source of truth, so an interrupted manager, node, or calculation is
   resumed from what is on disk. The protocol is specified in

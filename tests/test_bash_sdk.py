@@ -213,6 +213,15 @@ httk_workflow_runner {workflow} {" ".join(steps)}
 """
 
 
+def test_a_workflow_name_outside_the_charset_is_refused(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, step="go")
+    completed = fixture.run(
+        '#!/usr/bin/env bash\nset -euo pipefail\nsource "$HTTK_WORKFLOW_BASH_API"\nhttk_workflow_runner "bad name" go\n'
+    )
+    assert completed.returncode == 2
+    assert "cannot name a runner" in completed.stderr
+
+
 def test_the_library_is_safe_with_set_u_and_reports_its_version() -> None:
     completed = subprocess.run(
         [

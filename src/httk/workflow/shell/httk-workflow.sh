@@ -72,6 +72,15 @@ httk_workflow_runner() {
     fi
     HTTK_WORKFLOW_RUNNER_WORKFLOW=$1
     shift
+    # The workflow name is printed verbatim into the description JSON, so it obeys
+    # the same charset as a step name: a stray quote would print invalid JSON.
+    case $HTTK_WORKFLOW_RUNNER_WORKFLOW in
+        '' | *[!A-Za-z0-9._-]*)
+            printf 'httk-workflow: workflow name %s cannot name a runner\n' \
+                "$HTTK_WORKFLOW_RUNNER_WORKFLOW" >&2
+            return 2
+            ;;
+    esac
     local outer inner index=0 position
     for outer in "$@"; do
         case $outer in

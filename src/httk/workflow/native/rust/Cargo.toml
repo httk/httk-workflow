@@ -1,0 +1,13 @@
+[package]
+name = "httk_workflow"
+version = "0.2.0"
+edition = "2021"
+description = "Native httk-workflow authoring SDK: a std-only bridge client, in safe Rust."
+license = "AGPL-3.0-or-later"
+# Vendored beside a runner or path-depended from an example; never published to
+# crates.io, and it has, and needs, zero registry dependencies.
+publish = false
+
+[lib]
+name = "httk_workflow"
+path = "src/lib.rs"

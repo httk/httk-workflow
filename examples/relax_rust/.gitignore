@@ -1,0 +1,4 @@
+# `make` builds in place: target/ is already ignored repo-wide; the copied
+# binary and the generated lock (path-deps only, so nothing is fetched) are not.
+/relax
+/Cargo.lock

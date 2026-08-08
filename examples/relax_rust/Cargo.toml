@@ -1,0 +1,15 @@
+[package]
+name = "relax_rust"
+version = "0.0.0"
+edition = "2021"
+# An example runner, never published; the compiled binary is the runner file.
+publish = false
+
+[[bin]]
+name = "relax"
+path = "src/main.rs"
+
+[dependencies]
+# A path dependency on the packaged SDK crate — no crates.io, so
+# `cargo build --release --offline` needs no network.
+httk_workflow = { path = "../../src/httk/workflow/native/rust" }

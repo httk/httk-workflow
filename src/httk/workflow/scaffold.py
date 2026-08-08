@@ -577,7 +577,11 @@ def describe_runner(runner: str | os.PathLike[str]) -> dict[str, object]:
     :raises ValueError: If the runner is missing, cannot run, or emits an invalid description.
     """
 
-    path = Path(runner).expanduser()
+    # Resolve before building the exec command: a relative or bare name like
+    # ``./relax`` normalizes to ``relax``, and exec-ing a name with no slash does
+    # a PATH lookup, not a cwd-relative run — a FileNotFoundError at best and a
+    # hijack by a same-named program on PATH at worst.
+    path = Path(runner).expanduser().resolve()
     if not path.is_file():
         raise ValueError(f"a runner workflow must be an existing file: {path}")
     environment = dict(os.environ)

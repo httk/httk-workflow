@@ -105,6 +105,18 @@ namespaces = true
 "httk.workflow" = [
   "py.typed",
   "shell/*.sh",
+  # The native C authoring SDK ships beside the shell libraries as one .h/.c
+  # pair, designed to be vendored or compiled directly beside a runner.
+  "native/c/*.h",
+  "native/c/*.c",
+  # The native Fortran SDK is one module wrapping that C pair over iso_c_binding;
+  # it ships beside it, compiled with a runner and the C source (see native_fortran_api).
+  "native/fortran/*.f90",
+  # The native Rust SDK is a std-only crate (no crates.io deps), a bridge client
+  # like the Bash and C ones rather than FFI over them; it ships as its Cargo
+  # manifest and single source file, path-depended or vendored (see native_rust_api).
+  "native/rust/Cargo.toml",
+  "native/rust/src/*.rs",
   "adapter_templates/*/remote.json",
   "adapter_templates/*/adapter",
 ]
