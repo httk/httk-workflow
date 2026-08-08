@@ -117,6 +117,11 @@ namespaces = true
   # manifest and single source file, path-depended or vendored (see native_rust_api).
   "native/rust/Cargo.toml",
   "native/rust/src/*.rs",
+  # The native Perl SDK is one pure-core module, loaded directly by interpreted runners.
+  "native/perl/*.pm",
+  # The native Ada SDK is an Ada 2012 spec/body binding over the C SDK.
+  "native/ada/*.ads",
+  "native/ada/*.adb",
   "adapter_templates/*/remote.json",
   "adapter_templates/*/adapter",
 ]

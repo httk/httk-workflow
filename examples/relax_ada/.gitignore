@@ -1,0 +1,7 @@
+relax
+*.o
+*.ali
+# Includes the Relax_Steps package intermediates.
+b~*
+gnatbind.*
+gnatlink.*
