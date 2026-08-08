@@ -3,9 +3,10 @@
 import os
 
 from ..introspection import read_managers
-from ..models import Marker
+from ..models import Marker, ensure_step_known
 from ._common import *
 from ._common import (
+    _ERRORS,
     _durable,
     _group,
     _json_value,
@@ -13,6 +14,7 @@ from ._common import (
     _load_inputs,
     _local_root,
     _pairs,
+    _sanitize_tag,
 )
 
 # ---------------------------------------------------------------------------
@@ -170,29 +172,57 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
         "name": arguments.name,
     }
     is_batch = bool(items)
+    total = len(items)
     if items:
         for item in items:
-            item["tag"] = arguments.tag or item.get("tag")
+            # In a batch, --tag prefixes each item's derived tag (run7-si2o), so
+            # one flag names the whole sweep without erasing per-item identity; a
+            # single-item submission keeps --tag as the whole tag. Re-sanitize the
+            # composed tag so a 48-char derived tag or a prefix ending in '-' can
+            # never emit an over-long tag or a forbidden '--'.
+            derived = item.get("tag")
+            if arguments.tag and derived:
+                item["tag"] = _sanitize_tag(f"{arguments.tag}-{derived}")
+            else:
+                item["tag"] = arguments.tag or derived
         results: Iterator[ScaffoldedJob] = new_jobs(workspace, workflow_target, items, **shared)
     else:
         results = iter([new_job(workspace, workflow_target, tag=arguments.tag or input_tag, **shared)])
+
+    program = f"{context.program} workflow"
+    seen_warnings: set[str] = set()
+
+    def _emit_warnings(job: ScaffoldedJob) -> None:
+        for warning in job.warnings:
+            if warning not in seen_warnings:
+                seen_warnings.add(warning)
+                print(f"{program}: warning: {warning}", file=sys.stderr)
+
+    submitted = 0
+    collected: list[ScaffoldedJob] = []
+    try:
+        for job in results:
+            submitted += 1
+            _emit_warnings(job)
+            if arguments.json:
+                collected.append(job)
+            else:
+                # One tab-separated line per job, so a shell reads the key of one
+                # job with cut and a campaign streams as it is submitted.
+                print(f"{job.job_key}\t{job.payload}")
+    except _ERRORS:
+        if is_batch:
+            # A partial batch reports how far it got before failing, so an operator
+            # knows how many jobs already landed; the exit stays 2 via dispatch.
+            print(f"submitted {submitted} of {total} jobs before failing", file=sys.stderr)
+        raise
     if arguments.json:
         # One self-describing report per job, as an array, exactly as `job_records
         # --json` prints one array of records.
-        jobs = list(results)
-        print(json.dumps([job.as_mapping() for job in jobs], indent=2))
-        if is_batch:
-            # A batch submission ends with one count on stderr, so a scripted
-            # submission of a directory can confirm how many jobs it created.
-            print(f"submitted {len(jobs)} jobs", file=sys.stderr)
-        return 0
-    submitted = 0
-    for job in results:
-        # One tab-separated line per job, so a shell reads the key of one job with
-        # cut and a campaign streams as it is submitted.
-        print(f"{job.job_key}\t{job.payload}")
-        submitted += 1
+        print(json.dumps([job.as_mapping() for job in collected], indent=2))
     if is_batch:
+        # A batch submission ends with one count on stderr, so a scripted
+        # submission of a directory can confirm how many jobs it created.
         print(f"submitted {submitted} jobs", file=sys.stderr)
     return 0
 
@@ -275,6 +305,8 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     marker = workspace.find_marker_by_id(arguments.job_id)
     if marker is None:
         raise ValueError(f"job does not exist: {arguments.job_id}")
+    if arguments.action == "override_step" and arguments.step is not None:
+        _prevalidate_override_step(workspace, marker, arguments.step, force=bool(arguments.force))
     request: dict[str, object] = {
         "format": "httk-workflow-request",
         "format_version": 1,
@@ -300,6 +332,47 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     print(workspace.publish_request(sign_document(request)))
     _warn_if_no_live_manager(workspace, marker)
     return 0
+
+
+def _prevalidate_override_step(workspace: Workspace, marker: Marker, step: str, *, force: bool) -> None:
+    """Refuse an override_step whose target is outside the job's recorded steps.
+
+    The runner's real step set is recorded in the job's state frame as
+    ``runner_steps`` after its first attempt, so the request can be refused here
+    against that list — unless ``--force`` is given, since a payload runner is
+    mutable and an operator may have edited it to add the step. Before the first
+    attempt nothing is recorded, so the request is allowed with a note.
+
+    :param workspace: The workspace holding the job's state frame.
+    :param marker: Identify the job the request targets.
+    :param step: The step the override_step request names.
+    :param force: Whether ``--force`` downgrades the refusal to a note.
+    :raises httk.workflow.errors.FormatError: If the recorded steps exclude *step* and *force* is not set.
+    """
+
+    try:
+        state = workspace.read_state(marker)
+    except (WorkflowError, OSError):
+        state = {}
+    runner_steps = state.get("runner_steps")
+    if isinstance(runner_steps, list) and runner_steps:
+        known = [str(item) for item in runner_steps]
+        if step in known:
+            return
+        if not force:
+            ensure_step_known(step, known, f"job {marker.job_key}")
+        print(
+            f"the step {step!r} is not one of this job's recorded runner steps ({', '.join(known)}), "
+            "but --force was given: publishing anyway; the runner will refuse it at the next attempt "
+            "if it does not implement it",
+            file=sys.stderr,
+        )
+        return
+    print(
+        f"the step {step!r} could not be pre-validated: this job has not recorded its runner steps yet, "
+        "so the runner will refuse it at the next attempt if it does not implement it",
+        file=sys.stderr,
+    )
 
 
 def _warn_if_no_live_manager(workspace: Workspace, marker: Marker) -> None:
@@ -417,10 +490,7 @@ def build_job_parser(
         handler=handle_job_new,
     )
     add_workspace_argument(new, help_text="the workspace to submit into")
-    workflow_names: list[str] = []
-    for workflow_id in registered_workflows():
-        provider = workflow_provider(workflow_id)
-        workflow_names.append(f"{workflow_id} ({provider.alias})" if provider and provider.alias else workflow_id)
+    workflow_names = list(registered_workflow_labels())
     workflow_group = new.add_mutually_exclusive_group(required=True)
     workflow_group.add_argument(
         "--workflow",

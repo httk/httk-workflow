@@ -2093,7 +2093,9 @@ Codes emitted by this manager itself are reserved. Those currently in use are:
 - `budget_exhausted` — an attempt or activation budget exceeded;
 - `dependency_failure` — a join became impossible, or a named join child stayed
   unresolvable past the manager's bounded grace;
-- `transaction_corruption` — a published transaction could not be replayed;
+- `transaction_corruption` — the replay of a published transaction failed
+  midway; a transaction manifest or outcome the manager cannot parse is a
+  `protocol_error`, not this;
 - `runner_unavailable` — a runner outside the payload could not be resolved,
   staged, or entered at all;
 - `runner_mismatch` — the staged copy of such a runner did not match the

@@ -300,4 +300,7 @@ def test_json_log_records_carry_structured_fields(tmp_path: Path) -> None:
     assert claims and claims[0]["job_id"] == job_id
     launches = [record for record in records if record.get("event") == "launch"]
     assert launches and isinstance(launches[0]["pid"], int)
+    # A payload-source runner records the payload digest at launch, so post-hoc
+    # mutation of the runner in the mutable payload is visible in the journal.
+    assert isinstance(launches[0]["payload_digest"], str) and launches[0]["payload_digest"]
     assert any(record.get("event") == "transition" and record.get("kind") == "succeeded" for record in records)

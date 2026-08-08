@@ -5,12 +5,14 @@ Declared workflow parameters are Maker constructor configuration: the runner bui
 document Maker fields; language plumbing parameters are reserved-prefixed and never Maker-bound.
 """
 
+import importlib
 import json
 import os
 import re
 import shutil
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from importlib.machinery import ModuleSpec, PathFinder
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -74,6 +76,33 @@ def _ports(path: Path) -> LanguagePorts:
     return LanguagePorts(inputs=(), outputs=("output",))
 
 
+def _find_module_spec_without_import(module: str) -> ModuleSpec | None:
+    """Find a module by path without importing any parent package.
+
+    Mirrors :func:`httk.workflow.precheck._find_module_spec_without_import`: the
+    module tree is walked with :class:`~importlib.machinery.PathFinder` so a
+    missing dependency never triggers a parent package's import side effects.
+
+    :param module: The dotted module name to resolve.
+    :return: The resolved spec, or ``None`` when the module is not importable here.
+    """
+
+    parent_locations: Sequence[str] | None = None
+    qualified = ""
+    parts = module.split(".")
+    spec: ModuleSpec | None = None
+    for index, part in enumerate(parts):
+        qualified = part if not qualified else f"{qualified}.{part}"
+        spec = PathFinder.find_spec(qualified, parent_locations)
+        if spec is None:
+            return None
+        if index < len(parts) - 1:
+            if spec.submodule_search_locations is None:
+                return None
+            parent_locations = spec.submodule_search_locations
+    return spec
+
+
 def _validate_runner(options: Mapping[str, object], root: Path) -> None:
     del root
     for key, value in options.items():
@@ -81,6 +110,34 @@ def _validate_runner(options: Mapping[str, object], root: Path) -> None:
             raise ValueError(f"unknown runner option {key!r} for jobflow")
         if not isinstance(value, str) or _MAKER_SPEC.fullmatch(value) is None:
             raise ValueError("runner option 'maker' must be a dotted Maker spec like 'module:Class'")
+
+
+def _verify_maker_class(maker: str) -> None:
+    """Verify a ``module:Class`` Maker spec names a real class, at submission time.
+
+    When the Maker module is present on the preparing machine the class is verified
+    now — importing is acceptable at submission, as CWL's parser runs here too, and
+    ``_prepare`` is only reached when a job is created. A module that is not
+    installed here (a compute-node dependency, or a Maker staged onto ``PYTHONPATH``
+    only at run time) stays accepted; precheck and the runner report it if it is
+    truly missing.
+
+    :param maker: The ``module:Class`` Maker spec to verify.
+    :raises JobflowFormatError: If the resolvable, importable module defines no such class.
+    """
+
+    module_name, _, class_name = maker.partition(":")
+    if _find_module_spec_without_import(module_name) is None:
+        return
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        # A spec-resolvable but unimportable module is left to run time.
+        return
+    if not hasattr(module, class_name):
+        raise JobflowFormatError(
+            f"runner option 'maker' names class {class_name!r}, which module {module_name!r} does not define"
+        )
 
 
 def _prepare(request: LanguageRequest) -> LanguageScaffold:
@@ -99,6 +156,7 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
         parameters["jobflow_document"] = DOCUMENT_FILE
     else:
         maker = options["maker"]
+        _verify_maker_class(str(maker))
         parameters["jobflow_maker"] = maker
     declared_parameters = tuple(sorted(request.parameters))
     if declared_parameters:
@@ -144,6 +202,11 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
                             f"workflow input {name!r} is a directory, not a file: {resolved}; supply a regular file"
                         )
                     if _has_path_separator(text) or probe.exists():
+                        if Path(text).is_absolute():
+                            raise ValueError(
+                                f"workflow input {name!r} looks like a file path but no file exists at {resolved}; "
+                                "supply an existing file, or a literal value without path separators"
+                            )
                         raise ValueError(
                             f"workflow input {name!r} looks like a file path but no file exists under the workflow "
                             f"root at {resolved}; supply an existing file, or a literal value without path separators"

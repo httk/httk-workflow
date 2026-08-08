@@ -906,7 +906,12 @@ class Attempt:
         operation_id = self._next_operation()
         path = Path(source)
         if path.is_dir() and not path.is_symlink():
-            transaction.put_tree(operation_id, path, destination)
+            # A file put overwrites its destination; a directory put is made just
+            # as idempotent by replacing a destination tree that already exists in
+            # the committed data, so a step that advances back onto a step and
+            # re-puts the same tree succeeds instead of failing on put-tree.
+            replace = self.data is not None and (self.data / destination).exists()
+            transaction.put_tree(operation_id, path, destination, replace=replace)
         else:
             transaction.put_file(operation_id, path, destination)
         return operation_id

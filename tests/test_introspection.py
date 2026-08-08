@@ -25,6 +25,7 @@ from httk.workflow.introspection import (
     job_frames,
     list_jobs,
     render_frames,
+    render_job,
     resolve_job,
 )
 from httk.workflow.manifests import MAINTENANCE_LOCK_FILE
@@ -541,6 +542,52 @@ def test_why_reports_a_failed_job_with_its_breadcrumb_and_continue(tmp_path: Pat
     report = describe_job(workspace, marker)
     assert report["error_breadcrumb"]["exception"] == "RuntimeError"
     assert report["failure"]["details"] == {"exit_status": 7}
+
+
+_HEADLINE_CRASH_RUNNER = """#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+runlog = Path(".httk-runner") / "runlog.jsonl"
+runlog.parent.mkdir(parents=True, exist_ok=True)
+with runlog.open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps({
+        "format": "httk-workflow-runlog-event", "format_version": 1,
+        "kind": "note", "message": "starting",
+    }) + "\\n")
+    handle.write(json.dumps({
+        "format": "httk-workflow-runlog-event", "format_version": 1,
+        "kind": "headline", "message": "halfway through relax",
+    }) + "\\n")
+sys.exit(5)
+"""
+
+
+def test_render_job_surfaces_a_process_failure_breadcrumb_headline_and_control(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", _HEADLINE_CRASH_RUNNER, attempts_per_activation=1)
+    workspace.submit(payload, "project/crashed")
+    _run(workspace)
+
+    marker = resolve_job(workspace, job_id)
+    assert marker.kind == "failed"
+    report = describe_job(workspace, marker)
+    assert report["failure"]["code"] == "process_failure"
+    assert report["last_headline"] == "halfway through relax"
+    assert report["error_breadcrumb"] is None
+    assert report["attempt"]["control"] is not None
+
+    rendered = render_job(report)
+    # (b) process_failure with no error.json still says so; (d) the last headline
+    # is tailed from the runlog; (a) the attempt control dir is shown.
+    assert "the last attempt left no error.json breadcrumb" in rendered
+    assert "last headline" in rendered and "halfway through relax" in rendered
+    assert "attempt control" in rendered
+
+    diagnosis = explain_job(workspace, marker)
+    logs = next(check for check in diagnosis.checks if check.name == "attempt logs")
+    assert "stderr.log" in logs.detail
 
 
 def test_why_reports_an_exhausted_continue_budget(tmp_path: Path) -> None:

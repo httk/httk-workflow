@@ -227,7 +227,7 @@ def test_jobflow_language_manifest_accepts_maker_and_open_ports(tmp_path: Path) 
 
 
 def test_jobflow_manifest_rejects_duplicate_input_ports(tmp_path: Path) -> None:
-    package = _jobflow_package(tmp_path / "duplicate-input", 'maker = "atomate2:Maker"')
+    package = _jobflow_package(tmp_path / "duplicate-input", 'maker = "atomate2.vasp.flows.core:DoubleRelaxMaker"')
     manifest = (package / "httk_workflow.toml").read_text(encoding="utf-8")
     (package / "httk_workflow.toml").write_text(
         manifest
@@ -244,7 +244,7 @@ port = "make_structure"
 
 
 def test_jobflow_manifest_rejects_duplicate_output_ports(tmp_path: Path) -> None:
-    package = _jobflow_package(tmp_path / "duplicate-output", 'maker = "atomate2:Maker"')
+    package = _jobflow_package(tmp_path / "duplicate-output", 'maker = "atomate2.vasp.flows.core:DoubleRelaxMaker"')
     manifest = (package / "httk_workflow.toml").read_text(encoding="utf-8")
     (package / "httk_workflow.toml").write_text(
         manifest
@@ -261,7 +261,7 @@ port = "dynamic_output"
 
 
 def test_jobflow_manifest_preserves_declared_maker_parameters(tmp_path: Path) -> None:
-    package = _jobflow_package(tmp_path / "parameters", 'maker = "atomate2:Maker"')
+    package = _jobflow_package(tmp_path / "parameters", 'maker = "atomate2.vasp.flows.core:DoubleRelaxMaker"')
     manifest = (package / "httk_workflow.toml").read_text(encoding="utf-8")
     (package / "httk_workflow.toml").write_text(
         manifest + '\n[workflow.parameters.relax_steps]\ntype = "integer"\ndefault = 300\n', encoding="utf-8"

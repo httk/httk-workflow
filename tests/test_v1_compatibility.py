@@ -357,6 +357,58 @@ exit 0
     assert "complete" in (payload / "ht.taskmgr.stdout").read_text(encoding="utf-8")
 
 
+def test_v1_configuration_error_fails_once_without_retry_amplifying(tmp_path: Path) -> None:
+    # Exit 2 without writing ht.nextstep is a deterministic protocol defect: no
+    # retry can fix it, so it must be a single-attempt structured failure whose
+    # message survives, not a retried process_failure ending in retry_exhausted.
+    source = _legacy_source(
+        tmp_path,
+        """#!/usr/bin/env bash
+exit 2
+""",
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    submitted = _new_v1_job(workspace, source, "project/badconfig", attempts=5)
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=10)
+
+    marker = workspace.find_marker_by_id(submitted.job_id)
+    assert marker is not None and marker.kind == "failed"
+    state = workspace.read_state(marker)
+    assert state["failure"]["code"] == "v1.configuration_invalid"
+    assert "legacy exit 2 requires ht.nextstep" in state["failure"]["message"]
+    assert not state["failure"].get("retryable", False)
+    assert state["total_attempts"] == 1
+
+
+def test_v1_missing_runner_is_a_retryable_runner_unavailable(tmp_path: Path) -> None:
+    # A legacy runner not yet visible (NFS lag) is transient, not a deterministic
+    # config defect: the failure is a retryable v1.runner_unavailable, message
+    # intact, so a manager may try again rather than needing an operator resume.
+    source = _legacy_source(
+        tmp_path,
+        """#!/usr/bin/env bash
+exit 0
+""",
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    submitted = _new_v1_job(workspace, source, "project/lag", attempts=1)
+    marker = workspace.find_marker_by_id(submitted.job_id)
+    assert marker is not None
+    (workspace.payload_path(marker.placement, marker.job_key) / "ht_steps").chmod(0o600)
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=10)
+
+    marker = workspace.find_marker_by_id(submitted.job_id)
+    assert marker is not None and marker.kind == "failed"
+    failure = workspace.read_state(marker)["failure"]
+    assert failure["code"] == "v1.runner_unavailable"
+    assert failure.get("retryable") is True
+    assert "missing or not executable" in failure["message"]
+
+
 def test_v1_declared_break_runs_freeze_and_fails(tmp_path: Path) -> None:
     source = _legacy_source(
         tmp_path,

@@ -260,7 +260,7 @@ def language(name: str) -> WorkflowLanguage:
     :raises ValueError: If the module or its ``LANGUAGE`` is invalid.
     """
 
-    available = available_languages()
+    available = ", ".join(available_languages()) or "none"
     try:
         module = importlib.import_module(f"{__name__}.{name.replace('-', '_')}")
     except ImportError as exc:

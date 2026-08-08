@@ -486,6 +486,71 @@ def test_gather_rejects_rejoin_label_used_by_a_new_child_in_process(tmp_path: Pa
         attempt.gather("aggregate", rejoin=("old-child",))
 
 
+_FAIL_PARENT_RUNNER = """#!/usr/bin/env python3
+import shutil
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, "@SRC@")
+
+from httk.workflow import Runner
+from httk.workflow.protocol import JobSpec, prepare_job_payload
+
+run = Runner("tests.fail_parent")
+
+
+@run.step
+def branch(a):
+    payload = a.workdir / "child"
+    files = payload / "files"
+    files.mkdir(parents=True)
+    runner = files / "runner"
+    shutil.copy2(a.payload / "files" / "runner", runner)
+    runner.chmod(0o755)
+    prepare_job_payload(
+        payload,
+        JobSpec(name="Child", workflow="tests.fail_parent", runner_path="files/runner", initial_step="child"),
+    )
+    a.spawn(payload, label="doomed")
+    a.gather("aggregate", when="all_succeeded")
+
+
+@run.step
+def child(a):
+    time.sleep(0.02)
+    a.fail("child.broken", "the child declared a failure")
+
+
+@run.step
+def aggregate(a):
+    a.succeed()
+
+
+raise SystemExit(run.main())
+"""
+
+
+def test_dependency_failure_diagnosis_names_the_failed_child(tmp_path: Path) -> None:
+    from httk.workflow.introspection import explain_job
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _FAIL_PARENT_RUNNER.replace("@SRC@", _SRC), initial_step="branch")
+    workspace.submit(payload, "project/dep-fail")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=60.0)
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "failed"
+    state = workspace.read_state(marker)
+    assert state["failure"]["code"] == "dependency_failure"
+
+    diagnosis = explain_job(workspace, marker)
+    children = [check for check in diagnosis.checks if check.name == "dependency child"]
+    assert len(children) == 1
+    assert "doomed" in children[0].detail
+    assert "[child.broken]" in children[0].detail
+
+
 def test_unresolvable_join_child_fails_instead_of_waiting_forever(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _GHOST_JOIN_RUNNER, initial_step="branch")

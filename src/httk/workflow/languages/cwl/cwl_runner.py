@@ -119,6 +119,20 @@ class ToolError(Exception):
         self.details = dict(details or {})
 
 
+def _read_json_document(path: Path) -> object:
+    """Read and decode one JSON document, teaching on an unreadable or malformed file.
+
+    :param path: Read and JSON-decode this file.
+    :return: The decoded JSON value.
+    :raises httk.workflow.languages.cwl.cwl_runner.ToolError: If the file cannot be read or is not valid JSON.
+    """
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ToolError("cwl.document_invalid", f"{path} is not a readable JSON document: {exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 # The plan, and where a job is in it
 # ---------------------------------------------------------------------------
@@ -150,7 +164,7 @@ def plan_of(a: Attempt) -> dict[str, object]:
     path = root.joinpath(*PurePosixPath(str(pointer)).parts)
     if not path.is_file():
         raise ToolError("cwl.document_missing", f"the CWL plan {pointer} is not in {root}")
-    loaded = json.loads(path.read_text(encoding="utf-8"))
+    loaded = _read_json_document(path)
     if not isinstance(loaded, dict):
         raise ToolError("cwl.document_missing", f"the CWL plan {path} is not an object")
     return loaded
@@ -820,7 +834,7 @@ def start(a: Attempt) -> None:
         path = a.payload.joinpath(*PurePosixPath(pointer).parts)
         if not path.is_file():
             raise ToolError("cwl.document_missing", f"the CWL input object {pointer} is not in this payload")
-        loaded = json.loads(path.read_text(encoding="utf-8"))
+        loaded = _read_json_document(path)
         values = resolve_staged(loaded if isinstance(loaded, Mapping) else {}, a.payload)
     except ToolError as exception:
         _failed(a, exception)
@@ -1021,7 +1035,7 @@ def _child_outputs(child: object) -> dict[str, object]:
     path = Path(workdir) / OUTPUTS_FILE
     if not path.is_file():
         raise ToolError("cwl.child_invalid", f"the child {label} published no {OUTPUTS_FILE}")
-    loaded = json.loads(path.read_text(encoding="utf-8"))
+    loaded = _read_json_document(path)
     if not isinstance(loaded, Mapping):
         raise ToolError("cwl.child_invalid", f"the child {label} published a malformed {OUTPUTS_FILE}")
     return dict(loaded)

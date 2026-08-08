@@ -21,6 +21,7 @@ from ._reading import (
     _state_of,
     _workdir_relative,
     read_error_breadcrumb,
+    read_last_headline,
 )
 
 JOB_REPORT_FORMAT = "httk-workflow-job-report"
@@ -33,6 +34,7 @@ def describe_job(workspace: Workspace, marker: Marker) -> dict[str, Any]:
     job, job_error = _job_of(workspace, marker)
     payload = workspace.payload_path(marker.placement, marker.job_key)
     workdir = _workdir_relative(job, state)
+    workdir_path = None if workdir is None else payload.joinpath(*workdir.parts)
     control = _attempt_control(workspace, marker, state)
     report: dict[str, Any] = {
         "format": JOB_REPORT_FORMAT,
@@ -67,9 +69,10 @@ def describe_job(workspace: Workspace, marker: Marker) -> dict[str, Any]:
         "data_generation": state.get("data_generation"),
         "paths": {
             "payload": str(payload),
-            "workdir": None if workdir is None else str(payload.joinpath(*workdir.parts)),
+            "workdir": None if workdir_path is None else str(workdir_path),
             "data": str(payload / "data") if job is not None and job.data_mode == "transactional" else None,
         },
+        "last_headline": read_last_headline(workdir_path),
         "state_error": state_error,
         "job_error": job_error,
     }
@@ -235,6 +238,13 @@ def render_job(report: Mapping[str, Any]) -> str:
                 f"{breadcrumb.get('exception')}: {breadcrumb.get('message')} in step {breadcrumb.get('step')}",
             )
         )
+    elif isinstance(failure, Mapping) and failure.get("code") == "process_failure":
+        # A process that died without publishing an outcome usually left no
+        # error.json; say so, rather than showing nothing where the crash was.
+        lines.append(_pair("error breadcrumb", "the last attempt left no error.json breadcrumb"))
+    headline = report.get("last_headline")
+    if isinstance(headline, str) and headline:
+        lines.append(_pair("last headline", headline))
     for name in ("state_error", "job_error"):
         if report.get(name):
             lines.append(_pair(name.replace("_", " "), report[name]))

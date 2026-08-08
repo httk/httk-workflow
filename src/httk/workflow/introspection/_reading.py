@@ -1,5 +1,6 @@
 """Authoritative job, marker, state, and journal readers."""
 
+import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -18,6 +19,43 @@ from ..workspace import Workspace
 JOB_HISTORY_FORMAT = "httk-workflow-job-history"
 JOB_LIST_FORMAT = "httk-workflow-job-list"
 _HISTORY_READ_DEADLINE_SECONDS = 0.1
+#: How much of a runlog's tail to read when surfacing its last headline. A
+#: runlog can grow without bound, so the report reads only the final slice.
+_RUNLOG_TAIL_BYTES = 65536
+
+
+def read_last_headline(workdir: str | Path | None) -> str | None:
+    """Return the message of the last ``headline`` run-log event, if any.
+
+    The runlog is JSON lines a runner appends in its workdir; a ``headline``
+    event is the runner's own one-line summary of where it is. Only the tail of
+    the file is read, so a long-running runner's headline is cheap to surface.
+
+    :param workdir: The attempt workdir whose ``.httk-runner/runlog.jsonl`` to read.
+    :return: The last headline message, or ``None`` when there is none to read.
+    """
+
+    if workdir is None:
+        return None
+    path = Path(workdir) / ".httk-runner" / "runlog.jsonl"
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            handle.seek(max(0, handle.tell() - _RUNLOG_TAIL_BYTES))
+            data = handle.read()
+    except OSError:
+        return None
+    headline: str | None = None
+    for raw in data.split(b"\n"):
+        if not raw.strip():
+            continue
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(event, Mapping) and event.get("kind") == "headline" and isinstance(event.get("message"), str):
+            headline = event["message"]
+    return headline
 
 
 def resolve_job(workspace: Workspace, selector: str) -> Marker:

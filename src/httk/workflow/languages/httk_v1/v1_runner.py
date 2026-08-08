@@ -36,6 +36,28 @@ ACTIVE: subprocess.Popen[bytes] | None = None
 run = Runner("httk-v1")
 
 
+class _V1ConfigError(Exception):
+    """A v1 defect :func:`start` publishes as a structured failure, not a crash.
+
+    Raising this instead of a bare exception lets :func:`start` publish the
+    carried ``code`` with the real message, rather than letting the process die
+    and be reported as ``process_failure`` and eventually ``retry_exhausted``
+    with the text erased. Deterministic configuration defects use the default
+    non-retryable ``v1.configuration_invalid``; a transient site (a legacy
+    runner not yet visible on a shared filesystem) carries its own code and
+    ``retryable=True`` so the manager may try again.
+
+    :param message: The human-readable defect message.
+    :param code: The stable failure code to publish.
+    :param retryable: Whether repeating the attempt could help.
+    """
+
+    def __init__(self, message: str, *, code: str = "v1.configuration_invalid", retryable: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+
+
 def _remove(path: Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink(missing_ok=True)
@@ -87,7 +109,7 @@ def _priority(workdir: Path) -> int | None:
     try:
         return V1_PRIORITY_MAP[int(path.read_text(encoding="utf-8").strip())]
     except (KeyError, ValueError) as exc:
-        raise RuntimeError("ht.priority must contain an integer from 1 through 5") from exc
+        raise _V1ConfigError("ht.priority must contain an integer from 1 through 5") from exc
 
 
 def _terminate(process: subprocess.Popen[bytes], *, grace: float = 10.0) -> None:
@@ -169,7 +191,7 @@ def _freeze(program: Path, *, cwd: Path, environment: Mapping[str, str], log: Pa
 def _compatibility(a: Attempt) -> Mapping[str, object]:
     compatibility = a.job.raw.get("compatibility")
     if not isinstance(compatibility, Mapping) or compatibility.get("profile") != "httk-v1-task-v1":
-        raise RuntimeError("v1 compatibility metadata is missing")
+        raise _V1ConfigError("v1 compatibility metadata is missing")
     return compatibility
 
 
@@ -325,10 +347,10 @@ def _publish_pending(a: Attempt, pending: Mapping[str, object], attempts: int) -
 
     mode, step = pending.get("mode"), pending.get("step")
     if mode not in {"advance", "gather"} or not isinstance(step, str) or not step:
-        raise RuntimeError("v1 pending continuation is malformed")
+        raise _V1ConfigError("v1 pending continuation is malformed")
     priority = pending.get("priority")
     if priority is not None and (isinstance(priority, bool) or not isinstance(priority, int)):
-        raise RuntimeError("v1 pending continuation priority is malformed")
+        raise _V1ConfigError("v1 pending continuation priority is malformed")
     spawned_raw = a.state.get("v1_spawned", [])
     spawned = {item for item in spawned_raw if isinstance(item, str)} if isinstance(spawned_raw, list) else set()
     sources = _pending_sources(a, pending)
@@ -387,18 +409,40 @@ def _archive(payload: Path, workdir: Path, compression: str) -> None:
 
 @run.step
 def start(a: Attempt) -> None:
-    """Run one legacy step, retaining the legacy step name in durable state."""
+    """Run one legacy step, retaining the legacy step name in durable state.
+
+    A deterministic v1 configuration or protocol defect is published as a
+    non-retryable ``v1.configuration_invalid`` failure so it bypasses
+    ``retry_on`` and keeps its message, rather than dying as a ``process_failure``
+    that the manager eventually reports as ``retry_exhausted``.
+    """
+
+    try:
+        _start(a)
+    except _V1ConfigError as exc:
+        a.fail(exc.code, str(exc), retryable=exc.retryable)
+
+
+def _start(a: Attempt) -> None:
+    """Run one legacy step; deterministic config defects raise :class:`_V1ConfigError`."""
 
     signal.signal(signal.SIGTERM, _forward_signal)
     signal.signal(signal.SIGINT, _forward_signal)
     compatibility = _compatibility(a)
     program = str(compatibility.get("program", ""))
     if program not in {"ht_steps", "ht_run"}:
-        raise RuntimeError("compatibility.program must be ht_steps or ht_run")
+        raise _V1ConfigError("compatibility.program must be ht_steps or ht_run")
     timeout, wrapper, compression, attempts = _settings(a)
     program_path, log = a.payload / program, a.payload / "ht.taskmgr.stdout"
     if not program_path.is_file() or not os.access(program_path, os.X_OK):
-        raise RuntimeError(f"legacy runner is missing or not executable: {program_path}")
+        # A shared filesystem can lag (NFS attribute cache, slow automount after
+        # transfer), so a runner that is not yet visible is transient, not a
+        # deterministic config defect: publish a retryable code, message intact.
+        raise _V1ConfigError(
+            f"legacy runner is missing or not executable: {program_path}",
+            code="v1.runner_unavailable",
+            retryable=True,
+        )
     if program == "ht_steps":
         resume = a.payload / "ht.run.resume"
         if resume.is_dir() and not any(a.workdir.iterdir()):
@@ -409,7 +453,7 @@ def start(a: Attempt) -> None:
         current = a.payload
     current_step = a.state.get("v1_step", compatibility.get("legacy_step", "start"))
     if not isinstance(current_step, str) or not current_step:
-        raise RuntimeError("v1_step must be a nonempty string")
+        raise _V1ConfigError("v1_step must be a nonempty string")
     environment = _environment(
         a, root=_root(a), current=current, program=program, timeout=timeout, attempts=attempts, wrapper=wrapper
     )
@@ -457,7 +501,7 @@ def start(a: Attempt) -> None:
         a.advance("start", state={"v1_terminal": "succeed"}, priority=priority)
     elif result == 2:
         if next_step is None:
-            raise RuntimeError("legacy exit 2 requires ht.nextstep")
+            raise _V1ConfigError("legacy exit 2 requires ht.nextstep")
         sources = _task_directories(a.payload, spawned)
         if sources:
             _continue_with_children(
@@ -467,7 +511,7 @@ def start(a: Attempt) -> None:
             a.advance("start", state={"v1_step": next_step}, priority=priority)
     elif result == 3:
         if next_step is None:
-            raise RuntimeError("legacy exit 3 requires ht.nextstep")
+            raise _V1ConfigError("legacy exit 3 requires ht.nextstep")
         _continue_with_children(
             a,
             mode="gather",

@@ -342,6 +342,94 @@ def test_committing_wedge_surfaces_in_job_why(tmp_path: Path) -> None:
     assert "wedged" in diagnosis.summary and "disk is full" in diagnosis.summary
 
 
+def test_a_malformed_committing_outcome_fails_as_protocol_error_naming_both_ids(tmp_path: Path) -> None:
+    # A committing outcome the manager cannot parse is a protocol_error, not
+    # transaction_corruption (which is reserved for a replay that fails midway),
+    # and the identity mismatch names both the outcome's value and the attempt's.
+    workspace = Workspace.initialize(tmp_path / "ws")
+    payload, job_id = _payload(tmp_path / "src", _SLEEP_RUNNER, tag="malformed")
+    workspace.submit(payload, "project/malformed")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.tick()
+        running = resolve_job(workspace, job_id)
+        assert running.kind == "running"
+        state = StateFrame.from_mapping(workspace.read_state(running))
+        committing = manager._transition(
+            running,
+            "committing",
+            StateFrame.of(
+                state.carried(),
+                manager_id=manager.manager_id,
+                writer_id=manager.writer.writer_id,
+                attempt_id=str(state.attempt_id),
+                attempt_control=str(state.attempt_control),
+                outcome_action="succeed",
+                reason="outcome_published",
+            ),
+        )
+        manager._signal_running_attempts(signal.SIGKILL)
+        control = workspace.payload_path(committing.placement, committing.job_key) / str(state.attempt_control)
+        outcome_dir = control / "outcome.ready"
+        outcome_dir.mkdir()
+        (outcome_dir / "outcome.json").write_text(
+            json.dumps(
+                {
+                    "format": "httk-workflow-outcome",
+                    "format_version": 1,
+                    "job_id": committing.job_id,
+                    "activation_id": state.activation_id,
+                    "attempt_id": "wrong-attempt",
+                    "action": "succeed",
+                }
+            ),
+            encoding="utf-8",
+        )
+        manager.run_until_idle(timeout=30.0)
+    marker = resolve_job(workspace, job_id)
+    assert marker.kind == "failed"
+    failure = workspace.read_state(marker)["failure"]
+    assert failure["code"] == "protocol_error"
+    assert "'wrong-attempt'" in failure["message"] and str(state.attempt_id) in failure["message"]
+    # The assembly remedy belongs on parse/shape errors, not a stale/foreign
+    # (well-formed) outcome whose identity disagrees.
+    assert "assembled in place" not in failure["message"]
+
+
+def test_an_unparseable_committing_outcome_carries_the_assembly_remedy(tmp_path: Path) -> None:
+    # A partial/unparseable outcome is the signature of in-place assembly, so
+    # here — unlike an identity mismatch — the remedy is attached.
+    workspace = Workspace.initialize(tmp_path / "ws")
+    payload, job_id = _payload(tmp_path / "src", _SLEEP_RUNNER, tag="unparseable")
+    workspace.submit(payload, "project/unparseable")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.tick()
+        running = resolve_job(workspace, job_id)
+        assert running.kind == "running"
+        state = StateFrame.from_mapping(workspace.read_state(running))
+        committing = manager._transition(
+            running,
+            "committing",
+            StateFrame.of(
+                state.carried(),
+                manager_id=manager.manager_id,
+                writer_id=manager.writer.writer_id,
+                attempt_id=str(state.attempt_id),
+                attempt_control=str(state.attempt_control),
+                outcome_action="succeed",
+                reason="outcome_published",
+            ),
+        )
+        manager._signal_running_attempts(signal.SIGKILL)
+        control = workspace.payload_path(committing.placement, committing.job_key) / str(state.attempt_control)
+        outcome_dir = control / "outcome.ready"
+        outcome_dir.mkdir()
+        (outcome_dir / "outcome.json").write_text("{ not valid json", encoding="utf-8")
+        manager.run_until_idle(timeout=30.0)
+    failure = workspace.read_state(resolve_job(workspace, job_id))["failure"]
+    assert failure["code"] == "protocol_error"
+    assert "assembled in place" in failure["message"]
+
+
 def test_corrupt_committing_job_idles_promptly_and_is_reported(tmp_path: Path) -> None:
     # Regression: a committing job with an unreadable definition is not this
     # manager's work. It must not count as actionable — otherwise the run burns
@@ -461,6 +549,85 @@ def _rewrite_job(payload: Path, **members: object) -> None:
     definition = json.loads((payload / "job.json").read_text(encoding="utf-8"))
     definition.update(members)
     (payload / "job.json").write_text(json.dumps(definition), encoding="utf-8")
+
+
+def test_override_step_is_refused_client_side_against_recorded_runner_steps(tmp_path: Path, capsys) -> None:
+    context = CLIContext("httk", tmp_path)
+    workspace = Workspace.initialize(tmp_path / "ws")
+    payload, job_id = _payload(tmp_path / "src", _SUCCEED_RUNNER, tag="steps")
+    workspace.submit(payload, "project/steps")
+    name = register_ws(context, workspace.root, "steps-ws")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        submitted = resolve_job(workspace, job_id)
+        state = StateFrame.from_mapping(workspace.read_state(submitted))
+        manager._transition(
+            submitted,
+            "failed",
+            StateFrame.of(state.carried(), step="only", runner_steps=["only", "other"], reason="failed"),
+        )
+    capsys.readouterr()
+    assert (
+        command(
+            ["job", "request", name, job_id, "override_step", "--step", "bogus", "--operator", "me", "--reason", "x"],
+            context,
+        )
+        != 0
+    )
+    assert "does not implement the step 'bogus'" in capsys.readouterr().err
+
+
+def test_override_step_force_downgrades_the_refusal_and_publishes(tmp_path: Path, capsys) -> None:
+    # A payload runner is mutable, so an operator who edited it to add a recovery
+    # step must be able to override onto it with --force.
+    context = CLIContext("httk", tmp_path)
+    workspace = Workspace.initialize(tmp_path / "ws")
+    payload, job_id = _payload(tmp_path / "src", _SUCCEED_RUNNER, tag="forced")
+    workspace.submit(payload, "project/forced")
+    name = register_ws(context, workspace.root, "forced-ws")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        submitted = resolve_job(workspace, job_id)
+        state = StateFrame.from_mapping(workspace.read_state(submitted))
+        manager._transition(
+            submitted,
+            "failed",
+            StateFrame.of(state.carried(), step="only", runner_steps=["only", "other"], reason="failed"),
+        )
+    capsys.readouterr()
+    argv = ["job", "request", name, job_id, "override_step", "--step", "recover"]
+    argv += ["--operator", "me", "--reason", "x", "--force"]
+    assert command(argv, context) == 0
+    error = capsys.readouterr().err
+    assert "--force was given" in error
+    assert "the runner will refuse it at the next attempt" in error
+
+
+def test_override_step_is_allowed_with_a_note_before_runner_steps_are_recorded(tmp_path: Path, capsys) -> None:
+    context = CLIContext("httk", tmp_path)
+    workspace = Workspace.initialize(tmp_path / "ws")
+    payload, job_id = _payload(tmp_path / "src", _SUCCEED_RUNNER, tag="unstarted")
+    workspace.submit(payload, "project/unstarted")
+    name = register_ws(context, workspace.root, "unstarted-ws")
+    capsys.readouterr()
+    assert (
+        command(
+            [
+                "job",
+                "request",
+                name,
+                job_id,
+                "override_step",
+                "--step",
+                "whatever",
+                "--operator",
+                "me",
+                "--reason",
+                "x",
+            ],
+            context,
+        )
+        == 0
+    )
+    assert "could not be pre-validated" in capsys.readouterr().err
 
 
 def test_why_reports_a_runner_module_the_live_manager_refuses(tmp_path: Path) -> None:

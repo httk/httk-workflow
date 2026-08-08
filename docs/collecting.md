@@ -188,7 +188,10 @@ workspace afresh every time and writes whatever it finds. Re-storing an
 already-stored job is de-duplicated on its stable entry, run, and product ids, so
 running the same collect twice into the same store changes nothing. A store built
 under a different entry-family layout is not migrated in place; point `--into` at
-a new store file when the layout changes.
+a new store file when the layout changes. Reusing a store whose entry-type layout
+does not match the sweep fails fast with a teaching error that names the store
+path, the entry types this sweep needs, and the layout difference, and ends
+`Collect into a new store file.`
 
 ```console
 $ httk workflow collect workflow-workspace | head -1

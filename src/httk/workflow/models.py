@@ -476,6 +476,21 @@ def validate_step(value: object, name: str = "step") -> str:
     return text
 
 
+def ensure_step_known(step: str, steps: Sequence[str], subject: str) -> str:
+    """Return *step* when *subject* implements it, else raise listing the known set.
+
+    :param step: The requested step name.
+    :param steps: The steps *subject* is known to implement.
+    :param subject: A phrase naming the subject, used verbatim in the error.
+    :return: The validated requested step.
+    :raises httk.workflow.errors.FormatError: If *step* is malformed or not in *steps*.
+    """
+    validate_step(step, "step")
+    if step in steps:
+        return step
+    raise FormatError(f"{subject} does not implement the step {step!r}; its steps: {', '.join(steps) or 'none'}")
+
+
 def normalize_placement(value: str | PurePosixPath) -> PurePosixPath:
     """Validate and normalize one relative POSIX placement.
 

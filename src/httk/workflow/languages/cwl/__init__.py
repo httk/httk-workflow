@@ -814,8 +814,6 @@ def _prepare(request: LanguageRequest) -> LanguageScaffold:
         ctx.parameters["cwl_inputs"] = INPUTS_FILE
         return None
 
-    for warning in notes.warnings:
-        _LOGGER.warning("%s", warning)
     return LanguageScaffold(
         documents=documents,
         files={},
@@ -934,7 +932,6 @@ def load_cwl_inputs(inputs_path: str | os.PathLike[str]) -> dict[str, object]:
     :raises httk.workflow.languages.cwl.CwlImportError: If the input object cannot be read or is not a mapping.
     :raises OSError: If the input path cannot be read.
     :raises UnicodeError: If the input path is not valid UTF-8.
-    :raises json.JSONDecodeError: If a JSON input object is malformed.
     """
 
     path = Path(inputs_path).expanduser()
@@ -942,7 +939,10 @@ def load_cwl_inputs(inputs_path: str | os.PathLike[str]) -> dict[str, object]:
         raise CwlImportError(f"the CWL input object {path} does not exist")
     text = path.read_text(encoding="utf-8")
     if path.suffix.lower() == ".json":
-        loaded: object = json.loads(text)
+        try:
+            loaded: object = json.loads(text)
+        except ValueError as exc:
+            raise CwlImportError(f"cannot read the CWL input object {path} as JSON: {exc}") from exc
     else:
         loaded = _yaml_load(text, path)
     if not isinstance(loaded, Mapping):

@@ -46,6 +46,35 @@ os.rename(temporary, control / "outcome.ready")
 """
 
 
+def test_workflow_describe_reports_manifest_step_drift(tmp_path: Path, capsys) -> None:
+    src = str(Path(__file__).parents[1] / "src")
+    manifest = _MANIFEST.replace("tests.package", "tests.drift").replace(
+        'steps = ["start"]', 'steps = ["start", "gone"]'
+    )
+    package = _package(tmp_path / "drift", manifest)
+    # A native runner entry that actually implements only 'start' — so its
+    # --describe disagrees with the manifest's declared ["start", "gone"].
+    (package / "run").write_text(
+        "#!/usr/bin/env python3\n"
+        f"import sys\nsys.path.insert(0, {src!r})\n"
+        "from httk.workflow import Runner\n"
+        "run = Runner('tests.drift')\n"
+        "@run.step\n"
+        "def start(a):\n    a.succeed()\n"
+        "raise SystemExit(run.main())\n",
+        encoding="utf-8",
+    )
+    (package / "run").chmod(0o755)
+    context = _context(tmp_path)
+    assert command(["describe", str(package)], context) == 0
+    out = capsys.readouterr().out
+    assert "WARNING: step drift" in out and "gone" in out
+
+    assert command(["describe", str(package), "--json"], context) == 0
+    described = json.loads(capsys.readouterr().out)
+    assert "gone" in described["manifest_step_drift"]
+
+
 def _cli_package(root: Path) -> Path:
     manifest = _MANIFEST.replace("tests.package", "tests.cli.package").replace("test-package", "cli-package")
     manifest += '\n[workflow.postprocess.report]\nfile = "scripts/report.sh"\ndescription = "write a report"\n'
@@ -137,6 +166,106 @@ def test_job_new_batch_reconciles_structure_names_and_reports_skips_and_count(tm
     assert "notes-0.txt" in captured.err and "(+2 more)" in captured.err
     # And one submission count closes the batch.
     assert "submitted 2 jobs" in captured.err
+
+
+def test_job_new_batch_tag_prefixes_each_derived_tag(tmp_path: Path, capsys) -> None:
+    context = _context(tmp_path)
+    workspace = _workspace(tmp_path, context)
+    package = _cli_package(tmp_path / "package")
+    structures = tmp_path / "structures"
+    structures.mkdir()
+    (structures / "POSCAR.Si2O").write_text(_POSCAR, encoding="utf-8")
+    (structures / "mp-1.vasp").write_text(_POSCAR, encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                workspace,
+                "--workflow-dir",
+                str(package),
+                "--tag",
+                "run7",
+                "--input-from",
+                "structure",
+                str(structures),
+            ],
+            context,
+        )
+        == 0
+    )
+    keys = [line.split("\t")[0] for line in capsys.readouterr().out.splitlines()]
+    # --tag prefixes each derived structure tag rather than replacing it.
+    assert keys and all("run7-" in key for key in keys)
+
+
+def test_job_new_batch_tag_prefix_stays_within_the_tag_syntax(tmp_path: Path, capsys) -> None:
+    context = _context(tmp_path)
+    workspace = _workspace(tmp_path, context)
+    package = _cli_package(tmp_path / "package")
+    structures = tmp_path / "structures"
+    structures.mkdir()
+    # A near-cap derived tag and a prefix ending in '-' would otherwise compose an
+    # over-long tag or a forbidden '--'; re-sanitizing lands both jobs instead of
+    # dying partway with an untaught FormatError.
+    (structures / (("x" * 48) + ".vasp")).write_text(_POSCAR, encoding="utf-8")
+    (structures / "mp-1.vasp").write_text(_POSCAR, encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                workspace,
+                "--workflow-dir",
+                str(package),
+                "--tag",
+                "run-",
+                "--input-from",
+                "structure",
+                str(structures),
+            ],
+            context,
+        )
+        == 0
+    )
+    keys = [line.split("\t")[0] for line in capsys.readouterr().out.splitlines()]
+    assert len(keys) == 2
+    for key in keys:
+        tag = key.rsplit("--", 1)[0]
+        assert "--" not in tag and 0 < len(tag) <= 48
+
+
+def test_job_new_batch_reports_partial_progress_before_failing(tmp_path: Path, capsys) -> None:
+    context = _context(tmp_path)
+    workspace = _workspace(tmp_path, context)
+    package = _cli_package(tmp_path / "package")
+    structures = tmp_path / "structures"
+    structures.mkdir()
+    (structures / "one.vasp").write_text(_POSCAR, encoding="utf-8")
+    (structures / "two.vasp").write_text(_POSCAR, encoding="utf-8")
+
+    # A shared, undeclared input makes every item fail as the batch streams.
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                workspace,
+                "--workflow-dir",
+                str(package),
+                "--input",
+                "bad=1",
+                "--input-from",
+                "structure",
+                str(structures),
+            ],
+            context,
+        )
+        == 2
+    )
+    assert "of 2 jobs before failing" in capsys.readouterr().err
 
 
 def test_job_new_accepts_a_package_path_and_rejects_workflow_selection_errors(tmp_path: Path, capsys) -> None:

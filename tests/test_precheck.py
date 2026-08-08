@@ -39,6 +39,25 @@ def _job(root: Path, name: str, environment: Mapping[str, object], *, runner: st
     return payload
 
 
+def test_precheck_flags_a_step_outside_the_recorded_runner_steps(tmp_path: Path) -> None:
+    from httk.workflow.models import StateFrame
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload = _job(tmp_path / "src", "job", {})
+    submitted = workspace.submit(payload, "project/steps")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        state = StateFrame.from_mapping(workspace.read_state(submitted))
+        manager._transition(
+            submitted,
+            "paused",
+            StateFrame.of(state.carried(), step="bogus", runner_steps=["only", "other"], reason="paused"),
+        )
+    findings = list(precheck_module.precheck_jobs(workspace))
+    step_problems = [str(finding["step"]) for finding in findings if finding["step"]]
+    assert step_problems and "bogus" in step_problems[0]
+    assert "only, other" in step_problems[0]
+
+
 def test_precheck_reports_resolution_sources_and_exit_code(tmp_path: Path, capsys) -> None:
     """The CLI reports setting, default, and unresolved entries in JSON."""
 
@@ -66,6 +85,7 @@ def test_precheck_reports_resolution_sources_and_exit_code(tmp_path: Path, capsy
         "language_problems": 0,
         "language_indeterminate": 0,
         "input_problems": 0,
+        "step_problems": 0,
     }
     statuses = sorted(
         (entry["environment"][0]["status"], entry["environment"][0]["source"]) for entry in report["jobs"]

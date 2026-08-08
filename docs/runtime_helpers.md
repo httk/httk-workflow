@@ -299,9 +299,12 @@ rather than waiting forever.
 
 For a job with `data_mode="transactional"`, `a.put(source, destination)` stages a
 file or a directory and `a.remove(destination, missing_ok=...)` stages a removal.
-The manager applies them exactly once when it commits the outcome. Operation
-identifiers are generated in call order (`op-0001`, `op-0002`, …), so replaying
-the same step produces the same manifest:
+The manager applies them exactly once when it commits the outcome. A `put`
+overwrites its destination whether the source is a file or a directory: when the
+destination already exists in the committed data, a directory put replaces that
+tree, so a step that advances back onto a step and re-puts the same tree
+succeeds rather than failing. Operation identifiers are generated in call order
+(`op-0001`, `op-0002`, …), so replaying the same step produces the same manifest:
 
 ```python
 a.put(a.workdir / "energy.json", "results/energy.json")

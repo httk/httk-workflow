@@ -145,16 +145,32 @@ def _store_collected(items: list[CollectedJob], path: str) -> list[dict[str, obj
     """Save one bounded collected sweep into a file-backed SQLite store."""
 
     try:
-        from httk.data.db import Database, SqlStore
+        from httk.data.db import Database, SqlStore, StorageLayoutUpgradeRequiredError
     except ImportError as exc:
         raise ValueError("--into requires httk-data with its database dependencies") from exc
 
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
     layout, failures = _storage_layout(items)
+    requested = sorted(
+        {
+            str(getattr(value, "type", ""))
+            for item in items
+            for value in item.outputs.values()
+            if getattr(value, "type", None)
+        }
+    )
     reports: list[dict[str, object]] = []
     with Database.sqlite(target) as database:
-        store = SqlStore(database, entry_records=layout)
+        try:
+            store = SqlStore(database, entry_records=layout)
+        except StorageLayoutUpgradeRequiredError as exc:
+            needs = ", ".join(requested) or "no entry types"
+            raise ValueError(
+                f"{target} was created for a different set of entry types than this sweep needs ({needs}); "
+                f"its stored layout differs in {json.dumps(exc.diff, sort_keys=True, default=str)}. "
+                "Collect into a new store file."
+            ) from exc
         for index, item in enumerate(items):
             report = _collected_mapping(item)
             if item.missing_collector is not None:

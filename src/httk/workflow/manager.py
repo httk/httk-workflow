@@ -1457,13 +1457,21 @@ class TaskManager:
         assert process is not None
         assert running is not None
         self._running[attempt_id] = RunningAttempt(running, process, stdout, stderr, attempt_id, owner_uid=self.uid)
+        launch_fields: dict[str, object] = {"attempt_id": attempt_id, "pid": process.pid, "step": context["step"]}
+        if job.runner_source == "payload":
+            # A payload-source runner lives in the mutable payload, so record the
+            # payload digest at launch: it makes post-hoc mutation of the runner
+            # at least visible in the journal.
+            # ponytail: full payload tree digest per payload launch; cache or cap
+            # if payload launches ever dominate the manager's cost.
+            launch_fields["payload_digest"] = self.workspace.payload_digest(running)
         _LOGGER.info(
             "launched attempt %s for %s as pid %d in %s",
             attempt_id,
             running.job_key,
             process.pid,
             workdir,
-            extra=self._event("launch", running, attempt_id=attempt_id, pid=process.pid, step=context["step"]),
+            extra=self._event("launch", running, **launch_fields),
         )
 
     @staticmethod

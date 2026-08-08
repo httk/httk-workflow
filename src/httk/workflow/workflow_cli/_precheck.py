@@ -14,6 +14,7 @@ from ..precheck import (
     has_input_problem,
     has_language_problem,
     has_runner_problem,
+    has_step_problem,
     manager_availability_notice,
     precheck_jobs,
 )
@@ -37,6 +38,7 @@ def _summary(findings: list[dict[str, object]]) -> dict[str, int]:
         "language_problems": sum(has_language_problem(item) for item in findings),
         "language_indeterminate": sum(status_of(item, "language") == "indeterminate" for item in findings),
         "input_problems": sum(has_input_problem(item) for item in findings),
+        "step_problems": sum(has_step_problem(item) for item in findings),
     }
 
 
@@ -108,12 +110,16 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
             inputs = finding.get("inputs")
             if isinstance(inputs, list):
                 problems.extend(f"input: {problem}" for problem in inputs)
+            step_problem = finding.get("step")
+            if isinstance(step_problem, str) and step_problem:
+                problems.append(f"step: {step_problem}")
             suffix = f"; problems: {'; '.join(problems)}" if problems else "; ok"
             print(f"{finding['job_key']}\t{finding['workflow'] or '-'}\tenv: {statuses}{suffix}")
         print(
             f"checked {summary['checked']}, unresolved {summary['unresolved']}, "
             f"runner problems {summary['runner_problems']}, unclaimable {summary['claim_problems']}, "
-            f"language problems {summary['language_problems']}, input problems {summary['input_problems']}"
+            f"language problems {summary['language_problems']}, input problems {summary['input_problems']}, "
+            f"step problems {summary['step_problems']}"
         )
     return (
         1
@@ -122,6 +128,7 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
         or summary["claim_problems"]
         or summary["language_problems"]
         or summary["input_problems"]
+        or summary["step_problems"]
         else 0
     )
 
