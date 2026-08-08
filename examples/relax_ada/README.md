@@ -39,5 +39,5 @@ httk workflow collect
 
 The runner reads the `poscar` parameter (default `files/POSCAR`), optionally
 stages `INCAR`, runs the configured command, and publishes the VASP result into
-transactional data. See `docs/native_ada_api.md` for the binding surface and
+transactional data. See `docs/sdks/native_ada_api.md` for the binding surface and
 the NULL/empty string ownership rules.

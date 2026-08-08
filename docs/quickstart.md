@@ -159,7 +159,7 @@ marker.
   `examples/defect_campaign.sh`.
 - {doc}`workflow_packages` — authoring a directory workflow with hooks and a
   manifest.
-- {doc}`native_bash_api` — the same runner protocol from Bash.
+- {doc}`sdks/native_bash_api` — the same runner protocol from Bash.
 - {doc}`workflow_languages` — a Python Workflow Definition, CWL workflow,
   jobflow Maker document, or explicitly selected httk-v1 template becomes one
   job with `httk workflow job new --workflow DOCUMENT`, without being rewritten

@@ -48,7 +48,7 @@
 ! the plainer Fortran subroutine, because the C dispatcher calls it through an
 ! `int (*)(void)` pointer: c_funloc requires an interoperable target, and reading
 ! the return value of a `void` procedure through that pointer would be undefined.
-! See docs/native_fortran_api.md for the rationale and the string-ownership rules.
+! See docs/sdks/native_fortran_api.md for the rationale and the string-ownership rules.
 
 module httk_workflow
 

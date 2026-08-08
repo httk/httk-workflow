@@ -42,6 +42,6 @@ first step is named with `--step`. The finished calculation lands in
 `jobs/*/data/vasp/`, the same collected files the other relaxation examples
 produce for this input.
 
-See `docs/native_rust_api.md` for the full method table, the error semantics
+See `docs/sdks/native_rust_api.md` for the full method table, the error semantics
 (`Result<Option<String>>` reads and `StepError` aborts), the offline build, and
 how a Rust step handler is dispatched.

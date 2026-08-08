@@ -163,7 +163,7 @@ reported as `null` and sets `provenance.gaps` on the record, exactly like every
 other damaged evidence a collect still reports rather than hides.
 
 See {doc}`collecting` for the record as a whole, {doc}`runtime_helpers` and
-{doc}`native_bash_api` for the two authoring APIs, and
+{doc}`sdks/native_bash_api` for the two authoring APIs, and
 {doc}`workflow_filesystem_api` for the normative statement of the `declarations`
 member and the payload area it is stored in. See {doc}`provenance` for the
 collection of the `provenance` declaration.

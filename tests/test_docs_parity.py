@@ -1,4 +1,4 @@
-"""The authoring parity table in ``docs/sdk_parity.md`` is enforced, not aspired to.
+"""The authoring parity table in ``docs/sdks/sdk_parity.md`` is enforced, not aspired to.
 
 The table is the single documented source of truth for the authoring surface: one
 row per operation, spelled in Python and in Bash. This module parses it and holds
@@ -26,7 +26,7 @@ from pathlib import Path
 import httk.workflow
 from httk.workflow import Attempt, Runner
 
-_DOCS = Path(__file__).resolve().parent.parent / "docs" / "sdk_parity.md"
+_DOCS = Path(__file__).resolve().parent.parent / "docs" / "sdks" / "sdk_parity.md"
 _SHELL = Path(httk.workflow.__file__).with_name("shell") / "httk-workflow.sh"
 
 #: The table lives under this heading; everything before it is prose.

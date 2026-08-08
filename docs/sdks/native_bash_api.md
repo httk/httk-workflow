@@ -11,7 +11,7 @@ its steps, one `step_<name>` function implements each of them, and
 
 Directory-package hooks are language-independent too. A Bash executable can be
 the manifest's instantiate or collect hook; it consumes the JSON contract in
-{doc}`workflow_packages` rather than the runner SDK. For example, an
+{doc}`../workflow_packages` rather than the runner SDK. For example, an
 instantiate hook can use `jq` to read the envelope, stage a file from the
 payload-relative descriptor, and return the required response:
 
@@ -35,7 +35,7 @@ Nothing declares the shape of the workflow up front. A step decides *at run time
 which children to spawn and which step runs next, so the graph of a job is
 whatever its steps published. Every Bash function below performs its work through
 exactly the same implementation as the Python
-{doc}`authoring SDK <runtime_helpers>`, so a Bash runner and a Python runner
+{doc}`authoring SDK <../runtime_helpers>`, so a Bash runner and a Python runner
 publish the same bytes for the same campaign.
 
 The manager exports absolute paths to the two packaged, sourced libraries, so a
@@ -213,7 +213,7 @@ A step starts in its workdir, so ordinary relative paths are workdir paths.
 `httk_workflow_environment` only reads names declared by the workflow and
 returns exit status 1 for an undeclared or unresolved name without a default.
 The declared environment metadata and per-job overrides are described in
-{doc}`workflow_packages`.
+{doc}`../workflow_packages`.
 
 `$HTTK_WORKFLOW_DURABLE` is the durability contract for a Bash runner. There is
 no new function: every outcome, transaction, spawn, and workdir batch you publish
@@ -247,7 +247,7 @@ jq '.outputs = {"structures": 3}' declared.json >refined.json
 httk_workflow_declare workflow refined.json
 ```
 
-See {doc}`declarations` for the declared/observed contract and what a collect
+See {doc}`../declarations` for the declared/observed contract and what a collect
 reports.
 
 `httk_workflow_children` prints `label`, terminal state, job key, workdir, and
@@ -480,7 +480,7 @@ defaults, in Bash and in Python at once:
 (the calculation the remedy is validated against) and `--policy`, and records the
 escalation ladder in the job state directory rather than in the workdir, so a job
 with an isolated workdir keeps climbing it. A complete Bash VASP runner built on
-these functions ships with the module: see {doc}`vasp_runners`.
+these functions ships with the module: see {doc}`../vasp_runners`.
 
 ## Mapping from *httk* v1
 

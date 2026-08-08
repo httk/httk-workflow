@@ -94,7 +94,7 @@ httk workflow manager run --pool vasp
 
 The pseudopotential library resolves the same way, as `vasp.pseudo_library`
 (environment `HTTK_VASP_PSEUDO_LIBRARY`), falling back to the job's
-`pseudopotential_library` parameter. See {doc}`sdk_parity` for the resolution table
+`pseudopotential_library` parameter. See {doc}`sdks/sdk_parity` for the resolution table
 and {doc}`workflow_cli` for `workspace settings`.
 
 ## Declared inputs and parameters

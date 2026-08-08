@@ -1,7 +1,7 @@
 # Native Rust runner API
 
 *For authors writing a workflow runner in Rust.* The Rust SDK is the same
-authoring surface as the {doc}`Python <runtime_helpers>`, {doc}`Bash
+authoring surface as the {doc}`Python <../runtime_helpers>`, {doc}`Bash
 <native_bash_api>`, {doc}`C <native_c_api>`, and {doc}`Fortran
 <native_fortran_api>` ones, in idiomatic, dependency-free Rust. Like the Bash and
 C libraries it is a **bridge client**: every verb spawns `$HTTK_WORKFLOW_PYTHON
