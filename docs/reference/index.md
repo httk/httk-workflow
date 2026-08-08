@@ -8,7 +8,8 @@ in its `__all__` — rather than every source object. The three layers are:
   see {doc}`../workflow_protocol_api`.
 - **Execution / authoring** — the package root `httk.workflow` (`Runner`,
   `Attempt`, and the small job and result types), with `httk.workflow.sdk`,
-  `httk.workflow.runtime`, `httk.workflow.runtime_utils`,
+  `httk.workflow.runtime`, `httk.workflow.runtime_utils`, and
+  `httk.workflow.hookapi`,
   `httk.workflow.scaffold`, `httk.workflow.executors`, and
   `httk.workflow.shell_bridge`.
 - **Orchestration and management** — `httk.workflow.collecting`,

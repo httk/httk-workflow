@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import math
 import os
 import re
 import shutil
@@ -106,6 +107,7 @@ FILES_DIRECTORY = "files"
 STRUCTURE_PATTERNS = ("POSCAR*", "*.vasp")
 _DESCRIBE_VARIABLE = "HTTK_WORKFLOW_DESCRIBE"
 _DESCRIBE_TIMEOUT = 120.0
+_INSTANTIATE_TIMEOUT = 3600.0
 _TAG_CHARACTERS = "abcdefghijklmnopqrstuvwxyz0123456789._-"
 _MAXIMUM_TAG_LENGTH = 48
 
@@ -146,7 +148,9 @@ class WorkflowProvider:
     :param directory: Locate a directory-sourced workflow package.
     :param entry: Name the directory package's runner entry.
     :param instantiate_file: Name the directory package's instantiate hook.
+    :param instantiate_exec: Name an executable directory package instantiate hook.
     :param collect_file: Name the directory package's collector.
+    :param collector_exec: Name an executable directory package collector.
     :param postprocess_scripts: Map curated postprocess script names to package members and descriptions.
     :param parameters: Declare the workflow's parameter metadata.
     :param environment: Declare the workflow's environment metadata.
@@ -174,7 +178,9 @@ class WorkflowProvider:
     directory: Path | None = None
     entry: str = "run"
     instantiate_file: str | None = None
+    instantiate_exec: str | None = None
     collect_file: str | None = None
+    collector_exec: str | None = None
     postprocess_scripts: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     environment: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
@@ -202,6 +208,7 @@ class WorkflowProvider:
             if packaged and (
                 self.entry != "run"
                 or self.instantiate_file is not None
+                or self.instantiate_exec is not None
                 or self.collect_file is not None
                 or self.declaration_file is not None
             ):
@@ -329,7 +336,9 @@ class ResolvedWorkflow:
     :param directory: Locate a directory-sourced workflow package.
     :param entry: Name the directory package's runner entry.
     :param instantiate_file: Name the directory package's instantiate hook.
+    :param instantiate_exec: Name an executable directory package instantiate hook.
     :param collect_file: Name the directory package's collector.
+    :param collector_exec: Name an executable directory package collector.
     :param postprocess_scripts: Preserve curated postprocess script metadata.
     :param parameters: Preserve the workflow's parameter metadata.
     :param environment: Preserve the workflow's environment metadata.
@@ -360,7 +369,9 @@ class ResolvedWorkflow:
     directory: Path | None = None
     entry: str = "run"
     instantiate_file: str | None = None
+    instantiate_exec: str | None = None
     collect_file: str | None = None
+    collector_exec: str | None = None
     postprocess_scripts: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     parameters: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     environment: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
@@ -383,6 +394,7 @@ class ResolvedWorkflow:
             if self.packaged is not None and (
                 self.entry != "run"
                 or self.instantiate_file is not None
+                or self.instantiate_exec is not None
                 or self.collect_file is not None
                 or self.declaration_file is not None
             ):
@@ -481,6 +493,7 @@ class _Prepared:
     files: Mapping[str, Path] = field(default_factory=dict)
     parameters: Mapping[str, object] = field(default_factory=dict)
     instantiate: Callable[[InstantiateContext], object] | None = None
+    instantiate_exec: tuple[Path, str, str] | None = None
     finalize: Callable[[JobSpec], JobSpec] | None = None
 
 
@@ -691,7 +704,9 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
         directory=provider.directory,
         entry=provider.entry,
         instantiate_file=provider.instantiate_file,
+        instantiate_exec=provider.instantiate_exec,
         collect_file=provider.collect_file,
+        collector_exec=provider.collector_exec,
         postprocess_scripts=provider.postprocess_scripts,
         parameters=provider.parameters,
         environment=provider.environment,
@@ -767,7 +782,9 @@ def resolve_workflow(
                 directory=provider.directory or path.resolve(),
                 entry=provider.entry,
                 instantiate_file=provider.instantiate_file,
+                instantiate_exec=provider.instantiate_exec,
                 collect_file=provider.collect_file,
+                collector_exec=provider.collector_exec,
                 postprocess_scripts=provider.postprocess_scripts,
                 parameters=provider.parameters,
                 environment=provider.environment,
@@ -1176,18 +1193,27 @@ def _prepare(
             ) from exc
     runner_sha256 = str(reference["sha256"])
     instantiate: Callable[[InstantiateContext], object] | None
+    instantiate_exec: tuple[Path, str, str] | None = None
     if resolved.directory is not None and resolved.instantiate_file is not None:
         from .packages import _tree_hook
 
-        instantiate = cast(
-            Callable[[InstantiateContext], object],
-            _tree_hook(
+        if resolved.instantiate_exec is not None:
+            instantiate = None
+            instantiate_exec = (
                 workspace.runner_store_path(str(reference["path"])),
                 runner_sha256,
-                resolved.instantiate_file,
-                "instantiate",
-            ),
-        )
+                resolved.instantiate_exec,
+            )
+        else:
+            instantiate = cast(
+                Callable[[InstantiateContext], object],
+                _tree_hook(
+                    workspace.runner_store_path(str(reference["path"])),
+                    runner_sha256,
+                    resolved.instantiate_file,
+                    "instantiate",
+                ),
+            )
     else:
         instantiate = _resolve_instantiate(resolved, runner_sha256) if resolved.instantiate else None
     return _Prepared(
@@ -1197,6 +1223,7 @@ def _prepare(
         runner_sha256=runner_sha256,
         data_mode=resolved.data_mode,
         instantiate=instantiate,
+        instantiate_exec=instantiate_exec,
     )
 
 
@@ -1311,7 +1338,12 @@ def _submit(
                 destination.write_text(text, encoding="utf-8")
         _stage_files(staging, prepared.files)
         supplied_inputs = dict(inputs or {})
-        _stage_inputs(staging, workflow, supplied_inputs, instantiate=prepared.instantiate is not None)
+        _stage_inputs(
+            staging,
+            workflow,
+            supplied_inputs,
+            instantiate=prepared.instantiate is not None or prepared.instantiate_exec is not None,
+        )
         supplied_parameters = dict(parameters or {})
         supplied_environment = dict(environment or {})
         declared_environment = workflow.environment
@@ -1335,7 +1367,21 @@ def _submit(
         if collisions:
             raise ValueError(f"user parameter collides with reserved language parameter {collisions[0]!r}")
         job_parameters = {**supplied_parameters, **prepared.parameters}
-        if prepared.instantiate is not None:
+        if prepared.instantiate_exec is not None:
+            hook_inputs = _serialize_executable_inputs(staging, workflow, supplied_inputs)
+            hook_parameters, hook_tag = _run_executable_instantiate(
+                prepared.instantiate_exec,
+                staging,
+                workflow.workflow_id,
+                tag,
+                job_parameters,
+                hook_inputs,
+                workspace.root,
+            )
+            job_parameters = {**job_parameters, **hook_parameters}
+            if caller_tag is None and hook_tag is not None:
+                tag = hook_tag
+        elif prepared.instantiate is not None:
             context = InstantiateContext(
                 payload=staging,
                 inputs=MappingProxyType(supplied_inputs),
@@ -1393,6 +1439,158 @@ def _submit(
             "sha256": prepared.runner_sha256,
         },
     )
+
+
+def _serialize_executable_inputs(
+    payload: Path, workflow: ResolvedWorkflow, inputs: Mapping[str, object]
+) -> dict[str, dict[str, object]]:
+    """Copy or serialize executable-hook inputs into descriptor files."""
+
+    descriptors: dict[str, dict[str, object]] = {}
+    for name, value in inputs.items():
+        if workflow.inputs[name] is not None:
+            continue
+        source: Path | None = None
+        if isinstance(value, (str, os.PathLike)):
+            candidate = Path(os.fspath(value)).expanduser()
+            if candidate.is_file():
+                source = candidate
+        if source is not None:
+            relative = payload_relative(f"files/inputs/{name}/{source.name}")
+            destination = payload.joinpath(*relative.parts)
+            if destination.exists():
+                raise ValueError(f"generated member {relative.as_posix()!r} collides with an existing payload member")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            descriptors[name] = {"kind": "file", "path": relative.as_posix()}
+            continue
+        if _is_json_native(value):
+            descriptors[name] = {"kind": "value", "value": value}
+        else:
+            descriptors[name] = _save_executable_input(payload, name, value)
+    return descriptors
+
+
+def _is_json_native(value: object, active: set[int] | None = None) -> bool:
+    """Return whether *value* is JSON-native without applying JSON coercions."""
+
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if not isinstance(value, (list, dict)):
+        return False
+    active = set() if active is None else active
+    identity = id(value)
+    if identity in active:
+        return False
+    active.add(identity)
+    try:
+        if isinstance(value, list):
+            return all(_is_json_native(item, active) for item in value)
+        return all(isinstance(key, str) and _is_json_native(item, active) for key, item in value.items())
+    finally:
+        active.remove(identity)
+
+
+def _save_executable_input(payload: Path, name: str, value: object) -> dict[str, object]:
+    """Save one live executable-hook input using a registered extension."""
+
+    import httk.core
+    from httk.core.register import known_writers
+
+    dispatch_keys = sorted(known_writers())
+    last_error: Exception | None = None
+    for dispatch_key in dispatch_keys:
+        filename = f"{name}{dispatch_key}" if dispatch_key.startswith(".") else dispatch_key
+        relative = payload_relative(f"files/inputs/{name}/{filename}")
+        destination = payload.joinpath(*relative.parts)
+        if destination.exists():
+            raise ValueError(f"generated member {relative.as_posix()!r} collides with an existing payload member")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            httk.core.save(value, destination)
+        except Exception as exc:
+            last_error = exc
+            destination.unlink(missing_ok=True)
+            continue
+        # ponytail: core has no object-to-writer query; sorted-first-success is
+        # deterministic until core exposes explicit writer selection.
+        return {"kind": "file", "path": relative.as_posix()}
+    detail = f": {last_error}" if last_error is not None else ""
+    raise ValueError(
+        f"workflow input {name!r} value of type {type(value).__name__} cannot be serialized for an executable hook"
+        f"{detail}; use a .py hook or register a httk.core writer"
+    ) from last_error
+
+
+def _run_executable_instantiate(
+    hook: tuple[Path, str, str],
+    payload: Path,
+    workflow_id: str,
+    tag: str | None,
+    parameters: Mapping[str, object],
+    inputs: Mapping[str, Mapping[str, object]],
+    workspace_root: Path,
+) -> tuple[dict[str, object], str | None]:
+    """Run an instantiate executable from its digest-pinned runner tree."""
+
+    tree, pinned_sha256, member = hook
+    actual = tree_digest(tree)
+    if actual != pinned_sha256:
+        raise ValueError(
+            f"published workflow tree {tree} changed: digest {actual} does not match pinned {pinned_sha256}"
+        )
+    source = tree.joinpath(*PurePosixPath(member).parts)
+    if source.is_symlink() or not source.is_file() or not source.resolve().is_relative_to(tree.resolve()):
+        raise ValueError(f"workflow package hook member is unavailable in published tree {tree}: {member}")
+    if not os.access(source, os.X_OK):
+        raise ValueError(f"instantiate hook {member!r} is not executable; chmod +x")
+    request = {
+        "format": "httk-workflow-instantiate",
+        "format_version": 1,
+        "workflow": workflow_id,
+        "tag": tag,
+        "parameters": dict(parameters),
+        "inputs": {name: dict(descriptor) for name, descriptor in inputs.items()},
+    }
+    environment = dict(os.environ)
+    for variable in tuple(environment):
+        if variable.startswith("HTTK_WORKFLOW_"):
+            environment.pop(variable)
+    environment["HTTK_WORKFLOW_WORKSPACE_DIR"] = str(workspace_root)
+    try:
+        completed = subprocess.run(
+            [str(source)],
+            input=json.dumps(request, separators=(",", ":"), allow_nan=False),
+            capture_output=True,
+            text=True,
+            cwd=payload,
+            env=environment,
+            timeout=_INSTANTIATE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError(f"cannot run executable instantiate hook {member!r}: {exc}") from exc
+    stderr = completed.stderr.strip()
+    excerpt = stderr[-1000:] if stderr else ""
+    if completed.returncode != 0:
+        detail = f" (stderr: {excerpt})" if excerpt else ""
+        raise ValueError(f"executable instantiate hook {member!r} failed with exit {completed.returncode}{detail}")
+    try:
+        response = json.loads(completed.stdout)
+        if not isinstance(response, Mapping):
+            raise ValueError("response is not a JSON object")
+        response_parameters = response.get("parameters")
+        response_tag = response.get("tag")
+        if not isinstance(response_parameters, Mapping):
+            raise ValueError("response has no parameters mapping")
+        if response_tag is not None and not isinstance(response_tag, str):
+            raise ValueError("response tag is not a string")
+        return dict(response_parameters), response_tag
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        detail = f" (stderr: {excerpt})" if excerpt else ""
+        raise ValueError(f"executable instantiate hook {member!r} returned invalid JSON: {exc}{detail}") from exc
 
 
 def _stage_files(payload: Path, files: Mapping[str, str | os.PathLike[str]]) -> None:

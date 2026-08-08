@@ -17,15 +17,27 @@ my-workflow/
 ├── httk_workflow.toml
 ├── run
 ├── instantiate.py       # optional
+├── instantiate           # optional executable hook
 ├── collect.py            # optional
+├── collect               # optional executable hook
 └── support/              # any regular support files
 ```
 
 `run` receives the normal runner environment and publishes the outcome protocol
-used by the manager. `instantiate.py` and `collect.py` are optional Python
-hooks. A package may contain other regular files needed by its entry or hooks;
-manifest members must be relative regular files inside the package, and hook
-members must end in `.py`. Symlinks, special files, absolute names, and `..`
+used by the manager. A workflow package is language-independent: its runner
+entry, instantiate hook, collect hook, and postprocess scripts may be written in
+any language available as an executable on the host. A workflow is a manifest
+plus the members it references. Python hooks remain first-class: a `.py`
+instantiate or collect hook uses the existing in-process path, while an
+executable hook uses the contracts below. Successful outputs share the same
+assembly semantics; collector failure handling is intentionally different and
+is documented below.
+
+A package may contain other regular files needed by its entry or hooks; manifest
+members must be relative regular files inside the package. `.py` is the Python
+fast path for instantiate and collect; a non-`.py` instantiate or collect member
+must have execute mode (`chmod +x`). Postprocess members must also be
+executable when selected. Symlinks, special files, absolute names, and `..`
 members are refused.
 
 Resolve or register a package with the Python API:
@@ -132,9 +144,12 @@ manifest preparation.
 
 ### Hook tables
 
-Each hook table has exactly one key, `file`, naming a relative `.py` regular
-file member. Presence of `[workflow.instantiate]` declares an instantiate hook;
-presence of `[workflow.collect]` declares a collect hook.
+Each hook table has exactly one key, `file`, naming a relative regular file
+member. A `.py` member selects the Python in-process fast path. Any other member
+must be executable (`chmod +x`) and selects the language-neutral subprocess
+contract. `workflow describe` reports `kind=python` or `kind=executable` for
+each present hook. Presence of `[workflow.instantiate]` declares an instantiate
+hook; presence of `[workflow.collect]` declares a collect hook.
 
 ```toml
 [workflow.instantiate]
@@ -339,7 +354,8 @@ the manifest remains the authoritative strictly httk-owned package glue.
 
 ## Hooks and trust
 
-The hook contracts are deliberately small:
+The hook contracts are deliberately small. Python hooks keep their existing
+in-process signatures:
 
 ```python
 def instantiate(context):
@@ -360,6 +376,107 @@ edges onto the `Run`, and emits `ProductLink` values from manifest/provider
 package path's instantiate hook and the job-pinned collect fallback execute
 from the published, digest-pinned tree; registered-directory collectors
 instead execute current source bytes by explicit registration consent.
+
+### Executable instantiate hook
+
+An executable instantiate hook is launched from the published, digest-pinned
+package tree. Its current working directory is the staging payload. The
+framework removes inherited `HTTK_WORKFLOW_*` variables, then supplies only
+`HTTK_WORKFLOW_WORKSPACE_DIR` with the workspace path. It sends one JSON request
+on stdin:
+
+```json
+{
+  "format": "httk-workflow-instantiate",
+  "format_version": 1,
+  "workflow": "example.relax",
+  "tag": "silicon",
+  "parameters": {"cutoff": 520},
+  "inputs": {
+    "structure": {"kind": "file", "path": "files/inputs/structure/POSCAR"},
+    "settings": {"kind": "value", "value": {"kpoints": [4, 4, 4]}}
+  }
+}
+```
+
+`tag` is a string or `null`; `parameters` and `inputs` are JSON objects. An
+input descriptor is either `{"kind": "file", "path": "<payload-relative POSIX
+path>"}` or `{"kind": "value", "value": <JSON value>}`. The hook may read
+file descriptors relative to its payload working directory, write files into
+that payload, and return one JSON object on stdout:
+
+```json
+{"parameters": {"cutoff": 520, "derived": "ready"}, "tag": "silicon-4x4x4"}
+```
+
+`parameters` is required and must be an object. `tag` is optional and, when
+returned, must be a string. Returned parameters are merged into the job
+parameters; a returned tag is used only when the caller did not supply one.
+Nonzero exit status, malformed stdout, or an invalid response aborts submission.
+
+Before launching this form, the framework pre-serializes only inputs consumed
+by the hook (`destination` omitted in the manifest):
+
+| Supplied input | Descriptor and staged member |
+| --- | --- |
+| Existing regular file path or path-like value | `{"kind": "file", "path": "files/inputs/<name>/<basename>"}`; the file is copied there. |
+| JSON-native value | `{"kind": "value", "value": <value>}` with the value unchanged. Accepted shapes are strings, booleans, `null`, finite numbers, lists, and string-keyed mappings, recursively. |
+| Live object or other non-JSON-native value | Everything else goes through registered-writer serialization. `httk.core.save` probes registered dispatch keys in deterministic sorted order: extension keys stage `files/inputs/<name>/<name><extension>`, while exact-basename keys stage `files/inputs/<name>/<basename>`; the first successful writer wins. |
+
+An object with no registered writer is a submission error naming the object type
+and the remedies: use a `.py` hook, or register a `httk.core` writer. The Python
+fast path receives the original `InstantiateContext` and inputs; this
+pre-serialization is the executable boundary, not a semantic difference.
+
+### Executable collect hook
+
+An executable collect hook is launched with its package tree as the current
+working directory. For a direct package path and the opt-in job-pinned fallback,
+that is the published tree whose full digest is checked against `job.json`; a
+registered-directory provider is the explicit-consent exception and runs its
+current source tree. It receives one stream per executable-collector sweep:
+first the handshake line, then one record line per job, in collection order:
+
+```json
+{"format": "httk-workflow-collect-stream", "format_version": 1}
+{"record": {"workspace_id": "workspace", "job_id": "job-1", "state": "succeeded", "job": {}}}
+```
+
+The `record` value is the complete `JobRecord.as_mapping()` mapping; the
+shortened object above only illustrates the envelope. The hook writes one
+response line for each record, in the same order:
+
+```json
+{"job_id": "job-1", "outputs": {"energy": {"value": 3.14}}}
+```
+
+or:
+
+```json
+{"job_id": "job-1", "error": "could not read the result"}
+```
+
+The response `job_id` must match the input record. A malformed response, a
+wrong job id, an explicit error, a missing response, or a response whose output
+cannot be resolved degrades that job only; the sweep continues and other jobs'
+responses remain usable. One executable collector process handles all records
+for that collector in the sweep.
+
+Each output value must be exactly one of these discriminator wrappers:
+
+| Wrapper | Result |
+| --- | --- |
+| `{"entry": { ... }}` | A registered entry type is reconstructed as its real record. The mapping must contain a registered string `type`; an optional `id` must match the constructed record. |
+| `{"value": <JSON value>}` | A `DataRecord`. If the declared output has `ref`, the referenced property definition is loaded and the value is hard-validated with `httk-data` (which is required at collect time); without `ref`, a generated `_httk_custom_*` property definition is used. |
+| `{"file": "<path>"}` | A workspace-confined `FileRecord`. The wrapper must contain exactly the `file` key, and the path must resolve to a regular file below the workspace or workdir. |
+
+The wrapper discriminator is reserved: extra keys are rejected. On the
+successful path, the Python fast path returns ordinary Python objects to the
+existing assembler and has the same role validation and record assembly
+semantics as these executable wrappers. Failure behavior remains deliberately
+different: an exception from a registered Python collector aborts collection
+iteration, while an executable collector's malformed, errored, missing, or
+unresolvable response degrades only its job and lets the sweep continue.
 
 The job-embedded declaration governs the Run (immutable facts per job). ProductLinks
 come from the live registered provider's manifest and therefore apply today's

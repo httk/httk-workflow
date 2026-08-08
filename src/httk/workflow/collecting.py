@@ -41,6 +41,11 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import os
+import signal
+import subprocess
+import threading
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache
@@ -50,8 +55,9 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote
 
 from . import languages
-from ._util import read_json, require_mapping, require_string, tree_digest
+from ._util import read_json, require_mapping, require_string, sha256_file, tree_digest
 from .errors import FormatError
+from .hookapi import COLLECT_STREAM_FORMAT, COLLECT_STREAM_VERSION
 from .introspection import (
     _job_of,
     _optional_int,
@@ -106,6 +112,18 @@ COLLECTABLE_KINDS = tuple(kind for kind in STATE_KINDS if kind in TERMINAL_KINDS
 #: The default selection: the jobs that finished the way they were meant to.
 DEFAULT_COLLECT_STATES = ("succeeded",)
 _FILE_URL_PREFIX = "file://"
+DEFAULT_COLLECT_TIMEOUT: float | None = 3600.0
+#: Maximum UTF-8 response-line size retained from an executable collector.
+MAX_COLLECT_RESPONSE_LINE_BYTES = 1024 * 1024
+#: Maximum stderr line retained from an executable collector.
+MAX_COLLECT_STDERR_LINE_BYTES = 64 * 1024
+#: Maximum total stderr retained from an executable collector.
+MAX_COLLECT_STDERR_BYTES = 1024 * 1024
+
+
+class _CollectEnvironmentError(RuntimeError):
+    """Report an operator-side collect dependency failure."""
+
 
 if TYPE_CHECKING:
     import httk.core
@@ -910,6 +928,380 @@ def _collector(value: object) -> Callable[[JobRecord], Mapping[str, object]] | N
     return cast(Callable[[JobRecord], Mapping[str, object]], function) if callable(function) else None
 
 
+def _workspace_file_record(
+    record: JobRecord,
+    recorded: str,
+    *,
+    published_prefix: str | None = None,
+    port: str | None = None,
+    index: int = 0,
+    name: str | None = None,
+) -> object:
+    """Resolve one workspace-confined path into a core ``FileRecord``."""
+
+    from httk.core import FileRecord
+
+    root = record.workspace_root.resolve()
+    recorded_path = Path(recorded)
+    actual: Path | None = None
+    invalid_absolute = False
+    try:
+        if recorded_path.is_absolute():
+            resolved = recorded_path.resolve()
+            if not resolved.is_relative_to(root):
+                invalid_absolute = True
+            elif resolved.is_file():
+                actual = resolved
+        elif record.workdir is not None:
+            workdir = record.workdir.resolve()
+            candidate = (workdir / recorded_path).resolve()
+            if candidate.is_relative_to(workdir) and candidate.is_relative_to(root) and candidate.is_file():
+                actual = candidate
+        if (
+            actual is None
+            and not invalid_absolute
+            and published_prefix is not None
+            and port is not None
+            and record.data is not None
+        ):
+            data_root = record.data.resolve()
+            published = (data_root / published_prefix / port).resolve()
+            if published.is_relative_to(data_root) and published.is_relative_to(root) and published.is_dir():
+                candidate = (published / f"{index:04d}-{recorded_path.name}").resolve()
+                if candidate.is_relative_to(published) and candidate.is_relative_to(root) and candidate.is_file():
+                    actual = candidate
+    except (OSError, RuntimeError):
+        actual = None
+    if actual is None:
+        raise ValueError(f"file path {recorded!r} is missing or outside the workspace/workdir/data roots")
+    descriptor_path = actual.relative_to(root).as_posix()
+    return FileRecord(
+        url=descriptor_path,
+        name=recorded_path.name if name is None else name,
+        size=actual.stat().st_size,
+        sha256=sha256_file(actual),
+    )
+
+
+def _executable_path(provider: object, root: Path) -> Path:
+    member = getattr(provider, "collector_exec", None)
+    if not isinstance(member, str):
+        raise ValueError("executable collector has no member")
+    relative = PurePosixPath(member)
+    source = root.joinpath(*relative.parts)
+    resolved = source.resolve()
+    if source.is_symlink() or not source.is_file() or not resolved.is_relative_to(root.resolve()):
+        raise ValueError(f"executable collector member is unavailable in trusted tree: {member}")
+    if not os.access(source, os.X_OK):
+        raise ValueError(f"executable collector {member!r} is not executable; chmod +x")
+    return source
+
+
+def _entry_record(value: Mapping[str, object]) -> object:
+    from httk.core.register import entry_record_info, known_entry_records, resolve_entry_family, resolve_entry_record
+
+    entry_type = value.get("type")
+    if not isinstance(entry_type, str):
+        raise ValueError("entry output must contain a string type")
+    known: list[str] = []
+    for name in known_entry_records():
+        try:
+            candidate = resolve_entry_record(name)
+        except (ImportError, ModuleNotFoundError, TypeError, ValueError):
+            continue
+        _, family_name, definition_id = entry_record_info(name)
+        instance_type = None
+        if family_name is not None:
+            try:
+                instance_type = getattr(resolve_entry_family(family_name), "type", None)
+            except (ImportError, ModuleNotFoundError, TypeError, ValueError):
+                instance_type = None
+        if not isinstance(instance_type, str) and isinstance(definition_id, str):
+            instance_type = definition_id.rsplit("/", 1)[-1]
+        if isinstance(instance_type, str):
+            known.append(instance_type)
+            if instance_type == entry_type:
+                fields = dict(value)
+                fields.pop("type", None)
+                expected_id = fields.pop("id", None)
+                result = cast(Any, candidate).create(fields)
+                if expected_id is not None and expected_id != getattr(result, "id", None):
+                    raise ValueError(f"entry output id {expected_id!r} does not match the constructed record")
+                return result
+    raise ValueError(f"unknown entry type {entry_type!r}; known types: {', '.join(sorted(set(known))) or '(none)'}")
+
+
+def _resolve_executable_output(record: JobRecord, provider: object, role: str, value: object) -> object:
+    if not isinstance(value, Mapping):
+        raise ValueError("output must be exactly one of {'entry': {...}}, {'value': ...}, or {'file': '...'}")
+    keys = set(value)
+    if keys == {"entry"} and isinstance(value.get("entry"), Mapping):
+        return _entry_record(cast(Mapping[str, object], value["entry"]))
+    if keys == {"value"}:
+        raw = value["value"]
+        declared = _provider_output_roles(provider).get(role, {})
+        ref = declared.get("ref")
+        if isinstance(ref, str):
+            try:
+                from httk.data import validation
+            except ImportError as exc:
+                raise _CollectEnvironmentError(
+                    "hard collect validation requires httk-data; install with `pip install httk-data`"
+                ) from exc
+            definition = _core().load_property_definition(ref)
+            validation.validate_property(definition, raw)
+            return _core().DataRecord.from_value(definition.definition_id, definition.name, raw)
+        from .languages import _data_record
+
+        return _data_record(role, raw)
+    if keys == {"file"} and isinstance(value.get("file"), str):
+        return _workspace_file_record(record, value["file"])
+    raise ValueError("output must be exactly one of {'entry': {...}}, {'value': ...}, or {'file': '...'}")
+
+
+def _run_executable_collector(
+    records: Sequence[JobRecord], provider: object, root: Path
+) -> tuple[dict[int, Mapping[str, object]], dict[int, str]]:
+    """Run one executable collector and resolve its ordered responses."""
+
+    def group_failures(reason: str) -> dict[int, str]:
+        return {index: reason for index in range(len(records))}
+
+    try:
+        executable = _executable_path(provider, root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return {}, group_failures(f"executable collector cannot be resolved: {exc}")
+    environment = dict(os.environ)
+    for variable in tuple(environment):
+        if variable.startswith("HTTK_WORKFLOW_"):
+            environment.pop(variable)
+    environment["HTTK_WORKFLOW_WORKSPACE_DIR"] = str(records[0].workspace_root)
+    payload = "\n".join(
+        [
+            json.dumps(
+                {"format": COLLECT_STREAM_FORMAT, "format_version": COLLECT_STREAM_VERSION}, separators=(",", ":")
+            ),
+            *(json.dumps({"record": record.as_mapping()}, separators=(",", ":")) for record in records),
+            "",
+        ]
+    ).encode("utf-8")
+    try:
+        process = subprocess.Popen(
+            [str(executable)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=root,
+            env=environment,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return {}, group_failures(
+            f"executable collector could not be launched: {exc}; check its shebang and executable permissions"
+        )
+
+    stdin = process.stdin
+    stdout = process.stdout
+    stderr = process.stderr
+    assert stdin is not None and stdout is not None and stderr is not None
+    response_lines: list[bytes] = []
+    stderr_capture = bytearray()
+    breach_reason: str | None = None
+    breach_lock = threading.Lock()
+    termination_lock = threading.Lock()
+    terminated = False
+
+    def terminate_group() -> None:
+        nonlocal terminated
+        with termination_lock:
+            if terminated:
+                return
+            terminated = True
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+            try:
+                process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    def breach(reason: str) -> None:
+        nonlocal breach_reason
+        with breach_lock:
+            if breach_reason is None:
+                breach_reason = reason
+        terminate_group()
+
+    def drain_stdout() -> None:
+        current = bytearray()
+        while True:
+            try:
+                chunk = stdout.read(64 * 1024)
+            except (OSError, ValueError):
+                return
+            if not chunk:
+                break
+            if breach_reason is not None:
+                continue
+            start = 0
+            while start < len(chunk):
+                newline = chunk.find(b"\n", start)
+                end = len(chunk) if newline < 0 else newline + 1
+                part = chunk[start : newline if newline >= 0 else end]
+                if len(current) + len(part) > MAX_COLLECT_RESPONSE_LINE_BYTES:
+                    breach(f"executable collector response line exceeded {MAX_COLLECT_RESPONSE_LINE_BYTES} bytes")
+                    current.clear()
+                    break
+                current.extend(part)
+                if newline >= 0:
+                    line = bytes(current)
+                    current.clear()
+                    if len(response_lines) < len(records):
+                        response_lines.append(line)
+                    elif line.strip():
+                        breach("executable collector emitted surplus response lines; write diagnostics to stderr")
+                        break
+                start = end
+            if breach_reason is not None:
+                continue
+        if breach_reason is None and current:
+            if len(response_lines) < len(records):
+                response_lines.append(bytes(current))
+            elif current.strip():
+                breach("executable collector emitted surplus response lines; write diagnostics to stderr")
+
+    def drain_stderr() -> None:
+        current_length = 0
+        total_length = 0
+        while True:
+            try:
+                chunk = stderr.read(64 * 1024)
+            except (OSError, ValueError):
+                return
+            if not chunk:
+                break
+            if len(stderr_capture) < MAX_COLLECT_STDERR_BYTES:
+                stderr_capture.extend(chunk[: MAX_COLLECT_STDERR_BYTES - len(stderr_capture)])
+            total_length += len(chunk)
+            if total_length > MAX_COLLECT_STDERR_BYTES:
+                breach(f"executable collector stderr exceeded {MAX_COLLECT_STDERR_BYTES} bytes")
+                continue
+            start = 0
+            while start < len(chunk):
+                newline = chunk.find(b"\n", start)
+                end = len(chunk) if newline < 0 else newline + 1
+                current_length += (newline if newline >= 0 else end) - start
+                if current_length > MAX_COLLECT_STDERR_LINE_BYTES:
+                    breach(f"executable collector stderr line exceeded {MAX_COLLECT_STDERR_LINE_BYTES} bytes")
+                    break
+                if newline >= 0:
+                    current_length = 0
+                start = end
+
+    def feed_stdin() -> None:
+        try:
+            stdin.write(payload)
+            stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            try:
+                stdin.close()
+            except (OSError, ValueError):
+                pass
+
+    def close_pipes() -> None:
+        for stream in (stdin, stdout, stderr):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    deadline = None if DEFAULT_COLLECT_TIMEOUT is None else time.monotonic() + DEFAULT_COLLECT_TIMEOUT
+
+    def remaining() -> float | None:
+        return None if deadline is None else max(0.0, deadline - time.monotonic())
+
+    stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+    stdin_thread = threading.Thread(target=feed_stdin, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    stdin_thread.start()
+    timed_out = False
+    try:
+        process.wait(timeout=remaining())
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        breach("executable collector timed out before responding")
+        process.wait()
+    if breach_reason is not None:
+        close_pipes()
+    for thread in (stdin_thread, stdout_thread, stderr_thread):
+        timeout = remaining()
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            timed_out = True
+            breach("executable collector drain did not finish before the deadline")
+            close_pipes()
+            thread.join(timeout=0.1)
+    close_pipes()
+    if timed_out:
+        return {}, group_failures("executable collector timed out before responding")
+    if breach_reason is not None:
+        _LOGGER.warning(
+            "%s; stderr capture truncated to %d bytes: %s",
+            breach_reason,
+            MAX_COLLECT_STDERR_BYTES,
+            bytes(stderr_capture).decode("utf-8", errors="replace"),
+        )
+        return {}, group_failures(breach_reason)
+
+    responses = response_lines
+    resolved: dict[int, Mapping[str, object]] = {}
+    failures: dict[int, str] = {}
+    for index, record in enumerate(records):
+        identity = f"{record.workspace_id}:{record.job_id}"
+        if index >= len(responses):
+            failures[index] = f"{identity}: executable collector ended before responding"
+            continue
+        line = responses[index]
+        if len(line) > MAX_COLLECT_RESPONSE_LINE_BYTES:
+            failures[index] = (
+                f"{identity}: executable collector response line exceeded {MAX_COLLECT_RESPONSE_LINE_BYTES} bytes"
+            )
+            continue
+        try:
+            response = json.loads(line.decode("utf-8"))
+            if not isinstance(response, Mapping):
+                raise ValueError("response is not a JSON object")
+            if response.get("job_id") != record.job_id:
+                raise ValueError(f"response job_id {response.get('job_id')!r} does not match {record.job_id!r}")
+            if isinstance(response.get("error"), str):
+                raise ValueError(response["error"])
+            outputs = response.get("outputs")
+            if not isinstance(outputs, Mapping):
+                raise ValueError("response has no outputs mapping")
+            resolved[index] = {
+                str(role): _resolve_executable_output(record, provider, str(role), output)
+                for role, output in outputs.items()
+            }
+        except UnicodeDecodeError as exc:
+            failures[index] = f"{identity}: executable collector response is not UTF-8: {exc}"
+        except ValueError as exc:
+            failures[index] = f"{identity}: executable collector response failed: {exc}"
+        except TypeError as exc:
+            failures[index] = f"{identity}: executable collector response is malformed: {exc}"
+    if len(responses) == len(records) and process.returncode:
+        _LOGGER.warning(
+            "executable collector %s exited with status %s after complete responses", executable, process.returncode
+        )
+    return resolved, failures
+
+
 def _job_collector(
     workspace: Workspace, record: JobRecord, workflow_id: str
 ) -> tuple[Callable[[JobRecord], Mapping[str, object]] | None, WorkflowProvider | None, str | None]:
@@ -964,6 +1356,8 @@ def _job_collector(
         )
     if provider.collect_file is None:
         return None, None, "job-pinned workflow tree has no collect hook"
+    if provider.collector_exec is not None:
+        return None, provider, None
     return (
         cast(
             Callable[[JobRecord], Mapping[str, object]],
@@ -1051,13 +1445,23 @@ def collect(
     from .provenance import run_record
     from .scaffold import workflow_provider
 
-    for record in job_records(workspace, states=states, placement=placement):
+    records = list(job_records(workspace, states=states, placement=placement))
+    results: list[CollectedJob | None] = [None] * len(records)
+    executable_groups: dict[str, list[tuple[int, JobRecord, WorkflowProvider, httk.core.Run]]] = {}
+
+    for index, record in enumerate(records):
         identity = f"{record.workspace_id}:{record.job_id}"
         workflow_id = record.job.get("workflow")
         workflow_id = workflow_id if isinstance(workflow_id, str) else ""
         provider = workflow_provider(workflow_id)
         run = run_record(record)
         fallback = False
+        if provider is not None and provider.collector_exec is not None:
+            if provider.directory is None:
+                raise ValueError(f"{identity}: executable collector has no trusted package directory")
+            key = f"{provider.directory.resolve()}:{provider.collector_exec}"
+            executable_groups.setdefault(key, []).append((index, record, provider, run))
+            continue
         try:
             adapter = _collector(provider.collector if provider is not None else None)
         except Exception as exc:
@@ -1076,7 +1480,7 @@ def collect(
                 and parameters.get("workflow_collect") == "package"
             )
             if provider is None and package_collect:
-                yield CollectedJob(
+                results[index] = CollectedJob(
                     workflow_id,
                     {},
                     (),
@@ -1091,7 +1495,7 @@ def collect(
                 try:
                     lang = languages.language(language_name)
                     if not lang.has_default_collector:
-                        yield CollectedJob(
+                        results[index] = CollectedJob(
                             workflow_id,
                             {},
                             (),
@@ -1104,7 +1508,7 @@ def collect(
                         continue
                     adapter = lang.collect
                 except Exception as exc:
-                    yield CollectedJob(
+                    results[index] = CollectedJob(
                         workflow_id,
                         {},
                         (),
@@ -1124,11 +1528,19 @@ def collect(
                     else f"no collector registered for workflow {workflow_id!r}; pass "
                     "allow_job_collector=True to use a pinned workspace workflow tree"
                 )
-                yield CollectedJob(workflow_id, {}, (), run, (), record, reason)
+                results[index] = CollectedJob(workflow_id, {}, (), run, (), record, reason)
                 continue
             adapter, fallback_provider, fallback_reason = _job_collector(workspace, record, workflow_id)
+            if fallback_provider is not None and fallback_provider.collector_exec is not None:
+                if fallback_provider.directory is None:
+                    raise ValueError(f"{identity}: executable collector has no trusted package directory")
+                key = f"{fallback_provider.directory.resolve()}:{fallback_provider.collector_exec}"
+                executable_groups.setdefault(key, []).append((index, record, fallback_provider, run))
+                continue
             if adapter is None or fallback_provider is None:
-                yield CollectedJob(workflow_id, {}, (), run, (), record, fallback_reason or "job collector unavailable")
+                results[index] = CollectedJob(
+                    workflow_id, {}, (), run, (), record, fallback_reason or "job collector unavailable"
+                )
                 continue
             provider = fallback_provider
             fallback = True
@@ -1136,12 +1548,12 @@ def collect(
             raw_outputs = adapter(record)
             if not isinstance(raw_outputs, Mapping):
                 raise ValueError("collector must return a mapping of output roles")
-            yield _assemble_collected(identity, record, provider, run, raw_outputs)
+            results[index] = _assemble_collected(identity, record, provider, run, raw_outputs)
         except Exception as exc:
             from .packages import _PinnedTreeError
 
             if fallback and isinstance(exc, _PinnedTreeError):
-                yield CollectedJob(
+                results[index] = CollectedJob(
                     workflow_id,
                     {},
                     (),
@@ -1152,8 +1564,36 @@ def collect(
                 )
                 continue
             if language_fallback and isinstance(exc, languages.LanguageOutputsMissingError):
-                yield CollectedJob(workflow_id, {}, (), run, (), record, str(exc))
+                results[index] = CollectedJob(workflow_id, {}, (), run, (), record, str(exc))
                 continue
             if str(exc).startswith(identity + ":"):
                 raise
             raise ValueError(f"{identity}: collector failed: {exc}") from exc
+
+    for entries in executable_groups.values():
+        group_records = [entry[1] for entry in entries]
+        provider = entries[0][2]
+        assert provider.directory is not None
+        resolved, failures = _run_executable_collector(group_records, provider, provider.directory.resolve())
+        for local_index, (index, record, group_provider, run) in enumerate(entries):
+            identity = f"{record.workspace_id}:{record.job_id}"
+            failure_reason = failures.get(local_index)
+            if failure_reason is not None:
+                results[index] = CollectedJob(group_provider.workflow_id, {}, (), run, (), record, failure_reason)
+                continue
+            try:
+                results[index] = _assemble_collected(identity, record, group_provider, run, resolved[local_index])
+            except Exception as exc:
+                results[index] = CollectedJob(
+                    group_provider.workflow_id,
+                    {},
+                    (),
+                    run,
+                    (),
+                    record,
+                    f"{identity}: executable collector output failed: {exc}",
+                )
+
+    for result in results:
+        assert result is not None
+        yield result

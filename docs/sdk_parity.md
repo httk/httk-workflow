@@ -46,7 +46,7 @@ language, and compares everything both left behind.
 | `Runner.inputs` | — | Immutable creation-time staged-input declarations. | the optional `inputs` member of the description |
 | `Runner.has_instantiate` | — | Whether a creation-time instantiate hook is registered. | none |
 | `Runner.step` | **step_&lt;name&gt;** function | Register one handler for one step; the name is the function's unless overridden. | none |
-| `Runner.instantiate` | — | Register the Python-only creation-time hook receiving `scaffold.InstantiateContext`. | none |
+| `Runner.instantiate` | — | Register the in-process Python creation-time hook receiving `scaffold.InstantiateContext`; directory packages may use the language-neutral executable hook contract instead. | none for the Python form; JSON stdin/stdout for the executable form |
 | `Runner.steps` | — | Every registered step name, against which every step name an outcome publishes is checked. | `.httk-job/runner-steps.json`, rewritten when the set changes |
 | `Runner.description` | `httk_workflow_main --describe` | Print this runner's own description and touch nothing else. | one `httk-workflow-runner-description` version 1 object on stdout |
 | `Runner.main` | `httk_workflow_main` | Dispatch the step the manager asked for, and turn every ending of it into exactly one outcome. | the published `outcome.ready/` of one attempt |
