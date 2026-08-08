@@ -381,7 +381,7 @@ impl Attempt {
                 return Err(BridgeError::PythonUnset);
             }
         };
-        let mut command = Command::new(&python);
+        let mut command = Command::new(python);
         command.arg("-m").arg(BRIDGE_MODULE).args(argv.iter().map(OsStr::new));
         if capture {
             // Capture stdout only; stderr and stdin stay inherited, as command
