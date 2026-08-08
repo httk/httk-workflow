@@ -13,7 +13,7 @@ requires-python = ">=3.12"
 authors = [{ name = "Rickard Armiento", email = "gitcommits@armiento.net" }]
 dependencies = [
   # 2.1.0 is the release that adds httk.core.FileRecord for first-class file outputs.
-  "httk-core>=2.1.0,<3",
+  "httk-core>=2.0.2,<3",
 ]
 keywords = [
   "Materials Discovery",
