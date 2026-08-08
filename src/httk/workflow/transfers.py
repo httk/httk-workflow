@@ -7,12 +7,13 @@ import shutil
 import stat
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ._util import read_json, sha256_file, utc_now, write_json_atomic
 from .configuration import sign_document, verify_document
-from .errors import FormatError, WorkspaceCorruptionError
+from .errors import FormatError, WorkflowError, WorkspaceCorruptionError
 from .models import (
     CORE_PROFILE,
     QUIESCENT_KINDS,
@@ -38,6 +39,7 @@ __all__ = [
     "TRANSFER_OFFER_FORMAT",
     "TRANSFER_RETIREMENT_FORMAT",
     "TRANSFER_RUNNERS",
+    "TransferCandidate",
     "acknowledge_transfer",
     "detach_job",
     "discard_staged_bundle",
@@ -45,6 +47,7 @@ __all__ = [
     "offer_transfers",
     "recover_transfers",
     "retire_transfers",
+    "select_transfer_jobs",
     "validate_bundle",
 ]
 
@@ -66,6 +69,32 @@ TRANSFER_OFFER_FORMAT = "httk-workflow-transfer-offer"
 TRANSFER_RETIREMENT_FORMAT = "httk-workflow-transfer-retirement"
 #: The terminal states a results fetch collects unless told otherwise.
 DEFAULT_OFFER_STATES = ("succeeded", "failed")
+
+
+@dataclass(frozen=True)
+class TransferCandidate:
+    """One job a transfer offer or resume can actually inspect.
+
+    :param job_id: Identify the job.
+    :param job_key: Preserve the stable job key.
+    :param prior_kind: State the job had before transfer.
+    :param source_placement: Placement in the source workspace.
+    :param bundle: Sealed payload, when this is a resumed transfer.
+    :param marker: Live source marker, when this is a new offer.
+    :param job: Readable immutable job definition, when available.
+    :param manifest: Validated sealed-bundle manifest, when available.
+    :param problem: Readability problem, if the candidate cannot be validated.
+    """
+
+    job_id: str
+    job_key: str
+    prior_kind: str
+    source_placement: PurePosixPath
+    bundle: Path | None
+    marker: Marker | None
+    job: JobDefinition | None
+    manifest: Mapping[str, Any] | None = None
+    problem: str | None = None
 
 
 def _excluded_from_bundle(name: str) -> bool:
@@ -691,6 +720,147 @@ def _offer_record(ledger: Mapping[str, Any], bundle: Path) -> dict[str, object]:
     }
 
 
+def select_transfer_jobs(
+    workspace: Workspace,
+    *,
+    destination_workspace_id: str,
+    states: Iterable[str] = DEFAULT_OFFER_STATES,
+    placement: str | PurePosixPath | None = None,
+    job_ids: Iterable[str] | None = None,
+    destination_remote: str | None = None,
+    include_transferring: bool = False,
+) -> list[TransferCandidate]:
+    """Select sealed and live jobs without changing transfer state.
+
+    :param workspace: Provide the source workspace.
+    :param destination_workspace_id: Select one destination's sealed ledgers.
+    :param states: Select quiescent states eligible for offering.
+    :param placement: Restrict source placements by normalized prefix.
+    :param job_ids: Restrict selection to explicit job ids when supplied.
+    :param destination_remote: Restrict sealed ledgers to one remote name.
+    :param include_transferring: Include live interrupted-transfer markers for advisory checks.
+    :return: Candidates in the same placement/key order as :func:`offer_transfers`.
+    :raises ValueError: If the destination id or requested states are invalid.
+    """
+
+    destination_id = destination_workspace_id
+    kinds = tuple(dict.fromkeys(states))
+    if not kinds:
+        raise ValueError("an offer needs at least one state kind")
+    allowed_kinds = QUIESCENT_KINDS | ({"transferring"} if include_transferring else set())
+    unusable = [kind for kind in kinds if kind not in allowed_kinds]
+    if unusable:
+        raise ValueError(f"only a quiescent job can be offered, so {', '.join(unusable)} cannot be")
+    prefix = None if placement is None else normalize_placement(placement).parts
+    selected_ids = None if job_ids is None else set(job_ids)
+    candidates: list[TransferCandidate] = []
+    offered_jobs: set[str] = set()
+    for ledger in _ledgers(workspace):
+        if ledger.get("status") != "sealed" or ledger.get("destination_workspace_id") != destination_id:
+            continue
+        if (
+            destination_remote is not None
+            and ledger.get("destination_remote", destination_remote) != destination_remote
+        ):
+            continue
+        if ledger.get("prior_kind") not in kinds or str(ledger["job_id"]) in offered_jobs:
+            continue
+        if selected_ids is not None and str(ledger["job_id"]) not in selected_ids:
+            continue
+        source_placement = normalize_placement(str(ledger["source_placement"]))
+        if prefix is not None and source_placement.parts[: len(prefix)] != prefix:
+            continue
+        bundle = Path(str(ledger["bundle"]))
+        if not bundle.is_dir():
+            continue
+        manifest: Mapping[str, Any] | None = None
+        problem: str | None = None
+        try:
+            manifest = read_json(bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
+        except (FormatError, OSError) as exc:
+            problem = str(exc)
+        if manifest is not None:
+            for field in (
+                "transfer_id",
+                "source_workspace_id",
+                "destination_workspace_id",
+                "job_id",
+                "job_key",
+                "source_placement",
+                "destination_placement",
+                "prior_kind",
+            ):
+                if field in ledger and manifest.get(field) != ledger[field]:
+                    problem = f"sealed transfer manifest disagrees with its ledger on {field}"
+                    break
+        try:
+            job = JobDefinition.from_path(bundle / "job.json")
+        except (WorkflowError, OSError) as exc:
+            job = None
+            problem = str(exc)
+        record = manifest if manifest is not None else ledger
+        candidate_job_id = str(record.get("job_id", ledger["job_id"]))
+        candidate_job_key = str(record.get("job_key", ledger["job_key"]))
+        try:
+            candidate_placement = normalize_placement(str(record.get("source_placement", ledger["source_placement"])))
+        except ValueError as exc:
+            candidate_placement = source_placement
+            problem = str(exc)
+        candidate_kind = str(record.get("prior_kind", ledger["prior_kind"]))
+        candidates.append(
+            TransferCandidate(
+                candidate_job_id,
+                candidate_job_key,
+                candidate_kind,
+                candidate_placement,
+                bundle,
+                None,
+                job,
+                manifest,
+                problem,
+            )
+        )
+        offered_jobs.add(str(ledger["job_id"]))
+    for marker in list(workspace.scan_markers(kinds)):
+        if selected_ids is not None and marker.job_id not in selected_ids:
+            continue
+        prior_kind = marker.kind
+        if marker.kind == "transferring":
+            state = workspace.read_state(marker)
+            if state.get("destination_workspace_id") != destination_id:
+                continue
+            if state.get("destination_remote") != destination_remote:
+                continue
+            if state.get("prior_kind") not in kinds:
+                continue
+            prior_kind = str(state["prior_kind"])
+        if prefix is not None and marker.placement.parts[: len(prefix)] != prefix:
+            continue
+        if marker.job_id in offered_jobs or _unresolved_join_reference(workspace, marker):
+            continue
+        try:
+            job = workspace.load_job(marker)
+            problem = None
+        except (WorkflowError, OSError) as exc:
+            job = None
+            problem = str(exc)
+        candidates.append(
+            TransferCandidate(
+                marker.job_id,
+                marker.job_key,
+                prior_kind,
+                marker.placement,
+                None,
+                marker,
+                job,
+                None,
+                problem,
+            )
+        )
+        offered_jobs.add(marker.job_id)
+    return sorted(candidates, key=lambda item: (item.source_placement.as_posix(), item.job_key))
+
+
 def offer_transfers(
     workspace: Workspace,
     *,
@@ -721,46 +891,32 @@ def offer_transfers(
 
     destination_id = canonical_uuid(destination_workspace_id, "destination_workspace_id")
     kinds = tuple(dict.fromkeys(states))
-    if not kinds:
-        raise ValueError("an offer needs at least one state kind")
-    unusable = [kind for kind in kinds if kind not in QUIESCENT_KINDS]
-    if unusable:
-        raise ValueError(f"only a quiescent job can be offered, so {', '.join(unusable)} cannot be")
-    prefix = None if placement is None else normalize_placement(placement).parts
     recover_transfers(workspace)
     offers: dict[str, dict[str, object]] = {}
-    offered_jobs: set[str] = set()
-    for ledger in _ledgers(workspace):
-        if ledger.get("status") != "sealed" or ledger.get("destination_workspace_id") != destination_id:
-            continue
-        if ledger.get("prior_kind") not in kinds:
-            continue
-        source_placement = normalize_placement(str(ledger["source_placement"])).parts
-        if prefix is not None and source_placement[: len(prefix)] != prefix:
-            continue
-        bundle = Path(str(ledger["bundle"]))
-        if not bundle.is_dir():
-            continue
-        offers[str(ledger["transfer_id"])] = _offer_record(ledger, bundle)
-        offered_jobs.add(str(ledger["job_id"]))
-    for marker in list(workspace.scan_markers(kinds)):
-        if prefix is not None and marker.placement.parts[: len(prefix)] != prefix:
-            continue
-        if marker.job_id in offered_jobs:
+    for candidate in select_transfer_jobs(
+        workspace,
+        destination_workspace_id=destination_id,
+        states=kinds,
+        placement=placement,
+    ):
+        if candidate.bundle is not None:
+            if candidate.manifest is None:
+                raise FormatError(candidate.problem or f"sealed transfer manifest is unreadable: {candidate.bundle}")
+            offers[str(candidate.manifest["transfer_id"])] = _offer_record(candidate.manifest, candidate.bundle)
             continue
         try:
-            bundle = detach_job(workspace, marker.job_id, destination_workspace_id=destination_id)
+            assert candidate.marker is not None
+            bundle = detach_job(workspace, candidate.marker.job_id, destination_workspace_id=destination_id)
         except ValueError as exc:
             _LOGGER.warning(
                 "not offering %s: %s",
-                marker.job_key,
+                candidate.job_key,
                 exc,
-                extra={"event": "transfer_offer_skipped", "job_key": marker.job_key},
+                extra={"event": "transfer_offer_skipped", "job_key": candidate.job_key},
             )
             continue
         manifest = read_json(bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
         offers[str(manifest["transfer_id"])] = _offer_record(manifest, bundle)
-        offered_jobs.add(str(manifest["job_id"]))
     return sorted(offers.values(), key=lambda item: (str(item["placement"]), str(item["job_key"])))
 
 

@@ -351,6 +351,19 @@ def test_environment_manifest_rejects_bad_declarations(tmp_path: Path, table: st
         load_workflow_package(package, register=False)
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        '[workflow.environment.value]\nsetting = "workflow.python"',
+        '[workflow.environment."workflow.python"]',
+    ],
+)
+def test_environment_manifest_rejects_manager_owned_setting_variables(tmp_path: Path, entry: str) -> None:
+    package = _package(tmp_path / "reserved-environment", _MANIFEST + f"\n{entry}\n")
+    with pytest.raises(ValueError, match="reserved 'HTTK_WORKFLOW_' variable"):
+        load_workflow_package(package, register=False)
+
+
 def test_environment_overrides_are_validated_at_submission(tmp_path: Path) -> None:
     package = _package(
         tmp_path / "submission-environment",

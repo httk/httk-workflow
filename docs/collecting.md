@@ -105,6 +105,9 @@ understanding the vocabulary the document names itself — which is the consumer
 job, not this module's. An observed document that cannot be read is reported as
 `null` and sets `provenance.gaps`. The declared documents are not repeated inside
 `job`; `declarations` is where they are read. See {doc}`declarations`.
+The observed `environment` declaration, when present, is the exact resolved
+value/source snapshot that drove the run; its format is
+`httk-workflow-environment-resolution` version 1.
 The `provenance` declaration becomes a stored `httk.core.Run`; see
 {doc}`provenance`.
 

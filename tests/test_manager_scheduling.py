@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 
+import httk.workflow.manager as manager_module
 from conftest import TestProfile as _TestProfile
 from httk.workflow import TaskManager, Workspace, _manager_requests
 from httk.workflow._logging import reset_logging
@@ -284,6 +285,42 @@ def _fake_running_attempt(
             },
         )
     return running, attempt_id
+
+
+def _publish_pending_environment(
+    control: Path, *, deadline: float, job_id: str, activation_id: str, attempt_id: str
+) -> None:
+    """Install a pending environment marker and a successful outcome."""
+
+    (control / ".httk-environment-resolution.json").write_text(
+        json.dumps(
+            {
+                "format": "httk-workflow-environment-resolution-marker",
+                "format_version": 1,
+                "status": "resolved",
+                "values": {"value": {"value": "manifest", "source": "default"}},
+                "log_pending": True,
+                "log_deadline": deadline,
+            }
+        ),
+        encoding="utf-8",
+    )
+    temporary = control / "outcome.tmp.test"
+    temporary.mkdir()
+    (temporary / "outcome.json").write_text(
+        json.dumps(
+            {
+                "format": "httk-workflow-outcome",
+                "format_version": 1,
+                "job_id": job_id,
+                "activation_id": activation_id,
+                "attempt_id": attempt_id,
+                "action": "succeed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    os.rename(temporary, control / "outcome.ready")
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +618,121 @@ def test_a_dead_writer_is_taken_over_at_once_without_waiting_out_the_grace(tmp_p
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "ready"
     assert workspace.read_state(marker)["takeover_evidence"]["evidence"] == "writer_process_dead"
+
+
+def test_dead_environment_writer_is_reconciled_after_its_grace(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    finished = subprocess.Popen([sys.executable, "-c", "pass"])
+    finished.wait(timeout=30)
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="dead-environment-writer")
+    marker, attempt_id = _fake_running_attempt(
+        workspace,
+        payload,
+        "project/dead-environment-writer",
+        manager_id=_fake_manager(workspace, heartbeat_age=0.0),
+        pid=finished.pid,
+        lease_seconds=10.0,
+    )
+    state = workspace.read_state(marker)
+    control = workspace.payload_path(marker.placement, marker.job_key) / str(state["attempt_control"])
+    _publish_pending_environment(
+        control,
+        deadline=time.time() - 1.0,
+        job_id=job_id,
+        activation_id=str(state["activation_id"]),
+        attempt_id=attempt_id,
+    )
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._poll_running()
+
+    committed = workspace.find_marker_by_id(job_id)
+    assert committed is not None and committed.kind == "committing"
+    recorded = json.loads((control / ".httk-environment-resolution.json").read_text(encoding="utf-8"))
+    assert recorded["log_pending"] is False
+    assert recorded["log_absent"] is True
+
+
+def test_pending_environment_outcomes_do_not_sleep_per_outcome(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    pending: list[tuple[str, Marker, Path]] = []
+    for index in range(12):
+        payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag=f"pending-environment-{index}")
+        marker, attempt_id = _fake_running_attempt(
+            workspace,
+            payload,
+            f"project/pending-environment/{index}",
+            manager_id=_fake_manager(workspace, heartbeat_age=0.0),
+            pid=os.getpid(),
+            lease_seconds=10.0,
+        )
+        state = workspace.read_state(marker)
+        control = workspace.payload_path(marker.placement, marker.job_key) / str(state["attempt_control"])
+        _publish_pending_environment(
+            control,
+            deadline=time.time() + 60.0,
+            job_id=job_id,
+            activation_id=str(state["activation_id"]),
+            attempt_id=attempt_id,
+        )
+        pending.append((job_id, marker, control))
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        started = time.monotonic()
+        manager._poll_running()
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 0.75
+    for job_id, _, control in pending:
+        still_running = workspace.find_marker_by_id(job_id)
+        assert still_running is not None and still_running.kind == "running"
+        recorded = json.loads((control / ".httk-environment-resolution.json").read_text(encoding="utf-8"))
+        assert recorded["log_pending"] is True
+
+
+def test_environment_log_clear_wins_the_reconciliation_toctou(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="environment-log-toctou")
+    marker, attempt_id = _fake_running_attempt(
+        workspace,
+        payload,
+        "project/environment-log-toctou",
+        manager_id=_fake_manager(workspace, heartbeat_age=0.0),
+        pid=os.getpid(),
+        lease_seconds=10.0,
+    )
+    state = workspace.read_state(marker)
+    control = workspace.payload_path(marker.placement, marker.job_key) / str(state["attempt_control"])
+    _publish_pending_environment(
+        control,
+        deadline=time.time() - 1.0,
+        job_id=job_id,
+        activation_id=str(state["activation_id"]),
+        attempt_id=attempt_id,
+    )
+    marker_path = control / ".httk-environment-resolution.json"
+    real_read_json = manager_module.read_json
+    reads = 0
+
+    def clear_after_first_read(path: Path) -> dict[str, Any]:
+        nonlocal reads
+        result = real_read_json(path)
+        reads += 1
+        if reads == 1:
+            cleared = dict(result)
+            cleared["log_pending"] = False
+            real_write = marker_path.write_text
+            real_write(json.dumps(cleared), encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(manager_module, "read_json", clear_after_first_read)
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        state_frame = manager._read_frame(marker)
+        assert manager._environment_log_ready(marker, state_frame)
+
+    recorded = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert recorded["log_pending"] is False
+    assert "log_absent" not in recorded
 
 
 def test_transient_marker_ownership_failure_preserves_a_live_attempt(

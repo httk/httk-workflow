@@ -275,6 +275,19 @@ its own default. `Attempt.setting` is the separate, untyped application-setting
 lookup and follows its own parameter → `HTTK_*` → workspace → call-default
 order.
 
+At attempt start, before any step code runs, the runner resolves every declared
+entry. A missing default-less entry or a type error publishes the non-retryable
+`environment_unresolved` failure and names the consulted layers and remedies.
+On success, the resolved values and their source layers are recorded as the
+observed `environment` declaration in
+`httk-workflow-environment-resolution` version 1, and a one-line run-log note
+records the same resolution after the handler completes. Deferring that note
+ensures the gate never creates or touches a workdir before the handler; if the
+handler aborts before a workdir exists, the observed declaration is still kept
+but the note is omitted. The snapshot is consistent for the whole attempt;
+unchanged resolutions on later activations do not create new observed data or
+log churn.
+
 The CLI supplies per-job overrides with repeatable
 `--environment NAME=VALUE`; JSON values are decoded when possible. Python
 `new_job(environment={...})` supplies shared overrides, and each `JobItem` in

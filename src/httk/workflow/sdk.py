@@ -34,6 +34,7 @@ import logging
 import os
 import shutil
 import sys
+import time
 import traceback
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -41,13 +42,15 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Literal, Self, cast, overload
 
-from ._util import read_json, require_string, validate_inputs, write_json_atomic
+from ._util import json_bytes, read_json, require_string, validate_inputs, write_json_atomic
 from .errors import FormatError
 from .models import (
     JOB_STATE_DIRECTORY,
+    RESERVED_WORKFLOW_ENVIRONMENT_PREFIX,
     Failure,
     JobDefinition,
     _matches_environment_type,
+    environment_variable_name,
     validate_declaration_name,
     validate_declarations,
     validate_failure,
@@ -88,10 +91,13 @@ RUNNER_ERROR_FORMAT = "httk-workflow-runner-error"
 _DESCRIBE_VARIABLE = "HTTK_WORKFLOW_DESCRIBE"
 _DESCRIBE_FLAG = "--describe"
 _RUNNER_STEPS_FILE = "runner-steps.json"
+_ENVIRONMENT_MARKER = ".httk-environment-resolution.json"
+_ENVIRONMENT_LOG_GRACE_SECONDS = 1.0
 
 type StepHandler = Callable[["Attempt"], object]
 type InstantiateHandler = Callable[[Any], object]
 type RunnerSource = Literal["payload", "workspace", "installed"]
+type EnvironmentSource = Literal["override", "environment-variable", "workspace-setting", "default"]
 
 
 class _Missing:
@@ -102,6 +108,138 @@ class _Missing:
 
 
 _MISSING = _Missing()
+
+
+class _EnvironmentResolutionError(ValueError):
+    """Identify the declared environment entry whose external value was invalid."""
+
+    def __init__(self, name: str, message: str) -> None:
+        self.name = name
+        super().__init__(message)
+
+
+def _decode_environment_layer(name: str, metadata: Mapping[str, object], value: object, layer: str) -> object:
+    """Decode and validate one external workflow environment layer."""
+
+    environment_type = metadata.get("type")
+    if not isinstance(environment_type, str):
+        return value
+    if environment_type == "string" and isinstance(value, str):
+        return value
+    decoded = value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise _EnvironmentResolutionError(
+                name,
+                f"workflow environment {name!r} from {layer} is not valid JSON for declared type {environment_type!r}",
+            ) from exc
+    if not _matches_environment_type(decoded, environment_type):
+        raise _EnvironmentResolutionError(
+            name,
+            f"workflow environment {name!r} from {layer} does not match declared type {environment_type!r}",
+        )
+    return decoded
+
+
+def _resolve_environment_value(
+    job: JobDefinition,
+    context_settings: Mapping[str, object],
+    name: str,
+    default: object = _MISSING,
+    *,
+    include_process_environment: bool = True,
+) -> tuple[object, EnvironmentSource | None]:
+    """Resolve one declared environment value using the SDK's layer order."""
+
+    environment = job.environment
+    declared = environment.get("declared", {})
+    if not isinstance(declared, Mapping) or name not in declared:
+        available = ", ".join(sorted(declared)) if isinstance(declared, Mapping) else "none"
+        raise KeyError(f"workflow environment {name!r} is not declared; declared environment: {available or 'none'}")
+    metadata = declared[name]
+    if not isinstance(metadata, Mapping):  # pragma: no cover - JobDefinition validates this
+        raise KeyError(f"workflow environment {name!r} is malformed")
+    setting = metadata.get("setting", name)
+    if not isinstance(setting, str):  # pragma: no cover - JobDefinition validates this
+        setting = name
+    variable = environment_variable_name(setting)
+    if variable.startswith(RESERVED_WORKFLOW_ENVIRONMENT_PREFIX):
+        raise _EnvironmentResolutionError(
+            name,
+            f"workflow environment {name!r} derives reserved {RESERVED_WORKFLOW_ENVIRONMENT_PREFIX!r} "
+            f"variable {variable!r}; choose a workflow setting outside the manager-owned namespace",
+        )
+    overrides = environment.get("overrides", {})
+    if isinstance(overrides, Mapping) and name in overrides:
+        return overrides[name], "override"
+    if include_process_environment and variable in os.environ:
+        return _decode_environment_layer(name, metadata, os.environ[variable], f"environment variable {variable}"), (
+            "environment-variable"
+        )
+    if setting in context_settings:
+        return _decode_environment_layer(
+            name, metadata, context_settings[setting], f"workspace setting {setting!r}"
+        ), "workspace-setting"
+    if "default" in metadata:
+        return metadata["default"], "default"
+    if isinstance(default, _Missing):
+        return None, None
+    return default, None
+
+
+def resolve_declared_environment(
+    job: JobDefinition,
+    context_settings: Mapping[str, object],
+    *,
+    include_process_environment: bool = True,
+) -> tuple[dict[str, dict[str, object]], list[str]]:
+    """Resolve every declared workflow environment entry before a step runs.
+
+    :param job: The immutable job definition.
+    :param context_settings: The workspace settings captured for this attempt.
+    :param include_process_environment: Include this process's environment layer.
+    :return: Resolved values with their source layer, and names without a value.
+    :raises ValueError: If an environment or workspace layer has the wrong type.
+    """
+
+    declared = job.environment.get("declared", {})
+    if not isinstance(declared, Mapping):  # pragma: no cover - JobDefinition validates this
+        return {}, []
+    values: dict[str, dict[str, object]] = {}
+    unresolved: list[str] = []
+    for name in sorted(declared):
+        value, source = _resolve_environment_value(
+            job,
+            context_settings,
+            name,
+            include_process_environment=include_process_environment,
+        )
+        if source is None:
+            unresolved.append(name)
+        else:
+            values[name] = {"value": value, "source": source}
+    return values, unresolved
+
+
+def _short_environment_value(value: object) -> str:
+    """Render one resolved value for the bounded one-line run note."""
+
+    try:
+        rendered = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):  # pragma: no cover - job environment is JSON-validated
+        rendered = repr(value)
+    return rendered if len(rendered) <= 80 else rendered[:77] + "..."
+
+
+def _environment_log_message(values: Mapping[str, Mapping[str, object]]) -> str:
+    """Build the one-line note for a resolved environment document."""
+
+    pairs = ", ".join(
+        f"{name}={_short_environment_value(item['value'])}({item['source']})" for name, item in values.items()
+    )
+    return f"parameters are in job.json; environment resolved as {pairs}"
 
 
 @dataclass(frozen=True)
@@ -425,6 +563,7 @@ class Attempt:
         self._action: str | None = None
         self._job: JobDefinition | None = None
         self._children: ChildrenView | None = None
+        self._environment_snapshot: dict[str, object] | None = None
 
     @classmethod
     def initialize(
@@ -542,8 +681,10 @@ class Attempt:
     def environment(self, name: str, default: object = _MISSING) -> object:
         """Resolve one declared workflow environment value through its layers.
 
-        Overrides, the declared setting's environment variable, workspace settings,
-        the declaration default, and *default* are consulted in that order.
+        Once the runner's start gate has run, this attempt reads the immutable
+        snapshot resolved there. Before that gate, overrides, the declared setting's
+        environment variable, workspace settings, the declaration default, and
+        *default* are consulted in that order.
 
         :param name: The declared environment name to look up.
         :param default: The value to return when no declared value exists.
@@ -551,57 +692,115 @@ class Attempt:
         :raises KeyError: If the name is undeclared or unresolved without a default.
         """
 
-        environment = self.job.environment
-        declared = environment.get("declared", {})
-        if not isinstance(declared, Mapping) or name not in declared:
-            available = ", ".join(sorted(declared)) if isinstance(declared, Mapping) else "none"
-            raise KeyError(
-                f"workflow environment {name!r} is not declared; declared environment: {available or 'none'}"
-            )
-        metadata = declared[name]
-        if not isinstance(metadata, Mapping):  # pragma: no cover - JobDefinition validates this
-            raise KeyError(f"workflow environment {name!r} is malformed")
-        overrides = environment.get("overrides", {})
-        if isinstance(overrides, Mapping) and name in overrides:
-            return overrides[name]
-        setting = metadata.get("setting", name)
-        if not isinstance(setting, str):  # pragma: no cover - JobDefinition validates this
-            setting = name
-        variable = "HTTK_" + setting.upper().replace(".", "_")
-        if variable in os.environ:
-            return self._environment_layer(name, metadata, os.environ[variable], f"environment variable {variable}")
-        settings = self.context.settings
-        if setting in settings:
-            return self._environment_layer(name, metadata, settings[setting], f"workspace setting {setting!r}")
-        if "default" in metadata:
-            return metadata["default"]
-        if isinstance(default, _Missing):
-            raise KeyError(f"workflow environment {name!r} is unresolved")
-        return default
-
-    @staticmethod
-    def _environment_layer(name: str, metadata: Mapping[str, object], value: object, layer: str) -> object:
-        """Decode and validate one external workflow environment layer."""
-
-        environment_type = metadata.get("type")
-        if not isinstance(environment_type, str):
+        if self._environment_snapshot is not None and name in self._environment_snapshot:
+            return self._environment_snapshot[name]
+        value, source = _resolve_environment_value(self.job, self.context.settings, name, default)
+        if source is None:
+            if isinstance(default, _Missing):
+                raise KeyError(f"workflow environment {name!r} is unresolved")
             return value
-        if environment_type == "string" and isinstance(value, str):
-            return value
-        decoded = value
-        if isinstance(value, str):
-            try:
-                decoded = json.loads(value)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"workflow environment {name!r} from {layer} is not valid JSON for declared type "
-                    f"{environment_type!r}"
-                ) from exc
-        if not _matches_environment_type(decoded, environment_type):
-            raise ValueError(
-                f"workflow environment {name!r} from {layer} does not match declared type {environment_type!r}"
+        return value
+
+    def _prepare_environment(self) -> bool:
+        """Resolve and record the job environment once before dispatch.
+
+        :return: ``True`` when the step may run, otherwise ``False`` after a
+            structured terminal failure was published.
+        """
+
+        declared = self.job.environment.get("declared", {})
+        if not isinstance(declared, Mapping) or not declared:
+            return True
+        marker = self.control / _ENVIRONMENT_MARKER
+        if marker.is_file():
+            recorded = read_json(marker)
+            values = recorded.get("values")
+            if recorded.get("status") == "resolved" and isinstance(values, Mapping):
+                self._environment_snapshot = {
+                    name: item["value"]
+                    for name, item in values.items()
+                    if isinstance(name, str) and isinstance(item, Mapping) and "value" in item
+                }
+                return True
+            self._environment_snapshot = {}
+            return False
+        if self.published:
+            return False
+        try:
+            values, unresolved = resolve_declared_environment(self.job, self.context.settings)
+        except _EnvironmentResolutionError as exc:
+            message = (
+                f"workflow environment {exc.name!r} could not be resolved: {exc}; "
+                "remedies: set the workspace setting, pass --environment NAME=VALUE, or add a manifest default"
             )
-        return decoded
+            write_json_atomic(
+                marker,
+                {"format": "httk-workflow-environment-resolution-marker", "format_version": 1, "status": "failed"},
+                durable=self.context.durable,
+            )
+            self.fail("environment_unresolved", message, details={"unresolved": [exc.name]}, retryable=False)
+            return False
+        if unresolved:
+            entries = ", ".join(repr(name) for name in unresolved)
+            layer_details: list[str] = []
+            for name in unresolved:
+                metadata = declared[name]
+                setting = metadata.get("setting", name) if isinstance(metadata, Mapping) else name
+                setting = setting if isinstance(setting, str) else name
+                layer_details.append(
+                    f"{name}: job override, environment variable {environment_variable_name(setting)}, "
+                    f"workspace setting {setting!r}, manifest default"
+                )
+            layers = "; ".join(layer_details)
+            message = (
+                f"workflow environment entries {entries} are unresolved; consulted layers: {layers}; "
+                "remedies: set the workspace setting, pass --environment NAME=VALUE, or add a manifest default"
+            )
+            write_json_atomic(
+                marker,
+                {"format": "httk-workflow-environment-resolution-marker", "format_version": 1, "status": "failed"},
+                durable=self.context.durable,
+            )
+            self.fail("environment_unresolved", message, details={"unresolved": unresolved}, retryable=False)
+            return False
+
+        self._environment_snapshot = {name: item["value"] for name, item in values.items()}
+        document = {
+            "format": "httk-workflow-environment-resolution",
+            "format_version": 1,
+            "values": values,
+        }
+        observed_path = self._declaration_path("environment")
+        observed = read_json(observed_path) if observed_path.is_file() else None
+        changed = observed is None or json_bytes(observed) != json_bytes(document)
+        if changed:
+            self.declare("environment", document)
+        marker_document: dict[str, object] = {
+            "format": "httk-workflow-environment-resolution-marker",
+            "format_version": 1,
+            "status": "resolved",
+            "values": values,
+            "log_pending": changed,
+        }
+        write_json_atomic(marker, marker_document, durable=self.context.durable)
+        return True
+
+    def _finish_environment_log(self) -> None:
+        """Emit the deferred environment note after the handler owns the workdir."""
+
+        marker = self.control / _ENVIRONMENT_MARKER
+        if not marker.is_file() or not self.workdir.is_dir():
+            return
+        recorded = read_json(marker)
+        if recorded.get("status") != "resolved" or not recorded.get("log_pending"):
+            return
+        values = recorded.get("values")
+        if not isinstance(values, Mapping):
+            return
+        self.log.append("note", _environment_log_message(values))
+        recorded = dict(recorded)
+        recorded["log_pending"] = False
+        write_json_atomic(marker, recorded, durable=self.context.durable)
 
     def declare(self, name: str, document: Mapping[str, object]) -> Path:
         """Record the observed workflow declaration *name* of this job.
@@ -986,9 +1185,23 @@ class Attempt:
             raise
         self._published = published
         self._action = action
+        self._activate_environment_log_deadline()
         if declared is not None:
             self._record_steps(declared)
         return published
+
+    def _activate_environment_log_deadline(self) -> None:
+        """Start the logging grace period when this attempt publishes."""
+
+        marker = self.control / _ENVIRONMENT_MARKER
+        if not marker.is_file():
+            return
+        recorded = read_json(marker)
+        if recorded.get("status") != "resolved" or not recorded.get("log_pending"):
+            return
+        recorded = dict(recorded)
+        recorded["log_deadline"] = time.time() + _ENVIRONMENT_LOG_GRACE_SECONDS
+        write_json_atomic(marker, recorded, durable=self.context.durable)
 
     def _undeclared_steps(self) -> list[str] | None:
         """Return the runner's step set when this job has not recorded it yet."""
@@ -1162,6 +1375,8 @@ class Runner:
             print(json.dumps(self.description(), sort_keys=True))
             return 0
         attempt = Attempt.initialize(runner=self)
+        if not attempt._prepare_environment():
+            return 0
         handler = self._steps.get(attempt.step)
         if handler is None:
             registered = ", ".join(sorted(self._steps)) or "none"
@@ -1177,6 +1392,7 @@ class Runner:
         except BaseException as exception:
             attempt._abort(exception)
             raise
+        attempt._finish_environment_log()
         if not attempt.published:
             attempt.fail("no_outcome", f"step {attempt.step!r} finished without publishing an outcome")
         return 0

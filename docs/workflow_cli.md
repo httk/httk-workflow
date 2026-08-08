@@ -45,6 +45,7 @@ httk workflow workspace  init | list | default | move | forget | delete | status
 httk workflow runner     publish | describe
 httk workflow job        new | submit | request | list | show | log | why | debug
 httk workflow describe   TARGET [--json]
+httk workflow precheck   [WORKSPACE] [--placement P] [--json]
 httk workflow collect
 httk workflow postprocess
 httk workflow manager    run
@@ -176,6 +177,28 @@ and returned 0; any resolution error or nonzero script return exits 1.
 Directory package authoring, manifest validation, publication, and hook trust
 tiers are documented in {doc}`workflow_packages`.
 
+### `precheck` — readiness before an attempt
+
+```console
+httk workflow precheck WORKSPACE
+httk workflow precheck WORKSPACE --json
+httk workflow precheck WORKSPACE --runner-search-path PATH --runner-search-path OTHER
+```
+
+This read-only report checks `submitted`, `ready`, `waiting`, and `paused` jobs:
+each declared environment entry is shown as `resolved`, `default`, or
+`unresolved`, with its source and setting name, and each runner reference is
+checked for availability and its pinned digest. `--placement` restricts the
+scan. The command exits `1` for an unresolved environment or broken runner
+reference. The authoritative environment gate remains at attempt start;
+precheck is advisory and can become stale. Its `HTTK_*` environment layer is
+the current process environment, which may differ on compute nodes; JSON also
+carries this caveat once as `environment_variable_caveat`.
+Use repeatable `--runner-search-path` options to check installed runner
+references. A plain installed reference without one is reported as
+`indeterminate`, not as a broken runner, and does not by itself produce exit
+status `1`.
+
 ### `manager` — the process that runs the jobs
 
 | Command | What it does | Notable options |
@@ -277,6 +300,11 @@ which stay in this filesystem follows entirely from where the two are bound:
 kinds a fetch moves, `--placement` restricts it to one subtree,
 `--destination-placement` lands the jobs somewhere other than the placement they
 had, and `--adapter-timeout` bounds every adapter operation the move runs.
+`--strict-environment` blocks before state moves when a checked destination
+environment is unresolved or cannot be read. Transfer checks intentionally use
+job overrides, destination settings, and declared defaults; they do not use the
+client process environment as a destination substitute. A remote settings read
+that is unavailable produces one immediate warning in non-strict mode.
 
 ### The protocol spellings, and what is gone
 
@@ -846,6 +874,14 @@ workspace and imports it on the remote, at the placement it had here unless
 `--destination-placement` puts it elsewhere. `run kappa:runs` submits the
 generated manager through the remote adapter; `--workers` fixes its worker count.
 `manager run` is the advanced spelling for the same operation.
+
+Before a transfer moves state, it checks each job's declared environment against
+the destination workspace settings. Unresolved default-less entries produce a
+warning; `--strict-environment` blocks the transfer before detaching. Remote
+settings are read through the adapter when reachable. If that read cannot be
+completed, one warning says the environment could not be prechecked remotely;
+strict mode treats that as a block. The client process environment is not used
+as a substitute for destination settings.
 
 To bring stopped jobs home, use the reverse transfer and then collect:
 

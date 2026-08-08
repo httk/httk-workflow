@@ -155,6 +155,7 @@ def _parser() -> argparse.ArgumentParser:
     runlog.add_argument("kind")
     runlog.add_argument("message")
     runlog.add_argument("files", nargs="*")
+    commands.add_parser("environment-log")
 
     put = commands.add_parser("put")
     put.add_argument("source")
@@ -397,6 +398,7 @@ def _bind() -> Attempt:
         attempt._action = str(read_json(published / "outcome.json").get("action", "published"))
     root = _draft_root(bound.control)
     if root is None:
+        attempt._prepare_environment()
         return attempt
     draft = OutcomeDraft._resume(bound.context, bound.control, root, durable=bound.context.durable)
     attempt._draft = draft
@@ -414,6 +416,7 @@ def _bind() -> Attempt:
             raise _Refused(f"the staged transaction manifest of this draft is unusable: {exception}") from exception
         attempt._transaction = transaction
         attempt._operations = len(transaction)
+    attempt._prepare_environment()
     return attempt
 
 
@@ -804,6 +807,8 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
         _print(document)
     elif command == "runlog":
         _attempt().log.append(arguments.kind, arguments.message, files=arguments.files)
+    elif command == "environment-log":
+        _attempt()._finish_environment_log()
     elif command == "put":
         attempt = _publishing()
         print(attempt.put(arguments.source, arguments.destination))

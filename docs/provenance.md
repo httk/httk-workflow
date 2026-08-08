@@ -47,6 +47,12 @@ a.declare("provenance", {
 })
 ```
 
+The runtime also records an observed `environment` declaration when the job
+declares workflow environment entries. Its
+`httk-workflow-environment-resolution` version 1 document carries each value
+and the layer that supplied it, so provenance can identify the settings that
+drove the run.
+
 Observed replaces declared wholesale; it is a full replacement document, not
 a merge. If no provenance document exists, `run_record` still uses the `$id`
 from the `workflow` declaration when available.

@@ -24,6 +24,7 @@ CORE_PROFILE = "core-v2"
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset()
 RUNNER_SOURCES = frozenset({"payload", "workspace", "installed"})
 PACKAGE_RUNNER_PREFIX = "pkg:"
+RESERVED_WORKFLOW_ENVIRONMENT_PREFIX = "HTTK_WORKFLOW_"
 STATE_KINDS = (
     "submitted",
     "ready",
@@ -206,6 +207,21 @@ def _matches_environment_type(value: object, environment_type: str) -> bool:
     return isinstance(value, dict)
 
 
+def environment_variable_name(setting: str) -> str:
+    """Return the environment variable derived from one workflow setting."""
+
+    return "HTTK_" + setting.upper().replace(".", "_")
+
+
+def _validate_environment_setting(setting: str, name: str) -> None:
+    variable = environment_variable_name(setting)
+    if variable.startswith(RESERVED_WORKFLOW_ENVIRONMENT_PREFIX):
+        raise FormatError(
+            f"{name} derives reserved {RESERVED_WORKFLOW_ENVIRONMENT_PREFIX!r} variable {variable!r}; "
+            "choose a workflow setting outside the manager-owned namespace"
+        )
+
+
 def validate_environment(value: object, name: str = "environment") -> dict[str, object]:
     """Validate the declared and overridden workflow environment of a job.
 
@@ -243,6 +259,8 @@ def validate_environment(value: object, name: str = "environment") -> dict[str, 
             and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", setting) is None
         ):
             raise FormatError(f"{name}.declared.{key}.setting must be a nonempty dotted identifier")
+        effective_setting = setting if setting is not None else key
+        _validate_environment_setting(effective_setting, f"{name}.declared.{key}")
         declared[key] = dict(metadata)
     overrides: dict[str, object] = {}
     for key, override in overrides_raw.items():

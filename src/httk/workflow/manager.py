@@ -104,6 +104,7 @@ _CANCELLING_MEMBERS = (
     "operator_reason",
     "request_id",
 )
+_ENVIRONMENT_MARKER = ".httk-environment-resolution.json"
 
 
 def _setting_variable_name(key: str) -> str:
@@ -1306,8 +1307,7 @@ class TaskManager:
         current_by_attempt[attempt_id] = marker
         outcome_path = self._outcome_path(marker, state)
         if outcome_path.is_dir():
-            self._commit_published_outcome(marker, job, state, outcome_path)
-            return True
+            return self._commit_published_outcome(marker, job, state, outcome_path)
         local = self._running.get(attempt_id)
         if local is not None:
             return_code = local.process.poll()
@@ -1465,13 +1465,15 @@ class TaskManager:
         job: JobDefinition,
         state: StateFrame,
         outcome_path: Path,
-    ) -> None:
+    ) -> bool:
         """Move one job with a published outcome into committing."""
 
         try:
+            if not self._environment_log_ready(marker, state):
+                return False
             self._begin_commit(marker, state, outcome_path)
         except TransitionLostError:
-            pass
+            return True
         except FormatError as exc:
             # A malformed outcome is a protocol violation of the runner, never a
             # reason to stop the manager.
@@ -1482,6 +1484,43 @@ class TaskManager:
                 f"cannot begin the commit of {marker.job_key}: {exc}",
                 self._event("commit_error", marker),
             )
+        return True
+
+    def _environment_log_ready(self, marker: Marker, state: StateFrame) -> bool:
+        """Report whether a published outcome may be committed this tick."""
+
+        marker_path = self._attempt_control_path(marker, state) / _ENVIRONMENT_MARKER
+        if not marker_path.is_file():
+            return True
+        try:
+            recorded = read_json(marker_path)
+        except (FormatError, OSError):
+            return True
+        if recorded.get("status") != "resolved" or not recorded.get("log_pending"):
+            return True
+        deadline = recorded.get("log_deadline")
+        deadline_expired = (
+            isinstance(deadline, (int, float)) and not isinstance(deadline, bool) and time.time() >= deadline
+        )
+        if not self._attempt_writer_dead(marker, state) and not deadline_expired:
+            return False
+        return self._reconcile_environment_log_absence(marker_path)
+
+    def _reconcile_environment_log_absence(self, marker_path: Path) -> bool:
+        """Clear pending logging after writer death or its persisted grace."""
+
+        # Re-read immediately before the atomic update so a runner that won the
+        # race to clear the handshake is never overwritten by stale state.
+        try:
+            recorded = read_json(marker_path)
+        except (FormatError, OSError):
+            return True
+        if recorded.get("status") != "resolved" or not recorded.get("log_pending"):
+            return True
+        recorded["log_pending"] = False
+        recorded["log_absent"] = True
+        write_json_atomic(marker_path, recorded, durable=self.workspace.durable)
+        return True
 
     def _attempt_control_path(self, marker: Marker, state: StateFrame) -> Path:
         """Return the attempt-control directory one frame names.
