@@ -588,6 +588,7 @@ def describe_runner(runner: str | os.PathLike[str]) -> dict[str, object]:
     environment[_DESCRIBE_VARIABLE] = "1"
     shell = Path(__file__).with_name("shell")
     environment["HTTK_WORKFLOW_BASH_API"] = str(shell / "httk-workflow.sh")
+    environment["HTTK_WORKFLOW_PERL_API"] = str(Path(__file__).with_name("native") / "perl")
     environment["HTTK_WORKFLOW_VASP_BASH_API"] = str(shell / "httk-vasp.sh")
     # Describing is a pure read of the program, so no attempt context of a
     # surrounding job may leak into it: a runner scaffolding jobs is itself running

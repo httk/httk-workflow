@@ -122,6 +122,10 @@ namespaces = true
   # The native Ada SDK is an Ada 2012 spec/body binding over the C SDK.
   "native/ada/*.ads",
   "native/ada/*.adb",
+  # The native C++ SDK is a header-only C++17 RAII wrapper over the C SDK.
+  "native/cpp/*.hpp",
+  # The native Java SDK is one java.base-only source file, compiled beside a runner.
+  "native/java/*.java",
   "adapter_templates/*/remote.json",
   "adapter_templates/*/adapter",
 ]

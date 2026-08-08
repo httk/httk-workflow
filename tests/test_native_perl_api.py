@@ -23,6 +23,7 @@ import pytest
 import httk.workflow
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.protocol import JobSpec, prepare_job_payload
+from httk.workflow.scaffold import describe_runner
 
 pytestmark = pytest.mark.skipif(shutil.which("perl") is None, reason="no Perl interpreter is available")
 
@@ -181,6 +182,31 @@ def test_the_sdk_and_example_are_warning_clean() -> None:
         assert "warning" not in completed.stderr.lower()
 
 
+def test_a_published_copy_uses_the_manager_sdk_path(tmp_path: Path) -> None:
+    published = tmp_path / "runner.pl"
+    shutil.copyfile(_RELAX_PERL, published)
+    published.chmod(0o555)
+    assert describe_runner(published) == {
+        "workflow": "httk.vasp.relax-perl",
+        "steps": ["prepare", "publish", "run"],
+    }
+
+
+def test_an_in_source_tree_runner_uses_the_findbin_fallback() -> None:
+    environment = dict(os.environ)
+    environment.pop("HTTK_WORKFLOW_PERL_API", None)
+    completed = subprocess.run(
+        [str(_RELAX_PERL), "--describe"],
+        cwd=_RELAX_PERL_DIR,
+        text=True,
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert '"workflow": "httk.vasp.relax-perl"' in completed.stdout
+
+
 def test_describe_is_byte_identical_to_the_bash_sdk(tmp_path: Path) -> None:
     workflow = "tests.perl.describe"
     order = ("relax", "collect", "prepare")
@@ -305,8 +331,6 @@ def test_a_handler_returning_nonzero_leaves_a_perl_error_breadcrumb(tmp_path: Pa
 def test_the_relax_runner_prepares_runs_and_publishes(tmp_path: Path) -> None:
     """The examples/relax_perl runner, driven end to end through a real manager."""
 
-    # A workspace runner keeps the example's documented, script-relative `use lib`
-    # wiring intact while giving the installed script its sibling source tree.
     payload = tmp_path / "payload"
     files = payload / "files"
     files.mkdir(parents=True)
@@ -315,11 +339,6 @@ def test_the_relax_runner_prepares_runs_and_publishes(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     workspace.set_setting("vasp.command", f"{sys.executable} {_MOCK_VASP}")
     reference = dict(workspace.publish_runner(_RELAX_PERL_DIR / "relax.pl", name="relax"))
-    # The manager launches a workspace-file runner from the attempt control
-    # directory; preserve the example's source-relative layout at that level.
-    module = workspace.root / "project" / "vasp" / "src" / "httk" / "workflow" / "native" / "perl"
-    module.mkdir(parents=True)
-    shutil.copyfile(_PERL_SDK / "HttkWorkflow.pm", module / "HttkWorkflow.pm")
     job = prepare_job_payload(
         payload,
         JobSpec(
