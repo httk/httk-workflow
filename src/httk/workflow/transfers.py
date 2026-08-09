@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ._util import read_json, sha256_file, tree_digest, utc_now, write_json_atomic
+from httk.core.digests import sha256_file, tree_digest
+
+from ._util import read_json, utc_now, write_json_atomic
 from .configuration import sign_document, verify_document
 from .errors import FormatError, WorkflowError, WorkspaceCorruptionError
 from .models import (

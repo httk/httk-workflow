@@ -22,7 +22,9 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .._util import sha256_file, utc_now, write_json_atomic
+from httk.core.digests import sha256_file
+
+from .._util import utc_now, write_json_atomic
 
 _LOGGER = logging.getLogger(__name__)
 

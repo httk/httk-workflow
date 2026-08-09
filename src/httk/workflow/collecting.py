@@ -54,8 +54,10 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote
 
+from httk.core.digests import sha256_file, tree_digest
+
 from . import languages
-from ._util import read_json, require_mapping, require_string, sha256_file, tree_digest
+from ._util import read_json, require_mapping, require_string
 from .errors import FormatError
 from .hookapi import COLLECT_STREAM_FORMAT, COLLECT_STREAM_VERSION
 from .introspection import (

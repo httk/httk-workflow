@@ -7,12 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.digests import tree_digest
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow import precheck as precheck_module
 from httk.workflow._runner_builds import register_build
-from httk.workflow._util import tree_digest
 from httk.workflow.models import QUIESCENT_KINDS
 from httk.workflow.projects import initialize_project
 from httk.workflow.runtime_builders import JobSpec, prepare_job_payload

@@ -17,11 +17,12 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.digests import tree_digest
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow import gc as gc_module
-from httk.workflow._util import read_json, tree_digest, utc_now, write_json_atomic
+from httk.workflow._util import read_json, utc_now, write_json_atomic
 from httk.workflow.gc import GcReport
 from httk.workflow.journal import parse_record_ref
 from httk.workflow.workflow_cli import command

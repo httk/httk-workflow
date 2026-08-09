@@ -6,12 +6,13 @@ import os
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
+from httk.core.building import BuildSpec
 from httk.core.cli import CLIContext
 
 from .._runner_builds import register_build
 from ..errors import FormatError
 from ..introspection import resolve_job
-from ..packages import BuildSpec, read_build_spec, source_tree_digest
+from ..packages import read_build_spec, source_tree_digest
 from ..scaffold import resolve_workflow
 from ..workspace import Workspace
 from ._common import _add_by_path_argument, _leaf, _local_root

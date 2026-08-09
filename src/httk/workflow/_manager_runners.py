@@ -6,7 +6,9 @@ from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ._util import sha256_file, tree_digest
+from httk.core.building import overlay_artifacts
+from httk.core.digests import sha256_file, tree_digest
+
 from .errors import FormatError, RunnerResolutionError
 from .models import JobDefinition, parse_package_runner
 
@@ -168,7 +170,7 @@ def stage_runner(
         raise RunnerResolutionError(
             "runner_unavailable", f"cannot stage runner {source} for {job.job_key}: {exc}"
         ) from exc
-    except FormatError as exc:
+    except ValueError as exc:
         raise RunnerResolutionError("runner_unavailable", f"cannot pin runner {source}: {exc}") from exc
     if digest != job.runner_sha256:
         raise RunnerResolutionError(
@@ -176,7 +178,7 @@ def stage_runner(
             f"{job.runner_source} runner {job.runner_path.as_posix()} has digest {digest}, but the job pinned {job.runner_sha256}",
         )
     if source.is_dir() and job.runner_source == "workspace":
-        from ._runner_builds import overlay_artifacts, platform_tag, registered_artifacts, workspace_build_command
+        from ._runner_builds import platform_tag, registered_artifacts, workspace_build_command
         from .packages import read_build_spec
 
         try:

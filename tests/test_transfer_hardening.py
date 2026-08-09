@@ -12,12 +12,12 @@ from types import SimpleNamespace
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.digests import tree_digest
 
 from conftest import register_ws
 from httk.workflow import FormatError, TaskManager, Workspace
 from httk.workflow import transfers as transfers_module
 from httk.workflow._runner_builds import register_build
-from httk.workflow._util import tree_digest
 from httk.workflow.packages import source_tree_digest
 from httk.workflow.scaffold import BuildSpec, new_job
 from httk.workflow.transfers import (

@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
-from .._util import sha256_file
+from httk.core.digests import sha256_file
 
 #: The subpackage the four packaged VASP runners are modules of.
 VASP_RUNNER_PACKAGE = "httk.workflow.vasp.runners"

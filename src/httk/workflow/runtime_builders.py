@@ -19,13 +19,13 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, Self
 
+from httk.core.digests import sha256_file, tree_digest
+
 from ._util import (
     fsync_directory,
     fsync_tree,
     json_bytes,
     read_json,
-    sha256_file,
-    tree_digest,
     utc_now,
     write_json_atomic,
 )

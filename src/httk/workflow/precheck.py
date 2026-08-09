@@ -5,9 +5,10 @@ from dataclasses import replace
 from importlib.machinery import ModuleSpec, PathFinder
 from pathlib import Path, PurePosixPath
 
+from httk.core.digests import sha256_file, tree_digest
+
 from . import languages
 from ._manager_runners import check_runner_reference, contained, runner_module_allowed
-from ._util import sha256_file, tree_digest
 from .errors import WorkflowError
 from .introspection._diagnosis import ManagerRecord, claim_requirements, manager_refusals, read_managers
 from .models import STATE_KINDS, JobDefinition, Marker, parse_package_runner

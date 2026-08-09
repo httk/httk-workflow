@@ -18,6 +18,7 @@ from typing import Any, cast
 import httk.core
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.digests import sha256_file
 
 from conftest import register_ws
 from httk.workflow import (
@@ -29,7 +30,6 @@ from httk.workflow import (
 )
 from httk.workflow import collecting as collecting_module
 from httk.workflow import scaffold as scaffold_module
-from httk.workflow._util import sha256_file
 from httk.workflow.collecting import COLLECT_FORMAT, module_distribution
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.runners import runner_path, runner_reference

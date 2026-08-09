@@ -5,14 +5,14 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
+from httk.core.digests import sha256_file, tree_digest
+
 from ._util import (
     fsync_directory,
     fsync_file,
     fsync_tree,
     read_json,
     retry_delay,
-    sha256_file,
-    tree_digest,
 )
 from .errors import FormatError, TransactionError, WorkspaceUnavailableError
 from .models import validate_label

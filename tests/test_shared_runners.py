@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.digests import tree_digest
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
-from httk.workflow._util import tree_digest
 from httk.workflow.errors import FormatError, WorkspaceCorruptionError
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.workflow_cli import command as workflow_command
