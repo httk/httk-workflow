@@ -149,6 +149,12 @@ registrations; `--json` emits machine-readable build or list records. Exit 0
 means the registration completed (or the list was read); malformed targets,
 probe/build failures, and missing artifacts are nonzero failures.
 
+The build vocabulary and engine come from `httk.core.building`; this layer keeps
+the workspace runner-build store, platform-tagged registrations, and manager
+artifact overlay. A plugin-sourced workflow is first resolved and pinned into
+the workspace like any other package, then built with the same command using
+its job or store runner target.
+
 ### `job` — making jobs, and finding out about them
 
 | Command | What it does | Notable options |
@@ -228,6 +234,11 @@ disagree with what the runner reports. The drift is reported, not gated:
 
 Directory package authoring, manifest validation, publication, and hook trust
 tiers are documented in {doc}`workflow_packages`.
+
+Installed-plugin workflow names are included in the registered-workflow
+listings. Listing and unknown-workflow hint entries carry `[plugin PLUGIN_NAME]`
+for their owner; `describe` resolves a plugin name and reports its source as
+`installed-package`.
 
 ### `precheck` — readiness before an attempt
 

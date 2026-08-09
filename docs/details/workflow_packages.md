@@ -165,6 +165,12 @@ a copy of the published source tree and can use only files inside that package:
 compiled packages must vendor their SDK and other build inputs. For example,
 `examples/relax_cpp` vendors both halves of its native SDK.
 
+The `[workflow.build]` vocabulary and build engine are shared
+`httk.core.building` machinery; `BuildSpec` and its execution helpers live
+there. *httk-workflow* owns the workspace store layout, platform-tagged build
+registrations, and the manager's artifact overlay. The package build semantics
+described here are unchanged.
+
 Publication is sources-only for build-declaring packages. Declared artifacts are
 stripped before publication, and the digest pins those remaining sources, not a
 machine's compiler output. Binaries never ride a transfer bundle. This makes a
@@ -442,6 +448,38 @@ entry-typed inputs and outputs. An external declaration must not contain
 the manifest remains the authoritative strictly httk-owned package glue.
 
 ## Hooks and trust
+
+### Installed plugin workflows
+
+Installed *httk₂* plugins can bundle workflow package directories by declaring them
+in `httk_plugin.toml`:
+
+```toml
+[plugin]
+workflows = ["workflows/relax"]
+```
+
+Each listed directory is loaded as a normal workflow package, including its
+canonical id and optional alias. The full plugin manifest and installation
+rules are documented in *httk-core*; this is only the workflow-package entry
+point.
+
+Workflow resolution first checks in-process registrations. Only on a miss does
+it consult installed plugins, so an in-process registration wins a plugin id or
+alias. If two plugins provide the same id or alias, that name is poisoned:
+looking it up raises an error naming both owning plugins. Other, non-conflicting
+plugin workflows remain resolvable.
+
+Plugin discovery is lazy and cached for the lifetime of the process. Install a
+plugin, then start a new process before expecting its workflows to resolve.
+Installing a plugin is explicit consent, so plugin-bundled workflows share the
+installed/registered trust tier. Their packages are published and built through
+the normal workspace pinning and build-registration path; resolving a name does
+not execute a hook or build command.
+
+Workflow-name listings and unknown-workflow hints label plugin entries with
+`[plugin PLUGIN_NAME]`, including an alias when one exists. `workflow describe`
+resolves these names and reports `source: installed-package`.
 
 The hook contracts are deliberately small. Python hooks keep their existing
 in-process signatures:
