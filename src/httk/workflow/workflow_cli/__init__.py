@@ -15,6 +15,7 @@ from collections.abc import Sequence
 
 from httk.core.cli import CLIContext
 
+from ._build import build_build_parser, handle_build
 from ._campaign import (
     build_campaign_parser,
     handle_campaign_collect,
@@ -166,6 +167,7 @@ def build_parser(program: str, context: CLIContext) -> argparse.ArgumentParser:
     build_job_parser(groups)
     build_describe_parser(groups)
     build_collect_parser(groups)
+    build_build_parser(groups)
     build_postprocess_parser(groups)
     build_precheck_parser(groups)
     build_run_parser(groups)

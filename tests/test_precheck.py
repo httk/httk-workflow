@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
@@ -11,9 +11,12 @@ from httk.core.cli import CLIContext
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow import precheck as precheck_module
+from httk.workflow._runner_builds import register_build
+from httk.workflow._util import tree_digest
 from httk.workflow.models import QUIESCENT_KINDS
 from httk.workflow.projects import initialize_project
 from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
+from httk.workflow.scaffold import BuildSpec
 from httk.workflow.transfers import offer_transfers, select_transfer_jobs
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
@@ -39,6 +42,47 @@ def _job(root: Path, name: str, environment: Mapping[str, object], *, runner: st
     return payload
 
 
+def _compiled_runner_job(
+    tmp_path: Path, *, platform: str | None = None, malformed: bool = False
+) -> tuple[Workspace, Path, str]:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = tmp_path / "runner"
+    source.mkdir()
+    (source / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (source / "run").chmod(0o755)
+    manifest = (
+        "[workflow]\nid = 'compiled'\n[workflow.runner]\nsteps = ['start']\n"
+        "[workflow.build]\ncommand = './build.sh'\nartifacts = ['out']\n"
+    )
+    if platform is not None:
+        manifest = manifest.replace("artifacts = ['out']", f"platform = {platform!r}\nartifacts = ['out']")
+    if malformed:
+        manifest = "[workflow\n"
+    (source / "httk_workflow.toml").write_text(manifest, encoding="utf-8")
+    (source / "build.sh").write_text("#!/bin/sh\nmkdir out\nprintf artifact > out/result\n", encoding="utf-8")
+    (source / "build.sh").chmod(0o755)
+    target = workspace.runners / "compiled"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    import shutil
+
+    shutil.copytree(source, target)
+    for entry in (target, *target.rglob("*")):
+        entry.chmod(0o555)
+    digest = tree_digest(target)
+    payload = _job(tmp_path / "payload", "compiled-job", {})
+    definition = json.loads((payload / "job.json").read_text(encoding="utf-8"))
+    definition["runner"] = {"source": "workspace", "path": "compiled", "sha256": digest}
+    (payload / "job.json").write_text(json.dumps(definition), encoding="utf-8")
+    workspace.submit(payload, "ready")
+    return workspace, target, digest
+
+
+def _runner_finding(finding: dict[str, object]) -> Mapping[str, object]:
+    runner = finding["runner"]
+    assert isinstance(runner, Mapping)
+    return runner
+
+
 def test_precheck_flags_a_step_outside_the_recorded_runner_steps(tmp_path: Path) -> None:
     from httk.workflow.models import StateFrame
 
@@ -56,6 +100,57 @@ def test_precheck_flags_a_step_outside_the_recorded_runner_steps(tmp_path: Path)
     step_problems = [str(finding["step"]) for finding in findings if finding["step"]]
     assert step_problems and "bogus" in step_problems[0]
     assert "only, other" in step_problems[0]
+
+
+def test_precheck_reports_an_unbuilt_platformless_package_and_clears_after_registration(tmp_path: Path) -> None:
+    workspace, runner, digest = _compiled_runner_job(tmp_path)
+    finding = next(precheck_module.precheck_jobs(workspace))
+    runner_finding = _runner_finding(finding)
+    assert runner_finding["status"] == "problem"
+    assert isinstance(runner_finding["problem"], str)
+    assert "httk workflow build --by-path" in runner_finding["problem"]
+    assert "--store compiled" in runner_finding["problem"]
+    register_build(
+        workspace, runner, PurePosixPath("compiled"), BuildSpec("./build.sh", ("out",)), source_sha256=digest
+    )
+    finding = next(precheck_module.precheck_jobs(workspace))
+    assert _runner_finding(finding)["status"] == "ok"
+
+
+def test_precheck_does_not_probe_platform_specific_packages(tmp_path: Path) -> None:
+    counter = tmp_path / "probed"
+    probe = tmp_path / "probe.sh"
+    probe.write_text(f"#!/bin/sh\ntouch {counter}\nprintf linux\n", encoding="utf-8")
+    probe.chmod(0o755)
+    workspace, _, _ = _compiled_runner_job(tmp_path, platform=probe.as_posix())
+    finding = next(precheck_module.precheck_jobs(workspace))
+    assert _runner_finding(finding) == {
+        "status": "indeterminate",
+        "problem": "declares platform-specific builds; registration is checked at manager start — run: "
+        f"httk workflow build --by-path {workspace.root} --store compiled",
+    }
+    assert not counter.exists()
+
+
+def test_precheck_reports_malformed_build_manifest(tmp_path: Path) -> None:
+    workspace, _, _ = _compiled_runner_job(tmp_path, malformed=True)
+    finding = next(precheck_module.precheck_jobs(workspace))
+    runner_finding = _runner_finding(finding)
+    assert runner_finding["status"] == "problem"
+    assert isinstance(runner_finding["problem"], str)
+    assert "manifest is malformed" in runner_finding["problem"]
+
+
+def test_precheck_existing_runner_problem_wins_over_build_lookup(tmp_path: Path) -> None:
+    workspace, runner, _ = _compiled_runner_job(tmp_path)
+    runner.chmod(0o755)
+    (runner / "run").chmod(0o755)
+    (runner / "run").unlink()
+    finding = next(precheck_module.precheck_jobs(workspace))
+    runner_finding = _runner_finding(finding)
+    assert runner_finding["status"] == "problem"
+    assert isinstance(runner_finding["problem"], str)
+    assert "has no run entry point" in runner_finding["problem"]
 
 
 def test_precheck_reports_resolution_sources_and_exit_code(tmp_path: Path, capsys) -> None:

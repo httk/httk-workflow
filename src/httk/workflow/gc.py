@@ -18,7 +18,8 @@ Everything here is conservative by construction. It never touches the
 quarantine, a sealed transfer bundle, a persistent workdir, a payload beyond
 its aged attempt-control directories, the marker of any job, a journal segment
 a current marker references, the directory of a manager that is still
-heartbeating, or the runner store. Removal is bottom-up and mutates no
+heartbeating, ``runner-builds`` (machine-local rebuildable derived state), or
+the runner store. Removal is bottom-up and mutates no
 workspace state, so a collector that is killed halfway leaves a workspace that
 is exactly as consistent as it was before.
 """

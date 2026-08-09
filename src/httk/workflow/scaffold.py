@@ -85,6 +85,7 @@ __all__ = [
     "FILES_DIRECTORY",
     "JOB_SCAFFOLD_FORMAT",
     "STRUCTURE_PATTERNS",
+    "BuildSpec",
     "InstantiateContext",
     "JobItem",
     "ResolvedWorkflow",
@@ -125,6 +126,15 @@ type PublishMode = Literal["workspace", "installed"]
 
 
 @dataclass(frozen=True)
+class BuildSpec:
+    """Describe how a workflow package is compiled and which outputs are disposable."""
+
+    command: str
+    artifacts: tuple[str, ...]
+    platform: str | None = None
+
+
+@dataclass(frozen=True)
 class WorkflowProvider:
     """One packaged workflow a domain or compat engine offers by name.
 
@@ -154,6 +164,7 @@ class WorkflowProvider:
     :param declarations: Declare workflow declaration documents.
     :param collector: Identify the optional result collector.
     :param directory: Locate a directory-sourced workflow package.
+    :param build: Describe the package build command and generated artifacts.
     :param entry: Name the directory package's runner entry.
     :param instantiate_file: Name the directory package's instantiate hook.
     :param instantiate_exec: Name an executable directory package instantiate hook.
@@ -184,6 +195,7 @@ class WorkflowProvider:
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     collector: Callable[[JobRecord], Mapping[str, object]] | str | None = None
     directory: Path | None = None
+    build: BuildSpec | None = None
     entry: str = "run"
     instantiate_file: str | None = None
     instantiate_exec: str | None = None
@@ -219,6 +231,7 @@ class WorkflowProvider:
                 or self.instantiate_exec is not None
                 or self.collect_file is not None
                 or self.declaration_file is not None
+                or self.build is not None
             ):
                 raise ValueError("directory-only fields are not allowed on a packaged workflow provider")
             if self.directory is not None and (not self.entry or PurePosixPath(self.entry).is_absolute()):
@@ -370,6 +383,7 @@ class ResolvedWorkflow:
     :param declarations: Preserve workflow declaration documents.
     :param collector: Preserve the optional result collector.
     :param directory: Locate a directory-sourced workflow package.
+    :param build: Describe the package build command and generated artifacts.
     :param entry: Name the directory package's runner entry.
     :param instantiate_file: Name the directory package's instantiate hook.
     :param instantiate_exec: Name an executable directory package instantiate hook.
@@ -403,6 +417,7 @@ class ResolvedWorkflow:
     declarations: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     collector: Callable[[JobRecord], Mapping[str, object]] | str | None = None
     directory: Path | None = None
+    build: BuildSpec | None = None
     entry: str = "run"
     instantiate_file: str | None = None
     instantiate_exec: str | None = None
@@ -433,6 +448,7 @@ class ResolvedWorkflow:
                 or self.instantiate_exec is not None
                 or self.collect_file is not None
                 or self.declaration_file is not None
+                or self.build is not None
             ):
                 raise ValueError("directory-only fields are not allowed on a packaged resolved workflow")
         object.__setattr__(self, "runner_options", MappingProxyType(dict(self.runner_options)))
@@ -454,7 +470,9 @@ class ResolvedWorkflow:
         if self.language is not None:
             raise ValueError("a language workflow is never published to the runner store")
         if self.directory is not None:
-            return f"{self.directory.name}.{tree_digest(self.directory)[:12]}"
+            from .packages import source_tree_digest
+
+            return f"{self.directory.name}.{source_tree_digest(self.directory)[:12]}"
         digest = sha256_file(self.source)
         stem = self.source.name
         suffix = ""
@@ -746,6 +764,7 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
         declarations=provider.declarations,
         collector=provider.collector,
         directory=provider.directory,
+        build=provider.build,
         entry=provider.entry,
         instantiate_file=provider.instantiate_file,
         instantiate_exec=provider.instantiate_exec,
@@ -824,6 +843,7 @@ def resolve_workflow(
                 declarations=provider.declarations,
                 collector=provider.collector,
                 directory=provider.directory or path.resolve(),
+                build=provider.build,
                 entry=provider.entry,
                 instantiate_file=provider.instantiate_file,
                 instantiate_exec=provider.instantiate_exec,
@@ -1233,7 +1253,9 @@ def _prepare(
                 raise
             target = workspace.runner_store_path(resolved.store_name)
             actual = tree_digest(target)
-            expected = tree_digest(resolved.source)
+            from .packages import source_tree_digest
+
+            expected = source_tree_digest(resolved.source)
             raise ValueError(
                 f"published workflow tree {target} has digest {actual}, but the package resolves to {expected}"
             ) from exc

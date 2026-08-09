@@ -1,6 +1,7 @@
 """Directory workflow package manifests and scaffold integration."""
 
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -13,9 +14,11 @@ from httk.workflow.models import MAXIMUM_DECLARATIONS_BYTES, JobDefinition
 from httk.workflow.packages import (
     load_workflow_package,
     parse_workflow_manifest,
+    read_build_spec,
+    source_tree_digest,
     workflow_declaration_from_manifest,
 )
-from httk.workflow.scaffold import new_job, resolve_workflow, workflow_provider
+from httk.workflow.scaffold import BuildSpec, new_job, resolve_workflow, workflow_provider
 
 _MANIFEST = '''
 [workflow]
@@ -162,6 +165,119 @@ def test_manifest_parses_and_generates_the_declared_roles(tmp_path: Path) -> Non
     }
     assert provider.declarations["workflow"] == workflow_declaration_from_manifest(provider)
     assert provider.outputs["relaxed"]["product_of"] == "initial_structure"
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        (
+            '\n[workflow.build]\ncommand = "python build.py"\nartifacts = ["build"]\n',
+            BuildSpec(command="python build.py", artifacts=("build",)),
+        ),
+        (
+            '\n[workflow.build]\ncommand = "python build.py"\nplatform = "linux x86_64"\nartifacts = ["build", "*.o"]\n',
+            BuildSpec(command="python build.py", platform="linux x86_64", artifacts=("build", "*.o")),
+        ),
+    ],
+)
+def test_manifest_build_section_populates_provider_and_resolved_workflow(
+    tmp_path: Path, extra: str, expected: BuildSpec
+) -> None:
+    package = _package(tmp_path / "package", _MANIFEST + extra)
+    provider = parse_workflow_manifest(package)
+    assert provider.build == expected
+    assert resolve_workflow(package).build == expected
+
+
+@pytest.mark.parametrize(
+    ("build", "message"),
+    [
+        ('command = "python build.py"\nartifacts = ["build"]\nbad = true', "unknown key"),
+        ('artifacts = ["build"]', "command is required"),
+        ('command = ""\nartifacts = ["build"]', "command must be a nonempty string"),
+        ("command = 'python \"build.py'\nartifacts = [\"build\"]", "valid shell words"),
+        ('command = "python build.py"\nartifacts = []', "nonempty array"),
+        ('command = "python build.py"\nartifacts = [""]', "only nonempty strings"),
+        ('command = "python build.py"\nartifacts = ["/build"]', "must be relative"),
+        ('command = "python build.py"\nartifacts = ["build/../out"]', "no '.', '..'"),
+        ('command = "python build.py"\nartifacts = ["build\\\\out"]', "no '.', '..', or backslashes"),
+        ('command = "python build.py"\nartifacts = ["*"]', "strip the runner entry point or manifest"),
+        (
+            'command = "python build.py"\nartifacts = ["httk_workflow.toml"]',
+            "strip the runner entry point or manifest",
+        ),
+    ],
+)
+def test_manifest_build_section_reports_validation_errors(tmp_path: Path, build: str, message: str) -> None:
+    manifest = _MANIFEST + f"\n[workflow.build]\n{build}\n"
+    with pytest.raises(ValueError, match=message):
+        parse_workflow_manifest(_package(tmp_path / "package", manifest))
+
+
+def test_manifest_build_section_rejects_invalid_platform_argv(tmp_path: Path) -> None:
+    manifest = _MANIFEST + '\n[workflow.build]\ncommand = "python build.py"\nplatform = ""\nartifacts = ["build"]\n'
+    with pytest.raises(ValueError, match=r"\[workflow\.build\]\.platform must contain at least one"):
+        parse_workflow_manifest(_package(tmp_path / "package", manifest))
+
+
+def test_build_spec_reader_only_needs_the_build_table(tmp_path: Path) -> None:
+    assert read_build_spec(tmp_path / "absent") is None
+    package = _package(tmp_path / "buildless")
+    assert read_build_spec(package) is None
+    malformed = _package(
+        tmp_path / "malformed",
+        _MANIFEST + '\n[workflow.build]\ncommand = "python build.py"\n',
+    )
+    with pytest.raises(ValueError, match=r"\[workflow\.build\]\.artifacts"):
+        read_build_spec(malformed)
+
+
+def test_build_is_directory_only(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="directory-only fields"):
+        scaffold.WorkflowProvider(
+            workflow_id="tests.file",
+            runner_package="tests.package",
+            runner_file="run.py",
+            build=BuildSpec(command="python build.py", artifacts=("build",)),
+        )
+    with pytest.raises(ValueError, match="directory-only fields"):
+        scaffold.ResolvedWorkflow(
+            source=tmp_path / "run.py",
+            workflow_id="tests.file",
+            initial_step="start",
+            packaged="run.py",
+            build=BuildSpec(command="python build.py", artifacts=("build",)),
+        )
+
+
+def test_source_digest_and_publication_ignore_build_artifacts(tmp_path: Path) -> None:
+    package = _package(
+        tmp_path / "package",
+        _MANIFEST + '\n[workflow.build]\ncommand = "python build.py"\nartifacts = ["build"]\n',
+    )
+    resolved = resolve_workflow(package)
+    digest = source_tree_digest(package)
+    store_name = resolved.store_name
+    build = package / "build"
+    build.mkdir()
+    (build / "runner.o").write_bytes(b"artifact")
+    assert source_tree_digest(package) == digest
+    assert resolved.store_name == store_name
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    reference = workspace.publish_runner(package, name=store_name)
+    store = workspace.runner_store_path(store_name)
+    assert not (store / "build").exists()
+    assert tree_digest(store) == digest == reference["sha256"]
+    shutil.rmtree(build)
+    assert workspace.publish_runner(package, name=store_name) == reference
+
+
+def test_buildless_publication_keeps_the_plain_tree_digest(tmp_path: Path) -> None:
+    package = _package(tmp_path / "package")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    workspace.publish_runner(package, name="buildless")
+    assert tree_digest(workspace.runner_store_path("buildless")) == tree_digest(package)
 
 
 def test_cwl_language_manifest_uses_registry_defaults(tmp_path: Path) -> None:

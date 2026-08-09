@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 import tomllib
 from collections.abc import Callable, Mapping
@@ -18,14 +20,17 @@ from . import languages
 from ._util import tree_digest, validate_inputs
 from .errors import FormatError
 from .models import RESERVED_WORKFLOW_ENVIRONMENT_PREFIX, environment_variable_name, validate_declarations
-from .scaffold import WorkflowProvider, payload_relative, register_workflow
+from .scaffold import BuildSpec, WorkflowProvider, payload_relative, register_workflow
 
 MANIFEST_NAME = "httk_workflow.toml"
 
 __all__ = [
     "MANIFEST_NAME",
+    "artifact_excluder",
     "load_workflow_package",
     "parse_workflow_manifest",
+    "read_build_spec",
+    "source_tree_digest",
     "workflow_declaration_from_manifest",
 ]
 
@@ -104,6 +109,107 @@ def _collect_member(directory: Path, value: object, path: str) -> tuple[str, boo
     if not os.access(candidate, os.X_OK):
         raise _error(directory, f"{path} must name a .py member or an executable member (chmod +x): {value!r}")
     return member, True
+
+
+def _build_section(workflow: Mapping[str, object], root: Path) -> BuildSpec | None:
+    """Validate and return the optional ``[workflow.build]`` section."""
+
+    if "build" not in workflow:
+        return None
+    build = _table(workflow["build"], "[workflow.build]", root)
+    _unknown(build, {"command", "platform", "artifacts"}, "[workflow.build]", root)
+    command = _string(build, "command", "[workflow.build]", root, required=True)
+    assert command is not None
+    platform = _optional_string(build, "platform", "[workflow.build]", root)
+    for key, value in (("command", command), ("platform", platform)):
+        if value is None:
+            continue
+        try:
+            argv = shlex.split(value)
+        except ValueError as exc:
+            raise _error(root, f"[workflow.build].{key} must contain valid shell words: {exc}") from exc
+        if not argv:
+            raise _error(root, f"[workflow.build].{key} must contain at least one shell word")
+    raw_artifacts = build.get("artifacts")
+    if not isinstance(raw_artifacts, list) or not raw_artifacts:
+        raise _error(root, "[workflow.build].artifacts must be a nonempty array of patterns")
+    artifacts: list[str] = []
+    for pattern in raw_artifacts:
+        if not isinstance(pattern, str) or not pattern:
+            raise _error(root, "[workflow.build].artifacts must contain only nonempty strings")
+        path = PurePosixPath(pattern)
+        if pattern.startswith("/") or "\\" in pattern or any(part in {".", ".."} for part in path.parts):
+            raise _error(
+                root,
+                f"[workflow.build].artifacts pattern {pattern!r} must be relative and contain no '.', '..', or backslashes",
+            )
+        if fnmatch.fnmatchcase("run", pattern) or fnmatch.fnmatchcase(MANIFEST_NAME, pattern):
+            raise _error(
+                root,
+                f"[workflow.build].artifacts pattern {pattern!r} would strip the runner entry point or manifest "
+                f"from publication; 'run' and {MANIFEST_NAME!r} must remain available",
+            )
+        artifacts.append(pattern)
+    return BuildSpec(command=command, platform=platform, artifacts=tuple(artifacts))
+
+
+def read_build_spec(root: Path) -> BuildSpec | None:
+    """Read and validate only the build section of one package manifest.
+
+    :param root: Locate the workflow package directory.
+    :return: The package build specification, or ``None`` when it is absent.
+    :raises ValueError: If the manifest or its build section is malformed.
+    """
+
+    manifest = root / MANIFEST_NAME
+    if not manifest.is_file():
+        return None
+    manifest_text = ""
+    try:
+        manifest_text = manifest.read_text(encoding="utf-8")
+        raw = tomllib.loads(manifest_text)
+    except (OSError, UnicodeError) as exc:
+        raise _error(root, f"cannot read {MANIFEST_NAME}: {exc}") from exc
+    except tomllib.TOMLDecodeError as exc:
+        lineno = getattr(exc, "lineno", None) or len(manifest_text.splitlines())
+        colno = getattr(exc, "colno", None) or len(manifest_text.rsplit("\n", 1)[-1]) + 1
+        raise _error(root, f"invalid {MANIFEST_NAME} (line {lineno}, column {colno}): {exc}") from exc
+    if not isinstance(raw, dict):  # pragma: no cover - tomllib always returns a dict
+        raise _error(root, "manifest must be a table")
+    workflow = raw.get("workflow")
+    if workflow is None:
+        return None
+    return _build_section(_table(workflow, "[workflow]", root), root)
+
+
+def artifact_excluder(spec: BuildSpec) -> Callable[[str], bool]:
+    """Return a predicate for build artifacts and their descendant paths.
+
+    :param spec: Supply the artifact patterns declared by a package.
+    :return: A predicate accepting relative POSIX paths.
+    """
+
+    def excluded(path: str) -> bool:
+        parts = PurePosixPath(path).parts
+        return any(
+            fnmatch.fnmatchcase("/".join(parts[:index]), pattern)
+            for index in range(1, len(parts) + 1)
+            for pattern in spec.artifacts
+        )
+
+    return excluded
+
+
+def source_tree_digest(root: Path) -> str:
+    """Return the digest of package sources, excluding declared build artifacts.
+
+    :param root: Locate the workflow package directory.
+    :return: The source-only tree digest.
+    :raises ValueError: If the package build section is malformed.
+    """
+
+    spec = read_build_spec(root)
+    return tree_digest(root, exclude=artifact_excluder(spec)) if spec is not None else tree_digest(root)
 
 
 def _validate_name(name: object, path: str, directory: Path) -> str:
@@ -504,6 +610,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
             "declaration_uri",
             "declaration_file",
             "runner",
+            "build",
             "instantiate",
             "collect",
             "postprocess",
@@ -649,6 +756,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
 
     collect_file: str | None = None
     collector_exec: str | None = None
+    build = _build_section(workflow, root)
     if "collect" in workflow:
         collect = _table(workflow["collect"], "[workflow.collect]", root)
         _unknown(collect, {"file"}, "[workflow.collect]", root)
@@ -753,6 +861,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         instantiate_exec=instantiate_exec,
         collect_file=collect_file,
         collector_exec=collector_exec,
+        build=build,
         postprocess_scripts=postprocess_scripts,
         parameters=parameters,
         environment=environment,

@@ -14,6 +14,11 @@ Every SDK is a bridge client that spawns `$HTTK_WORKFLOW_PYTHON -m httk.workflow
 
 The breadcrumb labels summarize the errors as ShellError; CError for C, Fortran, Ada, and C++; RustError; PerlError; and JavaError.
 
+Single-file compiled runners are architecture-bound and should transfer only
+between matching machines. A self-contained package with a `[workflow.build]`
+declaration is the portable alternative: transfer its sources, then build once
+per platform class. See `examples/relax_cpp` for the C++ package form.
+
 ```{toctree}
 :maxdepth: 1
 

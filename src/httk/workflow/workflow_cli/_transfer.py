@@ -4,11 +4,14 @@ import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from pathlib import PurePosixPath
 
+from .._runner_builds import workspace_build_command
 from ..adapters import probe_remote_workspace
 from ..adapters import run_adapter as read_adapter
 from ..errors import ResolutionMiss, WorkflowError
-from ..models import QUIESCENT_KINDS
+from ..models import QUIESCENT_KINDS, JobDefinition
+from ..packages import read_build_spec
 from ..precheck import environment_findings
 from ..transfers import TransferCandidate, select_transfer_jobs
 from ._common import *
@@ -22,6 +25,38 @@ from ._common import (
     _settings,
 )
 from ._common import _run_adapter as run_adapter
+
+
+def _print_build_reminder(
+    workspace: Workspace,
+    acknowledgement: Mapping[str, object],
+) -> None:
+    """Remind users to register artifacts for an imported compiled runner."""
+
+    try:
+        payload = workspace.payload_path(
+            PurePosixPath(str(acknowledgement["placement"])), str(acknowledgement["job_key"])
+        )
+        job = JobDefinition.from_path(payload / "job.json")
+        if job.runner_source != "workspace":
+            return
+        runner = workspace.runner_store_path(job.runner_path)
+        if runner.is_dir() and read_build_spec(runner) is not None:
+            print(
+                f"workflow {job.workflow} declares a build; run: {workspace_build_command(workspace, job.runner_path)} before starting managers here",
+                file=sys.stderr,
+            )
+    except (OSError, ValueError, KeyError):
+        pass
+
+
+def _relay_success_stderr(result: Mapping[str, object]) -> None:
+    """Relay diagnostics emitted by a successful remote protocol command."""
+
+    stderr = result.get("stderr")
+    if isinstance(stderr, str) and stderr:
+        print(stderr, file=sys.stderr, end="" if stderr.endswith("\n") else "\n")
+
 
 # ---------------------------------------------------------------------------
 # remote
@@ -493,6 +528,7 @@ def _send_jobs_to_remote(
         )
         if invoked.get("returncode") != 0:
             raise RuntimeError(f"destination import failed: {invoked.get('stderr', '')}")
+        _relay_success_stderr(invoked)
         try:
             acknowledgement = json.loads(str(invoked.get("stdout", "")))
         except json.JSONDecodeError as exc:
@@ -536,8 +572,10 @@ def handle_transfer_receive(arguments: argparse.Namespace, context: CLIContext) 
     ``--by-path`` spelling.
     """
 
-    acknowledgement = _protocol_workspace(arguments.workspace, context).import_bundle(arguments.bundle)
+    workspace = _protocol_workspace(arguments.workspace, context)
+    acknowledgement = workspace.import_bundle(arguments.bundle)
     print(json.dumps(acknowledgement, sort_keys=True, separators=(",", ":")))
+    _print_build_reminder(workspace, acknowledgement)
     return 0
 
 
@@ -741,6 +779,7 @@ def _fetch_jobs_from_remote(
             timeout=timeout,
         )
         acknowledgement = local.import_bundle(str(pulled.get("path", staging)))
+        _print_build_reminder(local, acknowledgement)
         # The payload now lives at its placement in this workspace, so the
         # staged copy is dropped through a rename rather than left to be
         # re-imported by the next fetch.
@@ -791,6 +830,7 @@ def _transfer_local_to_local(
         )
         acknowledgement = destination.import_bundle(str(bundle))
         source.acknowledge_transfer(acknowledgement)
+        _print_build_reminder(destination, acknowledgement)
         acknowledgements.append(acknowledgement)
     return acknowledgements
 
@@ -877,6 +917,7 @@ def _transfer_remote_to_remote(
             )
             if imported.get("returncode") != 0:
                 raise RuntimeError(f"destination import failed: {imported.get('stderr', '')}")
+            _relay_success_stderr(imported)
             try:
                 acknowledgement = json.loads(str(imported.get("stdout", "")))
             except json.JSONDecodeError as exc:
