@@ -91,6 +91,12 @@ def test_plugin_name_collisions_are_poisoned_but_other_workflows_work(tmp_path: 
 
     with pytest.raises(ValueError, match="plugin-one.*plugin-two"):
         workflow_provider("test.plugin.flow")
+    for alias in ("one-flow", "two-flow"):
+        with pytest.raises(ValueError, match="plugin-one.*plugin-two"):
+            workflow_provider(alias)
+    assert all(name not in registered_workflows() for name in ("test.plugin.flow", "one-flow", "two-flow"))
+    labels = registered_workflow_labels()
+    assert all(name not in "\n".join(labels) for name in ("test.plugin.flow", "one-flow", "two-flow"))
     assert workflow_provider("test.plugin.other") is not None
 
 

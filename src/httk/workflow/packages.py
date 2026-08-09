@@ -846,10 +846,10 @@ def _plugin_workflow_data() -> tuple[Mapping[str, WorkflowProvider], Mapping[str
         _PLUGIN_WORKFLOW_CACHE = (MappingProxyType({}), MappingProxyType({}), MappingProxyType({}))
         return _PLUGIN_WORKFLOW_CACHE
 
-    providers: dict[str, WorkflowProvider] = {}
-    owners: dict[str, str] = {}
-    names: dict[str, list[str]] = {}
-    for plugin in plugins.installed_plugins():
+    records: list[tuple[str, WorkflowProvider]] = []
+    name_records: dict[str, list[int]] = {}
+    installed = sorted(plugins.installed_plugins(), key=lambda plugin: (plugin.name, str(plugin.root)))
+    for plugin in installed:
         for member in plugin.manifest.workflows:
             try:
                 provider = load_workflow_package(plugin.root / member, register=False)
@@ -861,19 +861,35 @@ def _plugin_workflow_data() -> tuple[Mapping[str, WorkflowProvider], Mapping[str
                     exc,
                 )
                 continue
-            providers[provider.workflow_id] = provider
-            owners[provider.workflow_id] = plugin.name
+            record = len(records)
+            records.append((plugin.name, provider))
             for name in (provider.workflow_id, provider.alias):
                 if name is not None:
-                    names.setdefault(name, []).append(plugin.name)
+                    name_records.setdefault(name, []).append(record)
 
-    conflicts = {
-        name: tuple(dict.fromkeys(plugin_names)) for name, plugin_names in names.items() if len(plugin_names) > 1
-    }
+    conflicts: dict[str, set[str]] = {}
+    for indexes in name_records.values():
+        if len(indexes) < 2:
+            continue
+        plugin_names = {records[index][0] for index in indexes}
+        for index in indexes:
+            provider = records[index][1]
+            for name in (provider.workflow_id, provider.alias):
+                if name is not None:
+                    conflicts.setdefault(name, set()).update(plugin_names)
+
+    poisoned = set(conflicts)
+    providers: dict[str, WorkflowProvider] = {}
+    owners: dict[str, str] = {}
+    for plugin_name, provider in records:
+        if any(name in poisoned for name in (provider.workflow_id, provider.alias) if name is not None):
+            continue
+        providers[provider.workflow_id] = provider
+        owners[provider.workflow_id] = plugin_name
     _PLUGIN_WORKFLOW_CACHE = (
         MappingProxyType(providers),
         MappingProxyType(owners),
-        MappingProxyType(conflicts),
+        MappingProxyType({name: tuple(sorted(plugin_names)) for name, plugin_names in conflicts.items()}),
     )
     return _PLUGIN_WORKFLOW_CACHE
 
