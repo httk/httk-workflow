@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -51,7 +52,7 @@ def _plugin(
 
 
 @pytest.fixture(autouse=True)
-def _plugin_cache() -> None:
+def _plugin_cache() -> Iterator[None]:
     scaffold._WORKFLOW_PROVIDERS.pop("test.plugin.flow", None)
     _reset_plugin_workflow_cache()
     yield
