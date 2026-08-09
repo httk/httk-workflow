@@ -4,10 +4,10 @@ Re-registration leaves prior generations on disk. Reclaim a tag directory only
 when no managers are running.
 """
 
+import os
 import shlex
 import shutil
 import stat
-import sys
 import uuid
 from pathlib import Path, PurePosixPath
 
@@ -29,11 +29,21 @@ from .workspace import Workspace
 BUILD_DIRECTORY = "runner-builds"
 
 
+def _environment() -> dict[str, str]:
+    """Return the build environment without workflow runtime variables."""
+
+    environment = dict(os.environ)
+    for key in tuple(environment):
+        if key.startswith("HTTK_WORKFLOW_"):
+            environment.pop(key)
+    return environment
+
+
 def platform_tag(spec: BuildSpec) -> str:
     """Return the local platform tag declared by a build specification."""
 
     try:
-        return _core_platform_tag(spec.platform)[0]
+        return _core_platform_tag(spec.platform, env=_environment())[0]
     except BuildError as exc:
         raise RunnerResolutionError(exc.code, exc.message or str(exc)) from exc
 
@@ -73,14 +83,6 @@ def registered_artifacts(
 def _make_writable(root: Path) -> None:
     for entry in (root, *root.rglob("*")):
         entry.chmod(entry.stat().st_mode | stat.S_IWUSR)
-
-
-def _replay_build_output(log_path: Path) -> None:
-    try:
-        output = log_path.read_text(encoding="utf-8").split("build output:\n", 1)[1]
-    except (IndexError, OSError, UnicodeError):
-        return
-    sys.stderr.write(output)
 
 
 def register_build(
@@ -124,13 +126,10 @@ def register_build(
                 verified_spec,
                 strip_env_prefixes=("HTTK_WORKFLOW_",),
                 log_path=log_path,
+                stdout_to_stderr=stdout_to_stderr,
             )
         except BuildError as exc:
-            if stdout_to_stderr:
-                _replay_build_output(log_path)
             raise RunnerResolutionError(exc.code, exc.message or str(exc)) from exc
-        if stdout_to_stderr:
-            _replay_build_output(log_path)
         generation = write_generation(
             workspace.runner_builds,
             store_relative.as_posix(),
