@@ -277,12 +277,20 @@ def register_workflow(provider: WorkflowProvider) -> None:
 
 
 def registered_workflows() -> tuple[str, ...]:
-    """Return the name of every registered workflow, in registration order.
+    """Return registered ids, followed by sorted installed-plugin workflow ids.
 
     :return: The registered workflow ids.
     """
 
-    return tuple(_WORKFLOW_PROVIDERS)
+    result = list(_WORKFLOW_PROVIDERS)
+    registered_names = set(result)
+    registered_names.update(provider.alias for provider in _WORKFLOW_PROVIDERS.values() if provider.alias)
+    from .packages import installed_plugin_workflows
+
+    result.extend(
+        workflow_id for workflow_id in sorted(installed_plugin_workflows()) if workflow_id not in registered_names
+    )
+    return tuple(result)
 
 
 #: File suffixes that make an argument path-shaped: a runner file or a language
@@ -291,24 +299,53 @@ _RUNNER_SUFFIXES = frozenset({".py", ".cwl", ".json", ".yaml", ".yml"})
 
 
 def registered_workflow_labels() -> tuple[str, ...]:
-    """Return each registered workflow as an ``id (alias)`` label, ids without an alias bare.
+    """Return display labels for registered and installed-plugin workflows.
 
     :return: The registered workflow labels, in registration order.
     """
 
-    return tuple(
+    labels = [
         f"{workflow_id} ({provider.alias})" if provider.alias else workflow_id
         for workflow_id, provider in _WORKFLOW_PROVIDERS.items()
+    ]
+    registered_names = set(_WORKFLOW_PROVIDERS)
+    registered_names.update(provider.alias for provider in _WORKFLOW_PROVIDERS.values() if provider.alias)
+    from .packages import (
+        _plugin_workflow_conflicts,
+        installed_plugin_workflow_owners,
+        installed_plugin_workflows,
     )
+
+    conflicts = _plugin_workflow_conflicts()
+    owners = installed_plugin_workflow_owners()
+    providers = installed_plugin_workflows()
+    for workflow_id in sorted(providers):
+        provider = providers[workflow_id]
+        if workflow_id in registered_names or workflow_id in conflicts:
+            continue
+        alias = provider.alias if provider.alias not in conflicts else None
+        label = f"{workflow_id} ({alias})" if alias else workflow_id
+        labels.append(f"{label} [plugin {owners[workflow_id]}]")
+    return tuple(labels)
 
 
 def _registered_names() -> list[str]:
-    """Return every registered id and alias, for close-match suggestions."""
+    """Return every registered or installed-plugin id and alias."""
 
     names: list[str] = []
     for workflow_id, provider in _WORKFLOW_PROVIDERS.items():
         names.append(workflow_id)
         if provider.alias:
+            names.append(provider.alias)
+    from .packages import _plugin_workflow_conflicts, installed_plugin_workflows
+
+    conflicts = _plugin_workflow_conflicts()
+    providers = installed_plugin_workflows()
+    for workflow_id in sorted(providers):
+        provider = providers[workflow_id]
+        if workflow_id not in conflicts:
+            names.append(workflow_id)
+        if provider.alias and provider.alias not in conflicts:
             names.append(provider.alias)
     return names
 
@@ -324,6 +361,20 @@ def workflow_provider(name: str) -> WorkflowProvider | None:
     if provider is not None:
         return provider
     for candidate in _WORKFLOW_PROVIDERS.values():
+        if candidate.alias == name:
+            return candidate
+
+    from .packages import _plugin_workflow_conflicts, installed_plugin_workflows
+
+    conflict = _plugin_workflow_conflicts().get(name)
+    if conflict is not None:
+        plugins = ", ".join(repr(plugin) for plugin in conflict)
+        raise ValueError(f"workflow name {name!r} is bundled by multiple plugins: {plugins}")
+    providers = installed_plugin_workflows()
+    provider = providers.get(name)
+    if provider is not None:
+        return provider
+    for candidate in providers.values():
         if candidate.alias == name:
             return candidate
     return None
