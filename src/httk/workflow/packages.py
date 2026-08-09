@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
@@ -11,7 +12,7 @@ import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import Any, cast
 
 from httk.core.building import BuildSpec, artifact_excluder, read_manifest_build_spec
@@ -24,10 +25,17 @@ from .models import RESERVED_WORKFLOW_ENVIRONMENT_PREFIX, environment_variable_n
 from .scaffold import WorkflowProvider, payload_relative, register_workflow
 
 MANIFEST_NAME = "httk_workflow.toml"
+_LOGGER = logging.getLogger(__name__)
+
+_PLUGIN_WORKFLOW_CACHE: (
+    tuple[Mapping[str, WorkflowProvider], Mapping[str, str], Mapping[str, tuple[str, ...]]] | None
+) = None
 
 __all__ = [
     "MANIFEST_NAME",
     "artifact_excluder",
+    "installed_plugin_workflow_owners",
+    "installed_plugin_workflows",
     "load_workflow_package",
     "parse_workflow_manifest",
     "read_build_spec",
@@ -823,6 +831,83 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     if collect_file is not None and collector_exec is None:
         provider = replace(provider, collector=cast(Any, _source_hook(root, collect_file, "collect")))
     return provider
+
+
+def _plugin_workflow_data() -> tuple[Mapping[str, WorkflowProvider], Mapping[str, str], Mapping[str, tuple[str, ...]]]:
+    """Load and cache installed-plugin workflow providers and their metadata."""
+
+    global _PLUGIN_WORKFLOW_CACHE
+    if _PLUGIN_WORKFLOW_CACHE is not None:
+        return _PLUGIN_WORKFLOW_CACHE
+
+    try:
+        from httk.core import plugins
+    except ImportError:
+        _PLUGIN_WORKFLOW_CACHE = (MappingProxyType({}), MappingProxyType({}), MappingProxyType({}))
+        return _PLUGIN_WORKFLOW_CACHE
+
+    providers: dict[str, WorkflowProvider] = {}
+    owners: dict[str, str] = {}
+    names: dict[str, list[str]] = {}
+    for plugin in plugins.installed_plugins():
+        for member in plugin.manifest.workflows:
+            try:
+                provider = load_workflow_package(plugin.root / member, register=False)
+            except (OSError, ValueError) as exc:
+                _LOGGER.warning(
+                    "Skipping workflow package from plugin %r member %r: %s",
+                    plugin.name,
+                    member,
+                    exc,
+                )
+                continue
+            providers[provider.workflow_id] = provider
+            owners[provider.workflow_id] = plugin.name
+            for name in (provider.workflow_id, provider.alias):
+                if name is not None:
+                    names.setdefault(name, []).append(plugin.name)
+
+    conflicts = {
+        name: tuple(dict.fromkeys(plugin_names)) for name, plugin_names in names.items() if len(plugin_names) > 1
+    }
+    _PLUGIN_WORKFLOW_CACHE = (
+        MappingProxyType(providers),
+        MappingProxyType(owners),
+        MappingProxyType(conflicts),
+    )
+    return _PLUGIN_WORKFLOW_CACHE
+
+
+def installed_plugin_workflows() -> Mapping[str, WorkflowProvider]:
+    """Return workflow packages bundled by installed plugins, keyed by id.
+
+    Discovery is lazy and cached for the process lifetime. Installing a plugin
+    during that lifetime requires a new process or the private
+    :func:`_reset_plugin_workflow_cache` test helper.
+
+    :return: The installed plugin workflow providers by canonical workflow id.
+    """
+
+    return _plugin_workflow_data()[0]
+
+
+def installed_plugin_workflow_owners() -> Mapping[str, str]:
+    """Return the installed plugin name owning each bundled workflow id."""
+
+    return _plugin_workflow_data()[1]
+
+
+def _plugin_workflow_conflicts() -> Mapping[str, tuple[str, ...]]:
+    """Return poisoned bundled workflow names and their owning plugins."""
+
+    return _plugin_workflow_data()[2]
+
+
+def _reset_plugin_workflow_cache() -> None:
+    """Clear cached installed-plugin workflow discovery for tests."""
+
+    global _PLUGIN_WORKFLOW_CACHE
+    _PLUGIN_WORKFLOW_CACHE = None
 
 
 def load_workflow_package(path: str | Path, *, register: bool = True) -> WorkflowProvider:
