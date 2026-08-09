@@ -8,12 +8,12 @@ from typing import Any, cast
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.digests import tree_digest
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace, collect, job_records
 from httk.workflow import collecting as collecting_module
 from httk.workflow import scaffold as scaffold_module
-from httk.workflow._util import tree_digest
 from httk.workflow.collecting import JobRecord
 from httk.workflow.scaffold import new_job
 from httk.workflow.workflow_cli import command

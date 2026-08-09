@@ -14,11 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Self
 
+from httk.core.digests import sha256_file, tree_digest
+
 from ._util import (
     fsync_directory,
     read_json,
-    sha256_file,
-    tree_digest,
     utc_now,
     visibility_attempts,
     write_json_atomic,

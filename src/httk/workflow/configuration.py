@@ -1,4 +1,8 @@
-"""Manage XDG configuration and identity for workflow commands."""
+"""Manage XDG configuration and identity for workflow commands.
+
+The per-user configuration and data directory functions are provided by
+``httk.core.userdirs`` and re-exported here for workflow callers.
+"""
 
 import base64
 import configparser
@@ -18,6 +22,7 @@ from httk.core.crypto import (
     ed25519_sign,
     ed25519_verify,
 )
+from httk.core.userdirs import config_home, data_home
 
 from ._util import json_bytes, write_json_atomic
 
@@ -101,37 +106,6 @@ def settable_config_keys() -> tuple[str, ...]:
     """
 
     return tuple(sorted(name for name, key in CONFIG_KEYS.items() if key.settable))
-
-
-def config_home() -> Path:
-    """Return the httk configuration directory.
-
-    :return: Resolved per-user configuration directory.
-    """
-
-    override = os.environ.get("HTTK_CONFIG_HOME")
-    if override:
-        return Path(override).expanduser().resolve()
-    base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return (base / "httk").resolve()
-
-
-def data_home() -> Path:
-    """Return the httk data directory.
-
-    Remote definitions and identity keys are *configuration* and live under
-    :func:`config_home`; the lazily created default workspace is genuine
-    per-user data and lives here. :func:`adopt_legacy_data_home` also uses this
-    location to find data left by older releases.
-
-    :return: Resolved per-user data directory.
-    """
-
-    override = os.environ.get("HTTK_DATA_HOME")
-    if override:
-        return Path(override).expanduser().resolve()
-    base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
-    return (base / "httk").resolve()
 
 
 #: The two directories that moved out of the data home, as

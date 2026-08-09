@@ -16,11 +16,11 @@ from typing import Any
 import httk.core
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.digests import sha256_file
 from httk.core.register import register_format_serializer, register_reader, register_writer
 
 import httk.workflow.vasp
 from httk.workflow import FormatError, TaskManager, Workspace, scaffold
-from httk.workflow._util import sha256_file
 from httk.workflow.models import JobDefinition, validate_label
 from httk.workflow.runners import RUNNERS, runner_path
 from httk.workflow.runtime_builders import JobSpec

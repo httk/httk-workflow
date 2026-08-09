@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from httk.core.digests import tree_digest
 
 from httk.workflow import Workspace, languages, scaffold
-from httk.workflow._util import tree_digest
 from httk.workflow.models import MAXIMUM_DECLARATIONS_BYTES, JobDefinition
 from httk.workflow.packages import (
     load_workflow_package,

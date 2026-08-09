@@ -15,7 +15,7 @@ from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal
 
-from httk.workflow._util import sha256_file
+from httk.core.digests import sha256_file
 
 if TYPE_CHECKING:
     import httk.core

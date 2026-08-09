@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 
 from httk.core.cli import CLIContext
+from httk.core.digests import tree_digest
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace, job_records, scaffold
-from httk.workflow._util import tree_digest
 from httk.workflow.packages import load_workflow_package
 from httk.workflow.scaffold import new_job
 from httk.workflow.workflow_cli import command

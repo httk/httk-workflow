@@ -60,13 +60,15 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Literal, TypedDict, cast
 
+from httk.core.building import BuildSpec
+from httk.core.digests import sha256_file, tree_digest
 from httk.core.report import context_logger
 
 if TYPE_CHECKING:
     from .collecting import JobRecord
     from .languages import LanguageRequest
 
-from ._util import sha256_file, tree_digest, validate_inputs
+from ._util import validate_inputs
 from .errors import FormatError
 from .models import (
     ATTEMPT_CONTROL_PREFIX,
@@ -123,15 +125,6 @@ _MAXIMUM_TAG_LENGTH = 48
 type DataMode = Literal["none", "transactional"]
 type WorkdirMode = Literal["persistent", "isolated"]
 type PublishMode = Literal["workspace", "installed"]
-
-
-@dataclass(frozen=True)
-class BuildSpec:
-    """Describe how a workflow package is compiled and which outputs are disposable."""
-
-    command: str
-    artifacts: tuple[str, ...]
-    platform: str | None = None
 
 
 @dataclass(frozen=True)

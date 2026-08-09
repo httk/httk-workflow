@@ -16,6 +16,8 @@ from pathlib import Path, PurePosixPath
 from types import FrameType
 from typing import Any, BinaryIO, Self
 
+from httk.core.digests import sha256_file, tree_digest
+
 from . import (
     _manager_cancellation,
     _manager_commit,
@@ -26,9 +28,7 @@ from . import (
 )
 from ._util import (
     read_json,
-    sha256_file,
     timestamp_seconds,
-    tree_digest,
     utc_now,
     write_json_atomic,
 )

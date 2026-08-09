@@ -32,6 +32,7 @@ from typing import Any
 
 import httk.core
 from httk.core.cli import CLIContext
+from httk.core.digests import sha256_file, tree_digest
 
 # The packaged domains register their workflows as an import side effect, so the
 # CLI resolves `job new --workflow NAME` against a populated registry. The generic
@@ -39,7 +40,7 @@ from httk.core.cli import CLIContext
 from .. import vasp as _vasp
 from .._logging import LOG_LEVELS, add_log_file, configure_logging
 from .._manager_runners import RUNNER_TREE_ENTRY
-from .._util import read_json, sha256_file, tree_digest, utc_now, write_json_atomic
+from .._util import read_json, utc_now, write_json_atomic
 from ..adapters import (
     REMOTE_MANAGER_COMMAND,
     REMOTE_OFFER_COMMAND,

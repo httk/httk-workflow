@@ -17,9 +17,10 @@ from functools import partial
 from pathlib import Path
 
 from httk.core.crypto import ed25519_public_key, ed25519_sign, ed25519_verify
+from httk.core.digests import sha256_file
 from httk.core.project import LegacyProjectError
 
-from ._util import json_bytes, retry_delay, sha256_file, timestamp_seconds, utc_now
+from ._util import json_bytes, retry_delay, timestamp_seconds, utc_now
 from .models import QUIESCENT_KINDS, STATE_KINDS
 from .projects import (
     PROJECT_DIRECTORY,
