@@ -36,6 +36,15 @@ job from it. Declared inputs are staged objects; parameters are knobs;
 workflows declare `[workflow.build]` (sources-only digests, binaries built and
 registered per machine with `httk workflow build`).
 
+The `[workflow.build]` vocabulary and engine are shared `httk.core.building`
+machinery. *httk-workflow* owns the workspace store layout, platform-tagged
+registrations, and manager artifact overlay; the build semantics are unchanged.
+
+An installed *httk₂* plugin may bundle workflow packages. Resolution checks
+in-process registrations first, then installed plugins; workflow listings label
+plugin entries with their owning plugin, while `workflow describe` reports a
+plugin entry as `source: installed-package`.
+
 The full guide, {doc}`details/workflow_packages`, is the manifest reference:
 every table and key, hook envelopes, output declarations and provenance,
 language realizations, and the build-registration mechanics.
