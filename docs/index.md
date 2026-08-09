@@ -115,5 +115,18 @@ reference/index
 notebooks/examples
 workflow_filesystem_api
 httk_v1_migration_guide
+```
+
+```{toctree}
+:maxdepth: 1
+:caption: Details
+
+details/runtime_helpers
+details/taskmanager
+details/workflow_packages
+details/workflow_cli
+details/adapter_authoring
+details/workflow_filesystem_api
+details/httk_v1_migration_guide
 v1_compatibility
 ```
