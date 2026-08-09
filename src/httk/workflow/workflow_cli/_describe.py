@@ -126,6 +126,16 @@ def _workflow_description(target: str, format: str | None = None) -> dict[str, o
         "initial_step": workflow.initial_step,
         "data_mode": workflow.data_mode,
         "workdir_mode": workflow.workdir_mode,
+        "build": (
+            {
+                "present": True,
+                "command": workflow.build.command,
+                "platform": workflow.build.platform,
+                "artifacts": list(workflow.build.artifacts),
+            }
+            if workflow.build is not None
+            else {"present": False}
+        ),
         "inputs": _input_document(workflow),
         "parameters": {name: dict(metadata) for name, metadata in workflow.parameters.items()},
         "environment": {name: dict(metadata) for name, metadata in workflow.environment.items()},
@@ -168,6 +178,14 @@ def _value(value: object) -> str:
 
 
 def _render_text(description: Mapping[str, object]) -> str:
+    build = description["build"]
+    assert isinstance(build, Mapping)
+    build_line = (
+        f"build: yes (command={build['command']}, platform={build['platform'] or '-'}, "
+        f"artifacts={_value(build['artifacts'])})"
+        if build["present"]
+        else "build: no"
+    )
     lines = [
         f"workflow: {description['workflow']}",
         f"alias: {description['alias'] or '-'}",
@@ -180,6 +198,7 @@ def _render_text(description: Mapping[str, object]) -> str:
             f"summary: {description['summary'] or '-'}",
             f"data_mode: {description['data_mode']}",
             f"workdir_mode: {description['workdir_mode']}",
+            build_line,
             "steps:",
         ]
     )

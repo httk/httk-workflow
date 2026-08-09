@@ -136,20 +136,35 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def tree_digest(path: Path, *, skip: Callable[[str], bool] | None = None) -> str:
+def tree_digest(
+    path: Path,
+    *,
+    skip: Callable[[str], bool] | None = None,
+    exclude: Callable[[str], bool] | None = None,
+) -> str:
     """Hash a tree without following symlinks.
 
     *skip* names top-level entries to leave out of the digest entirely, which is
     how a payload digest ignores the runner-private directories that live inside
     a payload without being part of the job.
+    *exclude* names relative POSIX paths to leave out; excluding a directory
+    also leaves out its descendants.
     """
 
     digest = hashlib.sha256()
+    excluded_directories: list[str] = []
     for entry in sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix()):
         parts = entry.relative_to(path).parts
+        relative_text = entry.relative_to(path).as_posix()
         if skip is not None and parts and skip(parts[0]):
             continue
-        relative = entry.relative_to(path).as_posix().encode()
+        if any(relative_text.startswith(directory + "/") for directory in excluded_directories):
+            continue
+        if exclude is not None and exclude(relative_text):
+            if entry.is_dir():
+                excluded_directories.append(relative_text)
+            continue
+        relative = relative_text.encode()
         if entry.is_symlink():
             raise FormatError(f"symlink is forbidden in immutable bundle: {entry}")
         if entry.is_dir():

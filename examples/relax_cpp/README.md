@@ -1,35 +1,31 @@
 # A VASP relaxation runner in C++17
 
-`relax.cpp` has the same three-step shape as the Ada and Fortran examples:
-`prepare`, `run`, and `publish`. It declares `httk.vasp.relax-cpp` and uses the
-header-only C++17 SDK in `src/httk/workflow/native/cpp/`, a RAII wrapper over the
-native C SDK. Every bridge call reaches the same
-`$HTTK_WORKFLOW_PYTHON -m httk.workflow._shell_bridge` implementation as the
-other runner SDKs, so it works with `examples/mock_vasp.py`.
+`relax.cpp` has the three-step `prepare`, `run`, and `publish` shape and uses
+the native C++17 SDK. The package vendors the C++ header and C pair under
+`cpp/` and `c/`, so its build has no reach-out to the source checkout.
 
-Build it with the Makefile:
+Build and register the compiled runner once per platform class, then publish a
+job and start a manager:
 
 ```console
-make            # cc -std=c99 -c .../httk_workflow.c ; c++ -std=c++17 ...
+httk workflow build WORKSPACE ./relax_cpp
+httk workflow job new WORKSPACE --workflow-dir ./relax_cpp --step prepare \
+    --file POSCAR=POSCAR --data-mode transactional --tag silicon
+httk workflow run WORKSPACE
+httk workflow collect WORKSPACE
 ```
 
-Enumerate it without running it:
+The manifest's `platform = "uname -sm"` records which platform class produced
+the binary. On a shared filesystem, one registration for that tag serves every
+matching node; on a heterogeneous cluster, build once for each tag.
+
+`make` and `./relax --describe` remain available for direct SDK exploration:
 
 ```console
+make
 ./relax --describe
-{"format": "httk-workflow-runner-description", "format_version": 1, "steps": ["prepare", "publish", "run"], "workflow": "httk.vasp.relax-cpp"}
 ```
 
-Drive one relaxation with the compiled binary:
-
-```console
-httk project init --name relax-cpp
-httk workflow workspace init . --name default
-httk workflow job new --workflow ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workflow workspace settings set vasp.command "$PWD/../mock_vasp.py"
-httk workflow run
-httk workflow collect
-```
-
-See `docs/sdks/native_cpp_api.md` for the C++ surface, C string ownership, and the
-plain-function-pointer handler contract.
+Build registration stores `relax` and its object files in the workspace's
+machine-local cache. Publication transfers sources only, so each platform
+build is reproducible from the self-contained package.

@@ -1,6 +1,6 @@
 [workflow]
-id = "httk.vasp.relax-java"
-description = "A minimal Java VASP relaxation runner."
+id = "httk.vasp.relax-cpp"
+description = "A minimal C++17 VASP relaxation runner."
 
 [workflow.runner]
 entry = "run"
@@ -10,4 +10,5 @@ data_mode = "transactional"
 
 [workflow.build]
 command = "make"
-artifacts = ["classes"]
+platform = "uname -sm"
+artifacts = ["relax", "*.o"]

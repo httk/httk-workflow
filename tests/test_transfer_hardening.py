@@ -1,20 +1,25 @@
 """What a detached transfer bundle pins, refuses, and recovers from."""
 
+import argparse
 import ast
 import json
 import os
 import shutil
 import sys
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
+from httk.core.cli import CLIContext
 
+from conftest import register_ws
 from httk.workflow import FormatError, TaskManager, Workspace
 from httk.workflow import transfers as transfers_module
+from httk.workflow._runner_builds import register_build
 from httk.workflow._util import tree_digest
-from httk.workflow.scaffold import new_job
+from httk.workflow.packages import source_tree_digest
+from httk.workflow.scaffold import BuildSpec, new_job
 from httk.workflow.transfers import (
     TRANSFER_DIRECTORY,
     TRANSFER_FORMAT_VERSION,
@@ -24,6 +29,7 @@ from httk.workflow.transfers import (
     validate_bundle,
 )
 from httk.workflow.workflow_cli import _transfer as transfer_cli
+from httk.workflow.workflow_cli import command
 from test_native_java_api import _build_example
 
 
@@ -464,20 +470,107 @@ def test_a_directory_runner_survives_detach_bundle_import_and_execution(tmp_path
     job = new_job(source, package, files={"POSCAR": poscar}, step="prepare", data_mode="transactional")
     job_document = json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
     runner_path = str(job_document["runner"]["path"])
-    expected_digest = tree_digest(package)
+    expected_digest = source_tree_digest(package)
 
     bundle = source.detach(job.job_id, destination_workspace_id=destination.workspace_id)
     manifest = validate_bundle(bundle)
     assert manifest["runners"] == [{"path": runner_path, "sha256": expected_digest}]
+    bundled_runner = bundle / TRANSFER_DIRECTORY / "runners" / Path(*runner_path.split("/"))
+    assert not (bundled_runner / "classes").exists()
     destination.import_bundle(bundle)
 
     stored = destination.runner_store_path(runner_path)
     assert stored.is_dir()
     assert tree_digest(stored) == expected_digest
+    register_build(
+        destination,
+        stored,
+        PurePosixPath(runner_path),
+        BuildSpec("make", ("classes",)),
+        source_sha256=expected_digest,
+    )
     with TaskManager(destination, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=300.0)
     marker = destination.find_marker_by_id(job.job_id)
     assert marker is not None and marker.kind == "succeeded"
+
+
+def test_receive_reminds_about_build_registration_for_bundled_runner_trees(tmp_path: Path, capsys) -> None:
+    source = Workspace.initialize(tmp_path / "source")
+    destination = Workspace.initialize(tmp_path / "destination")
+    package = tmp_path / "compiled"
+    package.mkdir()
+    (package / "httk_workflow.toml").write_text(
+        "[workflow]\nid = 'compiled.transfer'\n[workflow.runner]\nsteps = ['start']\n"
+        "[workflow.build]\ncommand = './build.sh'\nartifacts = ['out']\n",
+        encoding="utf-8",
+    )
+    (package / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (package / "run").chmod(0o755)
+    (package / "build.sh").write_text("#!/bin/sh\nmkdir out\n", encoding="utf-8")
+    (package / "build.sh").chmod(0o755)
+    job = new_job(source, package)
+    bundle = source.detach(job.job_id, destination_workspace_id=destination.workspace_id)
+
+    assert (
+        transfer_cli.handle_transfer_receive(
+            argparse.Namespace(workspace=str(destination.root), bundle=str(bundle)),
+            CLIContext("httk", tmp_path),
+        )
+        == 0
+    )
+    output = capsys.readouterr().err
+    assert "workflow compiled.transfer declares a build" in output
+    assert "httk workflow build" in output
+
+
+def test_local_transfer_command_reminds_after_importing_a_build_declaring_runner(tmp_path: Path, capsys) -> None:
+    source = Workspace.initialize(tmp_path / "source-command")
+    destination = Workspace.initialize(tmp_path / "destination-command")
+    package = tmp_path / "compiled-command"
+    package.mkdir()
+    (package / "httk_workflow.toml").write_text(
+        "[workflow]\nid = 'compiled.transfer.command'\n[workflow.runner]\nsteps = ['start']\n"
+        "[workflow.build]\ncommand = './build.sh'\nartifacts = ['out']\n",
+        encoding="utf-8",
+    )
+    (package / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (package / "run").chmod(0o755)
+    (package / "build.sh").write_text("#!/bin/sh\nmkdir out\n", encoding="utf-8")
+    (package / "build.sh").chmod(0o755)
+    job = new_job(source, package)
+    context = CLIContext("httk", tmp_path)
+    source_name = register_ws(context, source.root, "transfer-source")
+    destination_name = register_ws(context, destination.root, "transfer-destination")
+
+    assert command(["transfer", source_name, destination_name, "--job", job.job_id], context) == 0
+    output = capsys.readouterr().err
+    assert "workflow compiled.transfer.command declares a build" in output
+    assert "httk workflow build transfer-destination --store" in output
+
+
+def test_receive_does_not_remind_for_buildless_runner_trees(tmp_path: Path, capsys) -> None:
+    source = Workspace.initialize(tmp_path / "source")
+    destination = Workspace.initialize(tmp_path / "destination")
+    runner = tmp_path / "runner"
+    runner.mkdir()
+    (runner / "httk_workflow.toml").write_text(
+        "[workflow]\nid = 'buildless.transfer'\n[workflow.runner]\nsteps = ['start']\n",
+        encoding="utf-8",
+    )
+    (runner / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (runner / "run").chmod(0o755)
+    job = new_job(source, runner)
+    bundle = source.detach(job.job_id, destination_workspace_id=destination.workspace_id)
+
+    assert (
+        transfer_cli.handle_transfer_receive(
+            argparse.Namespace(workspace=str(destination.root), bundle=str(bundle)),
+            CLIContext("httk", tmp_path),
+        )
+        == 0
+    )
+    assert "declares a build" not in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------------------

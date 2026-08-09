@@ -1,37 +1,31 @@
 # A VASP relaxation runner in Java
 
-`Relax.java` has the same three-step `prepare`, `run`, and `publish` shape as
-the Rust and Perl examples, using the native Java SDK in
-`src/httk/workflow/native/java/`. It is a std-only bridge client: every
-`Attempt` verb execs `$HTTK_WORKFLOW_PYTHON -m httk.workflow._shell_bridge`.
-The workflow id is `httk.vasp.relax-java`.
+`Relax.java` has the three-step `prepare`, `run`, and `publish` shape, using the
+native Java SDK. `HttkWorkflow.java` is vendored beside it so this package is
+self-contained; the parity test keeps the copy identical to the shipped SDK.
 
-Build the SDK and example into `classes/`:
+The manifest declares a compiled package. Build and register its classes once
+on each machine before starting a manager:
+
+```console
+httk workflow build WORKSPACE ./relax_java
+httk workflow job new WORKSPACE --workflow-dir ./relax_java --step prepare \
+    --file POSCAR=POSCAR --data-mode transactional --tag silicon
+httk workflow run WORKSPACE
+httk workflow collect WORKSPACE
+```
+
+`make` remains useful for local SDK exploration:
 
 ```console
 make
 ./relax --describe
 ```
 
-This is a workflow package directory. The manifest's required `run` entry
-delegates to the `relax` launcher, and package publication hashes and transfers
-the whole directory—including `relax`, `run`, and `classes/`—as one
-digest-pinned tree. That is why this Java example uses the package form while
-a single-binary runner can be published as one file.
-
-From a separate workspace directory, drive one relaxation with the package
-job-new sequence:
-
-```console
-cd ..
-httk project init --name relax-java
-httk workflow workspace init ./relax-java-workspace --name default
-cd relax-java-workspace
-httk workflow job new --workflow-dir ../relax_java --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workflow workspace settings set vasp.command "$PWD/../mock_vasp.py"
-httk workflow run
-httk workflow collect
-```
+Build registration compiles the vendored sources and stores `classes/` in the
+workspace's machine-local runner-build cache. Package publication transfers
+sources only, so the same package can be built independently on another
+machine.
 
 The example is intentionally minimal and mock-VASP compatible; the packaged
 `vasp-relax` runner adds the production restart and diagnostic behavior.

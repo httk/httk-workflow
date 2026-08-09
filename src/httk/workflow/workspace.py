@@ -220,6 +220,7 @@ class Workspace:
         self.root = Path(root).resolve()
         self.control = self.root / ".httk-workflow"
         self.runners = self.control / "runners"
+        self.runner_builds = self.control / "runner-builds"
         self.durable = durable
         self._reported_faults: set[Path] = set()
         self.format = read_json(self.control / "format.json")
@@ -587,7 +588,19 @@ class Workspace:
         is_directory = source_path.is_dir()
         if not is_directory and not source_path.is_file():
             raise FormatError(f"a published runner must be a regular file or directory: {source_path}")
-        digest = tree_digest(source_path) if is_directory else sha256_file(source_path)
+        exclude: Callable[[str], bool] | None = None
+        if is_directory:
+            from .packages import artifact_excluder, read_build_spec, source_tree_digest
+
+            try:
+                build = read_build_spec(source_path)
+                digest = source_tree_digest(source_path)
+            except ValueError as exc:
+                raise FormatError(f"invalid build manifest for {source_path}: {exc}") from exc
+            if build is not None:
+                exclude = artifact_excluder(build)
+        else:
+            digest = sha256_file(source_path)
         target = self.runner_store_path(name if name is not None else source_path.name)
         if not is_directory and target.name == RUNNER_TREE_ENTRY and target.parent != self.runners:
             raise FormatError(
@@ -612,12 +625,12 @@ class Workspace:
                 )
             else:
                 if is_directory:
-                    self._install_runner_tree(source_path, target)
+                    self._install_runner_tree(source_path, target, exclude=exclude)
                 else:
                     self._install_runner_file(source_path, target)
         else:
             if is_directory:
-                self._install_runner_tree(source_path, target)
+                self._install_runner_tree(source_path, target, exclude=exclude)
             else:
                 self._install_runner_file(source_path, target)
         relative = target.relative_to(self.runners)
@@ -642,7 +655,7 @@ class Workspace:
         finally:
             staging.unlink(missing_ok=True)
 
-    def _install_runner_tree(self, source: Path, target: Path) -> None:
+    def _install_runner_tree(self, source: Path, target: Path, *, exclude: Callable[[str], bool] | None = None) -> None:
         """Install a runner tree, replacing an existing tree when requested."""
 
         self.ensure_directory(target.parent)
@@ -651,7 +664,19 @@ class Workspace:
         old: Path | None = None
         try:
             try:
-                shutil.copytree(source, staging, symlinks=False)
+                copy_ignore: Callable[[str, list[str]], set[str]] | None = None
+                if exclude is not None:
+
+                    def build_ignore(directory: str, names: list[str]) -> set[str]:
+                        return {
+                            name
+                            for name in names
+                            if exclude(PurePosixPath(os.path.relpath(Path(directory) / name, source)).as_posix())
+                        }
+
+                    copy_ignore = build_ignore
+
+                shutil.copytree(source, staging, symlinks=False, ignore=copy_ignore)
                 for entry in sorted(staging.rglob("*")):
                     entry.chmod(0o555)
                 # Linux requires write permission on a directory itself to rename it;

@@ -7,22 +7,24 @@ import subprocess
 import sys
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
 
 import httk.workflow
 from httk.workflow import TaskManager, Workspace
+from httk.workflow._runner_builds import register_build
 from httk.workflow.protocol import JobSpec, prepare_job_payload
-from httk.workflow.scaffold import describe_runner
+from httk.workflow.scaffold import BuildSpec, describe_runner, new_job
 
 _CXX = shutil.which("g++") or shutil.which("c++")
 _CC = shutil.which("cc")
+_MAKE = shutil.which("make")
 _READELF = shutil.which("readelf")
 pytestmark = pytest.mark.skipif(
-    _CXX is None or _CC is None,
-    reason="g++/c++ and a C compiler are required",
+    _CXX is None or _CC is None or _MAKE is None,
+    reason="g++/c++, a C compiler, and make are required",
 )
 
 _C_SDK = Path(httk.workflow.__file__).parent / "native" / "c"
@@ -214,6 +216,14 @@ def test_the_sdk_and_a_runner_compile_warning_clean(tmp_path: Path) -> None:
     assert "E" not in stack_headers[0].split()[-2]
 
 
+def test_vendored_cpp_sdk_is_byte_identical() -> None:
+    assert (_RELAX_CPP.parent / "cpp" / "httk_workflow.hpp").read_bytes() == (
+        _CPP_SDK / "httk_workflow.hpp"
+    ).read_bytes()
+    for name in ("httk_workflow.c", "httk_workflow.h"):
+        assert (_RELAX_CPP.parent / "c" / name).read_bytes() == (_C_SDK / name).read_bytes()
+
+
 def test_describe_is_byte_identical_to_the_bash_sdk(tmp_path: Path) -> None:
     workflow = "tests.cpp.describe"
     order = ["relax", "collect", "prepare"]
@@ -361,3 +371,50 @@ def test_the_relax_runner_prepares_runs_and_publishes(tmp_path: Path) -> None:
     published = root / "data" / "vasp"
     assert (published / "OUTCAR").is_file()
     assert (published / "CONTCAR").read_text(encoding="utf-8").splitlines()[-1].startswith("0.51")
+
+
+def test_relax_package_needs_foreground_build_registration(tmp_path: Path) -> None:
+    package = tmp_path / "relax_cpp"
+    shutil.copytree(_RELAX_CPP.parent, package, ignore=shutil.ignore_patterns("relax", "*.o"))
+    assert not (package / "relax").exists()
+    poscar = tmp_path / "POSCAR"
+    poscar.write_text(_POSCAR, encoding="utf-8")
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    workspace.set_setting("vasp.command", f"{sys.executable} {_MOCK_VASP}")
+    first = new_job(
+        workspace,
+        package,
+        files={"POSCAR": poscar},
+        tag="unbuilt",
+        data_mode="transactional",
+        step="prepare",
+    )
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=300.0)
+    marker = workspace.find_marker_by_id(first.job_id)
+    assert marker is not None and marker.kind == "failed"
+    assert workspace.read_state(marker)["failure"]["code"] == "runner_not_built"
+
+    source = workspace.runner_store_path(str(first.runner["path"]))
+    register_build(
+        workspace,
+        source,
+        PurePosixPath(str(first.runner["path"])),
+        BuildSpec("make", ("relax", "*.o"), "uname -sm"),
+        source_sha256=str(first.runner["sha256"]),
+    )
+    second = new_job(
+        workspace,
+        package,
+        files={"POSCAR": poscar},
+        tag="built",
+        data_mode="transactional",
+        step="prepare",
+    )
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=300.0)
+    marker = workspace.find_marker_by_id(second.job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    root = workspace.payload_path(marker.placement, marker.job_key)
+    assert (root / "data" / "vasp" / "OUTCAR").is_file()

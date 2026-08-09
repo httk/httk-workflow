@@ -43,6 +43,7 @@ carries the same switch on the leaf that acts on it, so both spellings work.
 ```text
 httk workflow workspace  init | list | default | move | forget | delete | status | managers | settings show | settings set | settings unset | policy show | policy set | fsck | gc | unlock
 httk workflow runner     publish | describe
+httk workflow build      [WORKSPACE] TARGET
 httk workflow job        new | submit | request | list | show | log | why | debug
 httk workflow describe   TARGET [--json]
 httk workflow precheck   [WORKSPACE] [--placement P] [--json]
@@ -121,10 +122,32 @@ name, and re-register it with `workspace init <newpath> --name NAME` instead.
 | `runner publish FILE_OR_DIRECTORY` | publish one runner file or directory, pinned by digest | `--workspace` (required), `--name`, `--replace` |
 | `runner describe [NAME]` | report the published runners and their digests | `--workspace` (required), `--json` |
 
+### `build` — foreground registration of compiled workflow packages
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `build [WORKSPACE] TARGET` | build and register a package, store runner, or job's workspace runner | `--list`, `--json` |
+
 Directory rows are reported as `tree (inferred)` because the store format
 identifies a tree by its `run` entry. New nested file publishes named `run` are
 refused; a pre-existing store may still contain an ambiguous legacy layout, so
 the marker is an honest inference rather than provenance metadata.
+
+The build command has two forms:
+
+```console
+httk workflow build [WORKSPACE] TARGET [--json]
+httk workflow build [WORKSPACE] --list [--json]
+```
+
+`TARGET` may be a workflow package directory, a workspace runner-store path,
+or a job reference whose runner is a workspace package. A package directory is
+published first, then its source tree is built and its artifacts are registered
+for the local platform tag. A store path or job reference builds the already
+published source tree. `--list` does no build and prints the workspace's
+registrations; `--json` emits machine-readable build or list records. Exit 0
+means the registration completed (or the list was read); malformed targets,
+probe/build failures, and missing artifacts are nonzero failures.
 
 ### `job` — making jobs, and finding out about them
 
@@ -380,6 +403,11 @@ environment is unresolved or cannot be read. Transfer checks intentionally use
 job overrides, destination settings, and declared defaults; they do not use the
 client process environment as a destination substitute. A remote settings read
 that is unavailable produces one immediate warning in non-strict mode.
+
+Bundles carry sources only for workflows that declare `[workflow.build]`;
+compiled artifacts are machine-local and are never transferred. After importing
+such a bundle, run `httk workflow build WORKSPACE TARGET` on the destination
+before starting its managers; the import operation repeats this reminder.
 
 ### The protocol spellings, and what is gone
 

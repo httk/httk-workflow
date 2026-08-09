@@ -144,6 +144,67 @@ manifest preparation. Preparing a `maker`-form job imports the named module on
 the submitting machine to verify the class exists, so submit where the Maker is
 installed; merely describing or resolving the package never imports it.
 
+## Building and registering binaries
+
+A compiled package declares its foreground build and disposable outputs in
+`[workflow.build]`:
+
+```toml
+[workflow.build]
+command = "make"
+platform = "uname -sm"       # optional; omit for one `any` registration
+artifacts = ["relax", "*.o"]
+```
+
+`command` and the optional `platform` are shell-word command strings. Each
+`artifacts` member is a relative POSIX `fnmatch` pattern. A directory match
+covers that directory's subtree; patterns are evaluated against relative paths.
+The patterns may not strip `run` or `httk_workflow.toml`, so the committed
+`run` entry and manifest remain in the source package. The build command runs in
+a copy of the published source tree and can use only files inside that package:
+compiled packages must vendor their SDK and other build inputs. For example,
+`examples/relax_cpp` vendors both halves of its native SDK.
+
+Publication is sources-only for build-declaring packages. Declared artifacts are
+stripped before publication, and the digest pins those remaining sources, not a
+machine's compiler output. Binaries never ride a transfer bundle. This makes a
+package self-contained and lets each destination build its own native runner.
+
+The operational sequence is one foreground registration per platform class:
+
+```console
+httk workflow build WORKSPACE ./my-workflow
+httk workflow job new WORKSPACE --workflow-dir ./my-workflow --step prepare
+httk workflow run WORKSPACE
+```
+
+Managers never build. This rejects a thundering herd of managers compiling the
+same package; on a shared filesystem, one registration for a platform tag serves
+all matching nodes. A heterogeneous cluster should declare `platform` and run
+the command once for each resulting tag. Omitting it on such a cluster creates
+one `any` registration, so every node uses the same binary regardless of its
+architecture.
+
+Registrations live under
+`WORKSPACE/.httk-workflow/runner-builds/<store-name>/<tag>/current.json`, which
+points to `<tag>/gen-*/artifacts/`. Each generation's `build.json` stamp records
+the source digest, command, platform probe, and time; the sibling `<tag>.log`
+records the command metadata and exit status. Re-registration leaves prior
+generations on disk; remove the tag directory only while no managers are
+running. Use
+`httk workflow build --list WORKSPACE` to inspect registrations. A missing or
+stale registration produces structured `runner_not_built`; a failed platform
+probe, build, or artifact collection produces `runner_build_failed`. These
+manager-detected failures are terminal unless the job explicitly opts into
+`retry_on`, for example `retry_on = ["runner_not_built"]`.
+
+`workflow precheck` checks an unqualified (`platform` omitted) build
+registration and reports a missing one as a problem. Platform-specific builds
+are reported as indeterminate because the local precheck cannot stand in for the
+manager's machine; the manager probes its own platform at attempt start. The
+build command is never inferred from `run`: `run` must be committed, executable,
+and usable as the package's source entry point before any build is registered.
+
 ### Hook tables
 
 Each hook table has exactly one key, `file`, naming a relative regular file

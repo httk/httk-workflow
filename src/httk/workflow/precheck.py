@@ -147,7 +147,43 @@ def _runner_problem(
         placement=marker.placement,
         runner_search_paths=runner_search_paths,
     )
-    return None if problem is None else ("problem", problem)
+    if problem is not None:
+        return "problem", problem
+    if job.runner_source == "workspace":
+        candidate = workspace.runner_store_path(job.runner_path)
+        try:
+            from ._runner_builds import registered_artifacts, workspace_build_command
+            from .packages import read_build_spec
+
+            build_spec = read_build_spec(candidate) if candidate.is_dir() else None
+        except ValueError as exc:
+            return "problem", f"published runner manifest is malformed: {exc}"
+        if build_spec is not None:
+            if build_spec.platform is not None:
+                return (
+                    "indeterminate",
+                    (
+                        "declares platform-specific builds; registration is checked at manager start — run: "
+                        f"{workspace_build_command(workspace, job.runner_path)}"
+                    ),
+                )
+            if (
+                registered_artifacts(
+                    workspace,
+                    job.runner_path,
+                    "any",
+                    expected_source_sha256=job.runner_sha256,
+                )
+                is None
+            ):
+                return (
+                    "problem",
+                    (
+                        f"workflow package {job.runner_path.as_posix()} is not built on this machine for platform any; "
+                        f"run: {workspace_build_command(workspace, job.runner_path)}"
+                    ),
+                )
+    return None
 
 
 def _claim_finding(

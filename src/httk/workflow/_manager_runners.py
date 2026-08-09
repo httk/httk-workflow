@@ -160,13 +160,9 @@ def stage_runner(
     try:
         if source.is_dir():
             shutil.copytree(source, staged, symlinks=False)
-            for entry in sorted(staged.rglob("*")):
-                entry.chmod(0o500)
-            staged.chmod(0o500)
             digest = tree_digest(staged)
         else:
             shutil.copyfile(source, staged)
-            staged.chmod(0o500)
             digest = sha256_file(staged)
     except OSError as exc:
         raise RunnerResolutionError(
@@ -179,6 +175,39 @@ def stage_runner(
             "runner_mismatch",
             f"{job.runner_source} runner {job.runner_path.as_posix()} has digest {digest}, but the job pinned {job.runner_sha256}",
         )
+    if source.is_dir() and job.runner_source == "workspace":
+        from ._runner_builds import overlay_artifacts, platform_tag, registered_artifacts, workspace_build_command
+        from .packages import read_build_spec
+
+        try:
+            spec = read_build_spec(staged)
+            if spec is not None:
+                tag = platform_tag(spec)
+                artifacts = registered_artifacts(
+                    manager.workspace,
+                    job.runner_path,
+                    tag,
+                    expected_source_sha256=job.runner_sha256,
+                )
+                if artifacts is None:
+                    raise RunnerResolutionError(
+                        "runner_not_built",
+                        f"workflow package {job.runner_path.as_posix()} is not built on this machine for "
+                        f"platform {tag}; run: {workspace_build_command(manager.workspace, job.runner_path)}",
+                    )
+                for entry in (staged, *staged.rglob("*")):
+                    entry.chmod(entry.stat().st_mode | 0o700 if entry.is_dir() else entry.stat().st_mode | 0o600)
+                overlay_artifacts(artifacts, staged)
+        except ValueError as exc:
+            raise RunnerResolutionError("runner_unavailable", f"published runner manifest is malformed: {exc}") from exc
+        except OSError as exc:
+            raise RunnerResolutionError("runner_unavailable", f"cannot overlay runner artifacts: {exc}") from exc
+    if staged.is_dir():
+        for entry in sorted(staged.rglob("*")):
+            entry.chmod(0o500)
+        staged.chmod(0o500)
+    else:
+        staged.chmod(0o500)
     executable = staged / RUNNER_TREE_ENTRY if staged.is_dir() else staged
     if not executable.is_file():
         raise RunnerResolutionError(

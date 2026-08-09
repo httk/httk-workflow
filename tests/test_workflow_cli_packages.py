@@ -321,6 +321,7 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
 
     assert command(["describe", str(package), "--json"], context) == 0
     directory = json.loads(capsys.readouterr().out)
+    assert directory["build"] == {"present": False}
     assert directory["hooks"] == {
         "instantiate": {"present": True, "file": "instantiate.py", "kind": "python", "packaged": False},
         "collect": {"present": True, "file": "collect.py", "kind": "python", "packaged": False},
@@ -341,6 +342,25 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
         assert by_alias["workflow"] == "tests.cli.package"
     finally:
         scaffold._WORKFLOW_PROVIDERS.pop(provider.workflow_id, None)
+
+
+def test_workflow_describe_reports_build_registration(tmp_path: Path, capsys) -> None:
+    package = _package(
+        tmp_path / "build",
+        _MANIFEST
+        + '\n[workflow.build]\ncommand = "python build.py"\nplatform = "linux x86_64"\nartifacts = ["build"]\n',
+    )
+    context = _context(tmp_path)
+    assert command(["describe", str(package), "--json"], context) == 0
+    described = json.loads(capsys.readouterr().out)
+    assert described["build"] == {
+        "present": True,
+        "command": "python build.py",
+        "platform": "linux x86_64",
+        "artifacts": ["build"],
+    }
+    assert command(["describe", str(package)], context) == 0
+    assert "build: yes" in capsys.readouterr().out
 
 
 def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path: Path, capsys) -> None:
@@ -421,3 +441,86 @@ def test_directory_package_runs_and_job_records_retain_the_tree_pin(tmp_path: Pa
         "sha256": tree_digest(package),
         "arguments": [],
     }
+
+
+def _compiled_cli_package(root: Path, *, build_command: str = "./build.sh") -> Path:
+    package = _package(
+        root,
+        _MANIFEST + f'\n[workflow.build]\ncommand = "{build_command}"\nartifacts = ["out"]\n',
+    )
+    (package / "build.sh").write_text(
+        "#!/bin/sh\nmkdir -p out\nprintf compiler-output\nprintf artifact > out/result\n", encoding="utf-8"
+    )
+    (package / "build.sh").chmod(0o755)
+    return package
+
+
+def test_workflow_build_registers_and_lists_a_package(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "build")
+    package = _compiled_cli_package(tmp_path / "package")
+
+    assert command(["build", name, str(package)], context) == 0
+    assert "platform probe" in capsys.readouterr().out
+    assert command(["build", name, "--list"], context) == 0
+    assert "any" in capsys.readouterr().out
+
+
+def test_workflow_build_uses_syntactic_path_detection_and_pointer_listings(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "build-targets")
+    package = _compiled_cli_package(tmp_path / "bare")
+    workspace.publish_runner(package, name="bare")
+
+    # The existing local directory named ``bare`` must not shadow the store selector.
+    assert command(["build", name, "bare"], context) == 0
+    capsys.readouterr()
+    assert command(["build", name, "./bare"], context) == 0
+    capsys.readouterr()
+    current = next(workspace.runner_builds.rglob("current.json"))
+    generation = json.loads(current.read_text(encoding="utf-8"))["generation"]
+    (current.parent / generation / "artifacts" / "build.json").write_text("{}", encoding="utf-8")
+    assert command(["build", name, "--list", "--json"], context) == 0
+    rows = json.loads(capsys.readouterr().out)
+    stores = {row["store"] for row in rows}
+    assert "bare" in stores and len(stores) == 2
+
+
+def test_workflow_build_store_option_handles_nested_selectors(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "build-nested")
+    package = _compiled_cli_package(tmp_path / "nested")
+    workspace.publish_runner(package, name="group/nested")
+
+    assert command(["build", name, "--store", "group/nested"], context) == 0
+    capsys.readouterr()
+    assert command(["build", name, "group/nested"], context) == 2
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_workflow_build_refuses_a_buildless_package_and_reports_failures(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "build-errors")
+    buildless = _package(tmp_path / "buildless")
+    assert command(["build", name, str(buildless)], context) == 2
+    assert "[workflow.build]" in capsys.readouterr().err
+
+    failed = _compiled_cli_package(tmp_path / "failed", build_command="./missing.sh")
+    assert command(["build", name, str(failed)], context) == 2
+    assert "missing.sh" in capsys.readouterr().err
+
+
+def test_workflow_build_json_is_one_report(tmp_path: Path, capfd) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "build-json")
+    package = _compiled_cli_package(tmp_path / "package-json")
+    assert command(["build", name, str(package), "--json"], context) == 0
+    captured = capfd.readouterr()
+    report = json.loads(captured.out)
+    assert report["platform_tag"] == "any"
+    assert "compiler-output" in captured.err

@@ -49,9 +49,10 @@ class RunnerResolutionError(WorkflowError):
     """A shared runner cannot be resolved, staged, or verified.
 
     The failure carries the exact protocol failure ``code`` the manager records,
-    so an unresolvable runner (``runner_unavailable``) and a runner whose staged
-    bytes disagree with the digest the job pinned (``runner_mismatch``) stay
-    distinguishable to an operator.
+    so an unresolvable runner (``runner_unavailable``), a runner whose staged
+    bytes disagree with the digest the job pinned (``runner_mismatch``), a
+    missing registration (``runner_not_built``), and a failed foreground build
+    (``runner_build_failed``) stay distinguishable to an operator.
 
     :param code: Protocol failure code recorded by the manager.
     :param message: Human-readable failure description.
