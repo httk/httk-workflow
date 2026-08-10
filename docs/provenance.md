@@ -65,7 +65,7 @@ from httk.workflow.provenance import run_record
 
 record = next(job_records(workspace))
 run = run_record(record)
-store.save(run)  # the httk-data side
+store.save(run)  # the httk-store side
 ```
 
 `run_record` does not fold children into the parent run. Each child collects to

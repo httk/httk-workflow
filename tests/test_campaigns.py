@@ -234,7 +234,7 @@ def test_campaign_collect_into_skips_degraded_jobs_and_exits_nonzero(tmp_path: P
     """Campaign collect passes --into and --allow-job-collector through, stores no
     empty Run for a degraded job, and exits nonzero with an aggregated summary."""
 
-    pytest.importorskip("httk.data")
+    pytest.importorskip("httk.store")
     root, workspaces = _campaign_project(tmp_path, "explicit")
     runner = _runner(tmp_path, _SUCCEED, "succeed.py")
     for partition in ("north", "south"):

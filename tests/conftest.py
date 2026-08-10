@@ -41,7 +41,7 @@ def _isolated_httk_config(tmp_path_factory: pytest.TempPathFactory, monkeypatch:
     still overrides it: this only runs first."""
 
     monkeypatch.setenv("HTTK_CONFIG_HOME", str(tmp_path_factory.mktemp("httk-config")))
-    monkeypatch.setenv("HTTK_DATA_HOME", str(tmp_path_factory.mktemp("httk-data")))
+    monkeypatch.setenv("HTTK_DATA_HOME", str(tmp_path_factory.mktemp("httk-store")))
 
 
 @pytest.fixture(autouse=True)

@@ -478,9 +478,9 @@ def test_generated_definitions_follow_a_role_when_its_kind_changes() -> None:
 
 
 def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: Workspace, capsys) -> None:
-    pytest.importorskip("httk.data")
+    pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
-    from httk.data.db import Database, SqlStore
+    from httk.store.db import Database, SqlStore
 
     package = _package(tmp_path / "collect-into", "echo.cwl", _ECHO_TOOL, "message", "spoken")
     new_job(workspace, package, inputs={"message": "hello"})

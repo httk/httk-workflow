@@ -594,7 +594,7 @@ Each output value must be exactly one of these discriminator wrappers:
 | Wrapper | Result |
 | --- | --- |
 | `{"entry": { ... }}` | A registered entry type is reconstructed as its real record. The mapping must contain a registered string `type`; an optional `id` must match the constructed record. |
-| `{"value": <JSON value>}` | A `DataRecord`. If the declared output has `ref`, the referenced property definition is loaded and the value is hard-validated with `httk-data` (which is required at collect time); without `ref`, a generated `_httk_custom_*` property definition is used. |
+| `{"value": <JSON value>}` | A `DataRecord`. If the declared output has `ref`, the referenced property definition is loaded and the value is hard-validated with `httk-store` (which is required at collect time); without `ref`, a generated `_httk_custom_*` property definition is used. |
 | `{"file": "<path>"}` | A workspace-confined `FileRecord`. The wrapper must contain exactly the `file` key, and the path must resolve to a regular file below the workspace or workdir. |
 
 The wrapper discriminator is reserved: extra keys are rejected. On the
@@ -666,7 +666,7 @@ Python users who need persistence call `store.save(...)` themselves. `--into`
 is the CLI shortcut: it opens a file-backed SQLite `SqlStore`, saves output
 entries, runs, and products, and reports stored ids. Entry families and record
 classes are resolved lazily from the core registry; output types may require
-`httk-data` and `httk-atomistic` to be installed.
+`httk-store` and `httk-atomistic` to be installed.
 
 With `--into`, each job's entries, run, and products are stored as one job-level
 operation. A storage failure is reported on that job's summary as

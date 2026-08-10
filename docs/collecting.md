@@ -25,7 +25,7 @@ not today's. The workflow collect hook is the workflow-owned substep of collecti
 provider or pinned manifest is reachable, no products are emitted.
 
 `JobRecord` is the layering boundary of *httk₂*. *httk-workflow* has no
-database dependency: it produces records, and something else — `httk-data` —
+database dependency: it produces records, and something else — `httk-store` —
 consumes them. A consumer therefore reads results like this, and nothing in
 *httk-workflow* knows what `store` or `load_vasp` are:
 
@@ -257,7 +257,7 @@ at a time. The limits are enforced during draining: a 1 MiB response line, a
 degrades the affected executable collector group. Surplus blank response lines
 are ignored; a nonblank surplus response line likewise degrades the whole group. Other
 malformed or non-UTF-8 responses degrade only their individual job. A declared output
-`ref` makes `httk-data` validation hard-required at collect time; without a
+`ref` makes `httk-store` validation hard-required at collect time; without a
 `ref`, the framework creates a `_httk_custom_*` property definition. Python
 `.py` hooks keep the in-process path and the same successful assembled-output
 semantics, but a registered Python collector exception aborts iteration rather

@@ -145,9 +145,9 @@ def _store_collected(items: list[CollectedJob], path: str) -> list[dict[str, obj
     """Save one bounded collected sweep into a file-backed SQLite store."""
 
     try:
-        from httk.data.db import Database, SqlStore, StorageLayoutUpgradeRequiredError
+        from httk.store.db import Database, SqlStore, StorageLayoutUpgradeRequiredError
     except ImportError as exc:
-        raise ValueError("--into requires httk-data with its database dependencies") from exc
+        raise ValueError("--into requires httk-store with its database dependencies") from exc
 
     target = Path(path).expanduser()
     target.parent.mkdir(parents=True, exist_ok=True)
