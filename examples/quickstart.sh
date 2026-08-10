@@ -62,11 +62,11 @@ httk_workflow workspace settings set vasp.command "$here/mock_vasp.py"
 # 4. Run every ready job until nothing is left to do.
 httk_workflow run
 
-# 5. What happened, and store entries, runs, and products when httk-data is installed.
-if python3 -c 'import httk.data.db' >/dev/null 2>&1; then
+# 5. What happened, and store entries, runs, and products when httk-store is installed.
+if python3 -c 'import httk.store.db' >/dev/null 2>&1; then
     httk_workflow collect --into results.sqlite
 else
-    echo 'httk-data is not installed; skipping results.sqlite storage' >&2
+    echo 'httk-store is not installed; skipping results.sqlite storage' >&2
     httk_workflow collect
 fi
 

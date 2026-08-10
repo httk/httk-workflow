@@ -1062,10 +1062,10 @@ def _resolve_executable_output(record: JobRecord, provider: object, role: str, v
         ref = declared.get("ref")
         if isinstance(ref, str):
             try:
-                from httk.data import validation
+                from httk.store import validation
             except ImportError as exc:
                 raise _CollectEnvironmentError(
-                    "hard collect validation requires httk-data; install with `pip install httk-data`"
+                    "hard collect validation requires httk-store; install with `pip install httk-store`"
                 ) from exc
             definition = _core().load_property_definition(ref)
             validation.validate_property(definition, raw)

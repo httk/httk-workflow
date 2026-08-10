@@ -26,7 +26,7 @@ vocabulary and which version it follows, and a consumer that understands that
 vocabulary gives it meaning. An engine that wrapped or changed the document
 could only ever come to disagree with the standard it is carrying.
 
-collection therefore belongs to *httk-data* and OPTIMADE tooling. Carriage,
+collection therefore belongs to *httk-store* and OPTIMADE tooling. Carriage,
 digest coverage, and honest reporting belong here.
 
 Packaged workflows may carry declarations into every scaffolded `job.json`; the

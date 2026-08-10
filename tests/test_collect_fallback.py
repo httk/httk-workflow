@@ -247,10 +247,10 @@ def test_native_parameters_do_not_trigger_language_fallback(
 
 
 def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_path: Path, capsys) -> None:
-    pytest.importorskip("httk.data")
+    pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
     from httk.core import DataRecord, DataRecordEntry, RunEntry
-    from httk.data.db import Database, SqlStore
+    from httk.store.db import Database, SqlStore
 
     workspace, _ = _finished(tmp_path)
     context = CLIContext("httk", tmp_path)
@@ -279,10 +279,10 @@ def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_pa
 
 
 def test_collect_into_twice_is_idempotent(tmp_path: Path, capsys) -> None:
-    pytest.importorskip("httk.data")
+    pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
     from httk.core import RunEntry
-    from httk.data.db import Database, SqlStore
+    from httk.store.db import Database, SqlStore
 
     workspace, _ = _finished(tmp_path)
     context = CLIContext("httk", tmp_path)
@@ -305,10 +305,10 @@ def test_collect_into_twice_is_idempotent(tmp_path: Path, capsys) -> None:
 
 
 def test_collect_into_a_store_with_a_different_layout_teaches(tmp_path: Path, capsys) -> None:
-    pytest.importorskip("httk.data")
+    pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
     from httk.core.register import resolve_entry_family, resolve_entry_record
-    from httk.data.db import Database, SqlStore
+    from httk.store.db import Database, SqlStore
 
     workspace, _ = _finished(tmp_path)
     context = CLIContext("httk", tmp_path)
@@ -326,7 +326,7 @@ def test_collect_into_a_store_with_a_different_layout_teaches(tmp_path: Path, ca
 
 
 def test_collect_into_reports_an_unknown_entry_type_per_job(tmp_path: Path, capsys) -> None:
-    pytest.importorskip("httk.data")
+    pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
 
     manifest = _DATA_MANIFEST.replace('entry_type = "records"', 'entry_type = "fake_entries"')

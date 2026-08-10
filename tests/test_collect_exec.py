@@ -496,12 +496,12 @@ def test_declared_ref_validates_and_uses_definition(monkeypatch: pytest.MonkeyPa
         fromlist: Sequence[str] | None = None,
         level: int = 0,
     ) -> ModuleType:
-        if name.startswith("httk.data"):
-            raise ModuleNotFoundError("httk-data is absent", name="httk.data")
+        if name.startswith("httk.store"):
+            raise ModuleNotFoundError("httk-store is absent", name="httk.store")
         return real_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr("builtins.__import__", blocked_import)
-    with pytest.raises(RuntimeError, match="pip install httk-data"):
+    with pytest.raises(RuntimeError, match="pip install httk-store"):
         _resolve_executable_output(record, provider, "answer", {"value": []})
 
 

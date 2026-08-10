@@ -15,7 +15,7 @@ to be declared.
 Every command below works without VASP installed: `examples/mock_vasp.py` writes
 the output files a finished run leaves behind, so the whole path — prepare, run,
 publish, collect — is exercised for real, with meaningless numbers. Install
-`httk-data` for `collect --into results.sqlite`; without it, that command reports
+`httk-store` for `collect --into results.sqlite`; without it, that command reports
 a teaching error (the shell example skips storage and continues).
 
 The complete sequence of this page is also `examples/quickstart.sh`, which runs
@@ -90,7 +90,7 @@ the workspace, which is how a campaign is run.
 
 **`collect --into`** printed one JSON summary per finished job and stored its
 entries, run, and products in the file-backed SQLite database `results.sqlite`.
-The stored results are readable with `httk-data`; the collection record is the
+The stored results are readable with `httk-store`; the collection record is the
 boundary to that data layer — see {doc}`collecting`.
 
 **`postprocess`** ran the registered `relaxation-plot` script against the
