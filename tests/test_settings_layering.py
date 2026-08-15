@@ -327,6 +327,49 @@ def test_seed_settings_skips_a_derived_name_collision(tmp_path: Path) -> None:
     assert workspace.seed_settings({"a_b": "seed"}) == {"a.b": "operator"}
 
 
+def test_a_workflow_prelude_initializes_the_runner_environment(tmp_path: Path) -> None:
+    """Layer 2: the workspace prelude for the job's workflow runs in a login shell
+    before the runner, so a variable it exports reaches the runner's environment."""
+
+    observed = _manager_environment(
+        tmp_path,
+        {},
+        ("HTTK_PRELUDE_MARKER",),
+        before_run=lambda workspace: workspace.set_workflow_prelude(
+            "tests.settings_export", "export HTTK_PRELUDE_MARKER=hello"
+        ),
+    )
+    assert observed["HTTK_PRELUDE_MARKER"] == "hello"
+
+
+def test_a_failing_workflow_prelude_aborts_before_the_runner(tmp_path: Path) -> None:
+    """``set -e`` in the prelude aborts the login shell before it execs the runner,
+    so a job whose prelude fails never succeeds."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload = tmp_path / "payload"
+    payload.mkdir()
+    runner = payload / "runner.py"
+    runner.write_text(_EXPORT_RUNNER.format(names=("HTTK_PRELUDE_MARKER",)), encoding="utf-8")
+    runner.chmod(0o755)
+    job = prepare_job_payload(
+        payload,
+        JobSpec(
+            name="Settings export",
+            workflow="tests.settings_export",
+            runner_path="runner.py",
+            initial_step="only",
+            data_mode="none",
+        ),
+    )
+    workspace.submit(payload, "project/settings")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        workspace.set_workflow_prelude("tests.settings_export", "false")
+        manager.run_until_idle(timeout=120.0)
+    marker = workspace.find_marker_by_id(job.id)
+    assert marker is not None and marker.kind != "succeeded"
+
+
 def test_the_vasp_runner_reads_the_workspace_setting_without_the_environment(tmp_path: Path, monkeypatch) -> None:
     """The packaged relaxation runner takes its command from ``vasp.command``, so a
     workspace configured with it needs no ``HTTK_VASP_COMMAND`` in the run's env."""

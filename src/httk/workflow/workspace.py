@@ -94,6 +94,40 @@ def _validate_settings(raw: object) -> dict[str, object]:
     return {_validate_setting_key(key): _validate_setting_value(str(key), value) for key, value in raw.items()}
 
 
+def _validate_workflow_prelude_id(workflow_id: str) -> str:
+    """Return one workflow-prelude key, refusing an ill-formed one.
+
+    The key mirrors a ``[workflow].id``: a nonempty string with no whitespace,
+    because a prelude map is keyed by the workflow it initializes the
+    environment for.
+    """
+
+    if not isinstance(workflow_id, str) or not workflow_id or any(character.isspace() for character in workflow_id):
+        raise ValueError(f"workflow prelude id must be a nonempty whitespace-free string: {workflow_id!r}")
+    return workflow_id
+
+
+def _validate_workflow_prelude_value(workflow_id: str, value: object) -> str:
+    """Return one workflow-prelude value, refusing a non-string or NUL."""
+
+    if not isinstance(value, str):
+        raise ValueError(f"workflow prelude {workflow_id!r} must be a string, not {type(value).__name__}")
+    if "\0" in value:
+        raise ValueError(f"workflow prelude {workflow_id!r} must not contain NUL characters")
+    return value
+
+
+def _validate_workflow_preludes(raw: object) -> dict[str, str]:
+    """Return a validated map of workflow id to shell prelude text."""
+
+    if not isinstance(raw, Mapping):
+        raise FormatError("workspace workflow_preludes must be a JSON object")
+    return {
+        _validate_workflow_prelude_id(str(key)): _validate_workflow_prelude_value(str(key), value)
+        for key, value in raw.items()
+    }
+
+
 # Anything below state/ that cannot possibly be a marker basename is ignored
 # silently: NFS silly-renames, editor droppings, and other foreign files are
 # not protocol entries and must never stop a scan or reach quarantine.
@@ -496,6 +530,60 @@ class Workspace:
         write_json_atomic(self.control / "format.json", stored, durable=self.durable)
         self.format = stored
         return dict(current)
+
+    def read_workflow_preludes(self) -> dict[str, str]:
+        """Read and validate the workflow-in-workspace preludes from disk.
+
+        A workflow prelude is shell text run to initialize the environment
+        before each launch of a runner for that workflow. A workspace written
+        before the section existed reads as an empty map.
+
+        :return: The current map of workflow id to prelude text.
+        :raises httk.workflow.errors.FormatError: If the stored preludes are not valid.
+        """
+
+        return _validate_workflow_preludes(read_json(self.control / "format.json").get("workflow_preludes", {}))
+
+    def set_workflow_prelude(self, workflow_id: str, value: str) -> dict[str, str]:
+        """Store one workflow prelude and return the resulting map.
+
+        The write is the same read-modify-write of ``format.json`` that
+        :meth:`set_setting` uses: an exclusively created temporary and a rename,
+        so a reader never sees a torn object, and last writer wins.
+
+        :param workflow_id: Name the workflow whose prelude to store.
+        :param value: Supply the shell prelude text.
+        :return: The resulting map of workflow id to prelude text.
+        :raises ValueError: If the workflow id or prelude value is invalid.
+        """
+
+        _validate_workflow_prelude_id(workflow_id)
+        _validate_workflow_prelude_value(workflow_id, value)
+        stored = read_json(self.control / "format.json")
+        preludes = _validate_workflow_preludes(stored.get("workflow_preludes", {}))
+        preludes[workflow_id] = value
+        stored["workflow_preludes"] = preludes
+        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
+        self.format = stored
+        return dict(preludes)
+
+    def unset_workflow_prelude(self, workflow_id: str) -> dict[str, str]:
+        """Remove one workflow prelude, refusing one that is not set.
+
+        :param workflow_id: Name the workflow whose prelude to remove.
+        :return: The resulting map of workflow id to prelude text.
+        :raises ValueError: If the prelude is not set.
+        """
+
+        stored = read_json(self.control / "format.json")
+        preludes = _validate_workflow_preludes(stored.get("workflow_preludes", {}))
+        if workflow_id not in preludes:
+            raise ValueError(f"workflow prelude is not set: {workflow_id}")
+        del preludes[workflow_id]
+        stored["workflow_preludes"] = preludes
+        write_json_atomic(self.control / "format.json", stored, durable=self.durable)
+        self.format = stored
+        return dict(preludes)
 
     def open_journal_writer(self, *, writer_id: str | None = None) -> JournalWriter:
         """Open one exclusive journal writer configured by workspace policy.

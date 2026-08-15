@@ -41,7 +41,7 @@ carries the same switch on the leaf that acts on it, so both spellings work.
 ## The complete tree
 
 ```text
-httk workflow workspace  init | list | default | move | forget | delete | status | managers | settings show | settings set | settings unset | policy show | policy set | fsck | gc | unlock
+httk workflow workspace  init | list | default | move | forget | delete | status | managers | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock
 httk workflow runner     publish | describe
 httk workflow build      [WORKSPACE] TARGET
 httk workflow job        new | submit | request | list | show | log | why | debug
@@ -90,6 +90,9 @@ them to a remote workspace for execution.
 | `workspace settings show NAME [KEY]` | print the application settings, or one | `--json` |
 | `workspace settings set NAME KEY VALUE` | store one application setting | |
 | `workspace settings unset NAME KEY` | remove one application setting | |
+| `workspace workflow-prelude show NAME [WORKFLOW]` | print the per-workflow preludes, or one | `--json` |
+| `workspace workflow-prelude set NAME WORKFLOW VALUE` | store one workflow's prelude (`VALUE` may be `@FILE`) | `--no-durable` |
+| `workspace workflow-prelude unset NAME WORKFLOW` | remove one workflow's prelude | `--no-durable` |
 | `workspace policy show NAME` | print the workspace policy | `--json` |
 | `workspace policy set NAME KEY VALUE` | store one policy member | `--json` |
 | `workspace fsck NAME` | check every marker against its journal frame (remote: over the adapter) | `--repair`, `--quarantine-unrepairable`, `--json` |
@@ -775,6 +778,34 @@ default. The manager exports scalar workspace settings into each attempt
 environment (`vasp.command` becomes `HTTK_VASP_COMMAND`) and snapshots them into
 `context.json`, so a runner sees the values the workspace held when its job was
 claimed. See {doc}`/vasp_runners` and {doc}`/sdks/sdk_parity`.
+
+### Workflow preludes
+
+Two layers of shell setup run before a job's runner, both sourced under `set -e`
+so a failing line aborts the job rather than running the calculation in a broken
+environment:
+
+- **`environment.prelude`** — the workspace-wide layer, one shell fragment that
+  applies to every job. It is an ordinary application setting: `workspace
+  settings set NAME environment.prelude "…"`.
+- **`workflow-prelude`** — the per-workflow layer, keyed by workflow id (the
+  `[workflow].id` of the manifest, `=` the job's `workflow`). It applies only to
+  jobs of that workflow and runs *after* the workspace-wide prelude:
+
+  ```console
+  httk workflow workspace workflow-prelude set my-workspace relax-vasp "module load VASP/6.2.1"
+  httk workflow workspace workflow-prelude set my-workspace relax-vasp @prelude.sh
+  httk workflow workspace workflow-prelude show my-workspace
+  httk workflow workspace workflow-prelude unset my-workspace relax-vasp
+  ```
+
+  `VALUE` is stored verbatim (never JSON-parsed); `@FILE` reads the shell text
+  from a file, for a multi-line module-load script kept on disk. Without
+  `--json`, `show` is line-oriented (`WORKFLOW⇥text`), so a multi-line prelude's
+  continuation lines carry no id prefix — machine consumers should use `--json`.
+
+See {doc}`/taskmanager` for how each layer is delivered on a local versus a
+remote (slurm) manager, and why preludes stay behind when a job is transferred.
 
 ## Workspace policy and integrity
 

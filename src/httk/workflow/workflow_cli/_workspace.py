@@ -544,6 +544,125 @@ def handle_workspace_settings_unset(arguments: argparse.Namespace, context: CLIC
     return 0
 
 
+def _prelude_value(text: str) -> str:
+    """Return a per-workflow prelude value, reading ``@file`` from disk.
+
+    A leading ``@`` reads the shell text from that file, so an operator can keep
+    a multi-line module-load script on disk instead of quoting it on the command
+    line; any other text is stored literally. Unlike :func:`_json_value` this
+    never parses the payload as JSON, which would corrupt a shell script.
+
+    :param text: The ``VALUE`` argument, either literal text or ``@PATH``.
+    :return: The shell text to store.
+    """
+
+    if text.startswith("@"):
+        return Path(text[1:]).expanduser().read_text(encoding="utf-8")
+    return text
+
+
+def handle_workspace_workflow_prelude_show(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Show one workspace's per-workflow preludes, or one workflow's prelude.
+
+    :param arguments: The parsed ``workflow-prelude show`` arguments.
+    :param context: The invocation context.
+    :return: The process exit status.
+    """
+
+    ambiguous_id = False
+    if arguments.workflow is None and arguments.workspace is not None:
+        candidate = arguments.workspace
+        try:
+            resolve_workspace(candidate, project=context.cwd)
+        except ValueError as exc:
+            if not str(exc).startswith("unknown workspace:"):
+                raise
+            arguments.workspace = None
+            arguments.workflow = candidate
+            ambiguous_id = True
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        return _remote_workspace_read(
+            binding,
+            context,
+            (*REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND, "show"),
+            arguments,
+            flags=("--json",),
+            tail=() if arguments.workflow is None else (arguments.workflow,),
+        )
+    workspace = Workspace(root, mutable=False)
+    preludes = workspace.read_workflow_preludes()
+    if arguments.workflow is not None:
+        if arguments.workflow not in preludes:
+            if ambiguous_id:
+                raise ValueError(
+                    f"{arguments.workflow!r} is neither a registered workspace nor a workflow "
+                    f"with a prelude in the default workspace"
+                )
+            raise ValueError(f"no per-workflow prelude is set for workflow: {arguments.workflow}")
+        print(preludes[arguments.workflow])
+        return 0
+    if arguments.json:
+        print(json.dumps(preludes, indent=2, sort_keys=True))
+        return 0
+    for workflow_id in sorted(preludes):
+        print(f"{workflow_id}\t{preludes[workflow_id]}")
+    return 0
+
+
+def handle_workspace_workflow_prelude_set(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Store one per-workflow prelude on a workspace.
+
+    :param arguments: The parsed ``workflow-prelude set`` arguments.
+    :param context: The invocation context.
+    :return: The process exit status.
+    """
+
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        return _remote_workspace_read(
+            binding,
+            context,
+            (*REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND, "set"),
+            arguments,
+            flags=("--durable", "--no-durable"),
+            tail=(arguments.workflow, arguments.value),
+        )
+    # Resolve ``@file`` only for a local store: a remote store forwards the raw
+    # argument so the file is read on the far side, as `settings set` forwards.
+    value = _prelude_value(arguments.value)
+    workspace = Workspace(root, durable=_durable(arguments))
+    preludes = workspace.set_workflow_prelude(arguments.workflow, value)
+    print(preludes[arguments.workflow])
+    return 0
+
+
+def handle_workspace_workflow_prelude_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove one per-workflow prelude from a workspace.
+
+    :param arguments: The parsed ``workflow-prelude unset`` arguments.
+    :param context: The invocation context.
+    :return: The process exit status.
+    """
+
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        return _remote_workspace_read(
+            binding,
+            context,
+            (*REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND, "unset"),
+            arguments,
+            flags=("--durable", "--no-durable"),
+            tail=(arguments.workflow,),
+        )
+    workspace = Workspace(root, durable=_durable(arguments))
+    workspace.unset_workflow_prelude(arguments.workflow)
+    return 0
+
+
 def build_workspace_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
 ) -> None:
@@ -714,6 +833,56 @@ def build_workspace_parser(
     settings_unset.add_argument("key", metavar="KEY", help="the dotted setting name to remove")
     _add_by_path_argument(settings_unset)
     add_durability_arguments(settings_unset)
+
+    _, prelude_actions = _group(
+        group,
+        "workflow-prelude",
+        summary="show or set a workspace's per-workflow shell preludes",
+        description="Show or set the per-workflow shell prelude a job's runner sources before it runs",
+    )
+    prelude_show = _leaf(
+        prelude_actions,
+        "show",
+        summary="print the per-workflow preludes",
+        description="Print the per-workflow preludes of one workspace, or one workflow's prelude",
+        handler=handle_workspace_workflow_prelude_show,
+    )
+    add_workspace_argument(prelude_show, help_text="the workspace whose preludes to read")
+    prelude_show.add_argument(
+        "workflow",
+        metavar="WORKFLOW",
+        nargs="?",
+        help="print only this workflow's prelude (default: all of them)",
+    )
+    prelude_show.add_argument("--json", action="store_true", help="print the preludes as one JSON object")
+    _add_by_path_argument(prelude_show)
+    prelude_set = _leaf(
+        prelude_actions,
+        "set",
+        summary="store one per-workflow prelude",
+        description="Store one per-workflow shell prelude on a workspace, keyed by workflow id",
+        handler=handle_workspace_workflow_prelude_set,
+    )
+    add_workspace_argument(prelude_set, help_text="the workspace to change")
+    prelude_set.add_argument("workflow", metavar="WORKFLOW", help="the workflow id the prelude applies to")
+    prelude_set.add_argument(
+        "value",
+        metavar="VALUE",
+        help="the shell text to store, or @FILE to read it from a file",
+    )
+    _add_by_path_argument(prelude_set)
+    add_durability_arguments(prelude_set)
+    prelude_unset = _leaf(
+        prelude_actions,
+        "unset",
+        summary="remove one per-workflow prelude",
+        description="Remove one per-workflow prelude from a workspace",
+        handler=handle_workspace_workflow_prelude_unset,
+    )
+    add_workspace_argument(prelude_unset, help_text="the workspace to change")
+    prelude_unset.add_argument("workflow", metavar="WORKFLOW", help="the workflow id whose prelude to remove")
+    _add_by_path_argument(prelude_unset)
+    add_durability_arguments(prelude_unset)
 
     fsck = _leaf(
         group,

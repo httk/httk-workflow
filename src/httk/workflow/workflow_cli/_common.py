@@ -54,6 +54,7 @@ from ..adapters import (
     REMOTE_WORKSPACE_LIST_COMMAND,
     REMOTE_WORKSPACE_MOVE_COMMAND,
     REMOTE_WORKSPACE_SETTINGS_COMMAND,
+    REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND,
     add_remote,
     import_v1_remote,
     list_remotes,

@@ -308,7 +308,7 @@ def test_ssh_start_manager_generates_and_submits_the_batch_script(tmp_path: Path
     script_path = Path(str(result["script"]))
     assert script_path.parent == workspace.root / ".httk-workflow" / "batch"
     script = script_path.read_text(encoding="utf-8")
-    assert script.startswith("#!/bin/bash\n")
+    assert script.startswith("#!/bin/bash -l\n")
     assert "#SBATCH --account=p2026-1" in script
     assert "#SBATCH --partition=main" in script
     assert "#SBATCH --time=04:00:00" in script
