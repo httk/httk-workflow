@@ -34,6 +34,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "forget",
         "delete",
         "settings",
+        "workflow-prelude",
         "policy",
         "fsck",
         "gc",

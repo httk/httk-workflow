@@ -43,6 +43,7 @@ __all__ = [
     "REMOTE_WORKSPACE_LIST_COMMAND",
     "REMOTE_WORKSPACE_MOVE_COMMAND",
     "REMOTE_WORKSPACE_SETTINGS_COMMAND",
+    "REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND",
     "REQUEST_FORMAT",
     "RESULT_FORMAT",
     "SEED_SETTING_MAP",
@@ -137,6 +138,7 @@ REMOTE_OFFER_COMMAND = ("httk", "workflow", "transfer", "offer")
 REMOTE_RETIRE_COMMAND = ("httk", "workflow", "transfer", "retire")
 REMOTE_STATUS_COMMAND = ("httk", "workflow", "workspace", "status")
 REMOTE_WORKSPACE_SETTINGS_COMMAND = ("httk", "workflow", "workspace", "settings")
+REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND = ("httk", "workflow", "workspace", "workflow-prelude")
 REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
 
 

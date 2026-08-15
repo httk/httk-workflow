@@ -1280,6 +1280,7 @@ class TaskManager:
             workdir_reused = False
         workdir.mkdir(parents=True, exist_ok=True)
         settings = self.workspace.read_settings()
+        workflow_prelude = self.workspace.read_workflow_preludes().get(job.workflow, "")
         context = {
             "format": "httk-workflow-attempt-context",
             "format_version": 1,
@@ -1381,6 +1382,7 @@ class TaskManager:
                     context_path=context_path,
                     context=context,
                     runner=runner,
+                    workflow_prelude=workflow_prelude,
                 )
             )
         )

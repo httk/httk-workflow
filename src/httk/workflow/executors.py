@@ -35,6 +35,7 @@ class AttemptLaunch:
     :param context_path: Path of the serialized runner context.
     :param context: Runner context members.
     :param runner: Resolved executable, or no value to use the payload runner.
+    :param workflow_prelude: Shell text run in a login shell before the runner, or empty for none.
     """
 
     job: JobDefinition
@@ -45,6 +46,7 @@ class AttemptLaunch:
     context_path: Path
     context: Mapping[str, Any]
     runner: Path | None = None
+    workflow_prelude: str = ""
 
     @property
     def runner_command(self) -> Path:
@@ -119,10 +121,20 @@ class PathRunnerExecutor:
     def command(self, launch: AttemptLaunch) -> Sequence[str]:
         """Build the command for one path-runner attempt.
 
+        When the launch carries a workflow prelude, the runner is wrapped in a
+        login shell that runs the prelude (under ``set -e``) then execs the
+        runner, so a failing prelude line aborts before the runner starts and
+        the runner inherits the initialized environment.
+
         :param launch: Attempt paths and runner context.
         :return: Argument vector for the runner process.
         """
-        return [str(launch.runner_command), *launch.job.runner_arguments]
+        base = [str(launch.runner_command), *launch.job.runner_arguments]
+        if not launch.workflow_prelude.strip():
+            return base
+        script_path = launch.control / "prelude.sh"
+        script_path.write_text("set -e\n" + launch.workflow_prelude + '\nexec "$@"\n', encoding="utf-8")
+        return ["bash", "-l", str(script_path), *base]
 
     def commit_outcome(self, commit: OutcomeCommit) -> None:
         """Complete path-executor outcome work before the marker advances.

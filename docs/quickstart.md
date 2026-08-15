@@ -55,7 +55,9 @@ $ httk workflow postprocess --script relaxation-plot
 ```
 
 On a VASP machine, set `vasp.command` to a command such as
-`"srun -n 32 vasp_std"` instead.
+`"srun -n 32 vasp_std"` instead. If the machine needs shell setup first — a
+`module load`, a `source activate` — put it in a prelude rather than in
+`vasp.command`; see [Environment preludes](taskmanager.md#environment-preludes).
 
 ## What each command did
 

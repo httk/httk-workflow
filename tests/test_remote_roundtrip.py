@@ -167,7 +167,7 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     spooled = sorted(remote.spool.glob("*.sbatch"))
     assert len(spooled) == 2
     script = spooled[0].read_text(encoding="utf-8")
-    assert script.startswith("#!/bin/bash\n")
+    assert script.startswith("#!/bin/bash -l\n")
     assert f"#SBATCH --chdir={campaign.station.root}" in script
     assert "exec httk workflow manager run station --workers 2" in script
     _run_there(campaign)
