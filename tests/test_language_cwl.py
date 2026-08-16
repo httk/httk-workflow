@@ -496,7 +496,7 @@ def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: W
     assert report["stored"]["run"]
     with Database.sqlite(store_path) as database:
         store = SqlStore(database)
-        entry = store.fetch_entry(FileEntry, report["stored"]["entries"][0])
+        entry = store.fetch_entry(FileEntry, report["stored"]["entries"][0], eager=True)
     assert isinstance(entry, FileRecord)
     assert entry.id == report["stored"]["entries"][0]
 

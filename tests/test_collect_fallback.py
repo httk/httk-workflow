@@ -272,8 +272,8 @@ def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_pa
     assert report["stored"]["run"]
     with Database.sqlite(store_path) as database:
         store = SqlStore(database)
-        entry = store.fetch_entry(DataRecordEntry, report["stored"]["entries"][0])
-        run = store.fetch_entry(RunEntry, report["stored"]["run"])
+        entry = store.fetch_entry(DataRecordEntry, report["stored"]["entries"][0], eager=True)
+        run = store.fetch_entry(RunEntry, report["stored"]["run"], eager=True)
     assert isinstance(entry, DataRecord)
     assert run is not None
 
@@ -300,7 +300,7 @@ def test_collect_into_twice_is_idempotent(tmp_path: Path, capsys) -> None:
 
     # The run is present exactly once — the re-store neither errored nor forked it.
     with Database.sqlite(store_path) as database:
-        run = SqlStore(database).fetch_entry(RunEntry, first["run"])
+        run = SqlStore(database).fetch_entry(RunEntry, first["run"], eager=True)
     assert run is not None
 
 
