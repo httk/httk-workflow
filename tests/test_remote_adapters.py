@@ -531,34 +531,33 @@ def test_local_slurm_transfers_stay_in_this_filesystem(tmp_path: Path, remote: R
     assert not remote.log.exists()
 
 
-def test_install_reports_a_missing_remote_httk_with_the_packaging_hint(tmp_path: Path, remote: Remote) -> None:
+def test_check_reports_a_missing_remote_httk_with_the_remedy(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
-    initialize_project(project, name="install-missing")
+    initialize_project(project, name="check-missing")
     bundle = fake_remote(project, httk_command=str(tmp_path / "nowhere" / "httk"))
 
     with pytest.raises(RuntimeError, match="pipx install httk-workflow"):
         run_adapter(bundle, "install", {"remote_settings": {}})
 
 
-def test_install_finds_the_remote_httk_without_creating_a_workspace(tmp_path: Path, remote: Remote) -> None:
+def test_check_finds_the_remote_httk_without_creating_a_workspace(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
-    initialize_project(project, name="install-found")
+    initialize_project(project, name="check-found")
     workspace = remote.root / "runs" / "fresh"
     bundle = fake_remote(project, workspace=str(workspace))
 
     result = run_adapter(bundle, "install", {"remote_settings": {}})
 
     assert result["installed"] is True
-    assert result["bootstrapped"] is False
     assert result["httk_command"] == ["httk"]
     assert str(result["httk_version"]).strip()
     assert "workspace_created" not in result
     assert not workspace.exists()
 
 
-def test_install_refuses_an_unreachable_host(tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_check_refuses_an_unreachable_host(tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch) -> None:
     project = tmp_path / "project"
-    initialize_project(project, name="install-unreachable")
+    initialize_project(project, name="check-unreachable")
     bundle = fake_remote(project)
     monkeypatch.setenv("HTTK_FAKE_SSH_REFUSE", "1")
 
@@ -566,11 +565,13 @@ def test_install_refuses_an_unreachable_host(tmp_path: Path, remote: Remote, mon
         run_adapter(bundle, "install", {"remote_settings": {}})
 
 
-def test_install_attempts_pip_only_when_bootstrap_opts_in(
+def test_check_never_installs_software_on_the_target(
     tmp_path: Path,
     remote: Remote,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The retired bootstrap=pip setting is inert: no pip attempt, ever."""
+
     project = tmp_path / "project"
     initialize_project(project, name="bootstrap")
     remote.install("python3", _FAKE_PYTHON)
@@ -578,21 +579,10 @@ def test_install_attempts_pip_only_when_bootstrap_opts_in(
     monkeypatch.setenv("HTTK_FAKE_PIP_LOG", str(log))
     absent = str(tmp_path / "nowhere" / "httk")
 
-    without = fake_remote(project, name="plain", httk_command=absent)
+    bundle = fake_remote(project, name="opted-in", httk_command=absent, bootstrap="pip")
     with pytest.raises(RuntimeError, match="pipx install httk-workflow"):
-        run_adapter(without, "install", {"remote_settings": {}})
+        run_adapter(bundle, "install", {"remote_settings": {}})
     assert not log.exists()
-
-    opted_in = fake_remote(project, name="opted-in", httk_command=absent, bootstrap="pip")
-    with pytest.raises(RuntimeError, match="pipx install httk-workflow"):
-        run_adapter(opted_in, "install", {"remote_settings": {}})
-    assert json.loads(log.read_text(encoding="utf-8").splitlines()[0]) == [
-        "-m",
-        "pip",
-        "install",
-        "--user",
-        "httk-workflow",
-    ]
 
 
 def test_configure_verifies_connectivity_for_ssh_remotes(

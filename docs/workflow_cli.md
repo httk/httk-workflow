@@ -11,7 +11,7 @@ httk workflow build      (compiled packages: build and register binaries)
 httk workflow describe | precheck | collect | postprocess
 httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-managers
-httk workflow remote     list | add | configure | install | show | remove
+httk workflow remote     list | add | configure | check | show | remove
 httk workflow transfer   SRC DST
 httk workflow config | project | v1
 ```
