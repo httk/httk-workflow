@@ -91,7 +91,12 @@ def handle_remote_add(arguments: argparse.Namespace, context: CLIContext) -> int
 
 
 def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Run the ``configure`` or ``install`` operation of one remote adapter."""
+    """Run the ``configure`` or ``check`` verb of one remote adapter.
+
+    ``check`` runs the adapter operation that keeps its historical protocol
+    spelling ``install``: it verifies the target has a working httk and never
+    installs anything.
+    """
 
     operation = arguments.operation
     target = resolve_remote(arguments.remote, project=context.cwd)
@@ -125,6 +130,11 @@ def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIC
                 file=sys.stderr,
             )
     print(json.dumps(result, indent=2, sort_keys=True))
+    if operation == "configure":
+        print(
+            f"configured; verify httk is available there with: httk workflow remote check {arguments.remote}",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -243,15 +253,17 @@ def build_remote_parser(
         help="never prompt; refuse a missing value",
     )
 
-    for operation, summary in (
-        ("configure", "run the adapter's configure operation"),
-        ("install", "run the adapter's install operation"),
+    # The check verb runs the adapter operation whose frozen protocol spelling
+    # is "install"; the maintained adapters only ever verify, never install.
+    for verb, operation, summary in (
+        ("configure", "configure", "run the adapter's configure operation"),
+        ("check", "install", "check that httk answers on the remote"),
     ):
         parser = _leaf(
             group,
-            operation,
+            verb,
             summary=summary,
-            description=f"Run the {operation} operation of one remote adapter",
+            description=f"Run the {verb} operation of one remote adapter",
             handler=handle_remote_adapter_operation,
         )
         parser.set_defaults(operation=operation)

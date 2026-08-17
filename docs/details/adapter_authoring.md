@@ -215,23 +215,23 @@ answered, and `skipped` when there is no `host` or the remote sets
 
 ### `install`
 
-Report — and only where explicitly opted into, arrange — that the target can run
-*httk-workflow*, and ensure the remote's workspace root exists.
+Verify that the target can run *httk-workflow*. The CLI verb for this
+operation is `httk workflow remote check`; the operation keeps its historical
+protocol spelling `install`, but an adapter never installs software — setting
+httk up on the target is the user's job, done by logging in there.
 
 No request members beyond the envelope.
 
 ```json
 {"format": "httk-computer-request", "format_version": 1, "operation": "install",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
- "remote_settings": {"host": "login.example.org", "username": "me",
-                      "bootstrap": "pip"}}
+ "remote_settings": {"host": "login.example.org", "username": "me"}}
 ```
 
 ```json
-{"bootstrapped": false, "format": "httk-computer-result", "format_version": 1,
+{"format": "httk-computer-result", "format_version": 1,
  "httk_command": ["httk"], "httk_version": "httk 2.0.0", "installed": true,
- "operation": "install", "ok": true, "workspace": "/scratch/me/runs",
- "workspace_created": true}
+ "operation": "install", "ok": true}
 ```
 
 | Result member | Meaning |
@@ -239,14 +239,13 @@ No request members beyond the envelope.
 | `installed` | `true` once a working `httk` was found |
 | `httk_command` | the argument vector that answered, as an array |
 | `httk_version` | its `--version` output, stripped |
-| `bootstrapped` | whether this call installed anything (only ever under `bootstrap=pip`) |
 
 Answering "httk-core is installed" is not enough: the maintained implementation
 also runs `httk workflow workspace --help`, because the `workflow` command group
-exists exactly when *this* package is installed beside the core. Installing
-software on someone else's cluster account is never the default: without
-`bootstrap=pip`, a target with no httk is a refusal carrying the instruction to
-install it.
+exists exactly when *this* package is installed beside the core. A target with
+no httk is a refusal carrying the remedy: log in there and make sure httk₂ is
+installed and reachable from a non-interactive shell, or set `httk_command=` to
+where it lives.
 
 ### `invoke`
 
@@ -392,7 +391,7 @@ command line always wins over the workspace's default.
 in two, by name:
 
 - keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS` —
-  `bootstrap`, `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
+  `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
   `port`, `username`, `vasp_command`, and `vasp_pseudo_library` —
   are written into the flat `settings` object of the shareable, signable
   `remote.json`;
@@ -589,7 +588,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             result(operation, configured=True, connectivity="ok")
         elif operation == "install":
-            ...   # probe httk, mkdir -p the workspace, refuse with instructions
+            ...   # probe httk (the `remote check` verb); refuse with instructions
         elif operation in {"invoke", "status"}:
             cwd = request.get("cwd") if operation == "invoke" else None
             completed = ssh(settings, request["argv"], cwd=cwd)
@@ -622,7 +621,7 @@ remote:
 mkdir -p httk_project/remotes/my-cluster
 cp -a my-cluster/. httk_project/remotes/my-cluster/
 httk workflow remote configure my-cluster --set username=me
-httk workflow remote install my-cluster
+httk workflow remote check my-cluster
 httk workflow workspace init my-cluster:/scratch/me/runs --name runs
 httk workflow manager run my-cluster:runs --workers 8
 ```

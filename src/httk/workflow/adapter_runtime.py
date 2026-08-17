@@ -74,9 +74,10 @@ _SUBMITTED_JOB = re.compile(r"Submitted batch job (\d+)")
 _WHITESPACE = re.compile(r"\s")
 
 _MISSING_HTTK = (
-    "httk-workflow is not available on the target; install it there, for "
-    "example with 'pipx install httk-workflow', or configure the remote with "
-    "httk_command=COMMAND, or opt into an automatic attempt with bootstrap=pip"
+    "httk-workflow is not available on the target; log in there and make sure "
+    "httk is installed and reachable from a non-interactive shell (for example "
+    "with 'pipx install httk-workflow'), or configure the remote with "
+    "httk_command=COMMAND"
 )
 
 
@@ -572,6 +573,8 @@ def _probe_httk(kind: str, run: _Runner, settings: Mapping[str, object]) -> tupl
 
 
 def _install(kind: str, request: Mapping[str, object]) -> None:
+    """Verify the target has a working httk; the protocol keeps the name ``install``."""
+
     settings = _settings(request)
     run = _runner(kind, settings)
     if kind == "ssh-slurm":
@@ -580,26 +583,11 @@ def _install(kind: str, request: Mapping[str, object]) -> None:
             _refusal("install", f"cannot reach {_ssh_destination(settings)}: {reachable.stderr.strip()}")
             return
     found = _probe_httk(kind, run, settings)
-    bootstrapped = False
-    if found is None and _text(settings, "bootstrap") == "pip":
-        # Opt-in only: installing software on someone else's cluster account is
-        # never the default behaviour of a configuration operation.
-        attempt = run(["python3", "-m", "pip", "install", "--user", "httk-workflow"])
-        bootstrapped = attempt.returncode == 0
-        if attempt.stderr:
-            print(attempt.stderr.rstrip("\n"), file=sys.stderr)
-        found = _probe_httk(kind, run, settings)
     if found is None:
         _refusal("install", _MISSING_HTTK)
         return
     command, version = found
-    values: dict[str, object] = {
-        "installed": True,
-        "bootstrapped": bootstrapped,
-        "httk_command": command,
-        "httk_version": version,
-    }
-    _result("install", **values)
+    _result("install", installed=True, httk_command=command, httk_version=version)
 
 
 def _configure(kind: str, request: Mapping[str, object]) -> None:

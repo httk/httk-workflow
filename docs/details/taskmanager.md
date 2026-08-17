@@ -38,14 +38,16 @@ job whose state cannot be read until `workspace fsck --repair` restores it.
 
 ## Running on a remote
 
-The canonical remote flow keeps scheduler settings with the remote workspace:
+The canonical remote flow keeps scheduler settings with the remote workspace.
+httk₂ must already be set up on the remote (log in there and install it, e.g.
+with `pipx install httk-workflow`); `remote check` verifies that:
 
 ```console
 httk workflow remote add kappa --template ssh-slurm
 httk workflow remote configure kappa \
     --set host=kappa.example.org --set username=rar \
     --set check_connectivity=yes
-httk workflow remote install kappa
+httk workflow remote check kappa
 httk workflow workspace init kappa:/scratch/rar/httk/runs
 httk workflow workspace settings set kappa:runs slurm.partition batch
 httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"

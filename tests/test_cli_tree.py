@@ -46,7 +46,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "v1": ("collect",),
     "config": ("init", "show", "set", "unset", "import-v1"),
     "project": ("init", "import-v1", "show", "doctor", "manifest"),
-    "remote": ("list", "add", "configure", "install", "import-v1", "show", "remove"),
+    "remote": ("list", "add", "configure", "check", "import-v1", "show", "remove"),
     "campaign": ("init", "show", "submit", "collect", "start-managers"),
 }
 
@@ -249,7 +249,7 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
         parser.parse_args(["project", "init", "--default-queue", "batch"])
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["remote", "install", "c", "--timeout", "5"])
+        parser.parse_args(["remote", "check", "c", "--timeout", "5"])
     # The manager's idle wait is bounded by --idle-timeout.
     assert parser.parse_args(["manager", "run", "WS", "--idle-timeout", "5"]).idle_timeout == 5.0
     assert parser.parse_args(["manager", "run", "WS"]).idle_timeout == 3600.0

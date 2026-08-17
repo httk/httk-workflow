@@ -184,6 +184,19 @@ def test_scheduler_setting_is_refused_for_remote_configuration(tmp_path: Path, m
     assert not (remote / "credentials.json").exists()
 
 
+def test_retired_bootstrap_setting_is_refused_with_the_remedy(tmp_path: Path, monkeypatch, capsys) -> None:
+    project = _project(tmp_path, monkeypatch, name="bootstrap-retired")
+    remote = add_remote("cluster", template="local", project=project)
+
+    code = command(["remote", "configure", "cluster", "--set", "bootstrap=pip"], CLIContext("httk", project))
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "'bootstrap' is retired" in err and "remote check" in err
+    assert json.loads((remote / "remote.json").read_text(encoding="utf-8"))["settings"] == {}
+    assert not (remote / "credentials.json").exists()
+
+
 def test_stale_project_anchor_secrets_stay_out_of_manifest(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch, name="stale-anchor")
     stale = project / ".httk-project"

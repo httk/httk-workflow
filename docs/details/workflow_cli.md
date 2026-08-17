@@ -54,7 +54,7 @@ httk workflow campaign   init | show | submit | collect | start-managers
 httk workflow v1         collect
 httk workflow config     init | show | set | unset | import-v1
 httk workflow project    init | import-v1 | show | doctor | manifest create | manifest verify
-httk workflow remote     list | add | configure | install | import-v1 | show | remove
+httk workflow remote     list | add | configure | check | import-v1 | show | remove
 httk workflow transfer   SRC DST      (plus the protocol spellings: receive | offer | retire)
 ```
 
@@ -374,7 +374,7 @@ unambiguous.
 | `remote list` | list the remotes this project can reach | |
 | `remote add NAME` | create a remote from a packaged adapter template | `--template`, `--global`, `--non-interactive` |
 | `remote configure REMOTE` | run the adapter's `configure` operation | `--set KEY=VALUE`, `--adapter-timeout` |
-| `remote install REMOTE` | run the adapter's `install` operation | `--set KEY=VALUE`, `--adapter-timeout` |
+| `remote check REMOTE` | check that `httk` answers on the remote | `--set KEY=VALUE`, `--adapter-timeout` |
 | `remote import-v1 SOURCE` | map a legacy *httk* v1 computer bundle | `--name`, `--global` |
 | `remote show NAME` | describe one remote and its settings | `--json` |
 | `remote remove NAME` | remove one remote bundle | `--force` |
@@ -911,7 +911,7 @@ copied or run. Any other `kind` in a `remote.json` is refused rather than
 executed in the wrong place.
 
 `remote configure --set KEY=VALUE` persists only the machine-level keys
-`bootstrap`, `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
+`check_connectivity`, `host`, `httk_command`, `legacy_settings`,
 `port`, `username`, `vasp_command`, and `vasp_pseudo_library`
 in the shareable `remote.json`. Scheduler profile values are workspace
 settings: use `slurm.account`, `slurm.partition`, `slurm.time_limit`,
@@ -941,7 +941,7 @@ configured host, where the manager is submitted with `sbatch`. Only `ssh` and
 | Operation | `ssh-slurm` behaviour | Settings used |
 | --- | --- | --- |
 | `configure` | verifies the host answers with a cheap remote `true`, so a mistyped host fails immediately instead of at the first transfer | `host`, `username`, `port`, `check_connectivity` |
-| `install` | checks that `httk` answers on the far side and reports its version | `host`, `username`, `port`, `httk_command`, `bootstrap` |
+| `install` (the `remote check` verb) | checks that `httk` answers on the far side and reports its version | `host`, `username`, `port`, `httk_command` |
 | `push` / `pull` | one `rsync --archive` transfer, creating missing destination components; a `pull` is always the whole remote directory, a `push` is the whole tree or the request's explicit relative `files` batch | `host`, `username`, `port` |
 | `invoke` | runs the request's argument vector on the host, optionally in the request's directory, and returns its status, stdout and stderr | `host`, `username`, `port`, `httk_command` |
 | `status` | the same machinery running `httk workflow workspace status NAME --json` remotely | as `invoke` |
@@ -975,13 +975,31 @@ built by a single helper that quotes element-wise; nothing else composes a
 command string. `rsync` transfers pass `--protect-args` so that even file names
 travel in the protocol rather than through the remote shell.
 
-### Installing httk on the target
+### httk on the target: `remote check`
 
-`remote install` never installs software behind your back. It reports the
-`httk` it found and the workspace directory it ensured; when nothing answers it
-fails with a message pointing at `pipx install httk-workflow` on the target.
-Configuring the remote with `bootstrap=pip` opts into one attempt at
-`python3 -m pip install --user httk-workflow` before that check is repeated.
+httk is never installed on a remote for you: setting up software on an HPC
+account is yours to do, because every cluster does it differently (modules,
+venvs, conda, pipx, ...). The contract is simply that the connection the
+adapter opens — a *non-interactive* shell — can run `httk`, with the
+*httk-workflow* package installed beside the core.
+
+`remote check` verifies exactly that, and running it once after configuring a
+new remote is recommended: it confirms the host answers, that `httk` is found
+(also trying `python3 -m httk.core.cli`), that the workflow command group
+exists, and reports the command and version it found. `--version` alone would
+only prove httk-core.
+
+When the check fails, log in on the remote and make sure httk₂ is set up and
+available there — for example with `pipx install httk-workflow` — and note
+that it must be reachable from a *non-interactive* shell: a `module load` or
+conda activation guarded by an interactivity test in `.bashrc` works when you
+log in but not over the adapter's connection. If `httk` deliberately lives
+elsewhere (a project venv, a wrapper script), point the remote at it with
+`remote configure REMOTE --set httk_command="/proj/venv/bin/httk"` instead.
+
+In the adapter protocol this operation keeps its historical spelling
+`install`; the earlier `bootstrap=pip` opt-in that attempted a
+`pip install --user` is retired.
 
 ## Detached transfers
 
@@ -1003,15 +1021,16 @@ destination.
 
 ## Running on a remote and fetching the results
 
-Add and configure the machine, install *httk-workflow* there, create its
-workspace, then send and run a job:
+Add and configure the machine, make sure *httk-workflow* is installed there
+(log in and set it up, e.g. `pipx install httk-workflow`), verify with
+`remote check`, create its workspace, then send and run a job:
 
 ```console
 httk workflow remote add kappa --template ssh-slurm
 httk workflow remote configure kappa \
     --set host=kappa.example.org --set username=rar \
     --set check_connectivity=yes
-httk workflow remote install kappa
+httk workflow remote check kappa
 httk workflow workspace init kappa:/scratch/rar/httk/runs
 httk workflow workspace settings set kappa:runs slurm.partition batch
 httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
