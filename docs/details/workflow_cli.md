@@ -49,6 +49,7 @@ httk workflow describe   TARGET [--json]
 httk workflow precheck   [WORKSPACE] [--placement P] [--json]
 httk workflow collect
 httk workflow postprocess
+httk workflow run        [WORKSPACE]  (the recommended spelling of `manager run`)
 httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-managers
 httk workflow v1         collect
