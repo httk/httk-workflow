@@ -145,7 +145,8 @@ def _store_collected(items: list[CollectedJob], path: str) -> list[dict[str, obj
     """Save one bounded collected sweep into a file-backed SQLite store."""
 
     try:
-        from httk.store.db import Database, SqlStore, StorageLayoutUpgradeRequiredError
+        from httk.store import Backend, SqlStore
+        from httk.store.backend.sql import StorageLayoutUpgradeRequiredError
     except ImportError as exc:
         raise ValueError("--into requires httk-store with its database dependencies") from exc
 
@@ -161,7 +162,7 @@ def _store_collected(items: list[CollectedJob], path: str) -> list[dict[str, obj
         }
     )
     reports: list[dict[str, object]] = []
-    with Database.sqlite(target) as database:
+    with Backend.sqlite(target) as database:
         try:
             store = SqlStore(database, entry_records=layout)
         except StorageLayoutUpgradeRequiredError as exc:

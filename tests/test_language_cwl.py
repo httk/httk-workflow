@@ -480,7 +480,7 @@ def test_generated_definitions_follow_a_role_when_its_kind_changes() -> None:
 def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: Workspace, capsys) -> None:
     pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
-    from httk.store.db import Database, SqlStore
+    from httk.store import Backend, SqlStore
 
     package = _package(tmp_path / "collect-into", "echo.cwl", _ECHO_TOOL, "message", "spoken")
     new_job(workspace, package, inputs={"message": "hello"})
@@ -494,7 +494,7 @@ def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: W
     assert report["outputs"]["spoken"]["type"] == "files"
     assert report["stored"]["entries"]
     assert report["stored"]["run"]
-    with Database.sqlite(store_path) as database:
+    with Backend.sqlite(store_path) as database:
         store = SqlStore(database)
         entry = store.fetch_entry(FileEntry, report["stored"]["entries"][0], eager=True)
     assert isinstance(entry, FileRecord)
