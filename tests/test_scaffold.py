@@ -584,7 +584,7 @@ def test_an_object_parameter_requires_a_registered_writer(tmp_path: Path, worksp
         "raise SystemExit(run.main())\n",
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match="httk-io and httk-atomistic"):
+    with pytest.raises(ValueError, match="httk-atomistic"):
         new_job(workspace, runner, inputs={"data": object()})
 
 
@@ -959,7 +959,6 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
 def test_parameter_from_cif_is_written_as_a_poscar_when_domain_plugins_are_available(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pytest.importorskip("httk.io")
     pytest.importorskip("httk.atomistic")
     assert httk.core.has_writer_for("POSCAR")
     cif = tmp_path / "silicon.cif"

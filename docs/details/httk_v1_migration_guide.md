@@ -671,8 +671,8 @@ run = Runner("example.structure", inputs={"structure": "POSCAR"})
 ```
 
 Callers pass the structure object. The scaffold writes it to `files/POSCAR`
-using the registered writer (the *httk-io* and *httk-atomistic* distributions
-provide the POSCAR writer). A path input is copied instead; for example,
+using the registered writer (the *httk-atomistic* distribution
+provides the POSCAR writer). A path input is copied instead; for example,
 the Python API uses `new_job(ws, workflow, inputs={"structure": obj})`,
 and a batch uses `new_jobs(...)` items such as
 `{"inputs": {"structure": obj}}`. The command-line spellings are

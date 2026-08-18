@@ -101,7 +101,7 @@ and {doc}`workflow_cli` for `workspace settings`.
 
 The four workflows declare one creation input: `structure` → `files/POSCAR`.
 Paths are copied verbatim; other objects are serialized with `httk.core.save`,
-which requires the `httk-io` and `httk-atomistic` packages for POSCAR/CIF writers.
+which requires the `httk-atomistic` package for POSCAR/CIF writers.
 
 Every implementation parameter is optional and every one is documented, with its default, in the API
 reference of {py:mod}`httk.workflow.vasp.runners`. The ones a campaign normally sets are
