@@ -250,7 +250,7 @@ def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_pa
     pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
     from httk.core import DataRecord, DataRecordEntry, RunEntry
-    from httk.store.db import Database, SqlStore
+    from httk.store import Backend, SqlStore
 
     workspace, _ = _finished(tmp_path)
     context = CLIContext("httk", tmp_path)
@@ -270,7 +270,7 @@ def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_pa
     assert summary["collected"] == 1 and summary["degraded"] == 0 and summary["storage_errors"] == 0
     assert report["stored"]["entries"]
     assert report["stored"]["run"]
-    with Database.sqlite(store_path) as database:
+    with Backend.sqlite(store_path) as database:
         store = SqlStore(database)
         entry = store.fetch_entry(DataRecordEntry, report["stored"]["entries"][0], eager=True)
         run = store.fetch_entry(RunEntry, report["stored"]["run"], eager=True)
@@ -282,7 +282,7 @@ def test_collect_into_twice_is_idempotent(tmp_path: Path, capsys) -> None:
     pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
     from httk.core import RunEntry
-    from httk.store.db import Database, SqlStore
+    from httk.store import Backend, SqlStore
 
     workspace, _ = _finished(tmp_path)
     context = CLIContext("httk", tmp_path)
@@ -299,7 +299,7 @@ def test_collect_into_twice_is_idempotent(tmp_path: Path, capsys) -> None:
     assert first == second
 
     # The run is present exactly once — the re-store neither errored nor forked it.
-    with Database.sqlite(store_path) as database:
+    with Backend.sqlite(store_path) as database:
         run = SqlStore(database).fetch_entry(RunEntry, first["run"], eager=True)
     assert run is not None
 
@@ -308,14 +308,14 @@ def test_collect_into_a_store_with_a_different_layout_teaches(tmp_path: Path, ca
     pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
     from httk.core.register import resolve_entry_family, resolve_entry_record
-    from httk.store.db import Database, SqlStore
+    from httk.store import Backend, SqlStore
 
     workspace, _ = _finished(tmp_path)
     context = CLIContext("httk", tmp_path)
     workspace_name = register_ws(context, workspace.root, "collect-mismatch")
     store_path = tmp_path / "results.sqlite"
     # A store created for an unrelated entry-type layout cannot absorb this sweep.
-    with Database.sqlite(store_path) as database:
+    with Backend.sqlite(store_path) as database:
         SqlStore(database, entry_records={resolve_entry_family("runs"): (resolve_entry_record("core-run"),)})
 
     assert command(["collect", workspace_name, "--allow-job-collector", "--into", str(store_path)], context) == 2
