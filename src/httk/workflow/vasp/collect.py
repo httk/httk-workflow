@@ -51,8 +51,7 @@ def _load(path: Path, *, raw: bool = False) -> Any:
         return core.load(str(path), raw=raw)
     except ImportError as exc:
         raise ValueError(
-            "VASP collecting requires the file readers and structure adapters provided by "
-            f"httk-io + httk-atomistic: {exc}"
+            f"VASP collecting requires the file readers and structure adapters provided by httk-atomistic: {exc}"
         ) from exc
 
 

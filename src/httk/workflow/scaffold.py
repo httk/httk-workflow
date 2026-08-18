@@ -1907,7 +1907,7 @@ def _stage_inputs(
         if not httk.core.has_writer_for(destination.name):
             raise ValueError(
                 f"no writer is registered for {destination.name!r}; a writer must be registered "
-                "(installing httk-io and httk-atomistic provides the POSCAR/CIF writers)"
+                "(installing httk-atomistic provides the POSCAR/CIF writers)"
             )
         path = payload.joinpath(*destination.parts)
         path.parent.mkdir(parents=True, exist_ok=True)

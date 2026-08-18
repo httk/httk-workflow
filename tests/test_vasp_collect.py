@@ -10,7 +10,6 @@ from pathlib import Path, PurePosixPath
 import pytest
 
 pytest.importorskip("httk.atomistic")
-pytest.importorskip("httk.io")
 
 import httk.core
 
