@@ -294,6 +294,9 @@ class Workspace:
         # than pick a winner.
         self._marker_duplicates: frozenset[str] = frozenset()
 
+    def __repr__(self) -> str:
+        return f"Workspace(root={str(self.root)!r}, workspace_id={self.workspace_id!r})"
+
     def ensure_directory(self, path: Path) -> Path:
         """Create a directory below the workspace root.
 

@@ -565,6 +565,9 @@ class Attempt:
         self._children: ChildrenView | None = None
         self._environment_snapshot: dict[str, object] | None = None
 
+    def __repr__(self) -> str:
+        return f"Attempt(job_id={self.context.job_id!r}, step={self.step!r}, attempt_id={self.context.attempt_id!r})"
+
     @classmethod
     def initialize(
         cls,
@@ -1279,6 +1282,9 @@ class Runner:
         self._inputs = MappingProxyType(validate_inputs(inputs or {}))
         self._steps: dict[str, StepHandler] = {}
         self._instantiate: InstantiateHandler | None = None
+
+    def __repr__(self) -> str:
+        return f"Runner(workflow={self.workflow!r}, steps={len(self._steps)})"
 
     @property
     def inputs(self) -> Mapping[str, str | None]:
