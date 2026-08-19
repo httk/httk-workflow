@@ -835,7 +835,7 @@ class _Unset:
         return "UNSET"
 
 
-# Deliberately typed as ``Any`` so that every keyword of :meth:`StateFrame.of`
+# Deliberately typed as ``Any`` so that every keyword of :meth:`StateFrame.replace`
 # can declare the type of its member and still default to absence. Nothing
 # outside this module ever observes the value.
 _UNSET: Any = _Unset()
@@ -912,7 +912,7 @@ class StateFrame:
         return name in self.members
 
     @classmethod
-    def of(
+    def replace(
         cls,
         base: "StateFrame | None" = None,
         *,

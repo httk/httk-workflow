@@ -575,7 +575,7 @@ def test_main_replays_a_workdir_batch_an_earlier_attempt_sealed(tmp_path: Path) 
     fixture = _fixture(tmp_path, step="resume")
     source = fixture.root / "new.txt"
     source.write_text("new\n", encoding="utf-8")
-    batch = ReplayableWorkdirBatch.create(fixture.workdir)
+    batch = ReplayableWorkdirBatch.initialize(fixture.workdir)
     batch.transaction.put_file("value", source, "results/value.txt")
     batch.seal()
 

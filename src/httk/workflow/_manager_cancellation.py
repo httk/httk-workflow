@@ -63,9 +63,9 @@ def fence_members(state: Any, members: tuple[str, ...], request: Mapping[str, An
         "operator_reason": request.get("reason"),
         "request_id": request.get("request_id"),
     }
-    result = type(state).of(audited, **updates)
+    result = type(state).replace(audited, **updates)
     if operator_key is not None:
-        result = type(state).of(result, operator_key=operator_key)
+        result = type(state).replace(result, operator_key=operator_key)
     return result
 
 
@@ -95,7 +95,7 @@ def finish(manager: Any, marker: Any, state: Any, members: tuple[str, ...], *, u
     manager._cancel_kill_at.pop(attempt_id, None)
     manager._cancel_unverified.discard(attempt_id)
     manager._transition(
-        marker, "cancelled", StateFrame.of(state.select(members), cancellation=proof, reason="operator_cancel")
+        marker, "cancelled", StateFrame.replace(state.select(members), cancellation=proof, reason="operator_cancel")
     )
     logger.warning(
         "cancelled %s: attempt %s is %s",
@@ -118,18 +118,18 @@ def request_cancel(
     utc_now: Any,
     logger: Any,
 ) -> str | None:
-    audited = StateFrame.of(
+    audited = StateFrame.replace(
         state.select(members),
         operator=request.get("operator"),
         operator_reason=request.get("reason"),
         request_id=request.get("request_id"),
     )
     if operator_key is not None:
-        audited = StateFrame.of(audited, operator_key=operator_key)
+        audited = StateFrame.replace(audited, operator_key=operator_key)
     if marker.kind == "cancelling":
         return "the job is already being cancelled"
     if marker.kind == "running":
-        fenced = manager._transition(marker, "cancelling", StateFrame.of(audited, reason="operator_cancel"))
+        fenced = manager._transition(marker, "cancelling", StateFrame.replace(audited, reason="operator_cancel"))
         logger.warning(
             "cancelling %s: attempt %s is fenced and will be stopped",
             fenced.job_key,
@@ -145,7 +145,7 @@ def request_cancel(
     manager._transition(
         marker,
         "cancelled",
-        StateFrame.of(
+        StateFrame.replace(
             audited,
             cancellation={"verified": "no_live_attempt", "from_kind": marker.kind, "verified_at": utc_now()},
             reason="operator_cancel",
@@ -173,7 +173,7 @@ def report_unverifiable(
         manager._transition(
             marker,
             "cancelling",
-            StateFrame.of(
+            StateFrame.replace(
                 state.select(members),
                 cancellation={
                     "verified": None,

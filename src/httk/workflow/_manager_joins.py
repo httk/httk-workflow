@@ -175,7 +175,7 @@ def evaluate(manager: Any, marker: Any, parent_job: Any, state: Any) -> bool:
     manager._transition(
         marker,
         "failed",
-        StateFrame.of(
+        StateFrame.replace(
             state.carried(),
             failure=manager._failure("dependency_failure", "join condition became impossible"),
             join_summary=observations,

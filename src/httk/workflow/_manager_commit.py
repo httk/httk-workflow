@@ -190,10 +190,10 @@ def process_committing(manager: Any, marker: Marker) -> None:
         )
     )
     action = outcome["action"]
-    progress = StateFrame.of(state.carried(), data_generation=data_generation)
+    progress = StateFrame.replace(state.carried(), data_generation=data_generation)
     declared_steps = manager._declared_runner_steps(marker, outcome)
     if declared_steps is not None:
-        progress = StateFrame.of(progress, runner_steps=declared_steps)
+        progress = StateFrame.replace(progress, runner_steps=declared_steps)
     priority_raw = outcome.get("priority")
     next_priority = (
         marker.priority if priority_raw is None else require_int(priority_raw, "outcome.priority", maximum=999)
@@ -214,7 +214,7 @@ def process_committing(manager: Any, marker: Marker) -> None:
         manager._transition(
             marker,
             "waiting",
-            StateFrame.of(
+            StateFrame.replace(
                 progress,
                 next_step=next_step,
                 join=manager._labeled_join(join, outcome_path),
@@ -223,7 +223,9 @@ def process_committing(manager: Any, marker: Marker) -> None:
             priority=next_priority,
         )
     elif action == "succeed":
-        manager._transition(marker, "succeeded", StateFrame.of(progress, reason="succeeded"), priority=next_priority)
+        manager._transition(
+            marker, "succeeded", StateFrame.replace(progress, reason="succeeded"), priority=next_priority
+        )
     elif action == "fail":
         try:
             failure_value = validate_failure(outcome.get("failure"))
@@ -244,14 +246,14 @@ def process_committing(manager: Any, marker: Marker) -> None:
         manager._transition(
             marker,
             "failed",
-            StateFrame.of(progress, failure=failure_value.as_mapping(), reason=reason),
+            StateFrame.replace(progress, failure=failure_value.as_mapping(), reason=reason),
             priority=next_priority,
         )
     elif action == "pause":
         manager._transition(
             marker,
             "paused",
-            StateFrame.of(progress, pause=outcome.get("pause"), reason="step_paused"),
+            StateFrame.replace(progress, pause=outcome.get("pause"), reason="step_paused"),
             priority=next_priority,
         )
     else:
@@ -276,7 +278,7 @@ def advance(
         manager._transition(
             marker,
             "failed",
-            StateFrame.of(
+            StateFrame.replace(
                 progress, failure=failure("budget_exhausted", "maximum_activations exceeded"), reason="budget_exhausted"
             ),
         )
@@ -284,7 +286,7 @@ def advance(
     manager._transition(
         marker,
         "ready",
-        StateFrame.of(
+        StateFrame.replace(
             progress,
             step=next_step,
             activation_id=str(uuid.uuid4()),
@@ -316,11 +318,11 @@ def retry(
         manager._transition(
             marker,
             "failed",
-            StateFrame.of(progress, failure=failure("retry_exhausted", reason), reason="retry_exhausted"),
+            StateFrame.replace(progress, failure=failure("retry_exhausted", reason), reason="retry_exhausted"),
         )
         return
     evidence_value = {} if takeover_evidence is None else dict(takeover_evidence)
-    retried = StateFrame.of(
+    retried = StateFrame.replace(
         progress,
         reason=reason,
         unclean_restart=unclean,
@@ -328,7 +330,7 @@ def retry(
         previous_attempt_id=state.attempt_id,
     )
     if takeover_evidence is not None:
-        retried = StateFrame.of(retried, takeover_evidence=evidence_value)
+        retried = StateFrame.replace(retried, takeover_evidence=evidence_value)
     manager._transition(marker, "ready", retried, priority=priority)
 
 
@@ -405,9 +407,9 @@ def handle_attempt_failure(
         if code in job.retry_policy.retry_on:
             manager._retry(marker, job, state, progress, code, unclean=unclean, takeover_evidence=takeover_evidence)
             return
-        failed = StateFrame.of(progress, failure=failure(code, message, exit_status=exit_status), reason=code)
+        failed = StateFrame.replace(progress, failure=failure(code, message, exit_status=exit_status), reason=code)
         if takeover_evidence is not None:
-            failed = StateFrame.of(failed, takeover_evidence=dict(takeover_evidence))
+            failed = StateFrame.replace(failed, takeover_evidence=dict(takeover_evidence))
         manager._transition(marker, "failed", failed)
     except Exception as exc:
         from .errors import TransitionLostError, WorkflowError
@@ -459,7 +461,7 @@ def resume(manager: Any, logger: Any) -> bool:
                 manager._transition(
                     marker,
                     "failed",
-                    StateFrame.of(
+                    StateFrame.replace(
                         state.carried(),
                         failure=manager._failure(code, str(exc)),
                         reason="commit_failed",

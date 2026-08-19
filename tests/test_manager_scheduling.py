@@ -387,7 +387,7 @@ def test_a_state_frame_written_before_the_typed_frame_loads_identically() -> Non
 
     # Typed writes merge onto a base without disturbing anything else, and a
     # value of None writes the JSON null the protocol distinguishes.
-    updated = StateFrame.of(carried, reason="succeeded", data_generation=None)
+    updated = StateFrame.replace(carried, reason="succeeded", data_generation=None)
     assert updated.as_mapping()["data_generation"] is None
     assert updated.reason == "succeeded"
     assert updated.step == "relax"
@@ -1016,7 +1016,7 @@ def test_marker_ownership_filters_scheduling_and_recovery(tmp_path: Path) -> Non
         manager._transition(
             ready,
             "claimed",
-            StateFrame.of(
+            StateFrame.replace(
                 manager._read_frame(ready).carried(),
                 manager_id=str(uuid.uuid4()),
                 writer_id=manager.writer.writer_id,

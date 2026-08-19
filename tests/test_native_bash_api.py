@@ -61,7 +61,7 @@ def _draft(tmp_path: Path, *, data_generation: int | None = None) -> OutcomeDraf
         encoding="utf-8",
     )
     (tmp_path / "run").mkdir()
-    return OutcomeDraft(AttemptContext.read(context), control)
+    return OutcomeDraft(AttemptContext.from_path(context), control)
 
 
 def test_composed_outcome_contains_transaction_and_children(tmp_path: Path) -> None:
@@ -118,7 +118,7 @@ def test_workdir_batch_replays_after_seal(tmp_path: Path) -> None:
     workdir.mkdir()
     source = tmp_path / "new"
     source.write_text("new\n", encoding="utf-8")
-    batch = ReplayableWorkdirBatch.create(workdir)
+    batch = ReplayableWorkdirBatch.initialize(workdir)
     batch.transaction.put_file("value", source, "results/value.txt")
     batch.seal()
     recovered = ReplayableWorkdirBatch.recover(workdir)
