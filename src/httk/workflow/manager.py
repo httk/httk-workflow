@@ -290,6 +290,9 @@ class RunningAttempt:
     cancelling: bool = False
     owner_uid: int | None = None
 
+    def __repr__(self) -> str:
+        return f"RunningAttempt(attempt_id={self.attempt_id!r}, pid={self.process.pid})"
+
     def close_logs(self) -> None:
         """Close the captured output streams for this attempt."""
 
@@ -494,6 +497,9 @@ class TaskManager:
                 )
                 continue
         self._warn_unmatched_placement_prefixes()
+
+    def __repr__(self) -> str:
+        return f"TaskManager(workspace={self.workspace!r}, pools={tuple(sorted(self.pools))!r})"
 
     def _warn_unmatched_placement_prefixes(self) -> None:
         """Warn once for each configured prefix that matches no state subtree.
