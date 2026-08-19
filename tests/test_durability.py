@@ -116,7 +116,7 @@ def _write_context(
         document["durable"] = durable
     path = directory / "context.json"
     path.write_text(json.dumps(document), encoding="utf-8")
-    return AttemptContext.read(path)
+    return AttemptContext.from_path(path)
 
 
 def test_attempt_context_round_trips_durable_and_tolerates_absence(tmp_path: Path) -> None:

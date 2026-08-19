@@ -543,7 +543,7 @@ def apply_vasp_remedy(
             }
         )
         history.update({"attempts": attempts, "events": events})
-        batch = ReplayableWorkdirBatch.create(root, durable=durable)
+        batch = ReplayableWorkdirBatch.initialize(root, durable=durable)
         for index, (name, source) in enumerate(sorted(changed.items())):
             batch.transaction.put_file(f"input-{index}", source, name)
         if history_file.is_relative_to(root):

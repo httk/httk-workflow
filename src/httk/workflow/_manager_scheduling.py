@@ -107,7 +107,7 @@ def register_submissions(manager: Any) -> bool:
             manager._transition(
                 marker,
                 "ready",
-                StateFrame.of(
+                StateFrame.replace(
                     step=job.initial_step,
                     activation_id=str(uuid.uuid4()),
                     activation_ordinal=1,
@@ -125,7 +125,7 @@ def register_submissions(manager: Any) -> bool:
                 manager._transition(
                     marker,
                     "failed",
-                    StateFrame.of(
+                    StateFrame.replace(
                         failure=manager._failure("protocol_error", str(exc)),
                         data_generation=None,
                         reason="submission_invalid",

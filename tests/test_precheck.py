@@ -94,7 +94,7 @@ def test_precheck_flags_a_step_outside_the_recorded_runner_steps(tmp_path: Path)
         manager._transition(
             submitted,
             "paused",
-            StateFrame.of(state.carried(), step="bogus", runner_steps=["only", "other"], reason="paused"),
+            StateFrame.replace(state.carried(), step="bogus", runner_steps=["only", "other"], reason="paused"),
         )
     findings = list(precheck_module.precheck_jobs(workspace))
     step_problems = [str(finding["step"]) for finding in findings if finding["step"]]

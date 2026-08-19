@@ -431,7 +431,7 @@ class ChildResult:
         return self.kind in {"failed", "cancelled"}
 
     @classmethod
-    def _observed(cls, raw: Mapping[str, object], workspace: Path) -> "ChildResult":
+    def from_mapping(cls, raw: Mapping[str, object], workspace: Path) -> "ChildResult":
         label = raw.get("label")
         payload_path = PurePosixPath(require_string(raw.get("payload_path"), "child payload_path"))
         workdir_raw = raw.get("workdir_path")
@@ -623,7 +623,9 @@ class Attempt:
             if not isinstance(observations, Sequence) or isinstance(observations, (str, bytes)):
                 observations = ()
             self._children = ChildrenView(
-                tuple(ChildResult._observed(item, self.workspace) for item in observations if isinstance(item, Mapping))
+                tuple(
+                    ChildResult.from_mapping(item, self.workspace) for item in observations if isinstance(item, Mapping)
+                )
             )
         return self._children
 
@@ -889,7 +891,7 @@ class Attempt:
         :return: A batch that seals changes for replay after interruption.
         """
 
-        return ReplayableWorkdirBatch.create(self.workdir, durable=self.context.durable)
+        return ReplayableWorkdirBatch.initialize(self.workdir, durable=self.context.durable)
 
     def put(self, source: str | os.PathLike[str], destination: str | os.PathLike[str]) -> str:
         """Stage one file or directory for the job's transactional data.

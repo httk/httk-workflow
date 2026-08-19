@@ -1143,7 +1143,7 @@ class TaskManager:
             self._transition(
                 marker,
                 "failed",
-                StateFrame.of(
+                StateFrame.replace(
                     state.carried(),
                     failure=self._failure("budget_exhausted", budget_failure),
                     reason="budget_exhausted",
@@ -1154,7 +1154,7 @@ class TaskManager:
         claimed = self._transition(
             marker,
             "claimed",
-            StateFrame.of(
+            StateFrame.replace(
                 state.carried(),
                 manager_id=self.manager_id,
                 writer_id=self.writer.writer_id,
@@ -1209,7 +1209,7 @@ class TaskManager:
             self._transition(
                 marker,
                 "ready",
-                StateFrame.of(
+                StateFrame.replace(
                     state.carried(),
                     reason=reason,
                     attempt_ordinal=max(0, (state.attempt_ordinal if state.attempt_ordinal is not None else 1) - 1),
@@ -1429,7 +1429,7 @@ class TaskManager:
             running = self._transition(
                 marker,
                 "running",
-                StateFrame.of(
+                StateFrame.replace(
                     claimed_state.carried(),
                     manager_id=self.manager_id,
                     writer_id=self.writer.writer_id,
@@ -1808,7 +1808,7 @@ class TaskManager:
         self._transition(
             marker,
             "committing",
-            StateFrame.of(
+            StateFrame.replace(
                 state.carried(),
                 manager_id=self.manager_id,
                 writer_id=self.writer.writer_id,
@@ -2056,7 +2056,7 @@ class TaskManager:
         self._transition(
             marker,
             "waiting",
-            StateFrame.of(
+            StateFrame.replace(
                 base,
                 join_unresolved={"child_id": child_id, "first_unresolved_at": utc_now()},
                 reason="join_child_unresolved",
@@ -2076,7 +2076,7 @@ class TaskManager:
             self._transition(
                 marker,
                 "failed",
-                StateFrame.of(
+                StateFrame.replace(
                     state.carried(),
                     failure=self._failure(code, message),
                     reason=reason,

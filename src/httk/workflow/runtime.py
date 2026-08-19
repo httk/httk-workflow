@@ -90,7 +90,7 @@ class AttemptContext:
     raw: Mapping[str, Any]
 
     @classmethod
-    def read(cls, path: str | os.PathLike[str]) -> Self:
+    def from_path(cls, path: str | os.PathLike[str]) -> Self:
         """Read and validate a manager-written attempt context.
 
         :param path: Locate the attempt context file.
@@ -187,7 +187,7 @@ def _read_environment(environment: Mapping[str, str] | None = None) -> _AttemptE
             raise ValueError(f"missing workflow runtime variable: {name}")
         return value
 
-    context = AttemptContext.read(required("HTTK_WORKFLOW_CONTEXT"))
+    context = AttemptContext.from_path(required("HTTK_WORKFLOW_CONTEXT"))
     step = values.get("HTTK_WORKFLOW_STEP") or context.step
     if step != context.step:
         raise ValueError(

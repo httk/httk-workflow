@@ -655,7 +655,7 @@ def _workdir_apply(arguments: argparse.Namespace) -> None:
     operations = raw.get("operations")
     if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
         raise _Refused("a workdir operation spec requires an operations array")
-    batch = ReplayableWorkdirBatch.create(_attempt().workdir, durable=_attempt().context.durable)
+    batch = ReplayableWorkdirBatch.initialize(_attempt().workdir, durable=_attempt().context.durable)
     for item in operations:
         if not isinstance(item, Mapping):
             raise _Refused("a workdir operation must be an object")

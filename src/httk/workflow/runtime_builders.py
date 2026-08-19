@@ -814,7 +814,7 @@ class ReplayableWorkdirBatch:
         self.transaction = TransactionBuilder(root, expected_generation=0, durable=False)
 
     @classmethod
-    def create(cls, workdir: str | os.PathLike[str], *, durable: bool = False) -> "ReplayableWorkdirBatch":
+    def initialize(cls, workdir: str | os.PathLike[str], *, durable: bool = False) -> "ReplayableWorkdirBatch":
         """Create a new workdir batch.
 
         :param workdir: Locate the workdir receiving the changes.

@@ -208,7 +208,7 @@ def test_paused_job_is_counted_and_not_actionable(tmp_path: Path) -> None:
         manager._register_submissions()
         ready = resolve_job(workspace, job_id)
         state = StateFrame.from_mapping(workspace.read_state(ready))
-        manager._transition(ready, "paused", StateFrame.of(state.carried(), reason="operator_paused"))
+        manager._transition(ready, "paused", StateFrame.replace(state.carried(), reason="operator_paused"))
         census = manager._work_census()
     assert census.paused == 1
     assert not census.actionable
@@ -318,7 +318,7 @@ def test_committing_wedge_surfaces_in_job_why(tmp_path: Path) -> None:
         committing = manager._transition(
             running,
             "committing",
-            StateFrame.of(
+            StateFrame.replace(
                 state.carried(),
                 manager_id=manager.manager_id,
                 writer_id=manager.writer.writer_id,
@@ -357,7 +357,7 @@ def test_a_malformed_committing_outcome_fails_as_protocol_error_naming_both_ids(
         committing = manager._transition(
             running,
             "committing",
-            StateFrame.of(
+            StateFrame.replace(
                 state.carried(),
                 manager_id=manager.manager_id,
                 writer_id=manager.writer.writer_id,
@@ -409,7 +409,7 @@ def test_an_unparseable_committing_outcome_carries_the_assembly_remedy(tmp_path:
         committing = manager._transition(
             running,
             "committing",
-            StateFrame.of(
+            StateFrame.replace(
                 state.carried(),
                 manager_id=manager.manager_id,
                 writer_id=manager.writer.writer_id,
@@ -445,7 +445,7 @@ def test_corrupt_committing_job_idles_promptly_and_is_reported(tmp_path: Path) -
         committing = manager._transition(
             running,
             "committing",
-            StateFrame.of(
+            StateFrame.replace(
                 state.carried(),
                 manager_id=manager.manager_id,
                 writer_id=manager.writer.writer_id,
@@ -563,7 +563,7 @@ def test_override_step_is_refused_client_side_against_recorded_runner_steps(tmp_
         manager._transition(
             submitted,
             "failed",
-            StateFrame.of(state.carried(), step="only", runner_steps=["only", "other"], reason="failed"),
+            StateFrame.replace(state.carried(), step="only", runner_steps=["only", "other"], reason="failed"),
         )
     capsys.readouterr()
     assert (
@@ -590,7 +590,7 @@ def test_override_step_force_downgrades_the_refusal_and_publishes(tmp_path: Path
         manager._transition(
             submitted,
             "failed",
-            StateFrame.of(state.carried(), step="only", runner_steps=["only", "other"], reason="failed"),
+            StateFrame.replace(state.carried(), step="only", runner_steps=["only", "other"], reason="failed"),
         )
     capsys.readouterr()
     argv = ["job", "request", name, job_id, "override_step", "--step", "recover"]
@@ -652,7 +652,7 @@ def test_why_reports_a_runner_module_the_live_manager_refuses(tmp_path: Path) ->
         manager._transition(
             submitted,
             "ready",
-            StateFrame.of(
+            StateFrame.replace(
                 state.carried(),
                 step="only",
                 activation_id="v1",
@@ -699,7 +699,7 @@ def test_why_flags_an_unlimited_budget_job_as_flapping(tmp_path: Path) -> None:
         manager._transition(
             ready,
             "failed",
-            StateFrame.of(
+            StateFrame.replace(
                 state.carried(),
                 total_attempts=11,
                 attempt_ordinal=11,
@@ -725,7 +725,7 @@ def test_why_surfaces_a_pending_operator_request(tmp_path: Path) -> None:
         failed = manager._transition(
             ready,
             "failed",
-            StateFrame.of(
+            StateFrame.replace(
                 state.carried(), failure={"code": "process_failure", "message": "boom"}, reason="process_failure"
             ),
         )

@@ -108,14 +108,14 @@ def apply(manager: Any, request: Mapping[str, Any]) -> str | None:
     action = request.get("action")
     state = manager._read_frame(marker)
     job = manager.workspace.load_job(marker)
-    audit = StateFrame.of(
+    audit = StateFrame.replace(
         state.carried(),
         operator=request.get("operator"),
         operator_reason=request.get("reason"),
         request_id=request.get("request_id"),
     )
     if operator_key_value is not None:
-        audit = StateFrame.of(audit, operator_key=operator_key_value)
+        audit = StateFrame.replace(audit, operator_key=operator_key_value)
     if action == "cancel" and marker.kind not in TERMINAL_KINDS:
         return manager._request_cancel(marker, state, request, operator_key_value)
     if action == "set_priority" and marker.kind in {"submitted", "ready", "waiting", "paused", "failed"}:
@@ -124,12 +124,12 @@ def apply(manager: Any, request: Mapping[str, Any]) -> str | None:
         manager._transition(
             marker,
             marker.kind,
-            StateFrame.of(StateFrame({**audit.members, **preserved.members}), reason="operator_priority"),
+            StateFrame.replace(StateFrame({**audit.members, **preserved.members}), reason="operator_priority"),
             priority=priority,
         )
         return None
     if action == "pause" and marker.kind in {"submitted", "ready", "waiting"}:
-        manager._transition(marker, "paused", StateFrame.of(audit, reason="operator_pause"))
+        manager._transition(marker, "paused", StateFrame.replace(audit, reason="operator_pause"))
         return None
     if action in {"continue", "override_step"} and marker.kind in {"failed", "paused"}:
         hazard = manager._decided_join_hazard(marker, job)
@@ -140,7 +140,7 @@ def apply(manager: Any, request: Mapping[str, Any]) -> str | None:
                     f"which observed it as {hazard['observed_kind']}; reviving it now races the parent reading its outputs. "
                     "Republish the request with force to accept that hazard, or continue the parent instead"
                 )
-            audit = StateFrame.of(audit, revival_hazard=hazard)
+            audit = StateFrame.replace(audit, revival_hazard=hazard)
             _LOGGER.warning(
                 "forced revival of %s: its parent %s already decided a join on it",
                 marker.job_key,
