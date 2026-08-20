@@ -124,15 +124,9 @@ def _read_global() -> dict[str, dict[str, str]]:
     if not isinstance(document, dict):
         raise ValueError(f"workspace registry is not a JSON object: {path}")
     if document.get("format") != _REGISTRY_FORMAT or document.get("format_version") != _REGISTRY_FORMAT_VERSION:
-        version = document.get("format_version")
-        if version == 1 or any(
-            isinstance(value, Mapping) and "remote" in value for value in document.get("workspaces", {}).values()
-        ):
-            raise ValueError(
-                f"workspace registry {path} predates machine-owned workspace names; remove it and re-register "
-                "local workspaces with `workspace init` (remote workspaces now register themselves on their own machine)"
-            )
-        raise ValueError(f"workspace registry is not {_REGISTRY_FORMAT} format version 2: {path}")
+        raise ValueError(
+            f"workspace registry is not {_REGISTRY_FORMAT} format version {_REGISTRY_FORMAT_VERSION}: {path}"
+        )
     workspaces = document.get("workspaces", {})
     if not isinstance(workspaces, dict):
         raise ValueError(f"workspace registry workspaces member is not an object: {path}")
@@ -140,11 +134,6 @@ def _read_global() -> dict[str, dict[str, str]]:
     for name, record in workspaces.items():
         if not isinstance(name, str) or not isinstance(record, Mapping):
             raise ValueError(f"workspace registry has an invalid entry: {path}")
-        if "remote" in record:
-            raise ValueError(
-                f"workspace registry {path} predates machine-owned workspace names; remove it and re-register "
-                "local workspaces with `workspace init` (remote workspaces now register themselves on their own machine)"
-            )
         location = record.get("path")
         if not isinstance(location, str) or not location or not Path(location).is_absolute():
             raise ValueError(f"workspace registry entry {name!r} has no absolute path: {path}")
