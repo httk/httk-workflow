@@ -88,7 +88,7 @@ sub _validate {
 sub _description {
     my ($self) = @_;
     my @steps = sort @{ $self->{steps} };
-    return '{"format": "httk-workflow-runner-description", "format_version": 1, "steps": ['
+    return '{"format": "httk-workflow-runner-description", "format_version": 2, "steps": ['
         . join(', ', map { '"' . $_ . '"' } @steps)
         . '], "workflow": "' . $self->{workflow} . "\"}\n";
 }

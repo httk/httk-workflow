@@ -51,7 +51,7 @@ else:
     body = {"action": "succeed"}
 outcome = {
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -73,7 +73,7 @@ from pathlib import Path
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 (control / "error.json").write_text(json.dumps({
     "format": "httk-workflow-runner-error",
-    "format_version": 1,
+    "format_version": 2,
     "step": os.environ["HTTK_WORKFLOW_STEP"],
     "exception": "RuntimeError",
     "message": "the inputs are missing",
@@ -93,7 +93,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -115,7 +115,7 @@ temporary = control / "outcome.tmp.child"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -138,7 +138,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 base = {
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -156,7 +156,7 @@ else:
     runner.chmod(0o755)
     (child_dir / "job.json").write_text(json.dumps({
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": child_id,
         "tag": "child",
         "name": "Child job",
@@ -237,7 +237,7 @@ def _payload(
     runner.chmod(0o755)
     job = {
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": job_id,
         "tag": tag,
         "name": "Introspection example",
@@ -553,11 +553,11 @@ runlog = Path(".httk-runner") / "runlog.jsonl"
 runlog.parent.mkdir(parents=True, exist_ok=True)
 with runlog.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps({
-        "format": "httk-workflow-runlog-event", "format_version": 1,
+        "format": "httk-workflow-runlog-event", "format_version": 2,
         "kind": "note", "message": "starting",
     }) + "\\n")
     handle.write(json.dumps({
-        "format": "httk-workflow-runlog-event", "format_version": 1,
+        "format": "httk-workflow-runlog-event", "format_version": 2,
         "kind": "headline", "message": "halfway through relax",
     }) + "\\n")
 sys.exit(5)

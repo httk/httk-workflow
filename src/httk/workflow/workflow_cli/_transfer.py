@@ -627,7 +627,7 @@ def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) ->
     if arguments.json:
         document = {
             "format": TRANSFER_OFFER_FORMAT,
-            "format_version": 1,
+            "format_version": 2,
             "workspace_id": workspace.workspace_id,
             "destination_workspace_id": arguments.destination_workspace_id,
             "offers": offers,
@@ -650,7 +650,7 @@ def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -
     if arguments.json:
         document = {
             "format": TRANSFER_RETIREMENT_FORMAT,
-            "format_version": 1,
+            "format_version": 2,
             "retired": retired,
         }
         print(json.dumps(document, sort_keys=True, separators=(",", ":")))
@@ -700,7 +700,7 @@ def _remote_offer(
             printed.add(rendered)
     try:
         document = json.loads(str(offered.get("stdout", "")))
-        if document.get("format") != TRANSFER_OFFER_FORMAT or document.get("format_version") != 1:
+        if document.get("format") != TRANSFER_OFFER_FORMAT or document.get("format_version") != 2:
             raise ValueError
         offers = document["offers"]
         if not isinstance(offers, list):

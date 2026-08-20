@@ -26,7 +26,7 @@ def _payload(
     runner.chmod(0o755)
     job = {
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": job_id,
         "tag": "test-job",
         "name": "Test job",
@@ -65,7 +65,7 @@ else:
     body = {"action": "succeed"}
 outcome = {
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -209,7 +209,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -244,7 +244,7 @@ content = b"complete\\n"
 (payload / "result.txt").write_bytes(content)
 (temporary / "transaction" / "manifest.json").write_text(json.dumps({
     "format": "httk-workflow-transaction",
-    "format_version": 1,
+    "format_version": 2,
     "id": "transaction",
     "expected_data_generation": context["data_generation"],
     "operations": [{
@@ -257,7 +257,7 @@ content = b"complete\\n"
 }))
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -291,7 +291,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 base = {
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -314,7 +314,7 @@ temporary = control / "outcome.tmp.child"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -325,7 +325,7 @@ os.rename(temporary, control / "outcome.ready")
     child_runner.chmod(0o755)
     (child_dir / "job.json").write_text(json.dumps({
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": child_id,
         "tag": "child",
         "name": "Child",
@@ -405,7 +405,7 @@ def test_priority_request_renames_authoritative_marker(tmp_path: Path) -> None:
         workspace.publish_request(
             {
                 "format": "httk-workflow-request",
-                "format_version": 1,
+                "format_version": 2,
                 "job_id": job_id,
                 "job_key": ready.job_key,
                 "placement": ready.placement.as_posix(),

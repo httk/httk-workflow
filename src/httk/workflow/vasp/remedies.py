@@ -273,7 +273,7 @@ class VaspRemedyDecision:
         """
         return {
             "format": "httk-vasp-remedy-decision",
-            "format_version": 1,
+            "format_version": 2,
             "policy": self.policy,
             "problem": self.problem,
             "step": self.step,
@@ -312,7 +312,7 @@ def _remedy_history_file(root: Path, history_path: str | os.PathLike[str]) -> Pa
 
 
 def _empty_remedy_history() -> dict[str, Any]:
-    return {"format": "httk-vasp-remedy-history", "format_version": 1, "attempts": {}, "events": []}
+    return {"format": "httk-vasp-remedy-history", "format_version": 2, "attempts": {}, "events": []}
 
 
 def _read_remedy_history(root: Path, history_path: str | os.PathLike[str]) -> dict[str, Any]:

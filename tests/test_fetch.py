@@ -218,7 +218,7 @@ def test_offer_seals_exactly_the_terminal_jobs_and_is_idempotent(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     document = _offer(pair, capsys)
-    assert document["format"] == "httk-workflow-transfer-offer" and document["format_version"] == 1
+    assert document["format"] == "httk-workflow-transfer-offer" and document["format_version"] == 2
     assert document["destination_workspace_id"] == pair.local.workspace_id
 
     offers = document["offers"]

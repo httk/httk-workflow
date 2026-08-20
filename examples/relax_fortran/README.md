@@ -25,7 +25,7 @@ Enumerate it without running it — every native runner answers `--describe`:
 
 ```console
 ./relax --describe
-{"format": "httk-workflow-runner-description", "format_version": 1, "steps": ["prepare", "publish", "run"], "workflow": "httk.vasp.relax-fortran"}
+{"format": "httk-workflow-runner-description", "format_version": 2, "steps": ["prepare", "publish", "run"], "workflow": "httk.vasp.relax-fortran"}
 ```
 
 Drive one relaxation with the compiled binary as the runner, exactly the flow of

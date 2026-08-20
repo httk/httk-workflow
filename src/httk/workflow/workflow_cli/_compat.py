@@ -27,7 +27,7 @@ def handle_v1_collect(arguments: argparse.Namespace, context: CLIContext) -> int
         json.dumps(
             {
                 "format": "httk-workflow-v1-collect-summary",
-                "format_version": 1,
+                "format_version": 2,
                 "finished": len(items),
                 "unfinished_by_status": dict(sorted(unfinished.items())) if isinstance(unfinished, dict) else {},
                 "skipped_no_rundir": stats.get("skipped_no_rundir", 0),

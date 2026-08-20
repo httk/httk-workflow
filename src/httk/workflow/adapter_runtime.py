@@ -92,7 +92,7 @@ def _result(operation: str, **values: object) -> None:
         json.dumps(
             {
                 "format": RESULT_FORMAT,
-                "format_version": 1,
+                "format_version": 2,
                 "operation": operation,
                 "ok": True,
                 **values,
@@ -109,7 +109,7 @@ def _refusal(operation: str, message: str) -> None:
             {
                 "error": message,
                 "format": RESULT_FORMAT,
-                "format_version": 1,
+                "format_version": 2,
                 "operation": operation,
                 "ok": False,
             },

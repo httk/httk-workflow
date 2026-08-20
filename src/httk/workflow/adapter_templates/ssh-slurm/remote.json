@@ -1,1 +1,1 @@
-{"adapter_version":1,"format":"httk-computer-adapter","format_version":1,"kind":"ssh-slurm","settings":{},"required_binaries":["rsync","ssh"],"timeout_seconds":300}
+{"adapter_version":2,"format":"httk-computer-adapter","format_version":2,"kind":"ssh-slurm","settings":{},"required_binaries":["rsync","ssh"],"timeout_seconds":300}

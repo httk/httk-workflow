@@ -452,7 +452,7 @@ class Diagnosis:
 
         return {
             "format": JOB_DIAGNOSIS_FORMAT,
-            "format_version": 1,
+            "format_version": 2,
             "job_id": self.job_id,
             "job_key": self.job_key,
             "state": self.state,

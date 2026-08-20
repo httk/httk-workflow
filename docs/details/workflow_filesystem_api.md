@@ -281,10 +281,10 @@ rename/prune rules below.
 ```json
 {
   "format": "httk-workflow-filesystem",
-  "format_version": 1,
+  "format_version": 2,
   "core_profile": "core-v2",
   "extensions": [],
-  "record_ref_encoding": "hwref-v1",
+  "record_ref_encoding": "hwref-v2",
   "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
   "created_at": "2026-07-24T12:00:00Z",
   "policy": {
@@ -301,7 +301,7 @@ rename/prune rules below.
 Everything this specification calls *configured* is one object in
 `format.json`, because a tunable that lives in each process cannot be agreed
 on by two implementations attaching the same workspace. The `policy` object is
-part of format version 1 and holds exactly these members:
+part of format version 2 and holds exactly these members:
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -664,8 +664,8 @@ frame then contains:
 4. the same eight-byte big-endian length as a trailer.
 
 The marker's compact `record-ref` identifies writer, segment, byte offset,
-length, and checksum. Format version 1 mandates the canonical filename-safe
-`hwref-v1` encoding:
+length, and checksum. Format version 2 mandates the canonical filename-safe
+`hwref-v2` encoding:
 
 ```text
 w<writer-uuid-hex>-s<segment-base36>-o<offset-base36>-l<length-base36>-h<checksum128-hex>
@@ -685,7 +685,7 @@ The worst-case noninitial marker basename is 213 ASCII bytes:
 
 ```text
 86 job-key + 5 ".p999" + 15 (".g" + 13 generation digits)
-+ 1 "." + 106 maximum hwref-v1 = 213
++ 1 "." + 106 maximum hwref-v2 = 213
 ```
 
 The 86-byte job key is a 48-byte tag, `--`, and a 36-byte UUID. The reference
@@ -694,7 +694,7 @@ base-36 segment number, `15` each for `-o`/offset and `-l`/length, and `34` for
 `-h` plus the checksum: `33 + 9 + 15 + 15 + 34 = 106`. A conforming workspace MUST
 support at least 213 bytes per filename component and MUST validate this at
 initialization. These field limits and the tag limit MUST NOT be enlarged
-within format version 1.
+within format version 2.
 
 Before a state-marker rename, the writer MUST flush the entire frame and, in
 the storage-durable profile, synchronize the segment. A marker can therefore
@@ -754,7 +754,7 @@ Every state frame includes:
 ```json
 {
   "format": "httk-workflow-state",
-  "format_version": 1,
+  "format_version": 2,
   "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
   "job_id": "01234567-89ab-cdef-0123-456789abcdef",
   "job_key": "silicon-relax--01234567-89ab-cdef-0123-456789abcdef",
@@ -814,7 +814,7 @@ A minimal `job.json` is:
 ```json
 {
   "format": "httk-workflow-job",
-  "format_version": 1,
+  "format_version": 2,
   "id": "01234567-89ab-cdef-0123-456789abcdef",
   "tag": "silicon-relax",
   "name": "Silicon relaxation",
@@ -1402,7 +1402,7 @@ working directory set to the staging payload:
 ```json
 {
   "format": "httk-workflow-instantiate",
-  "format_version": 1,
+  "format_version": 2,
   "workflow": "example.relax",
   "tag": "silicon",
   "parameters": {"cutoff": 520},
@@ -1417,7 +1417,7 @@ Its stdout is one JSON object containing `parameters` and, optionally, `tag`.
 An executable collect hook receives JSONL: the first line is exactly
 
 ```json
-{"format": "httk-workflow-collect-stream", "format_version": 1}
+{"format": "httk-workflow-collect-stream", "format_version": 2}
 ```
 
 and each later line is exactly one request envelope:
@@ -1452,7 +1452,7 @@ An unclean persistent retry context is:
 ```json
 {
   "format": "httk-workflow-attempt-context",
-  "format_version": 1,
+  "format_version": 2,
   "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
   "job_id": "01234567-89ab-cdef-0123-456789abcdef",
   "placement": "project-17/0/03a",
@@ -1517,7 +1517,7 @@ A minimal outcome is:
 ```json
 {
   "format": "httk-workflow-outcome",
-  "format_version": 1,
+  "format_version": 2,
   "job_id": "01234567-89ab-cdef-0123-456789abcdef",
   "activation_id": "e7f86a0e-34d6-45a7-b92d-3f4b2dc98c54",
   "attempt_id": "a6c2c973-29e1-44e2-9649-ae419e340ac4",
@@ -1621,7 +1621,7 @@ Example:
 ```json
 {
   "format": "httk-workflow-transaction",
-  "format_version": 1,
+  "format_version": 2,
   "id": "6fc3852b-f1df-4edf-a92c-7f81c3e02465",
   "expected_data_generation": 3,
   "operations": [
@@ -2216,7 +2216,7 @@ rescanned. The record sits beside the request under the request's own name plus
 ```json
 {
   "format": "httk-workflow-retired-request",
-  "format_version": 1,
+  "format_version": 2,
   "request": "3f2b0a1c-6c2e-4a2a-9a94-1b7c3e5f0d21.json",
   "manager_id": "b0d1e2f3-4455-6677-8899-aabbccddeeff",
   "reason": "the job is at generation 7, not the expected one",
@@ -2495,7 +2495,7 @@ journal:
 ```json
 {
   "format": "httk-workflow-gc",
-  "format_version": 1,
+  "format_version": 2,
   "workspace_id": "…",
   "collected_at": "2026-07-26T09:12:44.512314Z",
   "retention": {"journal_days": 30},

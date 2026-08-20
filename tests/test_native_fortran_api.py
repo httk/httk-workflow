@@ -196,7 +196,7 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
         json.dumps(
             {
                 "format": "httk-workflow-attempt-context",
-                "format_version": 1,
+                "format_version": 2,
                 "workspace_id": str(uuid.uuid4()),
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"fabricated--{uuid.uuid4()}",
@@ -442,7 +442,7 @@ def test_a_runner_can_be_registered_twice(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == {
         "format": "httk-workflow-runner-description",
-        "format_version": 1,
+        "format_version": 2,
         "steps": ["beta", "gamma"],
         "workflow": "w.second",
     }

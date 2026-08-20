@@ -116,7 +116,7 @@ def _payload(root: Path, *, pool: str = "default") -> tuple[Path, str]:
         json.dumps(
             {
                 "format": "httk-workflow-job",
-                "format_version": 1,
+                "format_version": 2,
                 "id": job_id,
                 "tag": "test",
                 "name": "test",
@@ -380,7 +380,7 @@ def test_forged_operator_request_is_quarantined(tmp_path: Path, monkeypatch) -> 
     request = sign_document(
         {
             "format": "httk-workflow-request",
-            "format_version": 1,
+            "format_version": 2,
             "request_id": str(uuid.uuid4()),
             "job_id": marker.job_id,
             "job_key": marker.job_key,
@@ -617,7 +617,7 @@ def test_written_configuration_keeps_its_format_members(tmp_path: Path, monkeypa
     _isolate(tmp_path, monkeypatch)
     write_config({"name": "A User"})
     stored = read_config()
-    assert stored["format"] == "httk-config" and stored["format_version"] == 1
+    assert stored["format"] == "httk-config" and stored["format_version"] == 2
 
 
 # ---------------------------------------------------------------------------

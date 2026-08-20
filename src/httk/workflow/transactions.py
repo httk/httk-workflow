@@ -93,8 +93,8 @@ def replay_transaction(
     """
 
     manifest = read_json(transaction_dir / "manifest.json")
-    if manifest.get("format") != "httk-workflow-transaction" or manifest.get("format_version") != 1:
-        raise FormatError("transaction must use httk-workflow-transaction version 1")
+    if manifest.get("format") != "httk-workflow-transaction" or manifest.get("format_version") != 2:
+        raise FormatError("transaction must use httk-workflow-transaction version 2")
     if manifest.get("expected_data_generation") != expected_generation:
         raise TransactionError("transaction expected_data_generation is stale")
     operations = manifest.get("operations")

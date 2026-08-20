@@ -111,7 +111,7 @@ job, not this module's. An observed document that cannot be read is reported as
 `job`; `declarations` is where they are read. See {doc}`declarations`.
 The observed `environment` declaration, when present, is the exact resolved
 value/source snapshot that drove the run; its format is
-`httk-workflow-environment-resolution` version 1.
+`httk-workflow-environment-resolution` version 2.
 The `provenance` declaration becomes a stored `httk.core.Run`; see
 {doc}`provenance`.
 
@@ -149,7 +149,7 @@ Every `collect` invocation except the pure-array `--json` form ends with one
 trailing JSONL summary line:
 
 ```text
-{"format":"httk-workflow-collect-summary","format_version":1,
+{"format":"httk-workflow-collect-summary","format_version":2,
  "collected":N,"degraded":N,"unfulfilled_roles":N,
  "storage_errors":N,"skipped_unreadable":N}
 ```
@@ -196,7 +196,7 @@ path, the entry types this sweep needs, and the layout difference, and ends
 ```console
 $ httk workflow collect workflow-workspace | head -1
 {"children":{},"data_generation":null,"data_path":null,"declarations":{},"failure":null,
- "format":"httk-workflow-collect","format_version":1,
+ "format":"httk-workflow-collect","format_version":2,
  "job":{"claim":{"pool":"default","required_capabilities":[]},"data":{"mode":"none"},
 "digest":"0e6f…","id":"5c0a…","initial_step":"only","parameters":{},"job_key":"single--5c0a…",
  "name":"collect single","parent":null,"priority":500,
@@ -243,7 +243,7 @@ An executable `[workflow.collect]` member is run once for the matching sweep
 from its package tree. For direct package paths and the opt-in job-pinned
 fallback, that tree is published and digest-checked; a registered-directory
 provider is the explicit-consent current-source exception. The first stdin line is
-`{"format":"httk-workflow-collect-stream","format_version":1}`; each
+`{"format":"httk-workflow-collect-stream","format_version":2}`; each
 following line is `{"record": <JobRecord mapping>}`. The hook must return one
 JSONL response per record, in order: `{"job_id": ..., "outputs": {role:
 value}}` or `{"job_id": ..., "error": ...}`. Output values use exactly one

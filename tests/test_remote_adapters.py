@@ -56,7 +56,7 @@ context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 outcome = {
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -89,7 +89,7 @@ def _payload(root: Path) -> tuple[Path, str]:
         json.dumps(
             {
                 "format": "httk-workflow-job",
-                "format_version": 1,
+                "format_version": 2,
                 "id": job_id,
                 "tag": "test",
                 "name": "test",

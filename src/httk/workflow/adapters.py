@@ -212,7 +212,7 @@ def probe_remote_workspace(
         document = json.loads(str(status.get("stdout", "")))
         if (
             document.get("format") != "httk-workflow-status"
-            or document.get("format_version") != 1
+            or document.get("format_version") != 2
             or document.get("core_profile") != CORE_PROFILE
         ):
             raise ValueError
@@ -311,9 +311,9 @@ def validate_adapter_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
 
     root = Path(bundle).expanduser().resolve()
     metadata = read_metadata(root)
-    if metadata.get("format") != ADAPTER_FORMAT or metadata.get("format_version") != 1:
-        raise ValueError(f"{METADATA_FILE} must use {ADAPTER_FORMAT} format version 1")
-    if metadata.get("adapter_version") != 1:
+    if metadata.get("format") != ADAPTER_FORMAT or metadata.get("format_version") != 2:
+        raise ValueError(f"{METADATA_FILE} must use {ADAPTER_FORMAT} format version 2")
+    if metadata.get("adapter_version") != 2:
         raise ValueError(f"unsupported remote adapter version: {metadata.get('adapter_version')!r}")
     # One executable dispatches every operation; the operation name travels in the
     # request JSON, so there is nothing per-operation to resolve or validate here.
@@ -671,7 +671,7 @@ def run_adapter(
     executable = root / ADAPTER_EXECUTABLE
     payload = {
         "format": REQUEST_FORMAT,
-        "format_version": 1,
+        "format_version": 2,
         "operation": operation,
         "adapter_dir": str(root),
         # Persisted settings and their manifest-excluded credentials reach the
@@ -707,7 +707,7 @@ def run_adapter(
         raise ValueError(f"adapter {operation} did not emit exactly one JSON result") from exc
     if not isinstance(result, dict):
         raise ValueError(f"adapter {operation} result must be a JSON object")
-    if result.get("format") != RESULT_FORMAT or result.get("format_version") != 1:
+    if result.get("format") != RESULT_FORMAT or result.get("format_version") != 2:
         raise ValueError(f"adapter {operation} returned an unsupported result")
     if result.get("operation") != operation:
         raise ValueError(f"adapter result operation disagrees with request: {operation}")

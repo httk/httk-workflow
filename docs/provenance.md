@@ -49,7 +49,7 @@ a.declare("provenance", {
 
 The runtime also records an observed `environment` declaration when the job
 declares workflow environment entries. Its
-`httk-workflow-environment-resolution` version 1 document carries each value
+`httk-workflow-environment-resolution` version 2 document carries each value
 and the layer that supplied it, so provenance can identify the settings that
 drove the run.
 

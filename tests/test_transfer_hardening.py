@@ -46,7 +46,7 @@ def _payload(root: Path, *, tag: str = "test") -> tuple[Path, str]:
         json.dumps(
             {
                 "format": "httk-workflow-job",
-                "format_version": 1,
+                "format_version": 2,
                 "id": job_id,
                 "tag": tag,
                 "name": tag,
@@ -216,7 +216,7 @@ def test_transfer_adapter_requests_are_exact_argv(tmp_path: Path, monkeypatch: p
             if captured[-1][3] == "offer":
                 return {
                     "returncode": 0,
-                    "stdout": json.dumps({"format": "httk-workflow-transfer-offer", "format_version": 1, "offers": []}),
+                    "stdout": json.dumps({"format": "httk-workflow-transfer-offer", "format_version": 2, "offers": []}),
                 }
             if captured[-1][3] == "retire":
                 return {"returncode": 0, "stdout": json.dumps({"retired": []})}

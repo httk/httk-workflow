@@ -27,7 +27,7 @@ def _payload(root: Path) -> tuple[Path, str]:
         json.dumps(
             {
                 "format": "httk-workflow-job",
-                "format_version": 1,
+                "format_version": 2,
                 "id": job_id,
                 "tag": "test",
                 "name": "test",
@@ -133,7 +133,7 @@ def test_adapter_json_contract_and_no_shell_interpolation(tmp_path: Path) -> Non
         """#!/usr/bin/env python3
 import json, sys
 request = json.load(open(sys.argv[1]))
-print(json.dumps({"format":"httk-computer-result","format_version":1,
+print(json.dumps({"format":"httk-computer-result","format_version":2,
                   "operation":request["operation"],"ok":True,"argv":request["argv"]}))
 """,
         encoding="utf-8",
@@ -143,8 +143,8 @@ print(json.dumps({"format":"httk-computer-result","format_version":1,
         json.dumps(
             {
                 "format": "httk-computer-adapter",
-                "format_version": 1,
-                "adapter_version": 1,
+                "format_version": 2,
+                "adapter_version": 2,
                 "settings": {},
             }
         ),

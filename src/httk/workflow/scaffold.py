@@ -562,7 +562,7 @@ class ScaffoldedJob:
 
         return {
             "format": JOB_SCAFFOLD_FORMAT,
-            "format_version": 1,
+            "format_version": 2,
             "job_id": self.job_id,
             "job_key": self.job_key,
             "tag": self.tag,
@@ -1811,7 +1811,7 @@ def _run_executable_instantiate(
         raise ValueError(f"instantiate hook {member!r} is not executable; chmod +x")
     request = {
         "format": "httk-workflow-instantiate",
-        "format_version": 1,
+        "format_version": 2,
         "workflow": workflow_id,
         "tag": tag,
         "parameters": dict(parameters),

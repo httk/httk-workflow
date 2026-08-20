@@ -1323,8 +1323,8 @@ class JobDefinition:
         :return: The parsed job definition.
         :raises httk.workflow.errors.FormatError: If the mapping does not satisfy the job protocol.
         """
-        if value.get("format") != "httk-workflow-job" or value.get("format_version") != 1:
-            raise FormatError("job format must be httk-workflow-job version 1")
+        if value.get("format") != "httk-workflow-job" or value.get("format_version") != 2:
+            raise FormatError("job format must be httk-workflow-job version 2")
         if "inputs" in value and "parameters" in value:
             raise FormatError(
                 "job.json carries both 'inputs' and 'parameters'; use only the renamed 'parameters' member"

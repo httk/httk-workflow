@@ -101,7 +101,7 @@ def _write_context(
     directory.mkdir(parents=True, exist_ok=True)
     document: dict[str, object] = {
         "format": "httk-workflow-attempt-context",
-        "format_version": 1,
+        "format_version": 2,
         "workspace_id": str(uuid.uuid4()),
         "job_id": str(uuid.uuid4()),
         "job_key": "durable--" + str(uuid.uuid4()),

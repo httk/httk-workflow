@@ -132,7 +132,7 @@ class FsckReport:
 
         return {
             "format": FSCK_REPORT_FORMAT,
-            "format_version": 1,
+            "format_version": 2,
             "workspace_id": self.workspace_id,
             "markers_checked": self.markers_checked,
             "counts": dict(self.counts),
@@ -165,7 +165,7 @@ class _JournalIndex:
         grouped: dict[str, list[JournalFrame]] = {}
         for entry in iter_journal_frames(self._workspace.control):
             frame = entry.frame
-            if frame.get("format") != "httk-workflow-state" or frame.get("format_version") != 1:
+            if frame.get("format") != "httk-workflow-state" or frame.get("format_version") != 2:
                 continue
             if frame.get("workspace_id") != workspace_id:
                 continue
@@ -189,7 +189,7 @@ def _identity_problem(workspace: "Workspace", marker: Marker, frame: Mapping[str
 
     expected: list[tuple[str, object]] = [
         ("format", "httk-workflow-state"),
-        ("format_version", 1),
+        ("format_version", 2),
         ("workspace_id", workspace.workspace_id),
         ("job_id", marker.job_id),
         ("job_key", marker.job_key),
@@ -275,7 +275,7 @@ def _repair_frame(workspace: "Workspace", marker: Marker, recovered: JournalFram
     frame.update(
         {
             "format": "httk-workflow-state",
-            "format_version": 1,
+            "format_version": 2,
             "workspace_id": workspace.workspace_id,
             "job_id": marker.job_id,
             "job_key": marker.job_key,

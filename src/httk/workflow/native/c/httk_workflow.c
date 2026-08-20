@@ -229,7 +229,7 @@ static int compare_names(const void *a, const void *b) {
 }
 
 void httk_workflow_describe(void) {
-    fputs("{\"format\": \"httk-workflow-runner-description\", \"format_version\": 1, \"steps\": [", stdout);
+    fputs("{\"format\": \"httk-workflow-runner-description\", \"format_version\": 2, \"steps\": [", stdout);
     if (g_step_count > 0) {
         const char **names = malloc(g_step_count * sizeof *names);
         if (names != NULL) {

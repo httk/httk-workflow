@@ -20,7 +20,7 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
     outputs = item.outputs
     mapping: dict[str, object] = {
         "format": "httk-workflow-collected",
-        "format_version": 1,
+        "format_version": 2,
         "job_id": item.record.job_id,
         "job_key": item.record.job_key,
         "workflow": item.workflow_id,
@@ -76,7 +76,7 @@ def _emit_collect_summary(
         json.dumps(
             {
                 "format": "httk-workflow-collect-summary",
-                "format_version": 1,
+                "format_version": 2,
                 "collected": collected,
                 "degraded": degraded,
                 "unfulfilled_roles": unfulfilled_roles,

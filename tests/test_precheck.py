@@ -499,7 +499,7 @@ def test_remote_offer_forwards_successful_stderr(tmp_path: Path, capsys, monkeyp
         "run_adapter",
         lambda *_args, **_kwargs: {
             "returncode": 0,
-            "stdout": json.dumps({"format": "httk-workflow-transfer-offer", "format_version": 1, "offers": []}),
+            "stdout": json.dumps({"format": "httk-workflow-transfer-offer", "format_version": 2, "offers": []}),
             "stderr": "warning: destination environment unresolved\n",
         },
     )

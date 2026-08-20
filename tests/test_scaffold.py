@@ -44,7 +44,7 @@ from httk.workflow.vasp.runners import PACKAGE
 def test_job_definition_uses_runner_executor_wire_key() -> None:
     job: dict[str, Any] = {
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": "12345678-1234-4234-8234-123456789abc",
         "tag": None,
         "name": "Test job",
@@ -135,7 +135,7 @@ def test_job_spec_compatibility_is_optional_and_round_trips() -> None:
 def test_job_definition_rejects_crossing_rename_residue(extra: dict[str, object], message: str) -> None:
     job: dict[str, Any] = {
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": "12345678-1234-4234-8234-123456789abc",
         "name": "Test job",
         "workflow": "tests.example",

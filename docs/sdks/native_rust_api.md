@@ -104,7 +104,7 @@ produced natively, byte-for-byte what a Python, Bash, C, or Fortran runner print
 for the same workflow and steps:
 
 ```json
-{"format": "httk-workflow-runner-description", "format_version": 1, "steps": ["prepare", "run"], "workflow": "my.workflow"}
+{"format": "httk-workflow-runner-description", "format_version": 2, "steps": ["prepare", "run"], "workflow": "my.workflow"}
 ```
 
 The step names are byte-sorted; the `workflow` follows.

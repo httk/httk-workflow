@@ -209,7 +209,7 @@ impl Runner {
         names.sort_unstable();
         let steps: Vec<String> = names.iter().map(|name| format!("\"{name}\"")).collect();
         format!(
-            "{{\"format\": \"httk-workflow-runner-description\", \"format_version\": 1, \"steps\": [{}], \"workflow\": \"{}\"}}\n",
+            "{{\"format\": \"httk-workflow-runner-description\", \"format_version\": 2, \"steps\": [{}], \"workflow\": \"{}\"}}\n",
             steps.join(", "),
             self.workflow,
         )
@@ -734,7 +734,7 @@ mod tests {
         let runner = Runner::new("my.workflow", &["run", "collect", "prepare"]);
         assert_eq!(
             runner.description(),
-            "{\"format\": \"httk-workflow-runner-description\", \"format_version\": 1, \
+            "{\"format\": \"httk-workflow-runner-description\", \"format_version\": 2, \
              \"steps\": [\"collect\", \"prepare\", \"run\"], \"workflow\": \"my.workflow\"}\n"
         );
     }

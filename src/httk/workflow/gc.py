@@ -183,7 +183,7 @@ class GcReport:
 
         return {
             "format": GC_FRAME_FORMAT,
-            "format_version": 1,
+            "format_version": 2,
             "workspace_id": self.workspace_id,
             "dry_run": self.dry_run,
             "collected_at": self.collected_at,
@@ -798,7 +798,7 @@ class _Collection:
             return report
         frame: dict[str, Any] = {
             "format": GC_FRAME_FORMAT,
-            "format_version": 1,
+            "format_version": 2,
             "workspace_id": self.workspace.workspace_id,
             "collected_at": report.collected_at,
             "retention": dict(report.retention),

@@ -137,7 +137,7 @@ public final class HttkWorkflow {
             for (String name : names) {
                 quoted.add("\"" + name + "\"");
             }
-            return "{\"format\": \"httk-workflow-runner-description\", \"format_version\": 1, "
+            return "{\"format\": \"httk-workflow-runner-description\", \"format_version\": 2, "
                     + "\"steps\": [" + String.join(", ", quoted) + "], \"workflow\": \"" + workflow + "\"}\n";
         }
 

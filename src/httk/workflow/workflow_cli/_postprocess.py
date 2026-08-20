@@ -36,7 +36,7 @@ def _stderr_last_line(stderr: str) -> str:
 def _result_mapping(result: PostprocessResult, record: Any) -> dict[str, object]:
     mapping: dict[str, object] = {
         "format": "httk-workflow-postprocess",
-        "format_version": 1,
+        "format_version": 2,
         "workspace_id": result.workspace_id,
         "job_id": result.job_id,
         "job_key": record.job_key,
@@ -52,7 +52,7 @@ def _result_mapping(result: PostprocessResult, record: Any) -> dict[str, object]
 def _error_mapping(record: Any, script: str, error: str) -> dict[str, object]:
     return {
         "format": "httk-workflow-postprocess",
-        "format_version": 1,
+        "format_version": 2,
         "workspace_id": record.workspace_id,
         "job_id": record.job_id,
         "job_key": record.job_key,

@@ -440,7 +440,7 @@ class ManifestVerification:
 
         return {
             "format": "httk-project-manifest-verification",
-            "format_version": 1,
+            "format_version": 2,
             "verdict": self.verdict,
             "reason": self.reason,
             "manifest": str(self.manifest),

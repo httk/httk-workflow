@@ -740,7 +740,7 @@ class Attempt:
             )
             write_json_atomic(
                 marker,
-                {"format": "httk-workflow-environment-resolution-marker", "format_version": 1, "status": "failed"},
+                {"format": "httk-workflow-environment-resolution-marker", "format_version": 2, "status": "failed"},
                 durable=self.context.durable,
             )
             self.fail("environment_unresolved", message, details={"unresolved": [exc.name]}, retryable=False)
@@ -763,7 +763,7 @@ class Attempt:
             )
             write_json_atomic(
                 marker,
-                {"format": "httk-workflow-environment-resolution-marker", "format_version": 1, "status": "failed"},
+                {"format": "httk-workflow-environment-resolution-marker", "format_version": 2, "status": "failed"},
                 durable=self.context.durable,
             )
             self.fail("environment_unresolved", message, details={"unresolved": unresolved}, retryable=False)
@@ -772,7 +772,7 @@ class Attempt:
         self._environment_snapshot = {name: item["value"] for name, item in values.items()}
         document = {
             "format": "httk-workflow-environment-resolution",
-            "format_version": 1,
+            "format_version": 2,
             "values": values,
         }
         observed_path = self._declaration_path("environment")
@@ -782,7 +782,7 @@ class Attempt:
             self.declare("environment", document)
         marker_document: dict[str, object] = {
             "format": "httk-workflow-environment-resolution-marker",
-            "format_version": 1,
+            "format_version": 2,
             "status": "resolved",
             "values": values,
             "log_pending": changed,
@@ -1254,7 +1254,7 @@ class Attempt:
                 self.control / "error.json",
                 {
                     "format": RUNNER_ERROR_FORMAT,
-                    "format_version": 1,
+                    "format_version": 2,
                     "step": self.step,
                     "exception": type(exception).__name__,
                     "message": str(exception),
@@ -1356,7 +1356,7 @@ class Runner:
 
         description = {
             "format": RUNNER_DESCRIPTION_FORMAT,
-            "format_version": 1,
+            "format_version": 2,
             "workflow": self.workflow,
             "steps": sorted(self._steps),
         }

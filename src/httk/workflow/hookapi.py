@@ -9,9 +9,9 @@ from dataclasses import dataclass
 from typing import Any
 
 COLLECT_STREAM_FORMAT = "httk-workflow-collect-stream"
-COLLECT_STREAM_VERSION = 1
+COLLECT_STREAM_VERSION = 2
 INSTANTIATE_FORMAT = "httk-workflow-instantiate"
-INSTANTIATE_VERSION = 1
+INSTANTIATE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ def instantiate_main(fn: Callable[[InstantiateRequest], Mapping[str, Any]]) -> N
     """Run *fn* as a v1 executable instantiate hook.
 
     The hook receives one JSON document on standard input:
-    ``{"format": "httk-workflow-instantiate", "format_version": 1,
+    ``{"format": "httk-workflow-instantiate", "format_version": 2,
     "workflow": <workflow-id>, "tag": <string-or-null>, "parameters":
     {...}, "inputs": {<name>: <descriptor>}}``. The current working
     directory is the staging payload; file descriptors contain payload-relative

@@ -237,7 +237,7 @@ def _compiled_package(root: Path) -> Path:
         "control = Path(os.environ['HTTK_WORKFLOW_CONTROL_DIR'])\n"
         "draft = control / 'outcome.tmp'\n"
         "draft.mkdir()\n"
-        "(draft / 'outcome.json').write_text(json.dumps({'format': 'httk-workflow-outcome', 'format_version': 1, "
+        "(draft / 'outcome.json').write_text(json.dumps({'format': 'httk-workflow-outcome', 'format_version': 2,"
         "'job_id': context['job_id'], 'activation_id': context['activation_id'], "
         "'attempt_id': context['attempt_id'], 'action': 'succeed'}))\n"
         "draft.rename(control / 'outcome.ready')\n",

@@ -113,7 +113,7 @@ def _fixture(
         json.dumps(
             {
                 "format": "httk-workflow-attempt-context",
-                "format_version": 1,
+                "format_version": 2,
                 "workspace_id": str(uuid.uuid4()),
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"fabricated--{uuid.uuid4()}",
@@ -251,7 +251,7 @@ def test_describe_mode_prints_the_step_set_before_any_step_runs(tmp_path: Path) 
     assert completed.returncode == 0, completed.stderr
     assert json.loads(completed.stdout) == {
         "format": "httk-workflow-runner-description",
-        "format_version": 1,
+        "format_version": 2,
         "workflow": "tests.bash",
         "steps": ["collect", "prepare"],
     }

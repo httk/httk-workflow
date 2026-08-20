@@ -185,7 +185,7 @@ def describe_project(
     seed = project / PROJECT_DIRECTORY / "keys" / "project.seed"
     return {
         "format": PROJECT_DESCRIPTION_FORMAT,
-        "format_version": 1,
+        "format_version": 2,
         "root": str(project),
         "project": {
             "project_id": metadata.get("project_id"),
@@ -272,7 +272,7 @@ def describe_remote(
     credentials = sorted(read_credentials(bundle))
     return {
         "format": REMOTE_DESCRIPTION_FORMAT,
-        "format_version": 1,
+        "format_version": 2,
         "name": name,
         "scope": scope,
         "bundle": str(bundle),
@@ -567,7 +567,7 @@ def project_doctor(
     ]
     report: dict[str, object] = {
         "format": DOCTOR_REPORT_FORMAT,
-        "format_version": 1,
+        "format_version": 2,
         "root": str(project),
         "project_id": metadata.get("project_id"),
         "checked_at": utc_now(),
@@ -605,7 +605,7 @@ def _journal_repairs(project: Path, report: Mapping[str, object], findings: Sequ
         return
     frame = {
         "format": DOCTOR_FRAME_FORMAT,
-        "format_version": 1,
+        "format_version": 2,
         "workspace_id": workspace.workspace_id,
         "project_id": report.get("project_id"),
         "checked_at": report.get("checked_at"),

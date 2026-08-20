@@ -359,7 +359,7 @@ class PotcarAssembly:
         """
         return {
             "format": "httk-vasp-potcar-provenance",
-            "format_version": 1,
+            "format_version": 2,
             "potcar": str(self.path),
             "library": str(self.library),
             "assembled_at": utc_now(),

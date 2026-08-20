@@ -362,7 +362,7 @@ entry. A missing default-less entry or a type error publishes the non-retryable
 `environment_unresolved` failure and names the consulted layers and remedies.
 On success, the resolved values and their source layers are recorded as the
 observed `environment` declaration in
-`httk-workflow-environment-resolution` version 1, and a one-line run-log note
+`httk-workflow-environment-resolution` version 2, and a one-line run-log note
 records the same resolution after the handler completes. Deferring that note
 ensures the gate never creates or touches a workdir before the handler; if the
 handler aborts before a workdir exists, the observed declaration is still kept
@@ -515,7 +515,7 @@ on stdin:
 ```json
 {
   "format": "httk-workflow-instantiate",
-  "format_version": 1,
+  "format_version": 2,
   "workflow": "example.relax",
   "tag": "silicon",
   "parameters": {"cutoff": 520},
@@ -565,7 +565,7 @@ current source tree. It receives one stream per executable-collector sweep:
 first the handshake line, then one record line per job, in collection order:
 
 ```json
-{"format": "httk-workflow-collect-stream", "format_version": 1}
+{"format": "httk-workflow-collect-stream", "format_version": 2}
 {"record": {"workspace_id": "workspace", "job_id": "job-1", "state": "succeeded", "job": {}}}
 ```
 

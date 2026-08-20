@@ -61,11 +61,11 @@ __all__ = [
 ]
 
 CONFIG_FORMAT = "httk-config"
-CONFIG_FORMAT_VERSION = 1
+CONFIG_FORMAT_VERSION = 2
 
 #: Domain separation of every detached identity signature, so a digest signed
 #: for one purpose can never be replayed as a signature of something else.
-IDENTITY_SIGNATURE_DOMAIN = b"httk-workflow-identity-v1\0"
+IDENTITY_SIGNATURE_DOMAIN = b"httk-workflow-identity-v2\0"
 #: The members an identity signature adds to the document it signs.
 IDENTITY_KEY_MEMBER = "operator_key"
 IDENTITY_SIGNATURE_MEMBER = "signature"
@@ -505,7 +505,7 @@ def import_v1_configuration(source: str | os.PathLike[str] | None = None) -> dic
     current.update(
         {
             "format": "httk-config",
-            "format_version": 1,
+            "format_version": 2,
             "name": parser.get("main", "name", fallback=str(current.get("name", ""))),
             "email": parser.get("main", "email", fallback=str(current.get("email", ""))),
             "imported_from": str(root),

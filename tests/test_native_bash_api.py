@@ -38,7 +38,7 @@ def _draft(tmp_path: Path, *, data_generation: int | None = None) -> OutcomeDraf
         json.dumps(
             {
                 "format": "httk-workflow-attempt-context",
-                "format_version": 1,
+                "format_version": 2,
                 "workspace_id": str(uuid.uuid4()),
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"job--{uuid.uuid4()}",
@@ -134,7 +134,7 @@ def test_supervisor_external_checker_and_literal_argv(tmp_path: Path) -> None:
 for line in sys.stdin:
     event = json.loads(line)
     if event.get("event") == "line" and "STOP" in event.get("line", ""):
-        print(json.dumps({"format":"httk-workflow-checker-result","format_version":1,
+        print(json.dumps({"format":"httk-workflow-checker-result","format_version":2,
                           "code":"found_stop","severity":"fatal","summary":"stop",
                           "source":event["source"],"stop":True}), flush=True)
 """,

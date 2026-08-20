@@ -85,7 +85,7 @@ class SourceEvent:
         """
         result: dict[str, object] = {
             "format": "httk-workflow-checker-event",
-            "format_version": 1,
+            "format_version": 2,
             "event": self.event,
             "source": self.source,
             "timestamp": self.timestamp or utc_now(),
@@ -166,8 +166,8 @@ class CheckerSpec:
         :return: The validated checker specification.
         :raises ValueError: If the mapping has an invalid checker format or source.
         """
-        if value.get("format") != "httk-workflow-checker-spec" or value.get("format_version") != 1:
-            raise ValueError("checker spec must use httk-workflow-checker-spec version 1")
+        if value.get("format") != "httk-workflow-checker-spec" or value.get("format_version") != 2:
+            raise ValueError("checker spec must use httk-workflow-checker-spec version 2")
         raw = value.get("argv")
         if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
             raise ValueError("checker argv must be an array")
@@ -251,7 +251,7 @@ class ProcessReport:
         """
         return {
             "format": "httk-workflow-process-report",
-            "format_version": 1,
+            "format_version": 2,
             "argv": list(self.argv),
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -423,7 +423,7 @@ class _Checker:
                 value = json.loads(line)
                 if not isinstance(value, dict) or value.get("format") != "httk-workflow-checker-result":
                     raise ValueError("wrong checker result format")
-                if value.get("format_version") != 1:
+                if value.get("format_version") != 2:
                     raise ValueError("unsupported checker result version")
                 severity = str(value.get("severity", "error"))
                 if severity not in {"info", "warning", "error", "fatal"}:

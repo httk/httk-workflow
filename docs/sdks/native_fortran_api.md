@@ -122,7 +122,7 @@ byte-for-byte what a Python, Bash, or C runner prints for the same workflow and
 steps:
 
 ```json
-{"format": "httk-workflow-runner-description", "format_version": 1, "steps": ["prepare", "run"], "workflow": "my.workflow"}
+{"format": "httk-workflow-runner-description", "format_version": 2, "steps": ["prepare", "run"], "workflow": "my.workflow"}
 ```
 
 ## Strings and ownership across the C boundary

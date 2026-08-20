@@ -29,7 +29,7 @@ control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 tmp = control / "outcome.tmp.test"
 tmp.mkdir()
 (tmp / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome", "format_version": 1,
+    "format": "httk-workflow-outcome", "format_version": 2,
     "job_id": context["job_id"], "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"], "action": "succeed",
 }))
@@ -44,7 +44,7 @@ control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 tmp = control / "outcome.tmp.test"
 tmp.mkdir()
 (tmp / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome", "format_version": 1,
+    "format": "httk-workflow-outcome", "format_version": 2,
     "job_id": context["job_id"], "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"], "action": "fail",
     "failure": {"code": "process_failure", "message": "boom"},
@@ -71,7 +71,7 @@ child_id = str(uuid.uuid5(uuid.UUID(context["job_id"]), "ghost"))
 tmp = control / "outcome.tmp.test"
 tmp.mkdir()
 (tmp / "outcome.json").write_text(json.dumps({
-    "format": "httk-workflow-outcome", "format_version": 1,
+    "format": "httk-workflow-outcome", "format_version": 2,
     "job_id": context["job_id"], "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"], "action": "wait", "next_step": "aggregate",
     "join": {"children": [{
@@ -105,7 +105,7 @@ def _payload(
         json.dumps(
             {
                 "format": "httk-workflow-job",
-                "format_version": 1,
+                "format_version": 2,
                 "id": job_id,
                 "tag": tag,
                 "name": f"Tier B {tag}",
@@ -375,7 +375,7 @@ def test_a_malformed_committing_outcome_fails_as_protocol_error_naming_both_ids(
             json.dumps(
                 {
                     "format": "httk-workflow-outcome",
-                    "format_version": 1,
+                    "format_version": 2,
                     "job_id": committing.job_id,
                     "activation_id": state.activation_id,
                     "attempt_id": "wrong-attempt",
@@ -732,7 +732,7 @@ def test_why_surfaces_a_pending_operator_request(tmp_path: Path) -> None:
         workspace.publish_request(
             {
                 "format": "httk-workflow-request",
-                "format_version": 1,
+                "format_version": 2,
                 "request_id": str(uuid.uuid4()),
                 "job_id": failed.job_id,
                 "job_key": failed.job_key,

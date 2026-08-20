@@ -502,7 +502,7 @@ def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[
         duplicate_ack: dict[str, object] = sign_document(
             {
                 "format": "httk-workflow-transfer-acknowledgement",
-                "format_version": 1,
+                "format_version": 2,
                 "transfer_id": transfer_id,
                 "source_workspace_id": manifest["source_workspace_id"],
                 "destination_workspace_id": workspace.workspace_id,
@@ -560,7 +560,7 @@ def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[
             }
         },
         "format": "httk-workflow-state",
-        "format_version": 1,
+        "format_version": 2,
         "workspace_id": workspace.workspace_id,
         "job_id": manifest["job_id"],
         "job_key": manifest["job_key"],
@@ -609,7 +609,7 @@ def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[
     acknowledgement: dict[str, object] = sign_document(
         {
             "format": "httk-workflow-transfer-acknowledgement",
-            "format_version": 1,
+            "format_version": 2,
             "transfer_id": transfer_id,
             "source_workspace_id": manifest["source_workspace_id"],
             "destination_workspace_id": workspace.workspace_id,

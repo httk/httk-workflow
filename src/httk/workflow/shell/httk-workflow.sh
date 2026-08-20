@@ -35,7 +35,7 @@ _httk_workflow_bridge() {
 # shell, so describing a runner needs no interpreter and touches nothing.
 _httk_workflow_describe() {
     local item first=1
-    printf '{"format": "httk-workflow-runner-description", "format_version": 1, "steps": ['
+    printf '{"format": "httk-workflow-runner-description", "format_version": 2, "steps": ['
     if [ "${#_httk_workflow_steps[@]}" -gt 0 ]; then
         while IFS= read -r item; do
             if [ -z "$item" ]; then

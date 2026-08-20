@@ -60,7 +60,7 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
             json.dumps(
                 {
                     "format": "httk-workflow-precheck",
-                    "format_version": 1,
+                    "format_version": 2,
                     "environment_variable_caveat": ENVIRONMENT_VARIABLE_CAVEAT,
                     "states": list(DEFAULT_PRECHECK_STATES),
                     "jobs": findings,

@@ -230,7 +230,7 @@ class JobSpec:
             runner["sha256"] = validate_sha256(self.runner_sha256, "runner_sha256")
         result: dict[str, object] = {
             "format": "httk-workflow-job",
-            "format_version": 1,
+            "format_version": 2,
             "id": self.job_id or str(uuid.uuid4()),
             "tag": self.tag,
             "name": self.name,
@@ -339,8 +339,8 @@ class TransactionBuilder:
 
         target = Path(root)
         manifest = read_json(target / "manifest.json")
-        if manifest.get("format") != "httk-workflow-transaction" or manifest.get("format_version") != 1:
-            raise ValueError("transaction must use httk-workflow-transaction version 1")
+        if manifest.get("format") != "httk-workflow-transaction" or manifest.get("format_version") != 2:
+            raise ValueError("transaction must use httk-workflow-transaction version 2")
         if manifest.get("expected_data_generation") != expected_generation:
             raise ValueError("transaction expected_data_generation does not match the attempt context")
         operations = manifest.get("operations")
@@ -457,7 +457,7 @@ class TransactionBuilder:
             self.root / "manifest.json",
             {
                 "format": "httk-workflow-transaction",
-                "format_version": 1,
+                "format_version": 2,
                 "id": str(uuid.uuid4()),
                 "expected_data_generation": self.expected_generation,
                 "operations": self._operations,
@@ -679,7 +679,7 @@ class OutcomeDraft:
             self.root / "children" / "spawn.json",
             {
                 "format": "httk-workflow-spawn",
-                "format_version": 1,
+                "format_version": 2,
                 "children": [item[1] for item in self._children],
             },
             # Draft-internal and rewritten once per registered child: the
@@ -748,8 +748,8 @@ class OutcomeDraft:
         if transaction_path.is_dir():
             context_generation = self.context.data_generation
             manifest = read_json(transaction_path / "manifest.json")
-            if manifest.get("format") != "httk-workflow-transaction" or manifest.get("format_version") != 1:
-                raise ValueError("transaction must use httk-workflow-transaction version 1")
+            if manifest.get("format") != "httk-workflow-transaction" or manifest.get("format_version") != 2:
+                raise ValueError("transaction must use httk-workflow-transaction version 2")
             if manifest.get("expected_data_generation") != context_generation:
                 raise ValueError("transaction expected_data_generation does not match the attempt context")
             if expected_data_generation is None:
@@ -758,7 +758,7 @@ class OutcomeDraft:
                 raise ValueError("expected_data_generation does not match the attempt context")
         body: dict[str, object] = {
             "format": "httk-workflow-outcome",
-            "format_version": 1,
+            "format_version": 2,
             "job_id": self.context.job_id,
             "activation_id": self.context.activation_id,
             "attempt_id": self.context.attempt_id,
@@ -1026,7 +1026,7 @@ class RunLog:
             )
         record = {
             "format": "httk-workflow-runlog-event",
-            "format_version": 1,
+            "format_version": 2,
             "timestamp": utc_now(),
             "kind": kind,
             "message": message,

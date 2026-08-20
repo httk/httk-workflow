@@ -215,7 +215,7 @@ httk workflow postprocess WS --script report --workflow-dir ./my-workflow --json
 ~~~
 
 With --json, each result is one JSON object in the
-httk-workflow-postprocess wire format, version 1, with workspace_id, job_id,
+httk-workflow-postprocess wire format, version 2, with workspace_id, job_id,
 job_key, script, and either returncode plus output_dir, or an error. Without
 --json, each result is tab-separated as
 job_key<TAB>script<TAB>returncode<TAB>output_dir; errors use ERROR in the

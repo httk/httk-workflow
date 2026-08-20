@@ -99,8 +99,8 @@ class AttemptContext:
         """
 
         value = read_json(Path(path))
-        if value.get("format") != "httk-workflow-attempt-context" or value.get("format_version") != 1:
-            raise ValueError("attempt context must use httk-workflow-attempt-context version 1")
+        if value.get("format") != "httk-workflow-attempt-context" or value.get("format_version") != 2:
+            raise ValueError("attempt context must use httk-workflow-attempt-context version 2")
         required = ("workspace_id", "job_id", "job_key", "placement", "step", "activation_id", "attempt_id")
         if any(not isinstance(value.get(name), str) or not value[name] for name in required):
             raise ValueError("attempt context is missing a required string identity")

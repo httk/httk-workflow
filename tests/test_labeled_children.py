@@ -25,7 +25,7 @@ temporary = control / "outcome.tmp.child"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -49,7 +49,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 base = {{
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -69,7 +69,7 @@ else:
         runner.chmod(0o755)
         (child_dir / "job.json").write_text(json.dumps({{
             "format": "httk-workflow-job",
-            "format_version": 1,
+            "format_version": 2,
             "id": child_id,
             "tag": "child",
             "name": "Child " + label,
@@ -136,7 +136,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -171,7 +171,7 @@ def _payload(
     runner.chmod(0o755)
     job = {
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": job_id,
         "tag": "parent",
         "name": "Labeled children parent",

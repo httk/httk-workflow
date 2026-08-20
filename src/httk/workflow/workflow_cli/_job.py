@@ -309,7 +309,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         _prevalidate_override_step(workspace, marker, arguments.step, force=bool(arguments.force))
     request: dict[str, object] = {
         "format": "httk-workflow-request",
-        "format_version": 1,
+        "format_version": 2,
         "request_id": str(uuid.uuid4()),
         "job_id": marker.job_id,
         "job_key": marker.job_key,
@@ -402,7 +402,7 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     workspace = Workspace(_local_root(arguments, context, action="list its jobs"), mutable=False)
     rows = list_jobs(workspace, kinds=arguments.kind, placement=arguments.placement)
     if arguments.json:
-        print(json.dumps({"format": JOB_LIST_FORMAT, "format_version": 1, "jobs": rows}, indent=2))
+        print(json.dumps({"format": JOB_LIST_FORMAT, "format_version": 2, "jobs": rows}, indent=2))
         return 0
     print(render_rows(rows))
     return 0
@@ -427,7 +427,7 @@ def handle_job_log(arguments: argparse.Namespace, context: CLIContext) -> int:
     if arguments.json:
         print(
             json.dumps(
-                {"format": JOB_HISTORY_FORMAT, "format_version": 1, "frames": frames},
+                {"format": JOB_HISTORY_FORMAT, "format_version": 2, "frames": frames},
                 indent=2,
             )
         )

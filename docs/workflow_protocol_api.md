@@ -25,7 +25,7 @@ protocol defines is re-exported there:
   {py:class}`~httk.workflow.protocol.MarkerFault`,
   {py:class}`~httk.workflow.protocol.StateFrame`, and
   {py:func}`~httk.workflow.protocol.marker_basename`.
-- **Journal records and references** — encode and parse an `hwref-v1` reference,
+- **Journal records and references** — encode and parse an `hwref-v2` reference,
   and read or verify the frame it names.
 - **Attempt context and outcome documents** —
   {py:class}`~httk.workflow.protocol.AttemptContext` and

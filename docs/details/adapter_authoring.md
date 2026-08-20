@@ -70,9 +70,9 @@ satisfying it stops being usable, which is the point.
 
 ```json
 {
-  "adapter_version": 1,
+  "adapter_version": 2,
   "format": "httk-computer-adapter",
-  "format_version": 1,
+  "format_version": 2,
   "kind": "pbs",
   "settings": {"host": "login.example.org"},
   "required_binaries": ["rsync", "ssh"],
@@ -87,8 +87,8 @@ is selected by the request, not by a per-operation path.
 | Member | Required | Meaning |
 | --- | --- | --- |
 | `format` | yes | must be `httk-computer-adapter` (the historical spelling; see above) |
-| `format_version` | yes | must be `1` |
-| `adapter_version` | yes | must be `1`; the version of the operation contract below |
+| `format_version` | yes | must be `2` |
+| `adapter_version` | yes | must be `2`; the version of the operation contract below |
 | `settings` | no | flat machine-level settings; defaults to `{}` |
 | `timeout_seconds` | no | positive number, default `60`; the wall-clock bound on one operation |
 | `required_binaries` | no | array of program names that must be on `PATH` **of the machine running the adapter**, checked with `shutil.which` at every validation |
@@ -152,7 +152,7 @@ envelope is always present:
 ```json
 {
   "format": "httk-computer-request",
-  "format_version": 1,
+  "format_version": 2,
   "operation": "invoke",
   "adapter_dir": "/home/me/project/httk_project/remotes/my-cluster",
   "remote_settings": {"host": "login.example.org"}
@@ -170,7 +170,7 @@ operation returns, whether it succeeded, failed, or timed out.
 ### The result envelope
 
 ```json
-{"format": "httk-computer-result", "format_version": 1, "operation": "invoke", "ok": true}
+{"format": "httk-computer-result", "format_version": 2, "operation": "invoke", "ok": true}
 ```
 
 `run_adapter` rejects a result that is not one JSON object, or whose `format`,
@@ -179,7 +179,7 @@ the same envelope with `ok: false` and a human-readable `error`:
 
 ```json
 {"error": "cannot reach me@login.example.org: Permission denied", "format": "httk-computer-result",
- "format_version": 1, "operation": "configure", "ok": false}
+ "format_version": 2, "operation": "configure", "ok": false}
 ```
 
 ### `configure`
@@ -198,7 +198,7 @@ validate the first configuration of a host. Merge `settings` over
 `remote_settings` and check the result.
 
 ```json
-{"format": "httk-computer-request", "format_version": 1, "operation": "configure",
+{"format": "httk-computer-request", "format_version": 2, "operation": "configure",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
  "remote_settings": {},
  "settings": {"host": "login.example.org", "username": "me"}}
@@ -206,7 +206,7 @@ validate the first configuration of a host. Merge `settings` over
 
 ```json
 {"connectivity": "ok", "configured": true, "format": "httk-computer-result",
- "format_version": 1, "operation": "configure", "ok": true}
+ "format_version": 2, "operation": "configure", "ok": true}
 ```
 
 The maintained implementation reports `connectivity` as `ok` when a remote `true`
@@ -223,14 +223,14 @@ httk up on the target is the user's job, done by logging in there.
 No request members beyond the envelope.
 
 ```json
-{"format": "httk-computer-request", "format_version": 1, "operation": "install",
+{"format": "httk-computer-request", "format_version": 2, "operation": "install",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
  "remote_settings": {"host": "login.example.org", "username": "me"}}
 ```
 
 ```json
-{"format": "httk-computer-result", "format_version": 1,
- "httk_command": ["httk"], "httk_version": "httk 2.0.0", "installed": true,
+{"format": "httk-computer-result", "format_version": 2,
+ "httk_command": ["httk"], "httk_version": "httk 2.1.0", "installed": true,
  "operation": "install", "ok": true}
 ```
 
@@ -259,13 +259,13 @@ did.
 
 ```json
 {"argv": ["httk", "workflow", "workspace", "status", "/scratch/me/runs", "--json"],
- "cwd": "/scratch/me", "format": "httk-computer-request", "format_version": 1,
+ "cwd": "/scratch/me", "format": "httk-computer-request", "format_version": 2,
  "operation": "invoke", "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
  "remote_settings": {"host": "login.example.org"}}
 ```
 
 ```json
-{"format": "httk-computer-result", "format_version": 1, "operation": "invoke", "ok": true,
+{"format": "httk-computer-result", "format_version": 2, "operation": "invoke", "ok": true,
  "returncode": 0, "stdout": "{\"format\": \"httk-workflow-status\", ...}\n", "stderr": ""}
 ```
 
@@ -288,13 +288,13 @@ that the far side is a compatible workspace before anything moves.
 
 ```json
 {"argv": ["httk", "workflow", "workspace", "status", "/scratch/me/runs", "--json"],
- "format": "httk-computer-request", "format_version": 1, "operation": "status",
+ "format": "httk-computer-request", "format_version": 2, "operation": "status",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
  "remote_settings": {"host": "login.example.org"}}
 ```
 
 ```json
-{"format": "httk-computer-result", "format_version": 1, "operation": "status", "ok": true,
+{"format": "httk-computer-result", "format_version": 2, "operation": "status", "ok": true,
  "returncode": 0, "stdout": "{\"format\": \"httk-workflow-status\", ...}\n", "stderr": ""}
 ```
 
@@ -315,14 +315,14 @@ manifest must not be able to name anything outside the workspace it came from.
 
 ```json
 {"destination": "/scratch/me/runs/.httk-workflow/transfers/incoming/6f1c…",
- "format": "httk-computer-request", "format_version": 1, "operation": "push",
+ "format": "httk-computer-request", "format_version": 2, "operation": "push",
  "source": "/home/me/ws/.httk-workflow/transfers/outgoing/6f1c…",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
  "remote_settings": {"host": "login.example.org"}}
 ```
 
 ```json
-{"format": "httk-computer-result", "format_version": 1, "operation": "push", "ok": true,
+{"format": "httk-computer-result", "format_version": 2, "operation": "push", "ok": true,
  "path": "/scratch/me/runs/.httk-workflow/transfers/incoming/6f1c…"}
 ```
 
@@ -353,7 +353,7 @@ hand-written requests and is not the normal path.
 
 ```json
 {"argv": ["httk", "workflow", "manager", "run", "runs"], "count": 2,
- "format": "httk-computer-request", "format_version": 1, "operation": "start-manager",
+ "format": "httk-computer-request", "format_version": 2, "operation": "start-manager",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
  "remote_settings": {"host": "login.example.org"},
  "workspace": "/scratch/me/runs"}
@@ -367,7 +367,7 @@ paths.
 Batch implementations report the submitted identifiers:
 
 ```json
-{"count": 2, "format": "httk-computer-result", "format_version": 1,
+{"count": 2, "format": "httk-computer-result", "format_version": 2,
  "job_ids": ["1840271", "1840272"], "operation": "start-manager", "ok": true,
  "script": "/scratch/me/runs/.httk-workflow/batch/manager-9c1f….sbatch"}
 ```
@@ -377,7 +377,7 @@ naming the first, so a caller that only ever started one manager reads the field
 it always did:
 
 ```json
-{"count": 2, "format": "httk-computer-result", "format_version": 1,
+{"count": 2, "format": "httk-computer-result", "format_version": 2,
  "operation": "start-manager", "ok": true, "pid": 40311, "pids": [40311, 40312]}
 ```
 
@@ -507,9 +507,9 @@ rule cheap to hold, because no request value is ever visible to `sh`.
 
 ```json
 {
-  "adapter_version": 1,
+  "adapter_version": 2,
   "format": "httk-computer-adapter",
-  "format_version": 1,
+  "format_version": 2,
   "kind": "pbs",
   "settings": {"host": "login.hpc.example.org"},
   "required_binaries": ["rsync", "ssh"],
@@ -533,13 +533,13 @@ OPERATIONS = ("configure", "install", "invoke", "push", "pull", "start-manager",
 
 
 def result(operation: str, **values: object) -> None:
-    print(json.dumps({"format": "httk-computer-result", "format_version": 1,
+    print(json.dumps({"format": "httk-computer-result", "format_version": 2,
                       "operation": operation, "ok": True, **values}, sort_keys=True))
 
 
 def refuse(operation: str, message: str) -> None:
     print(json.dumps({"error": message, "format": "httk-computer-result",
-                      "format_version": 1, "operation": operation, "ok": False}, sort_keys=True))
+                      "format_version": 2, "operation": operation, "ok": False}, sort_keys=True))
 
 
 def shell_command(argv: Sequence[str], *, cwd: str | None = None) -> str:

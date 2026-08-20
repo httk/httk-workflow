@@ -32,7 +32,7 @@ context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 outcome = {
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -59,7 +59,7 @@ def _payload(root: Path, name: str, *, tag: str = "scale", parent: dict[str, obj
         json.dumps(
             {
                 "format": "httk-workflow-job",
-                "format_version": 1,
+                "format_version": 2,
                 "id": job_id,
                 "tag": tag,
                 "name": "Scale test job",
@@ -375,7 +375,7 @@ def test_registration_accepts_a_submitted_marker_an_operator_already_repriced(tm
     workspace.publish_request(
         {
             "format": "httk-workflow-request",
-            "format_version": 1,
+            "format_version": 2,
             "request_id": str(uuid.uuid4()),
             "job_id": job_id,
             "job_key": submitted.job_key,
@@ -450,7 +450,7 @@ def _heartbeat(workspace: Workspace, manager_id: str, *, updated_at: str) -> Pat
         json.dumps(
             {
                 "format": "httk-workflow-manager",
-                "format_version": 1,
+                "format_version": 2,
                 "manager_id": manager_id,
                 "hostname": "elsewhere",
                 "pid": 1,
@@ -626,7 +626,7 @@ def _consumed_child(tmp_path: Path) -> tuple[Workspace, Marker, Marker]:
 def _continue_request(workspace: Workspace, marker: Marker, *, force: bool = False) -> None:
     request: dict[str, object] = {
         "format": "httk-workflow-request",
-        "format_version": 1,
+        "format_version": 2,
         "request_id": str(uuid.uuid4()),
         "job_id": marker.job_id,
         "job_key": marker.job_key,

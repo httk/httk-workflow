@@ -61,7 +61,7 @@ def _registration_rows(workspace: Workspace) -> list[dict[str, object]]:
             or not (generation / "artifacts").is_dir()
             or not isinstance(value, Mapping)
             or value.get("format") != "httk-workflow-runner-build"
-            or value.get("format_version") != 1
+            or value.get("format_version") != 2
         ):
             continue
         store = pointer.parent.parent.relative_to(workspace.runner_builds).as_posix()

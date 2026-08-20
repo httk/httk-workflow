@@ -141,7 +141,7 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
             json.dumps(
                 {
                     "format": "httk-workflow-status",
-                    "format_version": 1,
+                    "format_version": 2,
                     "workspace_id": workspace.workspace_id,
                     "root": str(workspace.root),
                     "workspace_format_version": workspace.format["format_version"],

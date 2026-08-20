@@ -36,7 +36,7 @@ temporary = control / "outcome.tmp.package"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -333,7 +333,7 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
         assert command(["describe", "tests.cli.package", "--json"], context) == 0
         by_id = json.loads(capsys.readouterr().out)
         assert by_id["format"] == "httk-workflow-workflow-description"
-        assert by_id["format_version"] == 1
+        assert by_id["format_version"] == 2
         assert by_id["source"]["kind"] == "registered-directory"
         assert by_id["workflow"] == provider.workflow_id
 
