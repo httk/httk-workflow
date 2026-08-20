@@ -59,8 +59,7 @@ TRANSFER_RUNNERS = "runners"
 
 TRANSFER_FORMAT = "httk-workflow-detached-transfer"
 #: Version 2 widened the payload digest: it now also pins the executable bit of
-#: every regular file and the target of every symlink. A version 1 bundle is
-#: refused by name rather than silently reported as a digest mismatch.
+#: every regular file and the target of every symlink.
 TRANSFER_FORMAT_VERSION = 2
 #: Domain separation of the payload digest, so a digest computed by an older
 #: rule can never collide with one computed by the current rule.
@@ -428,14 +427,7 @@ def validate_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
     if manifest.get("format") != TRANSFER_FORMAT or manifest.get("core_profile") != CORE_PROFILE:
         raise FormatError("unsupported detached transfer manifest")
     if manifest.get("format_version") != TRANSFER_FORMAT_VERSION:
-        # Naming the version keeps an older bundle from being reported as the
-        # digest mismatch it would otherwise look like: version 2 widened the
-        # payload digest to cover executable bits and symlink targets.
-        raise FormatError(
-            f"detached transfer manifest version {manifest.get('format_version')!r} is not "
-            f"{TRANSFER_FORMAT_VERSION}; the payload digest now pins executable bits and symlink "
-            f"targets, so re-seal this bundle at its source: {payload}"
-        )
+        raise FormatError("unsupported detached transfer manifest")
     canonical_uuid(manifest.get("transfer_id"), "transfer_id")
     canonical_uuid(manifest.get("source_workspace_id"), "source_workspace_id")
     canonical_uuid(manifest.get("destination_workspace_id"), "destination_workspace_id")

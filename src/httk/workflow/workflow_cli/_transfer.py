@@ -477,23 +477,18 @@ def _send_jobs_to_remote(
     for job_id in jobs:
         source.recover_transfers()
         candidates: list[tuple[Path, dict[str, object]]] = []
-        sealed_for_job: list[tuple[Path, dict[str, object]]] = []
         for ledger_path in (source.control / "transfers").glob("*.json"):
             ledger = read_json(ledger_path)
             if ledger.get("job_id") != job_id or ledger.get("status") != "sealed":
                 continue
-            sealed_for_job.append((ledger_path, ledger))
             if ledger.get("destination_workspace_id") != destination_workspace_id:
                 continue
-            if ledger.get("destination_remote") == target.name or "destination_remote" not in ledger:
+            if "destination_remote" not in ledger:
+                raise ValueError(
+                    f"cannot resume job {job_id}: sealed transfer ledger {ledger_path} has no destination_remote"
+                )
+            if ledger.get("destination_remote") == target.name:
                 candidates.append((ledger_path, ledger))
-        legacy = [item for item in candidates if "destination_remote" not in item[1]]
-        if legacy and len(sealed_for_job) != 1:
-            ledger_path = legacy[0][0]
-            raise ValueError(
-                f"cannot resume job {job_id}: sealed transfer ledger {ledger_path} has no destination_remote "
-                "and is ambiguous; retire that ledger or fetch the job from the destination"
-            )
         if len(candidates) > 1:
             ledger_path = candidates[0][0]
             raise ValueError(
@@ -505,10 +500,6 @@ def _send_jobs_to_remote(
             requested = str(destination_placement).strip("/")
             if candidates[0][1].get("destination_placement") != requested:
                 raise ValueError("resumed transfer destination placement disagrees with the request")
-        if legacy:
-            ledger_path, ledger = legacy[0]
-            ledger["destination_remote"] = target.name
-            write_json_atomic(ledger_path, ledger, durable=source.durable)
         bundle = source.detach(
             job_id,
             destination_workspace_id=destination_workspace_id,

@@ -510,7 +510,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     at every supported table, and external declarations are checked against
     the manifest's roles. Declared inputs describe staged objects, while
     parameters remain opaque implementation knobs and are carried under the
-    job's ``parameters`` member; the legacy ``inputs`` wire member is rejected.
+    job's ``parameters`` member.
 
     :param directory: Locate the package directory to parse.
     :return: The validated workflow provider.

@@ -714,11 +714,6 @@ def _parse_description(text: str, path: Path) -> dict[str, object]:
         raise ValueError(f"the runner {path} did not print a runner description: {exc}") from exc
     if not isinstance(described, Mapping) or not isinstance(described.get("workflow"), str):
         raise ValueError(f"the runner {path} did not print a runner description with a workflow name")
-    if "parameters" in described:
-        raise ValueError(
-            f"the runner {path} emitted the legacy 'parameters' staging map; "
-            "update it to the current description format using 'inputs'"
-        )
     steps = described.get("steps")
     if not isinstance(steps, list) or not all(isinstance(step, str) for step in steps):
         raise ValueError(f"the runner {path} described steps that are not an array of names")

@@ -463,16 +463,6 @@ def split_settings(settings: Mapping[str, str]) -> tuple[dict[str, str], dict[st
     retired = sorted(set(settings) & _RETIRED_REMOTE_SETTINGS)
     if retired:
         names = ", ".join(retired)
-        if "workspace_root" in retired:
-            raise ValueError(
-                "remote setting 'workspace_root' is retired; the machine that owns a workspace places it; "
-                "pass the path to `workspace init REMOTE:PATH` instead"
-            )
-        if "bootstrap" in retired:
-            raise ValueError(
-                "remote setting 'bootstrap' is retired; log in on the remote and install httk there yourself "
-                "(for example with 'pipx install httk-workflow'), then verify with `remote check`"
-            )
         raise ValueError(f"unknown remote setting {names!r}; set scheduler values in the workspace settings")
     persistable = {key: value for key, value in settings.items() if key in PERSISTABLE_REMOTE_SETTINGS}
     credentials = {key: value for key, value in settings.items() if key not in PERSISTABLE_REMOTE_SETTINGS}

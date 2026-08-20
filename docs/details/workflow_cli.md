@@ -583,15 +583,6 @@ per-user this package keeps is *configuration*:
 overrides. Legacy `~/.httk` data is read only through `config import-v1`; its
 64-byte private material is not converted.
 
-An earlier release kept the keys and the global definitions below
-`$XDG_DATA_HOME/httk/` instead, as `keys/` and `computers/`. The first command
-that needs either one moves what is there to its configuration home, preserving
-the `0600`/`0700` modes, and says so in one line on stderr. The move happens
-once and is idempotent. If both roots somehow exist, the configuration home wins
-and the stale legacy copy is reported in the log rather than merged: guessing
-which of two definitions of one remote was meant would be worse than saying
-nothing was.
-
 ```console
 httk workflow config init --name "A User" --email user@example.org
 httk workflow config set name "Another User"
@@ -609,10 +600,9 @@ provided by
 `config set` accepts only the keys the configuration actually has — including
 `machine_names`, `name`, and `email` — and names them when it refuses another, so a typo cannot become a
 member that nothing ever reads. `format` and `format_version` describe the
-document and are written by *httk* itself. A configuration whose `format` is
-something else is refused rather than read as if its members meant what *httk*
-means by them; one with no `format_version` at all predates versioning and is
-read as version 1.
+document and are written by *httk* itself. A configuration whose `format` or
+`format_version` is missing or something else is refused rather than read as if
+its members meant what *httk* means by them.
 
 A project has `httk_project/project.json` and a standard 32-byte Ed25519 seed
 stored with mode `0600`. Its default workflow workspace is recorded by name and

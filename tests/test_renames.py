@@ -9,7 +9,7 @@ wrong no other test would notice:
 * the group that *was* called ``remote`` — send, fetch, offer, retire — became
   ``transfer``;
 * the per-user remote definitions and identity keys moved from the data home to
-  the configuration home, with a one-time migration of whatever is still there;
+  the configuration home;
 * ``WorkflowWorkspace`` became ``Workspace``, and the packaged VASP runners moved
   into :mod:`httk.workflow.vasp.runners`.
 
@@ -19,8 +19,6 @@ so restoring a superseded name by accident becomes a failing test.
 """
 
 import json
-import logging
-import os
 import re
 from pathlib import Path
 
@@ -37,7 +35,7 @@ from httk.workflow.adapters import (
     metadata_path,
     resolve_remote,
 )
-from httk.workflow.configuration import config_home, data_home, keys_home, remotes_home
+from httk.workflow.configuration import config_home, data_home
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.runners import RUNNERS, runner_package, runner_path, runner_reference
@@ -198,80 +196,6 @@ def test_the_protocol_vectors_send_the_frozen_transfer_spellings() -> None:
     parsed = parser.parse_args(["transfer", "receive", "--workspace", "/w", "--bundle", "/b"])
     assert parsed.handler is cli.handle_transfer and parsed.args[0] == "receive"
     assert callable(cli.handle_transfer_receive)
-
-
-# ---------------------------------------------------------------------------
-# the XDG move (retained one-time migration)
-# ---------------------------------------------------------------------------
-
-
-def _legacy_tree(tmp_path: Path) -> tuple[Path, Path]:
-    """Write what an earlier release left in the data home, with its modes."""
-
-    computers = data_home() / "computers" / "cluster"
-    computers.mkdir(parents=True)
-    (computers / METADATA_FILE).write_text('{"kind":"local"}\n', encoding="utf-8")
-    (computers / "credentials.json").write_text('{"default":{"password":"hunter2"}}\n', encoding="utf-8")
-    os.chmod(computers / "credentials.json", 0o600)
-    os.chmod(computers.parent, 0o700)
-    keys = data_home() / "keys"
-    keys.mkdir(parents=True)
-    (keys / "identity.seed").write_text("seed\n", encoding="utf-8")
-    os.chmod(keys / "identity.seed", 0o600)
-    os.chmod(keys, 0o700)
-    return computers.parent, keys
-
-
-def test_the_legacy_data_home_is_adopted_once_and_idempotently(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys,
-) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    monkeypatch.delenv("HTTK_CONFIG_HOME", raising=False)
-    monkeypatch.delenv("HTTK_DATA_HOME", raising=False)
-    legacy_remotes, legacy_keys = _legacy_tree(tmp_path)
-
-    current = remotes_home()
-    assert current == config_home() / "remotes"
-    notice = capsys.readouterr().err
-    assert str(legacy_remotes) in notice and str(current) in notice
-
-    # The content moved, and the modes moved with it.
-    assert not legacy_remotes.exists() and not legacy_keys.exists()
-    assert (current / "cluster" / METADATA_FILE).is_file()
-    assert (current / "cluster" / "credentials.json").stat().st_mode & 0o777 == 0o600
-    assert current.stat().st_mode & 0o777 == 0o700
-    assert (keys_home() / "identity.seed").stat().st_mode & 0o777 == 0o600
-    assert keys_home().stat().st_mode & 0o777 == 0o700
-
-    # Asking again is a no-op that says nothing.
-    assert remotes_home() == current and keys_home() == config_home() / "keys"
-    assert capsys.readouterr().err == ""
-
-
-def test_both_roots_present_prefers_the_new_one_and_reports_the_stale_copy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog,
-    capsys,
-) -> None:
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    monkeypatch.delenv("HTTK_CONFIG_HOME", raising=False)
-    monkeypatch.delenv("HTTK_DATA_HOME", raising=False)
-    legacy_remotes, _ = _legacy_tree(tmp_path)
-    current = config_home() / "remotes" / "elsewhere"
-    current.mkdir(parents=True)
-    (current / METADATA_FILE).write_text('{"kind":"local"}\n', encoding="utf-8")
-
-    with caplog.at_level(logging.WARNING, logger="httk.workflow.configuration"):
-        assert remotes_home() == config_home() / "remotes"
-    assert "stale legacy directory" in (caplog.text + capsys.readouterr().err)
-    # Nothing was merged: the new root is exactly what it was.
-    assert sorted(path.name for path in (config_home() / "remotes").iterdir()) == ["elsewhere"]
-    assert (legacy_remotes / "cluster" / METADATA_FILE).is_file()
 
 
 # ---------------------------------------------------------------------------

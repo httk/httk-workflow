@@ -208,7 +208,7 @@ def test_a_planned_remedy_is_always_applicable_for_every_reviewed_problem(tmp_pa
             apply_vasp_remedy(decision, directory=tmp_path, history_path=history)
 
 
-def test_the_remedy_history_is_job_scoped_and_read_from_the_old_place(tmp_path: Path) -> None:
+def test_the_remedy_history_is_job_scoped_and_ignores_the_old_place(tmp_path: Path) -> None:
     payload = tmp_path / "payload"
     workdir = payload / "run"
     workdir.mkdir(parents=True)
@@ -217,8 +217,8 @@ def test_the_remedy_history_is_job_scoped_and_read_from_the_old_place(tmp_path: 
     history = job_remedy_history_path(payload)
     assert history == payload / ".httk-job" / "vasp-remedies.json"
 
-    # An escalation recorded in the pre-0.2 workdir location is still honored, so
-    # a job that was already climbing the ladder does not restart it.
+    # An escalation recorded in the pre-0.2 workdir location is not read: the
+    # ladder lives only with the job state now, so the climb starts from the top.
     legacy = workdir / DEFAULT_REMEDY_HISTORY
     legacy.parent.mkdir(parents=True)
     legacy.write_text(json.dumps({"attempts": {"kpoints_class": 1}, "events": []}), encoding="utf-8")
@@ -227,15 +227,14 @@ def test_the_remedy_history_is_job_scoped_and_read_from_the_old_place(tmp_path: 
         directory=workdir,
         history_path=history,
     )
-    assert decision.step == 1
-    assert decision.changes == (("centering", "Gamma"),)
+    assert decision.step == 0
+    assert not decision.give_up
 
     apply_vasp_remedy(decision, directory=workdir, history_path=history)
 
-    # From now on the ladder lives with the job state, outside every workdir.
-    assert json.loads(history.read_text(encoding="utf-8"))["attempts"]["kpoints_class"] == 2
-    assert (workdir / "KPOINTS").read_text(encoding="utf-8").splitlines()[2] == "Gamma"
-    assert not (workdir / "vasp-remedies.json").exists()
+    # The job-scoped history records the first attempt; the old place is untouched.
+    assert json.loads(history.read_text(encoding="utf-8"))["attempts"]["kpoints_class"] == 1
+    assert json.loads(legacy.read_text(encoding="utf-8"))["attempts"]["kpoints_class"] == 1
 
 
 def test_planning_and_applying_resolve_one_relative_history_against_the_workdir(tmp_path: Path) -> None:

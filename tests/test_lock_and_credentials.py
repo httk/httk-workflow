@@ -184,15 +184,14 @@ def test_scheduler_setting_is_refused_for_remote_configuration(tmp_path: Path, m
     assert not (remote / "credentials.json").exists()
 
 
-def test_retired_bootstrap_setting_is_refused_with_the_remedy(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_retired_bootstrap_setting_is_refused_as_unknown(tmp_path: Path, monkeypatch, capsys) -> None:
     project = _project(tmp_path, monkeypatch, name="bootstrap-retired")
     remote = add_remote("cluster", template="local", project=project)
 
     code = command(["remote", "configure", "cluster", "--set", "bootstrap=pip"], CLIContext("httk", project))
 
     assert code == 2
-    err = capsys.readouterr().err
-    assert "'bootstrap' is retired" in err and "remote check" in err
+    assert "unknown remote setting 'bootstrap'" in capsys.readouterr().err
     assert json.loads((remote / "remote.json").read_text(encoding="utf-8"))["settings"] == {}
     assert not (remote / "credentials.json").exists()
 
@@ -237,9 +236,9 @@ print(json.dumps({{"format":"httk-computer-result","format_version":2,
     assert json.loads(echo.read_text(encoding="utf-8"))["remote_settings"]["password"] == "hunter2"
 
 
-def test_whitelisted_setting_still_lands_in_remote_json(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_retired_workspace_root_setting_is_refused_as_unknown(tmp_path: Path, monkeypatch, capsys) -> None:
     project = _project(tmp_path, monkeypatch, name="whitelisted")
     destination = tmp_path / "elsewhere"
     _remote, code = _configured(project, f"workspace_root={destination}", "username=someone")
     assert code == 2
-    assert "the machine that owns a workspace places it" in capsys.readouterr().err
+    assert "unknown remote setting 'workspace_root'" in capsys.readouterr().err

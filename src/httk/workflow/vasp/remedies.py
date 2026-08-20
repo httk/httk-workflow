@@ -316,14 +316,11 @@ def _empty_remedy_history() -> dict[str, Any]:
 
 
 def _read_remedy_history(root: Path, history_path: str | os.PathLike[str]) -> dict[str, Any]:
-    """Read the remedy history, falling back to the pre-0.2 workdir location."""
+    """Read the remedy history from its job-scoped location."""
 
     history_file = _remedy_history_file(root, history_path)
     if history_file.exists():
         return read_json(history_file)
-    legacy = root / DEFAULT_REMEDY_HISTORY
-    if legacy != history_file and legacy.exists():
-        return read_json(legacy)
     return _empty_remedy_history()
 
 

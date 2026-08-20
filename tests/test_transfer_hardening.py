@@ -119,7 +119,7 @@ def test_resuming_a_transfer_requires_the_destination_remote_to_match(
     assert calls[0]["transfer_id"] != foreign_id
 
 
-def test_resuming_adopts_an_unambiguous_legacy_sealed_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_sealed_ledger_without_destination_remote_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = Workspace.initialize(tmp_path / "source")
     transfer_dir = source.control / "transfers"
     transfer_dir.mkdir(parents=True, exist_ok=True)
@@ -137,66 +137,13 @@ def test_resuming_adopts_an_unambiguous_legacy_sealed_ledger(tmp_path: Path, mon
         ),
         encoding="utf-8",
     )
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
-    target = SimpleNamespace(name="cluster", bundle=tmp_path / "adapter")
-    calls: list[dict[str, object]] = []
-
-    monkeypatch.setattr(transfer_cli, "_remote_workspace_probe", lambda *_args, **_kwargs: ("destination-id", "/dest"))
-
-    def detach(_job_id: str, **kwargs: object) -> Path:
-        calls.append(kwargs)
-        return bundle
-
-    monkeypatch.setattr(source, "detach", detach)
-    monkeypatch.setattr(source, "acknowledge_transfer", lambda _acknowledgement: None)
-
-    def adapter(
-        _bundle: Path, operation: str, _request: dict[str, object], *, timeout: float | None
-    ) -> dict[str, object]:
-        if operation == "push":
-            return {"path": "/dest/incoming"}
-        return {"returncode": 0, "stdout": json.dumps({"transfer_id": transfer_id})}
-
-    monkeypatch.setattr(transfer_cli, "run_adapter", adapter)
-    transfer_cli._send_jobs_to_remote(source, target, "destination", [job_id], destination_placement=None, timeout=None)
-
-    adopted = json.loads(ledger_path.read_text(encoding="utf-8"))
-    assert adopted["destination_remote"] == "cluster"
-    assert calls and calls[0]["transfer_id"] == transfer_id
-
-
-def test_ambiguous_legacy_sealed_ledgers_fail_with_recovery_guidance(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = Workspace.initialize(tmp_path / "source")
-    transfer_dir = source.control / "transfers"
-    transfer_dir.mkdir(parents=True, exist_ok=True)
-    job_id = str(uuid.uuid4())
-    ledger_paths = []
-    for _ in range(2):
-        transfer_id = str(uuid.uuid4())
-        ledger_path = transfer_dir / f"{transfer_id}.json"
-        ledger_path.write_text(
-            json.dumps(
-                {
-                    "transfer_id": transfer_id,
-                    "job_id": job_id,
-                    "destination_workspace_id": "destination-id",
-                    "status": "sealed",
-                }
-            ),
-            encoding="utf-8",
-        )
-        ledger_paths.append(ledger_path)
     target = SimpleNamespace(name="cluster", bundle=tmp_path / "adapter")
     monkeypatch.setattr(transfer_cli, "_remote_workspace_probe", lambda *_args, **_kwargs: ("destination-id", "/dest"))
 
-    with pytest.raises(ValueError, match="destination_remote.*ambiguous.*retire.*fetch") as exc_info:
+    with pytest.raises(ValueError, match="has no destination_remote"):
         transfer_cli._send_jobs_to_remote(
             source, target, "destination", [job_id], destination_placement=None, timeout=None
         )
-    assert str(ledger_paths[0]) in str(exc_info.value) or str(ledger_paths[1]) in str(exc_info.value)
 
 
 def test_transfer_adapter_requests_are_exact_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,9 +287,8 @@ def test_a_bundle_sealed_under_the_previous_digest_rule_is_refused_by_version(tm
     assert manifest["format_version"] == TRANSFER_FORMAT_VERSION == 2
     manifest["format_version"] = 1
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    # An older bundle is named as an old bundle rather than reported as the
-    # digest mismatch it would otherwise look like.
-    with pytest.raises(FormatError, match="version 1 is not 2"):
+    # A manifest at any other version is refused by the strict format gate.
+    with pytest.raises(FormatError, match="unsupported detached transfer manifest"):
         validate_bundle(bundle)
 
 

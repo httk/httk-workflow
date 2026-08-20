@@ -431,7 +431,7 @@ def test_transfer_acknowledgement_is_signed_and_a_forged_one_is_refused(tmp_path
 # ---------------------------------------------------------------------------
 
 
-def test_read_config_refuses_a_foreign_format_and_accepts_a_legacy_version(tmp_path: Path, monkeypatch) -> None:
+def test_read_config_refuses_a_foreign_format_or_version(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
     path = config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -444,10 +444,11 @@ def test_read_config_refuses_a_foreign_format_and_accepts_a_legacy_version(tmp_p
     with pytest.raises(ValueError, match="version 99"):
         read_config()
 
-    # No version at all is what every configuration written before versioning
-    # looks like, and it is read rather than refused.
+    # A document with no format or version at all is refused, not read as legacy:
+    # the format and format_version are both required.
     path.write_text(json.dumps({"name": "A User"}), encoding="utf-8")
-    assert read_config() == {"name": "A User"}
+    with pytest.raises(ValueError, match="not a httk-config document"):
+        read_config()
 
 
 def test_config_set_is_restricted_to_the_registry_and_unset_removes(tmp_path: Path, monkeypatch) -> None:
@@ -702,15 +703,3 @@ def test_remote_show_and_remove_are_reachable_from_the_command_line(
     assert bundle.is_dir()
     assert command(["remote", "remove", "cluster", "--force"], context) == 0
     assert not bundle.exists()
-
-
-def test_legacy_manifest_verification_reraises_prerelease_refusal(tmp_path: Path) -> None:
-    from httk.core.project import PROJECT_FILE, LegacyProjectError
-
-    project = tmp_path / "prerelease"
-    anchor = project / ".httk-project"
-    anchor.mkdir(parents=True)
-    (anchor / PROJECT_FILE).write_text("{}", encoding="utf-8")
-
-    with pytest.raises(LegacyProjectError, match="rename it: mv"):
-        verify_manifest(project)
