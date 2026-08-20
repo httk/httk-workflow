@@ -355,7 +355,7 @@ def register_children(
         job_key = str(raw.get("job_key", ""))
         placement = normalize_placement(str(raw.get("placement", "")))
         if raw.get("workspace_id", manager.workspace.workspace_id) != manager.workspace.workspace_id:
-            raise UnsupportedExtensionError("cross-workspace child requires multiworkspace-v1")
+            raise UnsupportedExtensionError("cross-workspace spawn children are not supported")
         source = children_dir / "jobs" / job_key
         expected_digest = str(expected_digests.get(job_key, ""))
         target = manager.workspace.payload_path(placement, job_key)

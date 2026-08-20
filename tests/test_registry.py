@@ -53,20 +53,20 @@ def test_register_workspace_rejects_the_retired_remote_positional_shape(tmp_path
         cast(Any, register_workspace)("home", "local", tmp_path / "runs")
 
 
-def test_registry_rejects_v1_files_with_a_teaching_error() -> None:
+def test_registry_rejects_other_format_versions() -> None:
     path = workspaces_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
                 "format": "httk-workspaces",
-                "format_version": 2,
-                "workspaces": {"runs": {"remote": "cluster", "path": "/tmp/runs"}},
+                "format_version": 1,
+                "workspaces": {},
             }
         ),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match=r"predates machine-owned.*remove it.*workspace init") as error:
+    with pytest.raises(ValueError, match=r"format version 2") as error:
         list_workspaces()
     assert str(path) in str(error.value)
 
