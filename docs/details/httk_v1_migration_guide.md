@@ -117,10 +117,9 @@ keys or the *httk* v1 queue. Imported project metadata records
 default, but the core-v2 workspace itself remains outside the project; detached
 transfer and transactional data are available to native jobs.
 
-The workspace registry is machine-owned in *httk₂*. An old `workspaces.json`
-is refused with a teaching error; remove it and re-register local workspaces
-with `workspace init PATH` (remote names are registered on their owning
-machine). `workspace default NAME` replaces project workspace bindings: it
+The workspace registry is machine-owned in *httk₂*: local workspaces are
+registered with `workspace init PATH`, and remote names are registered on
+their owning machine. `workspace default NAME` replaces project workspace bindings: it
 records only the name in `project.json`, while the workspace remains outside
 the project.
 
