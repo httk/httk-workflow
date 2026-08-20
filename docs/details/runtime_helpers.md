@@ -387,8 +387,7 @@ it cannot execute — a `bump_bands` for an INCAR without `NBANDS`, a KPOINTS ch
 with no KPOINTS staged — so `apply_vasp_remedy` never receives a remedy it would
 have to refuse. Both resolve a relative history path against that same directory;
 `job_remedy_history_path(payload)` is where a runner should keep it, beside the job
-state, so an isolated workdir does not silently restart the escalation. The
-pre-0.2 workdir location is still read when the job-scoped file does not exist yet.
+state, so an isolated workdir does not silently restart the escalation.
 
 Policies are a registry rather than module source: `register_remedy_policy(name,
 sequences, precedence)` adds one, `remedy_policy_names()` lists what is registered,

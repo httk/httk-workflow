@@ -1325,12 +1325,6 @@ class JobDefinition:
         """
         if value.get("format") != "httk-workflow-job" or value.get("format_version") != 2:
             raise FormatError("job format must be httk-workflow-job version 2")
-        if "inputs" in value and "parameters" in value:
-            raise FormatError(
-                "job.json carries both 'inputs' and 'parameters'; use only the renamed 'parameters' member"
-            )
-        if "inputs" in value:
-            raise FormatError("job.json member 'inputs' was renamed 'parameters'; re-scaffold the job")
         job_id = canonical_uuid(value.get("id"))
         tag_raw = value.get("tag")
         tag = None if tag_raw is None else validate_label(tag_raw, "tag")

@@ -8,10 +8,7 @@ import base64
 import configparser
 import hashlib
 import json
-import logging
 import os
-import shutil
-import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,8 +23,6 @@ from httk.core.userdirs import config_home, data_home
 
 from ._util import json_bytes, write_json_atomic
 
-_LOGGER = logging.getLogger(__name__)
-
 __all__ = [
     "CONFIG_FORMAT",
     "CONFIG_FORMAT_VERSION",
@@ -37,7 +32,6 @@ __all__ = [
     "IDENTITY_SIGNATURE_MEMBER",
     "ConfigKey",
     "DocumentSignature",
-    "adopt_legacy_data_home",
     "config_home",
     "config_path",
     "data_home",
@@ -108,70 +102,12 @@ def settable_config_keys() -> tuple[str, ...]:
     return tuple(sorted(name for name, key in CONFIG_KEYS.items() if key.settable))
 
 
-#: The two directories that moved out of the data home, as
-#: ``(legacy name, current name)``. The remote definitions were renamed in the
-#: same release, so the pair differs for them and not for the keys.
-_MIGRATED_DIRECTORIES = (("computers", "remotes"), ("keys", "keys"))
-
-
-def _adopt(legacy: Path, current: Path) -> Path:
-    """Move one legacy data-home directory to its configuration home, once.
-
-    The move is idempotent and never merges: with both roots present the new one
-    is authoritative and the stale copy is only reported, because guessing which
-    of two definitions of the same remote is meant would be worse than saying so.
-    """
-
-    if not legacy.is_dir():
-        return current
-    if current.exists():
-        _LOGGER.warning(
-            "ignoring the stale legacy directory %s; %s is authoritative and can be removed by hand",
-            legacy,
-            current,
-            extra={"event": "legacy_home_stale", "legacy": str(legacy), "current": str(current)},
-        )
-        return current
-    current.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.rename(legacy, current)
-    except OSError:
-        # A different filesystem, so copy the modes with the content and only
-        # then drop the source: an interrupted copy leaves the legacy tree.
-        shutil.copytree(legacy, current, symlinks=True)
-        shutil.rmtree(legacy)
-    message = f"httk: moved {legacy} to {current}"
-    _LOGGER.info(
-        "moved %s to %s",
-        legacy,
-        current,
-        extra={"event": "legacy_home_migrated", "legacy": str(legacy), "current": str(current)},
-    )
-    print(message, file=sys.stderr)
-    return current
-
-
-def adopt_legacy_data_home() -> None:
-    """Adopt whatever an earlier release left in the data home, once.
-
-    :return: ``None``.
-    """
-
-    legacy_root = data_home()
-    config_root = config_home()
-    if legacy_root == config_root:  # pragma: no cover - only a deployment override does this
-        return
-    for legacy_name, current_name in _MIGRATED_DIRECTORIES:
-        _adopt(legacy_root / legacy_name, config_root / current_name)
-
-
 def remotes_home() -> Path:
     """Return where this user's remote definitions live.
 
     :return: Per-user remote definition directory.
     """
 
-    adopt_legacy_data_home()
     return config_home() / "remotes"
 
 
@@ -181,7 +117,6 @@ def keys_home() -> Path:
     :return: Per-user identity key directory.
     """
 
-    adopt_legacy_data_home()
     return config_home() / "keys"
 
 
@@ -196,10 +131,8 @@ def config_path() -> Path:
 def read_config() -> dict[str, object]:
     """Read the user configuration, returning an empty mapping if absent.
 
-    A document of an unrecognized format is refused by name rather than read as
-    if its members meant what this implementation means by them. A document with
-    no version at all predates versioning and is accepted as legacy, because
-    that is what every configuration written before this check looks like.
+    A document of an unrecognized format or version is refused by name rather
+    than read as if its members meant what this implementation means by them.
 
     :return: Configuration members, or an empty mapping when no file exists.
     :raises ValueError: If the file is not a supported configuration document.
@@ -213,17 +146,10 @@ def read_config() -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError(f"configuration is not a JSON object: {path}")
     recorded_format = value.get("format")
-    if recorded_format is not None and recorded_format != CONFIG_FORMAT:
+    if recorded_format != CONFIG_FORMAT:
         raise ValueError(f"configuration is not a {CONFIG_FORMAT} document but {recorded_format!r}: {path}")
     version = value.get("format_version")
-    if version is None:
-        _LOGGER.debug(
-            "configuration %s records no format_version; reading it as legacy %s version 1",
-            path,
-            CONFIG_FORMAT,
-            extra={"event": "config_legacy", "path": str(path)},
-        )
-    elif version != CONFIG_FORMAT_VERSION:
+    if version != CONFIG_FORMAT_VERSION:
         raise ValueError(
             f"configuration {path} uses {CONFIG_FORMAT} version {version!r}, "
             f"but this implementation reads version {CONFIG_FORMAT_VERSION}"

@@ -125,48 +125,6 @@ def test_job_spec_compatibility_is_optional_and_round_trips() -> None:
     assert JobDefinition.from_mapping(mapping).raw["compatibility"] == compatibility
 
 
-@pytest.mark.parametrize(
-    ("extra", "message"),
-    [
-        ({"inputs": {}}, "renamed 'parameters'"),
-        ({"inputs": {}, "parameters": {}}, "both 'inputs' and 'parameters'"),
-    ],
-)
-def test_job_definition_rejects_crossing_rename_residue(extra: dict[str, object], message: str) -> None:
-    job: dict[str, Any] = {
-        "format": "httk-workflow-job",
-        "format_version": 2,
-        "id": "12345678-1234-4234-8234-123456789abc",
-        "name": "Test job",
-        "workflow": "tests.example",
-        "runner": {"path": "files/runner", "arguments": []},
-        "workdir": {"mode": "persistent", "path": "run"},
-        "data": {"mode": "none"},
-        "initial_step": "run",
-        "priority": 500,
-        "claim": {"pool": "default", "required_capabilities": []},
-        "retry_policy": {"retry_on": []},
-        "resources": {},
-        "parent": None,
-        **extra,
-    }
-    with pytest.raises(FormatError, match=message):
-        JobDefinition.from_mapping(job)
-
-
-@pytest.mark.parametrize("description", [{"parameters": {}}, {"inputs": {}, "parameters": {}}])
-def test_runner_description_rejects_crossing_rename_residue(tmp_path: Path, description: dict[str, object]) -> None:
-    runner = tmp_path / "legacy-description.py"
-    runner.write_text(
-        "#!/usr/bin/env python3\n"
-        f"import json\nprint(json.dumps({description | {'workflow': 'tests.legacy', 'steps': ['run']}}))\n",
-        encoding="utf-8",
-    )
-    runner.chmod(0o755)
-    with pytest.raises(ValueError, match=r"legacy 'parameters'.*current description format"):
-        describe_runner(runner)
-
-
 from httk.workflow.workflow_cli import command
 
 _POSCAR = """silicon

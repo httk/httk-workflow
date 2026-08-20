@@ -682,10 +682,7 @@ def verify_manifest(
     try:
         v2_root = discover_project(supplied)
     except LegacyProjectError as error:
-        # Only the v1 flavor has a read-only legacy verification path here; a
-        # pre-release .httk-project refusal propagates with its rename remedy.
-        if error.kind != "v1":
-            raise
+        # A v1 ht.project has a read-only legacy verification path here.
         path = (
             Path(manifest).expanduser().resolve()
             if manifest is not None
