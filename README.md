@@ -1,5 +1,13 @@
 # httk-workflow
 
+![Status: Early beta](https://img.shields.io/badge/status-early--beta-orange)
+
+> **⚠️ EARLY BETA**
+>
+> This is an early beta release of *httk₂*. The organization of the packages
+> and their APIs should not yet be regarded as stable, and may change between
+> releases.
+
 *httk-workflow* is the filesystem-native workflow engine for
 [*httk₂*](https://github.com/httk/httk2).
 
