@@ -133,7 +133,7 @@ def _attempt(
         json.dumps(
             {
                 "format": "httk-workflow-attempt-context",
-                "format_version": 1,
+                "format_version": 2,
                 "workspace_id": str(uuid.uuid4()),
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"fabricated--{uuid.uuid4()}",
@@ -204,7 +204,7 @@ def test_describe_is_byte_identical_to_the_bash_sdk(tmp_path: Path) -> None:
     )
     assert bash.returncode == 0, bash.stderr
     expected = (
-        '{"format": "httk-workflow-runner-description", "format_version": 1, '
+        '{"format": "httk-workflow-runner-description", "format_version": 2, '
         '"steps": ["collect", "prepare", "relax"], "workflow": "tests.java.describe"}\n'
     )
     for invocation in (

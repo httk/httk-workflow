@@ -336,7 +336,7 @@ def test_both_runners_describe_themselves_with_the_same_bytes(tmp_path: Path) ->
     assert described[0].stdout == described[1].stdout
     assert json.loads(described[0].stdout) == {
         "format": "httk-workflow-runner-description",
-        "format_version": 1,
+        "format_version": 2,
         "workflow": "tests.parity",
         "steps": _CAMPAIGN_STEPS,
     }

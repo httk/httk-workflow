@@ -21,7 +21,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -42,7 +42,7 @@ def _payload(root: Path, *, tag: str) -> tuple[Path, str]:
         json.dumps(
             {
                 "format": "httk-workflow-job",
-                "format_version": 1,
+                "format_version": 2,
                 "id": job_id,
                 "tag": tag,
                 "name": tag,
@@ -232,7 +232,7 @@ def test_request_replaced_during_claim_is_not_applied(tmp_path, monkeypatch) -> 
         assert marker is not None and marker.kind == "ready"
         request = {
             "format": "httk-workflow-request",
-            "format_version": 1,
+            "format_version": 2,
             "request_id": str(uuid.uuid4()),
             "job_id": marker.job_id,
             "job_key": marker.job_key,
@@ -272,7 +272,7 @@ def test_request_job_id_must_match_job_key(tmp_path) -> None:
         workspace.publish_request(
             {
                 "format": "httk-workflow-request",
-                "format_version": 1,
+                "format_version": 2,
                 "request_id": str(uuid.uuid4()),
                 "job_id": str(uuid.uuid4()),
                 "job_key": marker.job_key,

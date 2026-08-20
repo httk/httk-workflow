@@ -81,7 +81,7 @@ def test_collect_main_emits_v1_jsonl(tmp_path: Path) -> None:
     )
     completed = subprocess.run(
         [str(hook)],
-        input='{"format":"httk-workflow-collect-stream","format_version":1}\n{"record":{"job_id":"job-1"}}\n',
+        input='{"format":"httk-workflow-collect-stream","format_version":2}\n{"record":{"job_id":"job-1"}}\n',
         text=True,
         capture_output=True,
         check=False,
@@ -311,7 +311,7 @@ def test_collect_main_serialization_error_does_not_drop_the_tail(tmp_path: Path)
     )
     completed = subprocess.run(
         [str(hook)],
-        input='{"format":"httk-workflow-collect-stream","format_version":1}\n'
+        input='{"format":"httk-workflow-collect-stream","format_version":2}\n'
         '{"record":{"job_id":"job-1"}}\n{"record":{"job_id":"job-2"}}\n',
         text=True,
         capture_output=True,

@@ -26,7 +26,7 @@ def _payload(root: Path, runner_source: str, *, initial_step: str = "prepare") -
     runner.chmod(0o755)
     job = {
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": job_id,
         "tag": "test-job",
         "name": "Test job",
@@ -70,7 +70,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -239,7 +239,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -345,7 +345,7 @@ def test_gather_refuses_a_join_over_no_children(tmp_path: Path) -> None:
     control.mkdir()
     context = {
         "format": "httk-workflow-attempt-context",
-        "format_version": 1,
+        "format_version": 2,
         "workspace_id": str(uuid.uuid4()),
         "job_id": str(uuid.uuid4()),
         "job_key": f"job--{uuid.uuid4()}",
@@ -421,7 +421,7 @@ def _in_process_attempt(tmp_path: Path, *, label: str | None = None) -> Attempt:
     child_id = str(uuid.uuid4())
     context = {
         "format": "httk-workflow-attempt-context",
-        "format_version": 1,
+        "format_version": 2,
         "workspace_id": str(uuid.uuid4()),
         "job_id": str(uuid.uuid4()),
         "job_key": f"job--{uuid.uuid4()}",

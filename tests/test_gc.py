@@ -40,7 +40,7 @@ workdir = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 (workdir / "kept.txt").write_text("persistent application data\\n")
 outcome = {
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -67,7 +67,7 @@ def _payload(root: Path, name: str) -> tuple[Path, str]:
         json.dumps(
             {
                 "format": "httk-workflow-job",
-                "format_version": 1,
+                "format_version": 2,
                 "id": job_id,
                 "tag": "gc-test",
                 "name": "Collection test job",
@@ -140,7 +140,7 @@ def _manager_directory(workspace: Workspace, writer_id: str, *, live: bool, days
         manager_dir / "manager.json",
         {
             "format": "httk-workflow-manager",
-            "format_version": 1,
+            "format_version": 2,
             "manager_id": manager_id,
             "writer_id": writer_id,
             "hostname": "test",
@@ -179,7 +179,7 @@ def _sealed_ledger(workspace: Workspace, record_ref: str) -> Path:
         ledger,
         {
             "format": "httk-workflow-transfer",
-            "format_version": 1,
+            "format_version": 2,
             "transfer_id": transfer_id,
             "status": "sealed",
             "sealed_marker": f"{uuid.uuid4()}.p500.g1.{record_ref}",

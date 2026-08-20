@@ -121,7 +121,7 @@ int httk_workflow_main(int argc, char **argv);
  * Print this runner's machine-readable description to stdout, byte-for-byte the
  * same JSON a Python or Bash runner prints for the same workflow and step set:
  *
- *   {"format": "httk-workflow-runner-description", "format_version": 1,
+ *   {"format": "httk-workflow-runner-description", "format_version": 2,
  *    "steps": [<byte-sorted names>], "workflow": "<workflow>"}
  *
  * followed by one newline. httk_workflow_runner must have been called first.

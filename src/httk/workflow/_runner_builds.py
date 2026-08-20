@@ -138,7 +138,7 @@ def register_build(
             result.artifact_files,
             {
                 "format": "httk-workflow-runner-build",
-                "format_version": 1,
+                "format_version": 2,
                 "source_sha256": source_sha256,
                 "command": verified_spec.command,
                 "platform": verified_spec.platform,

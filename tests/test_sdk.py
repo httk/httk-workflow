@@ -281,7 +281,7 @@ def _attempt(
         json.dumps(
             {
                 "format": "httk-workflow-attempt-context",
-                "format_version": 1,
+                "format_version": 2,
                 "workspace_id": str(uuid.uuid4()),
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"fabricated--{uuid.uuid4()}",
@@ -365,7 +365,7 @@ def test_runner_gates_all_declared_environment_and_records_sources(
     observed = attempt.declaration("environment")
     assert observed == {
         "format": "httk-workflow-environment-resolution",
-        "format_version": 1,
+        "format_version": 2,
         "values": {
             "defaulted": {"value": "manifest", "source": "default"},
             "override": {"value": "job", "source": "override"},
@@ -849,7 +849,7 @@ def test_describe_mode_prints_the_step_set_and_touches_nothing(
     assert run.main([]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "format": "httk-workflow-runner-description",
-        "format_version": 1,
+        "format_version": 2,
         "workflow": "tests.describe",
         "steps": ["collect", "prepare"],
     }

@@ -52,7 +52,7 @@ def _payload(root: Path, *, tag: str, priority: int) -> tuple[Path, str]:
     runner.chmod(0o755)
     job = {
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": job_id,
         "tag": tag,
         "name": f"Streaming job {tag}",

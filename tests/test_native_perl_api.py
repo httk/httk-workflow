@@ -126,7 +126,7 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
         json.dumps(
             {
                 "format": "httk-workflow-attempt-context",
-                "format_version": 1,
+                "format_version": 2,
                 "workspace_id": str(uuid.uuid4()),
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"fabricated--{uuid.uuid4()}",
@@ -226,7 +226,7 @@ def test_describe_is_byte_identical_to_the_bash_sdk(tmp_path: Path) -> None:
     perl = subprocess.run([str(script), "--describe"], text=True, capture_output=True, check=False)
     assert perl.returncode == 0, perl.stderr
     expected = (
-        '{"format": "httk-workflow-runner-description", "format_version": 1, '
+        '{"format": "httk-workflow-runner-description", "format_version": 2, '
         '"steps": ["collect", "prepare", "relax"], "workflow": "tests.perl.describe"}\n'
     )
     assert bash.stdout == expected

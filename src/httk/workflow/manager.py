@@ -454,7 +454,7 @@ class TaskManager:
             self._manager_dir / "manager.json",
             {
                 "format": "httk-workflow-manager",
-                "format_version": 1,
+                "format_version": 2,
                 "manager_id": self.manager_id,
                 "writer_id": self.writer.writer_id,
                 "hostname": self.hostname,
@@ -607,7 +607,7 @@ class TaskManager:
                 control / "commit-wedge.json",
                 {
                     "format": "httk-workflow-commit-wedge",
-                    "format_version": 1,
+                    "format_version": 2,
                     "error": text,
                     "manager_id": self.manager_id,
                     "recorded_at": utc_now(),
@@ -1289,7 +1289,7 @@ class TaskManager:
         workflow_prelude = self.workspace.read_workflow_preludes().get(job.workflow, "")
         context = {
             "format": "httk-workflow-attempt-context",
-            "format_version": 1,
+            "format_version": 2,
             "workspace_id": self.workspace.workspace_id,
             "job_id": job.id,
             "job_key": job.job_key,
@@ -2152,7 +2152,7 @@ class TaskManager:
                 retired_dir / f"{claimed_path.name}.retirement",
                 {
                     "format": "httk-workflow-retired-request",
-                    "format_version": 1,
+                    "format_version": 2,
                     "request": claimed_path.name,
                     "manager_id": self.manager_id,
                     "reason": reason,

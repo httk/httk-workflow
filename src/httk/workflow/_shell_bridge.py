@@ -609,7 +609,7 @@ def _abort(arguments: argparse.Namespace) -> None:
         attempt.control / "error.json",
         {
             "format": RUNNER_ERROR_FORMAT,
-            "format_version": 1,
+            "format_version": 2,
             "step": attempt.step,
             "exception": arguments.exception,
             "message": arguments.message,
@@ -986,7 +986,7 @@ def _vasp_command(arguments: argparse.Namespace) -> int:
             Path(arguments.output),
             {
                 "format": "httk-vasp-diagnostics",
-                "format_version": 1,
+                "format_version": 2,
                 "diagnostics": [item.as_mapping() for item in diagnostics],
             },
         )

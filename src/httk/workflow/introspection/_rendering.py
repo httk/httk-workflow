@@ -38,7 +38,7 @@ def describe_job(workspace: Workspace, marker: Marker) -> dict[str, Any]:
     control = _attempt_control(workspace, marker, state)
     report: dict[str, Any] = {
         "format": JOB_REPORT_FORMAT,
-        "format_version": 1,
+        "format_version": 2,
         "workspace": str(workspace.root),
         "workspace_id": workspace.workspace_id,
         "core_profile": workspace.core_profile,

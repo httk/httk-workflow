@@ -28,7 +28,7 @@ def _context(path: Path) -> None:
         json.dumps(
             {
                 "format": "httk-workflow-attempt-context",
-                "format_version": 1,
+                "format_version": 2,
                 "workspace_id": "workspace",
                 "job_id": "job",
                 "job_key": "job-key",

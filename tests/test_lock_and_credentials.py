@@ -227,7 +227,7 @@ def test_secret_setting_remains_visible_to_the_adapter(tmp_path: Path, monkeypat
 import json, shutil, sys
 request = json.load(open(sys.argv[1]))
 shutil.copyfile(sys.argv[1], {str(echo)!r})
-print(json.dumps({{"format":"httk-computer-result","format_version":1,
+print(json.dumps({{"format":"httk-computer-result","format_version":2,
                   "operation":request["operation"],"ok":True}}))
 """,
         encoding="utf-8",

@@ -167,7 +167,7 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
         json.dumps(
             {
                 "format": "httk-workflow-attempt-context",
-                "format_version": 1,
+                "format_version": 2,
                 "workspace_id": str(uuid.uuid4()),
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"fabricated--{uuid.uuid4()}",
@@ -243,7 +243,7 @@ def test_describe_is_byte_identical_to_the_bash_sdk(tmp_path: Path) -> None:
     assert invocation.returncode == 0, invocation.stderr
     assert invocation.stdout == bash.stdout
     assert invocation.stdout == (
-        '{"format": "httk-workflow-runner-description", "format_version": 1, '
+        '{"format": "httk-workflow-runner-description", "format_version": 2, '
         '"steps": ["collect", "prepare", "relax"], "workflow": "tests.cpp.describe"}\n'
     )
     assert describe_runner(binary) == {"workflow": workflow, "steps": sorted(order)}

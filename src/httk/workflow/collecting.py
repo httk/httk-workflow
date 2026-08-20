@@ -106,7 +106,7 @@ __all__ = [
 ]
 
 COLLECT_FORMAT = "httk-workflow-collect"
-COLLECT_FORMAT_VERSION = 1
+COLLECT_FORMAT_VERSION = 2
 #: The state kinds a job_records may read: a job that stopped. The terminal kinds are
 #: final, and ``paused`` is included because a paused job published a real outcome
 #: and produced real results before an operator was asked to look at it.

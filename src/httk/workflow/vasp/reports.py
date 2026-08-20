@@ -76,7 +76,7 @@ class VaspRunReport:
         """
         return {
             "format": "httk-vasp-run-report",
-            "format_version": 1,
+            "format_version": 2,
             "process": self.process.as_mapping(),
             "classification": self.classification,
             "diagnostics": [item.as_mapping() for item in self.diagnostics],

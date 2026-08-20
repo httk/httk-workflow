@@ -47,7 +47,7 @@ trailing newline:
 
 ```console
 ./runner.pl --describe
-{"format": "httk-workflow-runner-description", "format_version": 1, "steps": ["prepare", "run"], "workflow": "my.workflow"}
+{"format": "httk-workflow-runner-description", "format_version": 2, "steps": ["prepare", "run"], "workflow": "my.workflow"}
 ```
 
 `HTTK_WORKFLOW_DESCRIBE=1` has the same effect. Managers and the describe

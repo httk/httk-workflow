@@ -162,7 +162,7 @@ apply, and then dispatches. It turns every ending of a step into an outcome:
 | the handler aborts | an `error.json` breadcrumb, then a nonzero exit the manager records as `process_failure` |
 
 `HTTK_WORKFLOW_DESCRIBE=1` makes `httk_workflow_runner` print
-`{"format": "httk-workflow-runner-description", "format_version": 1, "workflow":
+`{"format": "httk-workflow-runner-description", "format_version": 2, "workflow":
 ..., "steps": [...]}` and exit before any step function is even defined, so a
 tool can enumerate the steps of a runner it is not running. It is produced by the
 shell itself: describing a runner reads no attempt context, needs no interpreter,
@@ -430,11 +430,11 @@ instead:
 supervision and terminates its whole process group on timeout. The versioned JSON
 report it writes is authoritative.
 
-A checker spec has format `httk-workflow-checker-spec`, format version 1, an
+A checker spec has format `httk-workflow-checker-spec`, format version 2, an
 `argv` string array, and optional `required` and `sources` fields. Each source
 contains `path` and may contain `name` and a positive `inactivity_timeout`. The
 checker receives one `httk-workflow-checker-event` JSON object per line on stdin
-and emits `httk-workflow-checker-result` version 1 objects on stdout. Diagnostics
+and emits `httk-workflow-checker-result` version 2 objects on stdout. Diagnostics
 belong on stderr.
 
 `httk_workflow_runlog_note`, `httk_workflow_runlog_headline`, and

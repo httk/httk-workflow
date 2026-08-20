@@ -115,7 +115,7 @@ def _workflow_description(target: str, format: str | None = None) -> dict[str, o
     source = workflow.directory if workflow.directory is not None else workflow.source
     return {
         "format": WORKFLOW_DESCRIPTION_FORMAT,
-        "format_version": 1,
+        "format_version": 2,
         "workflow": workflow.workflow_id,
         "alias": workflow.alias,
         "source": {"kind": _source_kind(target, workflow), "path": str(source)},

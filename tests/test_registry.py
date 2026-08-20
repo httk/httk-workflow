@@ -60,7 +60,7 @@ def test_registry_rejects_v1_files_with_a_teaching_error() -> None:
         json.dumps(
             {
                 "format": "httk-workspaces",
-                "format_version": 1,
+                "format_version": 2,
                 "workspaces": {"runs": {"remote": "cluster", "path": "/tmp/runs"}},
             }
         ),

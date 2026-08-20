@@ -261,8 +261,8 @@ class Workspace:
         # A workspace written before the policy section existed reads as the
         # defaults, so an old workspace attaches without migration.
         self._policy = WorkspacePolicy.from_mapping(self.format.get("policy", {}))
-        if self.format.get("format") != "httk-workflow-filesystem" or self.format.get("format_version") != 1:
-            raise FormatError("workspace must use httk-workflow-filesystem format version 1")
+        if self.format.get("format") != "httk-workflow-filesystem" or self.format.get("format_version") != 2:
+            raise FormatError("workspace must use httk-workflow-filesystem format version 2")
         self.core_profile = self.format.get("core_profile")
         if self.core_profile != CORE_PROFILE:
             raise UnsupportedExtensionError(f"unsupported core profile: {self.core_profile!r}")
@@ -273,7 +273,7 @@ class Workspace:
         unsupported = self.extensions - SUPPORTED_EXTENSIONS
         if unsupported:
             raise UnsupportedExtensionError(f"unsupported enabled extensions: {', '.join(sorted(unsupported))}")
-        if self.format.get("record_ref_encoding") != "hwref-v1":
+        if self.format.get("record_ref_encoding") != "hwref-v2":
             raise UnsupportedExtensionError("unsupported record reference encoding")
         self.workspace_id = str(self.format.get("workspace_id"))
         try:
@@ -363,10 +363,10 @@ class Workspace:
             control / "format.json",
             {
                 "format": "httk-workflow-filesystem",
-                "format_version": 1,
+                "format_version": 2,
                 "core_profile": CORE_PROFILE,
                 "extensions": sorted(extension_set),
-                "record_ref_encoding": "hwref-v1",
+                "record_ref_encoding": "hwref-v2",
                 "workspace_id": str(uuid.uuid4()),
                 "created_at": utc_now(),
                 "policy": initial_policy.as_mapping(),
@@ -1355,7 +1355,7 @@ class Workspace:
         if marker.record_ref == "init":
             return {
                 "format": "httk-workflow-state",
-                "format_version": 1,
+                "format_version": 2,
                 "workspace_id": self.workspace_id,
                 "job_id": marker.job_id,
                 "job_key": marker.job_key,
@@ -1369,7 +1369,7 @@ class Workspace:
         frame = read_record(self.control, marker.record_ref, deadline_seconds=self.visibility_deadline)
         if (
             frame.get("format") != "httk-workflow-state"
-            or frame.get("format_version") != 1
+            or frame.get("format_version") != 2
             or frame.get("workspace_id") != self.workspace_id
             or frame.get("job_key") != marker.job_key
             or frame.get("state_generation") != marker.generation
@@ -1407,7 +1407,7 @@ class Workspace:
             raise WorkspaceCorruptionError("state generation exhausted")
         frame: dict[str, object] = {
             "format": "httk-workflow-state",
-            "format_version": 1,
+            "format_version": 2,
             "workspace_id": self.workspace_id,
             "job_id": marker.job_id,
             "job_key": marker.job_key,

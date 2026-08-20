@@ -67,7 +67,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -99,7 +99,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -121,7 +121,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -147,7 +147,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 base = {
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -161,7 +161,7 @@ if context["step"] == "spawn":
     (child_dir / "files" / "runner").chmod(0o755)
     (child_dir / "job.json").write_text(json.dumps({
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": child_id,
         "tag": "child",
         "name": "Contended child",
@@ -244,7 +244,7 @@ def _payload(
     runner.chmod(0o755)
     job = {
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": job_id,
         "tag": tag,
         "name": f"Concurrency job {tag}",
@@ -509,7 +509,7 @@ def test_an_operator_request_is_applied_by_exactly_one_manager(
             submitting.publish_request(
                 {
                     "format": "httk-workflow-request",
-                    "format_version": 1,
+                    "format_version": 2,
                     "request_id": str(uuid.uuid4()),
                     "job_id": marker.job_id,
                     "job_key": marker.job_key,
@@ -782,7 +782,7 @@ def test_an_isolated_attempt_is_adopted_on_the_grace_and_its_zombie_is_fenced(tm
             json.dumps(
                 {
                     "format": "httk-workflow-outcome",
-                    "format_version": 1,
+                    "format_version": 2,
                     "job_id": zombie.job_id,
                     "activation_id": zombie_activation,
                     "attempt_id": zombie_attempt,

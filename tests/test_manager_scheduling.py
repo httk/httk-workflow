@@ -40,7 +40,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -68,7 +68,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 base = {{
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -85,7 +85,7 @@ else:
     runner.chmod(0o755)
     (child_dir / "job.json").write_text(json.dumps({{
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": child_id,
         "tag": "child",
         "name": "Digest child",
@@ -158,7 +158,7 @@ def _payload(
     runner.chmod(0o755)
     job = {
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": job_id,
         "tag": tag,
         "name": f"Scheduling job {tag}",
@@ -198,7 +198,7 @@ def _drive_until(workspace: Workspace, manager: TaskManager, job_id: str, kinds:
 def _publish_cancel(workspace: Workspace, marker: Marker, **overrides: object) -> Path:
     request: dict[str, object] = {
         "format": "httk-workflow-request",
-        "format_version": 1,
+        "format_version": 2,
         "request_id": str(uuid.uuid4()),
         "job_id": marker.job_id,
         "job_key": marker.job_key,
@@ -296,7 +296,7 @@ def _publish_pending_environment(
         json.dumps(
             {
                 "format": "httk-workflow-environment-resolution-marker",
-                "format_version": 1,
+                "format_version": 2,
                 "status": "resolved",
                 "values": {"value": {"value": "manifest", "source": "default"}},
                 "log_pending": True,
@@ -311,7 +311,7 @@ def _publish_pending_environment(
         json.dumps(
             {
                 "format": "httk-workflow-outcome",
-                "format_version": 1,
+                "format_version": 2,
                 "job_id": job_id,
                 "activation_id": activation_id,
                 "attempt_id": attempt_id,
@@ -332,7 +332,7 @@ def _publish_pending_environment(
 #: implementation knows, and every envelope member the workspace supplies.
 _GOLDEN_RUNNING_FRAME: dict[str, Any] = {
     "format": "httk-workflow-state",
-    "format_version": 1,
+    "format_version": 2,
     "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
     "job_id": "01234567-89ab-cdef-0123-456789abcdef",
     "job_key": "silicon-relax--01234567-89ab-cdef-0123-456789abcdef",

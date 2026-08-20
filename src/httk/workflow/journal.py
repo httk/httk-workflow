@@ -99,7 +99,7 @@ class JournalWriter:
         self._handle = self._open_segment(self._segment_number)
 
     def append(self, record: Mapping[str, object]) -> str:
-        """Append *record* and return its canonical ``hwref-v1`` reference.
+        """Append *record* and return its canonical ``hwref-v2`` reference.
 
         :param record: Supply the journal record to append.
         :return: The canonical record reference.
@@ -130,7 +130,7 @@ class JournalWriter:
 
 
 def encode_record_ref(writer_id: str, segment: int, offset: int, length: int, checksum: bytes) -> str:
-    """Encode one canonical ``hwref-v1`` reference.
+    """Encode one canonical ``hwref-v2`` reference.
 
     :param writer_id: Identify the journal writer.
     :param segment: Identify the journal segment.
@@ -150,7 +150,7 @@ def encode_record_ref(writer_id: str, segment: int, offset: int, length: int, ch
 
 
 def parse_record_ref(record_ref: str) -> tuple[str, int, int, int, str]:
-    """Parse one canonical ``hwref-v1`` reference.
+    """Parse one canonical ``hwref-v2`` reference.
 
     :param record_ref: Supply the record reference to parse.
     :return: The writer, segment, offset, length, and checksum components.
@@ -159,7 +159,7 @@ def parse_record_ref(record_ref: str) -> tuple[str, int, int, int, str]:
 
     match = _REF_PATTERN.fullmatch(record_ref)
     if match is None:
-        raise FormatError(f"invalid hwref-v1 record reference: {record_ref!r}")
+        raise FormatError(f"invalid hwref-v2 record reference: {record_ref!r}")
     writer_hex = match.group("writer")
     writer_id = str(uuid.UUID(hex=writer_hex))
     segment = int(match.group("segment"), 36)

@@ -100,13 +100,13 @@ language, and compares everything both left behind.
 | `Runner.step` | **step_&lt;name&gt;** function | Register one handler for one step; the name is the function's unless overridden. | none |
 | `Runner.instantiate` | — | Register the in-process Python creation-time hook receiving `scaffold.InstantiateContext`; directory packages may use the language-neutral executable hook contract instead. | none for the Python form; JSON stdin/stdout for the executable form |
 | `Runner.steps` | — | Every registered step name, against which every step name an outcome publishes is checked. | `.httk-job/runner-steps.json`, rewritten when the set changes |
-| `Runner.description` | `httk_workflow_main --describe` | Print this runner's own description and touch nothing else. | one `httk-workflow-runner-description` version 1 object on stdout |
+| `Runner.description` | `httk_workflow_main --describe` | Print this runner's own description and touch nothing else. | one `httk-workflow-runner-description` version 2 object on stdout |
 | `Runner.main` | `httk_workflow_main` | Dispatch the step the manager asked for, and turn every ending of it into exactly one outcome. | the published `outcome.ready/` of one attempt |
 | `Runner.main` | `httk_workflow_main` | A handler that returns without publishing an outcome is reported as such rather than left ambiguous. | `fail` outcome with `failure.code` `no_outcome` |
 | `Runner.main` | `httk_workflow_main` | A step this runner does not implement is reported, with the registered steps named. | `fail` outcome with `failure.code` `unknown_step` |
-| `Attempt` | `httk_workflow_main` | A handler that raises, or dies under set -e, discards its unpublished draft, leaves a breadcrumb, and lets the manager's retry policy own what happens next. | `error.json` (`httk-workflow-runner-error` version 1) in the attempt control directory |
+| `Attempt` | `httk_workflow_main` | A handler that raises, or dies under set -e, discards its unpublished draft, leaves a breadcrumb, and lets the manager's retry policy own what happens next. | `error.json` (`httk-workflow-runner-error` version 2) in the attempt control directory |
 | `Attempt.initialize` | `httk_workflow_main` | Bind this process to its attempt and replay every workdir batch an earlier attempt sealed but did not apply. | reads the `HTTK_WORKFLOW_*` variables; replays `.httk-runner/workdir-ready/` |
-| `Attempt.context` | `httk_workflow_context` | The manager-written identity and restart evidence of this attempt; one field, or the whole object. | `attempt/context.json` (`httk-workflow-attempt-context` version 1) |
+| `Attempt.context` | `httk_workflow_context` | The manager-written identity and restart evidence of this attempt; one field, or the whole object. | `attempt/context.json` (`httk-workflow-attempt-context` version 2) |
 | `Attempt.step` | `httk_workflow_context step` | The step this attempt runs. Bash also exports it for the handler. | `context.json` → `step`; **$HTTK_WORKFLOW_STEP** |
 | `Attempt.control` | — | The attempt control directory, where the outcome is published. | **$HTTK_WORKFLOW_CONTROL_DIR** |
 | `Attempt.payload` | — | The immutable job payload directory. | **$HTTK_WORKFLOW_JOB_DIR** |
@@ -133,7 +133,7 @@ language, and compares everything both left behind.
 | `Attempt.declare` | `httk_workflow_declare` | Record the workflow declaration this job *observed*, carried verbatim; repeating it overwrites. | `.httk-job/declarations/<name>.json` |
 | `Attempt.declaration` | `httk_workflow_declaration` | Read one declaration back: observed first, then the one `job.json` declared, else absent. | `.httk-job/declarations/<name>.json`, or `job.json` → `declarations` |
 | `Attempt.run` | — | Run an argv array in the workdir and terminate its whole process group on timeout, returning a `CommandResult`. | none; the result is in memory |
-| `supervision.ProcessSupervisor` | `httk_workflow_run` | Run an argv array under checkers and inactivity watches, writing the authoritative report of what it did. | `process-report.json` (`httk-workflow-process-report` version 1) |
+| `supervision.ProcessSupervisor` | `httk_workflow_run` | Run an argv array under checkers and inactivity watches, writing the authoritative report of what it did. | `process-report.json` (`httk-workflow-process-report` version 2) |
 | `Attempt.put` | `httk_workflow_put` | Stage one file or tree into the job's transactional data; the manager applies it exactly once when the outcome commits. | an operation of `outcome.tmp.<uuid>/transaction/` |
 | `Attempt.remove` | `httk_workflow_remove` | Stage one removal from the job's transactional data. | an operation of `outcome.tmp.<uuid>/transaction/` |
 | `Attempt.workdir_batch` | `httk_workflow_workdir_apply` | Group workdir changes so that an interrupted apply is replayed on the next attempt instead of being left half-done. | `.httk-runner/workdir-ready/<uuid>/`, then `workdir-applied/` |

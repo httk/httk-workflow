@@ -77,8 +77,8 @@ def resolve_marker(manager: Any, request: Mapping[str, Any]) -> Any:
 
 
 def validate_envelope(request: Mapping[str, Any]) -> None:
-    if request.get("format") != "httk-workflow-request" or request.get("format_version") != 1:
-        raise FormatError("request must use httk-workflow-request version 1")
+    if request.get("format") != "httk-workflow-request" or request.get("format_version") != 2:
+        raise FormatError("request must use httk-workflow-request version 2")
 
 
 def action_class(action: object, kind: str) -> str:

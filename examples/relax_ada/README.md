@@ -23,7 +23,7 @@ Enumerate it without running it:
 
 ```console
 ./relax --describe
-{"format": "httk-workflow-runner-description", "format_version": 1, "steps": ["prepare", "publish", "run"], "workflow": "httk.vasp.relax-ada"}
+{"format": "httk-workflow-runner-description", "format_version": 2, "steps": ["prepare", "publish", "run"], "workflow": "httk.vasp.relax-ada"}
 ```
 
 Drive one relaxation with the compiled binary as the runner:

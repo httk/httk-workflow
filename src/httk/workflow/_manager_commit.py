@@ -83,8 +83,8 @@ def read_outcome(path: Path, marker: Marker, state: StateFrame) -> dict[str, Any
         outcome = read_json(path)
     except FormatError as exc:
         raise FormatError(f"{exc}{_ASSEMBLY_REMEDY}") from exc
-    if outcome.get("format") != "httk-workflow-outcome" or outcome.get("format_version") != 1:
-        raise FormatError(f"outcome must use httk-workflow-outcome version 1{_ASSEMBLY_REMEDY}")
+    if outcome.get("format") != "httk-workflow-outcome" or outcome.get("format_version") != 2:
+        raise FormatError(f"outcome must use httk-workflow-outcome version 2{_ASSEMBLY_REMEDY}")
     for key, expected in (
         ("job_id", marker.job_id),
         ("activation_id", state.activation_id),

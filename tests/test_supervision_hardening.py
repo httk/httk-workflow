@@ -46,7 +46,7 @@ _CHECKER = """import json, sys
 ticks = 0
 lines = 0
 def emit(code, summary, evidence=None):
-    print(json.dumps({"format": "httk-workflow-checker-result", "format_version": 1,
+    print(json.dumps({"format": "httk-workflow-checker-result", "format_version": 2,
                       "code": code, "severity": "info", "summary": summary,
                       "source": "checker", "evidence": evidence}), flush=True)
 for line in sys.stdin:
@@ -332,7 +332,7 @@ def test_report_json_is_still_the_versioned_process_report(tmp_path: Path) -> No
     report = ProcessSupervisor().run([sys.executable, "-c", "print('hello')"])
     value = json.loads(report.write(tmp_path / "report.json").read_text(encoding="utf-8"))
     assert value["format"] == "httk-workflow-process-report"
-    assert value["format_version"] == 1
+    assert value["format_version"] == 2
     assert value["returncode"] == 0
     assert value["termination"] == "exit"
     assert value["stdout_path"] is None

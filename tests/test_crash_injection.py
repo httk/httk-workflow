@@ -63,7 +63,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 base = {
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -85,7 +85,7 @@ if context["step"] == "prepare":
         })
     (temporary / "transaction" / "manifest.json").write_text(json.dumps({
         "format": "httk-workflow-transaction",
-        "format_version": 1,
+        "format_version": 2,
         "id": "transaction",
         "expected_data_generation": context["data_generation"],
         "operations": operations,
@@ -98,7 +98,7 @@ if context["step"] == "prepare":
     (child_dir / "files" / "runner").chmod(0o755)
     (child_dir / "job.json").write_text(json.dumps({
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": child_id,
         "tag": "child",
         "name": "Interrupted child",
@@ -157,7 +157,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -190,7 +190,7 @@ temporary = control / "outcome.tmp.test"
 temporary.mkdir()
 (temporary / "outcome.json").write_text(json.dumps({
     "format": "httk-workflow-outcome",
-    "format_version": 1,
+    "format_version": 2,
     "job_id": context["job_id"],
     "activation_id": context["activation_id"],
     "attempt_id": context["attempt_id"],
@@ -246,7 +246,7 @@ def _payload(
     runner.chmod(0o755)
     job = {
         "format": "httk-workflow-job",
-        "format_version": 1,
+        "format_version": 2,
         "id": job_id,
         "tag": tag,
         "name": f"Crash-injection job {tag}",
@@ -773,7 +773,7 @@ def test_a_cancellation_fence_whose_rename_happened_but_reported_failure_is_won(
         workspace.publish_request(
             {
                 "format": "httk-workflow-request",
-                "format_version": 1,
+                "format_version": 2,
                 "request_id": str(uuid.uuid4()),
                 "job_id": running.job_id,
                 "job_key": running.job_key,
@@ -850,7 +850,7 @@ def test_a_rename_that_failed_because_another_actor_won_is_reported_as_lost(
         rival_ref = writer.append(
             {
                 "format": "httk-workflow-state",
-                "format_version": 1,
+                "format_version": 2,
                 "workspace_id": rival.workspace_id,
                 "job_id": ready.job_id,
                 "job_key": ready.job_key,

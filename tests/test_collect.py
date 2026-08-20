@@ -238,7 +238,7 @@ def test_a_default_collect_yields_only_the_succeeded_jobs(
         "declared": None,
         "observed": {
             "format": "httk-workflow-environment-resolution",
-            "format_version": 1,
+            "format_version": 2,
             "values": {"timeout": {"value": 60, "source": "override"}},
         },
     }
@@ -474,14 +474,14 @@ def test_the_command_streams_one_record_per_line_and_round_trips(
     assert command(["collect", ws, "--raw"], context) == 0
     lines = capsys.readouterr().out.splitlines()
     summary = json.loads(lines[-1])
-    assert summary["format"] == "httk-workflow-collect-summary" and summary["format_version"] == 1
+    assert summary["format"] == "httk-workflow-collect-summary" and summary["format_version"] == 2
     assert summary["collected"] == 3 and summary["skipped_unreadable"] == 0
     record_lines = lines[:-1]
     assert len(record_lines) == 3
     labels = []
     for line in record_lines:
         mapping = json.loads(line)
-        assert mapping["format"] == COLLECT_FORMAT and mapping["format_version"] == 1
+        assert mapping["format"] == COLLECT_FORMAT and mapping["format_version"] == 2
         record = JobRecord.from_mapping(mapping)
         # A record survives the wire: what came back serializes to what went out.
         assert record.as_mapping() == mapping
@@ -647,4 +647,4 @@ def test_collect_assembles_overlay_edges_and_products(
 
 def test_a_record_refuses_a_mapping_of_another_format() -> None:
     with pytest.raises(FormatError, match="httk-workflow-collect"):
-        JobRecord.from_mapping({"format": "something-else", "format_version": 1})
+        JobRecord.from_mapping({"format": "something-else", "format_version": 2})

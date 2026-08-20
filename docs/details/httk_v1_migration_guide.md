@@ -388,7 +388,7 @@ For application-specific monitoring, write a checker spec:
 ```json
 {
   "format": "httk-workflow-checker-spec",
-  "format_version": 1,
+  "format_version": 2,
   "argv": ["./checker.py"],
   "required": true,
   "sources": [
@@ -419,7 +419,7 @@ for line in sys.stdin:
             json.dumps(
                 {
                     "format": "httk-workflow-checker-result",
-                    "format_version": 1,
+                    "format_version": 2,
                     "code": "application_fatal",
                     "severity": "fatal",
                     "summary": "application reported a fatal error",
