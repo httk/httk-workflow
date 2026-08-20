@@ -243,7 +243,7 @@ No request members beyond the envelope.
 Answering "httk-core is installed" is not enough: the maintained implementation
 also runs `httk workflow workspace --help`, because the `workflow` command group
 exists exactly when *this* package is installed beside the core. A target with
-no httk is a refusal carrying the remedy: log in there and make sure httk₂ is
+no httk is a refusal carrying the remedy: log in there and make sure *httk₂* is
 installed and reachable from a non-interactive shell, or set `httk_command=` to
 where it lives.
 

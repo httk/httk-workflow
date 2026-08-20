@@ -990,7 +990,7 @@ new remote is recommended: it confirms the host answers, that `httk` is found
 exists, and reports the command and version it found. `--version` alone would
 only prove httk-core.
 
-When the check fails, log in on the remote and make sure httk₂ is set up and
+When the check fails, log in on the remote and make sure *httk₂* is set up and
 available there — for example with `pipx install httk-workflow` — and note
 that it must be reachable from a *non-interactive* shell: a `module load` or
 conda activation guarded by an interactivity test in `.bashrc` works when you

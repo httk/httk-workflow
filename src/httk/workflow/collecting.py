@@ -1043,7 +1043,7 @@ def _entry_record(value: Mapping[str, object]) -> object:
                 fields = dict(value)
                 fields.pop("type", None)
                 expected_id = fields.pop("id", None)
-                result = cast(Any, candidate).create(fields)
+                result = cast(Any, candidate).from_obj(fields)
                 if expected_id is not None and expected_id != getattr(result, "id", None):
                     raise ValueError(f"entry output id {expected_id!r} does not match the constructed record")
                 return result

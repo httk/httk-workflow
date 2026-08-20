@@ -869,7 +869,7 @@ class StateFrame:
     The frame is held exactly as it is on disk, so every member round-trips
     verbatim — including one written by a newer implementation, by an enabled
     extension, or by a workspace older than this code. What this implementation
-    reads and writes goes through the typed accessors and through :meth:`of`,
+    reads and writes goes through the typed accessors and through :meth:`replace`,
     so a mistyped member name is a type error at the call site rather than a
     silently defaulted value at runtime.
 

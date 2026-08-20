@@ -39,7 +39,7 @@ job whose state cannot be read until `workspace fsck --repair` restores it.
 ## Running on a remote
 
 The canonical remote flow keeps scheduler settings with the remote workspace.
-httk₂ must already be set up on the remote (log in there and install it, e.g.
+*httk₂* must already be set up on the remote (log in there and install it, e.g.
 with `pipx install httk-workflow`); `remote check` verifies that:
 
 ```console
