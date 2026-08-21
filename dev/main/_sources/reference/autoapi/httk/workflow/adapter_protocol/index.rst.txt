@@ -1,0 +1,77 @@
+httk.workflow.adapter_protocol
+==============================
+
+.. py:module:: httk.workflow.adapter_protocol
+
+.. autoapi-nested-parse::
+
+   The public name of the remote-adapter protocol implementation.
+
+   A remote adapter is a versioned directory with one executable ``adapter``
+   program. Every operation -- ``configure``, ``install``, ``invoke``, ``push``,
+   ``pull``, ``start-manager`` and ``status`` -- runs that one program, which reads
+   one JSON request file, learns which operation to perform from the request's
+   ``operation`` member, and prints one JSON result. The ``install`` operation
+   keeps its historical protocol spelling but only ever *verifies* that the target
+   can run httk (the ``remote check`` CLI verb); adapters never install software.
+   The maintained ``local``,
+   ``local-slurm`` and ``ssh-slurm`` templates implement that protocol by executing
+   this module, which selects its behaviour from the ``kind`` recorded in the
+   bundle's ``remote.json`` and refuses any other kind rather than running it in
+   the wrong place.
+
+   This module is the documented surface of that contract. The implementation
+   lives in :mod:`httk.workflow.adapter_runtime`, which is what the packaged
+   ``adapter`` dispatcher executes; both names refer to the same objects. See
+   the workflow CLI guide in the httk-workflow documentation for the operations and
+   the settings each one uses.
+
+   Every subprocess started by the implementation is an argument vector, so no
+   shell ever parses a value that came from a request or from settings. ``ssh`` is
+   the one unavoidable exception, because it always joins its command words for a
+   login shell on the far side; every remote command string is therefore built by a
+   single element-wise quoting helper.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.adapter_protocol.BATCH_DIRECTIVES
+   httk.workflow.adapter_protocol.BATCH_DIRECTORY
+   httk.workflow.adapter_protocol.SUPPORTED_KINDS
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.adapter_protocol.main
+
+
+Module Contents
+---------------
+
+.. py:data:: BATCH_DIRECTIVES
+   :value: (('slurm.account', '--account'), ('slurm.partition', '--partition'), ('slurm.time_limit',...
+
+
+.. py:data:: BATCH_DIRECTORY
+   :value: '.httk-workflow/batch'
+
+
+.. py:data:: SUPPORTED_KINDS
+   :value: ('local', 'local-slurm', 'ssh-slurm')
+
+
+.. py:function:: main(argv = None)
+
+   Dispatch one adapter request file.
+
+   :param argv: The dispatcher arguments, or the process arguments when omitted.
+   :return: Zero after writing an adapter result, or a nonzero refusal status.
+
+

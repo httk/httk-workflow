@@ -1,0 +1,801 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="Native Rust runner API" href="native_rust_api.html"><link rel="prev" title="Native C runner API" href="native_c_api.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Native modern-Fortran runner API - httk-workflow dev:main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:main) — content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">httk-workflow dev:main documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:main documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_protocol_api.html">The filesystem protocol API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../runtime_helpers.html">Native runner helpers</a></li>
+<li class="toctree-l1 current has-children"><a class="reference internal" href="index.html">Runner SDKs</a><input aria-label="Toggle navigation of Runner SDKs" checked="" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l2"><a class="reference internal" href="sdk_parity.html">Python and Bash authoring parity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="native_bash_api.html">Native Bash runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="native_c_api.html">Native C runner API</a></li>
+<li class="toctree-l2 current current-page"><a class="current reference internal" href="#">Native modern-Fortran runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="native_rust_api.html">Native Rust runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="native_perl_api.html">Native Perl runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="native_ada_api.html">Native Ada runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="native_cpp_api.html">Native C++ runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="native_java_api.html">Native Java runner API</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../vasp_runners.html">Packaged VASP runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_packages.html">Workflow packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_languages.html">Workflow-language runner realizations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../taskmanager.html">Task-manager usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_cli.html">Project and workflow command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../adapter_authoring.html">Writing a remote adapter</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../reference/index.html">Reference</a><input aria-label="Toggle navigation of Reference" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../reference/autoapi/httk/workflow/index.html">httk.workflow</a><input aria-label="Toggle navigation of httk.workflow" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/adapter_protocol/index.html">httk.workflow.adapter_protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/adapters/index.html">httk.workflow.adapters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/collecting/index.html">httk.workflow.collecting</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../reference/autoapi/httk/workflow/compat/index.html">httk.workflow.compat</a><input aria-label="Toggle navigation of httk.workflow.compat" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/workflow/compat/v1/index.html">httk.workflow.compat.v1</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/configuration/index.html">httk.workflow.configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/errors/index.html">httk.workflow.errors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/executors/index.html">httk.workflow.executors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/hookapi/index.html">httk.workflow.hookapi</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/hygiene/index.html">httk.workflow.hygiene</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/manifests/index.html">httk.workflow.manifests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/projects/index.html">httk.workflow.projects</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/protocol/index.html">httk.workflow.protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/provenance/index.html">httk.workflow.provenance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/runtime/index.html">httk.workflow.runtime</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/runtime_utils/index.html">httk.workflow.runtime_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/scaffold/index.html">httk.workflow.scaffold</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/sdk/index.html">httk.workflow.sdk</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/shell_bridge/index.html">httk.workflow.shell_bridge</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/supervision/index.html">httk.workflow.supervision</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/transfers/index.html">httk.workflow.transfers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/vasp/index.html">httk.workflow.vasp</a></li>
+</ul>
+</li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-6" name="toctree-checkbox-6" role="switch" type="checkbox"/><label for="toctree-checkbox-6"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../notebooks/examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../workflow_filesystem_api.html">Workflow filesystem API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../details/runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../details/taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../details/workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../details/workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../details/adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../details/workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../details/httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/sdks/native_fortran_api.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section class="tex2jax_ignore mathjax_ignore" id="native-modern-fortran-runner-api">
+<h1>Native modern-Fortran runner API<a class="headerlink" href="#native-modern-fortran-runner-api" title="Link to this heading">¶</a></h1>
+<p><em>For authors writing a workflow runner in Fortran.</em> The Fortran SDK is the same
+authoring surface as the <a class="reference internal" href="../runtime_helpers.html"><span class="doc">Python</span></a>, <a class="reference internal" href="native_bash_api.html"><span class="doc">Bash</span></a>, and <a class="reference internal" href="native_c_api.html"><span class="doc">C</span></a> ones. It adds <strong>no new bridge
+protocol</strong>: it is <code class="docutils literal notranslate"><span class="pre">iso_c_binding</span></code> bindings over the native C library
+(<code class="docutils literal notranslate"><span class="pre">native/c/httk_workflow.{h,c}</span></code>) plus one idiomatic Fortran module, so the C
+<code class="docutils literal notranslate"><span class="pre">httk_workflow_main</span></code> still owns registration, dispatch, and the process exit
+status, and every verb still execs <code class="docutils literal notranslate"><span class="pre">$HTTK_WORKFLOW_PYTHON</span> <span class="pre">-m</span> <span class="pre">httk.workflow._shell_bridge</span> <span class="pre">&lt;verb&gt;</span> <span class="pre">…</span></code>. A Fortran runner therefore publishes the
+same bytes as a Python, Bash, or C runner for the same campaign. Only the
+<code class="docutils literal notranslate"><span class="pre">--describe</span></code> handshake is native. The normative cross-language semantics are the
+table in <a class="reference internal" href="sdk_parity.html"><span class="doc">Python and Bash authoring parity</span></a>; the function-by-function Fortran mapping is the table
+below.</p>
+<p>The SDK is one module source, <code class="docutils literal notranslate"><span class="pre">native/fortran/httk_workflow.f90</span></code>, packaged under
+<code class="docutils literal notranslate"><span class="pre">httk.workflow</span></code>. It is modern Fortran (2008), warning-clean under <code class="docutils literal notranslate"><span class="pre">gfortran</span> <span class="pre">-std=f2008</span> <span class="pre">-Wall</span> <span class="pre">-Wextra</span> <span class="pre">-Werror</span></code>, with no dependency beyond <code class="docutils literal notranslate"><span class="pre">iso_c_binding</span></code> and
+the C SDK it wraps. It is designed to be <strong>compiled beside a runner</strong> together
+with the C source.</p>
+<section id="a-complete-runner">
+<h2>A complete runner<a class="headerlink" href="#a-complete-runner" title="Link to this heading">¶</a></h2>
+<p>A runner declares its workflow and its complete step set once, implements one
+handler per step, and hands control to <code class="docutils literal notranslate"><span class="pre">httk_workflow_main</span></code>. Each handler is a
+<code class="docutils literal notranslate"><span class="pre">bind(c)</span></code> function of no arguments returning <code class="docutils literal notranslate"><span class="pre">integer(c_int)</span></code>:</p>
+<div class="highlight-fortran notranslate"><div class="highlight"><pre><span></span><span class="k">module </span><span class="n">my_steps</span>
+<span class="w">  </span><span class="k">use</span><span class="p">,</span><span class="w"> </span><span class="k">intrinsic</span><span class="w"> </span><span class="kd">::</span><span class="w"> </span><span class="nb">iso_c_binding</span><span class="p">,</span><span class="w"> </span><span class="k">only</span><span class="p">:</span><span class="w"> </span><span class="kt">c_int</span>
+<span class="kt">  </span><span class="k">use </span><span class="n">httk_workflow</span>
+<span class="w">  </span><span class="k">implicit none</span>
+<span class="k">contains</span>
+<span class="k">  function </span><span class="n">step_prepare</span><span class="p">()</span><span class="w"> </span><span class="k">result</span><span class="p">(</span><span class="n">code</span><span class="p">)</span><span class="w"> </span><span class="k">bind</span><span class="p">(</span><span class="n">c</span><span class="p">)</span>
+<span class="w">    </span><span class="kt">integer</span><span class="p">(</span><span class="kt">c_int</span><span class="p">)</span><span class="w"> </span><span class="kd">::</span><span class="w"> </span><span class="n">code</span>
+<span class="w">    </span><span class="k">call </span><span class="n">ignore</span><span class="p">(</span><span class="n">httk_workflow_advance</span><span class="p">(</span><span class="s2">"run"</span><span class="p">))</span>
+<span class="w">    </span><span class="n">code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span>
+<span class="w">  </span><span class="k">end function</span>
+<span class="k">  function </span><span class="n">step_run</span><span class="p">()</span><span class="w"> </span><span class="k">result</span><span class="p">(</span><span class="n">code</span><span class="p">)</span><span class="w"> </span><span class="k">bind</span><span class="p">(</span><span class="n">c</span><span class="p">)</span>
+<span class="w">    </span><span class="kt">integer</span><span class="p">(</span><span class="kt">c_int</span><span class="p">)</span><span class="w"> </span><span class="kd">::</span><span class="w"> </span><span class="n">code</span>
+<span class="w">    </span><span class="k">call </span><span class="n">ignore</span><span class="p">(</span><span class="n">httk_workflow_succeed</span><span class="p">())</span>
+<span class="w">    </span><span class="n">code</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span>
+<span class="w">  </span><span class="k">end function</span>
+<span class="k">end module</span>
+
+<span class="k">program </span><span class="n">main</span>
+<span class="w">  </span><span class="k">use</span><span class="p">,</span><span class="w"> </span><span class="k">intrinsic</span><span class="w"> </span><span class="kd">::</span><span class="w"> </span><span class="nb">iso_c_binding</span><span class="p">,</span><span class="w"> </span><span class="k">only</span><span class="p">:</span><span class="w"> </span><span class="nb">c_funloc</span>
+<span class="nb">  </span><span class="k">use </span><span class="n">httk_workflow</span>
+<span class="w">  </span><span class="k">use </span><span class="n">my_steps</span>
+<span class="w">  </span><span class="k">implicit none</span>
+<span class="k">  if</span><span class="w"> </span><span class="p">(</span><span class="n">httk_workflow_runner</span><span class="p">(</span><span class="s2">"my.workflow"</span><span class="p">,</span><span class="w"> </span><span class="p">&amp;</span>
+<span class="w">        </span><span class="p">[</span><span class="kt">character</span><span class="p">(</span><span class="nb">len</span><span class="o">=</span><span class="mi">8</span><span class="p">)</span><span class="w"> </span><span class="kd">::</span><span class="w"> </span><span class="s2">"prepare"</span><span class="p">,</span><span class="w"> </span><span class="s2">"run"</span><span class="p">],</span><span class="w"> </span><span class="p">&amp;</span>
+<span class="w">        </span><span class="p">[</span><span class="nb">c_funloc</span><span class="p">(</span><span class="n">step_prepare</span><span class="p">),</span><span class="w"> </span><span class="nb">c_funloc</span><span class="p">(</span><span class="n">step_run</span><span class="p">)])</span><span class="w"> </span><span class="o">/=</span><span class="w"> </span><span class="n">HTTK_WORKFLOW_OK</span><span class="p">)</span><span class="w"> </span><span class="p">&amp;</span>
+<span class="w">      </span><span class="k">call </span><span class="n">httk_workflow_exit</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+<span class="w">  </span><span class="k">call </span><span class="n">httk_workflow_exit</span><span class="p">(</span><span class="n">httk_workflow_main</span><span class="p">())</span>
+<span class="k">end program</span>
+</pre></div>
+</div>
+<p>Build it against the packaged SDK, compiling the two languages separately (the
+Fortran standard flag is not valid for C, and the C source is compiled with a C
+compiler, then linked into the Fortran build):</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">cc       -std=c99   -c .../httk/workflow/native/c/httk_workflow.c -o httk_workflow_c.o</span>
+<span class="go">gfortran -std=f2008    .../httk/workflow/native/fortran/httk_workflow.f90 \</span>
+<span class="go">         runner.f90 httk_workflow_c.o -o runner</span>
+</pre></div>
+</div>
+<p>The compiled binary is the runner file a job references. It is executable, so the
+manager runs it directly and the scaffolder describes it by running it — a job
+that starts from a runner file of your own is resolved the same way whatever
+language wrote it.</p>
+<p>A complete VASP relaxation authored this way — <code class="docutils literal notranslate"><span class="pre">prepare</span></code>, <code class="docutils literal notranslate"><span class="pre">run</span></code>, <code class="docutils literal notranslate"><span class="pre">publish</span></code>, the
+<code class="docutils literal notranslate"><span class="pre">vasp.command</span></code> setting, mock-VASP compatible, publishing to transactional data —
+ships as <code class="docutils literal notranslate"><span class="pre">examples/relax_fortran/</span></code>; see the walkthrough at the end of this page.</p>
+</section>
+<section id="step-handlers-and-dispatch">
+<h2>Step handlers and dispatch<a class="headerlink" href="#step-handlers-and-dispatch" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">httk_workflow_runner(workflow,</span> <span class="pre">names,</span> <span class="pre">handlers)</span></code> declares the complete step set
+before any work happens. <code class="docutils literal notranslate"><span class="pre">names</span></code> is a character array of the step names, and
+<code class="docutils literal notranslate"><span class="pre">handlers</span></code> is the array of their addresses, obtained with <code class="docutils literal notranslate"><span class="pre">c_funloc</span></code>, in the same
+order. A name that is empty, contains a character outside <code class="docutils literal notranslate"><span class="pre">[A-Za-z0-9._-]</span></code>, is
+duplicated, or is paired with a null handler is refused by the C validator with a
+diagnostic on stderr and the return value <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_REFUSED</span></code>. The
+registration is saved module state the C library keeps a pointer into; it
+outlives the process, so nothing is copied on dispatch.</p>
+<p>A step handler is a <strong><code class="docutils literal notranslate"><span class="pre">bind(c)</span></code> function returning <code class="docutils literal notranslate"><span class="pre">integer(c_int)</span></code></strong>, not the
+plainer Fortran subroutine, and this is the one place the Fortran surface is
+shaped by the C ABI it sits on. The C dispatcher calls each handler through an
+<code class="docutils literal notranslate"><span class="pre">int</span> <span class="pre">(*)(void)</span></code> pointer: <code class="docutils literal notranslate"><span class="pre">c_funloc</span></code> requires an interoperable (that is,
+<code class="docutils literal notranslate"><span class="pre">bind(c)</span></code>) target, and reading the return value of a <code class="docutils literal notranslate"><span class="pre">void</span></code>-returning procedure
+through an <code class="docutils literal notranslate"><span class="pre">int</span> <span class="pre">(*)(void)</span></code> pointer would be undefined behaviour. The return value
+carries the same meaning as a C handler’s:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Ending</p></th>
+<th class="head"><p>Published outcome</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>the handler publishes one, then <code class="docutils literal notranslate"><span class="pre">code</span> <span class="pre">=</span> <span class="pre">0</span></code></p></td>
+<td><p>that outcome</p></td>
+</tr>
+<tr class="row-odd"><td><p>the handler sets <code class="docutils literal notranslate"><span class="pre">code</span> <span class="pre">=</span> <span class="pre">0</span></code> without publishing</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fail(&quot;no_outcome&quot;,</span> <span class="pre">…)</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>the step is not registered</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">fail(&quot;unknown_step&quot;,</span> <span class="pre">&quot;…</span> <span class="pre">registered</span> <span class="pre">steps:</span> <span class="pre">…&quot;)</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>the handler sets <code class="docutils literal notranslate"><span class="pre">code</span></code> nonzero</p></td>
+<td><p>an <code class="docutils literal notranslate"><span class="pre">error.json</span></code> breadcrumb (exception <code class="docutils literal notranslate"><span class="pre">CError</span></code>), then that nonzero exit the manager records as <code class="docutils literal notranslate"><span class="pre">process_failure</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">httk_workflow_main()</span></code> forwards this process’s command line to the C
+<code class="docutils literal notranslate"><span class="pre">httk_workflow_main</span></code>, which reads the step the manager asked for, dispatches its
+handler, and <strong>owns the exit status</strong>. Because a Fortran program end always exits
+<code class="docutils literal notranslate"><span class="pre">0</span></code>, the runner propagates that status with <code class="docutils literal notranslate"><span class="pre">httk_workflow_exit(status)</span></code> — the
+Fortran counterpart of a C runner’s <code class="docutils literal notranslate"><span class="pre">return</span></code> from <code class="docutils literal notranslate"><span class="pre">main</span></code> (it calls libc <code class="docutils literal notranslate"><span class="pre">exit</span></code>,
+so the code is exact and carries no <code class="docutils literal notranslate"><span class="pre">STOP</span></code> diagnostic, and the SDK stays within
+Fortran 2008).</p>
+<p>Because dispatch lives in the C library, the breadcrumb an aborted handler leaves
+carries the exception label <strong><code class="docutils literal notranslate"><span class="pre">CError</span></code></strong> (not a Fortran-specific name). A Fortran
+author who set <code class="docutils literal notranslate"><span class="pre">code</span></code> nonzero recognizes their handler in <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">job</span> <span class="pre">why</span></code>
+output by that <code class="docutils literal notranslate"><span class="pre">CError</span></code> exception together with the <code class="docutils literal notranslate"><span class="pre">&quot;&lt;step&gt;</span> <span class="pre">exited</span> <span class="pre">with</span> <span class="pre">status</span> <span class="pre">N&quot;</span></code> message.</p>
+<p><code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_DESCRIBE=1</span></code> makes <code class="docutils literal notranslate"><span class="pre">httk_workflow_runner</span></code> print the runner
+description and exit <code class="docutils literal notranslate"><span class="pre">0</span></code> before any step runs, and <code class="docutils literal notranslate"><span class="pre">httk_workflow_main</span></code> honours
+<code class="docutils literal notranslate"><span class="pre">--describe</span></code> in argv the same way. The description is produced natively,
+byte-for-byte what a Python, Bash, or C runner prints for the same workflow and
+steps:</p>
+<div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span><span class="nt">"format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"httk-workflow-runner-description"</span><span class="p">,</span><span class="w"> </span><span class="nt">"format_version"</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="nt">"steps"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"prepare"</span><span class="p">,</span><span class="w"> </span><span class="s2">"run"</span><span class="p">],</span><span class="w"> </span><span class="nt">"workflow"</span><span class="p">:</span><span class="w"> </span><span class="s2">"my.workflow"</span><span class="p">}</span>
+</pre></div>
+</div>
+</section>
+<section id="strings-and-ownership-across-the-c-boundary">
+<h2>Strings and ownership across the C boundary<a class="headerlink" href="#strings-and-ownership-across-the-c-boundary" title="Link to this heading">¶</a></h2>
+<p>Fortran callers never see a C pointer. The module marshals strings both ways and
+frees every C allocation exactly once:</p>
+<ul class="simple">
+<li><p><strong>Arguments in</strong> are ordinary <code class="docutils literal notranslate"><span class="pre">character(len=*)</span></code> values, each copied to a
+NUL-terminated C string for the call. <strong>A trailing run of blanks is trimmed at
+the C boundary.</strong> This is a real divergence to be aware of, not a free lunch: a
+deferred-length string <em>can</em> hold meaningful trailing spaces, and they will not
+round-trip through this SDK. A value whose trailing whitespace is significant
+(a rare case for the bridge’s tokens and paths) must be passed through the
+<a class="reference internal" href="native_c_api.html"><span class="doc">C</span></a> SDK instead, which copies bytes verbatim.</p></li>
+<li><p><strong>Reads out</strong> are <strong>subroutines</strong> with a <code class="docutils literal notranslate"><span class="pre">character(len=:),</span> <span class="pre">allocatable,</span> <span class="pre">intent(out)</span></code> result argument — deliberately not functions. The C side returns a
+freshly <code class="docutils literal notranslate"><span class="pre">malloc</span></code>’d string; the module copies it into the argument and calls the
+C <code class="docutils literal notranslate"><span class="pre">free</span></code>, leaving a plain owned Fortran string with no cleanup for the caller.
+When the answer is <strong>absent</strong> (the C side returned <code class="docutils literal notranslate"><span class="pre">NULL</span></code>), the argument is
+left <strong>unallocated</strong>, which <code class="docutils literal notranslate"><span class="pre">allocated(value)</span></code> and the <code class="docutils literal notranslate"><span class="pre">status</span></code> argument both
+report; a legitimate <strong>empty</strong> string arrives <strong>allocated with length zero</strong>.
+That absent-versus-empty distinction is why the reads cannot be functions: an
+unallocated allocatable function result is undefined to assign from, and
+gfortran collapses it into a zero-length string, erasing the difference.</p></li>
+<li><p><strong>Optional arguments</strong> carry the C tail-arguments and defaults. A read with an
+optional default (<code class="docutils literal notranslate"><span class="pre">httk_workflow_parameter(name,</span> <span class="pre">value,</span> <span class="pre">fallback,</span> <span class="pre">status)</span></code>)
+omits <code class="docutils literal notranslate"><span class="pre">fallback</span></code> to pass C <code class="docutils literal notranslate"><span class="pre">NULL</span></code>; an absent optional <code class="docutils literal notranslate"><span class="pre">status</span></code> is simply not
+written. The NUL-terminated <code class="docutils literal notranslate"><span class="pre">char</span> <span class="pre">*[]</span></code> tail each verb forwards to the bridge is
+an optional <code class="docutils literal notranslate"><span class="pre">character(len=*),</span> <span class="pre">dimension(:)</span></code> argument (<code class="docutils literal notranslate"><span class="pre">args</span></code>, <code class="docutils literal notranslate"><span class="pre">files</span></code>,
+<code class="docutils literal notranslate"><span class="pre">assignments</span></code>): each element becomes one bridge argument, trailing blanks
+trimmed, and omitting the argument passes C <code class="docutils literal notranslate"><span class="pre">NULL</span></code>.</p></li>
+</ul>
+<p>Every integer-returning verb returns the bridge exit status directly as a plain
+<code class="docutils literal notranslate"><span class="pre">integer</span></code>. Every read takes an optional <code class="docutils literal notranslate"><span class="pre">integer,</span> <span class="pre">intent(out)</span> <span class="pre">::</span> <span class="pre">status</span></code> that
+carries the bridge exit status distinguishing an absent answer from a refused
+call (the constants below). <code class="docutils literal notranslate"><span class="pre">call</span> <span class="pre">ignore(verb(...))</span></code> discards a status a step
+body does not inspect, the frequent publish-and-move-on case.</p>
+</section>
+<section id="the-fortran-function-table">
+<h2>The Fortran function table<a class="headerlink" href="#the-fortran-function-table" title="Link to this heading">¶</a></h2>
+<p>Each Fortran procedure is one C function, which is one bridge subcommand — the
+same subcommand the paired Bash function calls — so this table’s C column is the
+<a class="reference internal" href="native_c_api.html"><span class="doc">Native C runner API</span></a> row this SDK realizes, and through it the <a class="reference internal" href="sdk_parity.html"><span class="doc">Python and Bash authoring parity</span></a>
+row. <code class="docutils literal notranslate"><span class="pre">args</span></code>/<code class="docutils literal notranslate"><span class="pre">files</span></code>/<code class="docutils literal notranslate"><span class="pre">assignments</span></code> are optional <code class="docutils literal notranslate"><span class="pre">character(len=*)</span></code> arrays;
+<code class="docutils literal notranslate"><span class="pre">status</span></code> is the optional bridge-status out-argument; <code class="docutils literal notranslate"><span class="pre">fallback</span></code> is an optional
+default. <strong>Reads are subroutines</strong> (marked <em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em>): the string arrives in the
+<code class="docutils literal notranslate"><span class="pre">intent(out),</span> <span class="pre">allocatable</span></code> argument named in the signature
+(<code class="docutils literal notranslate"><span class="pre">value</span></code>/<code class="docutils literal notranslate"><span class="pre">operation</span></code>/<code class="docutils literal notranslate"><span class="pre">job_key</span></code>/<code class="docutils literal notranslate"><span class="pre">job</span></code>/<code class="docutils literal notranslate"><span class="pre">id</span></code>), which is left unallocated when the
+answer is absent. Every other verb is an <code class="docutils literal notranslate"><span class="pre">integer</span></code> function returning the bridge
+status.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Fortran</p></th>
+<th class="head"><p>C</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_runner(workflow,</span> <span class="pre">names,</span> <span class="pre">handlers)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_runner</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_main()</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_main</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_exit(status)</span></code></p></td>
+<td><p>(<code class="docutils literal notranslate"><span class="pre">return</span></code> from <code class="docutils literal notranslate"><span class="pre">main</span></code>)</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_describe()</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_describe</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_invoke(argv,</span> <span class="pre">output)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_invoke</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_context(value,</span> <span class="pre">field,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_context</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_parameter(name,</span> <span class="pre">value,</span> <span class="pre">fallback,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_parameter</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_setting(name,</span> <span class="pre">value,</span> <span class="pre">fallback,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_setting</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_environment(name,</span> <span class="pre">value,</span> <span class="pre">fallback,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_environment</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_state_get(name,</span> <span class="pre">value,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_state_get</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_state_set(name,</span> <span class="pre">value)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_state_set</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_state_delete(name)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_state_delete</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_state_merge(assignments)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_state_merge</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_declare(name,</span> <span class="pre">document_file)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_declare</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_declaration(name,</span> <span class="pre">value,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_declaration</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_runlog_note(message)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_runlog_note</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_runlog_headline(message)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_runlog_headline</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_runlog_append(message,</span> <span class="pre">files)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_runlog_append</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_log(level,</span> <span class="pre">message)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_log</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_put(source,</span> <span class="pre">destination,</span> <span class="pre">operation,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_put</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_remove(destination,</span> <span class="pre">operation,</span> <span class="pre">missing_ok,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_remove</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_spawn(label,</span> <span class="pre">job_key,</span> <span class="pre">args,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_spawn</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_children(value,</span> <span class="pre">selection,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_children</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_child(label,</span> <span class="pre">field,</span> <span class="pre">value,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_child</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_advance(next_step,</span> <span class="pre">args)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_advance</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_gather(next_step,</span> <span class="pre">args)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_gather</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_succeed()</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_succeed</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_fail(code,</span> <span class="pre">message,</span> <span class="pre">args)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_fail</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_retry(reason)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_retry</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_pause(reason)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_pause</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_batch()</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_batch</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_job_prepare(destination,</span> <span class="pre">spec_file,</span> <span class="pre">job,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_job_prepare</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_workflow_workdir_apply(spec_file,</span> <span class="pre">id,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_workdir_apply</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_run(args)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_workflow_run</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><em><code class="docutils literal notranslate"><span class="pre">sub</span></code></em> <code class="docutils literal notranslate"><span class="pre">httk_calc(expression,</span> <span class="pre">value,</span> <span class="pre">status)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_calc</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_template_render(template_file,</span> <span class="pre">output,</span> <span class="pre">values_file)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_template_render</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">httk_compress(args)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_compress</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">httk_decompress(args)</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">httk_decompress</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Booleans are Fortran <code class="docutils literal notranslate"><span class="pre">logical</span></code>: <code class="docutils literal notranslate"><span class="pre">httk_workflow_remove</span></code>’s <code class="docutils literal notranslate"><span class="pre">missing_ok</span></code> is an
+optional <code class="docutils literal notranslate"><span class="pre">logical</span></code>, marshalled to the C <code class="docutils literal notranslate"><span class="pre">int</span></code> flag. As in C, the <code class="docutils literal notranslate"><span class="pre">httk_vasp_*</span></code>
+surface of the Bash SDK has no dedicated wrappers; reach a <code class="docutils literal notranslate"><span class="pre">vasp-*</span></code> verb through
+<code class="docutils literal notranslate"><span class="pre">httk_workflow_invoke</span></code>, which is why the example below runs the configured
+command through <code class="docutils literal notranslate"><span class="pre">httk_workflow_run</span></code> and classifies its result.</p>
+</section>
+<section id="exit-codes">
+<h2>Exit codes<a class="headerlink" href="#exit-codes" title="Link to this heading">¶</a></h2>
+<p>The three-status discipline is re-exported as module parameters, identical to the
+C SDK’s:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Status</p></th>
+<th class="head"><p>Meaning</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_OK</span></code> (<code class="docutils literal notranslate"><span class="pre">0</span></code>)</p></td>
+<td><p>the call succeeded</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_ABSENT</span></code> (<code class="docutils literal notranslate"><span class="pre">1</span></code>)</p></td>
+<td><p>the answer is legitimately absent: an unset state key, a missing parameter without a default, a child that was not observed</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_REFUSED</span></code> (<code class="docutils literal notranslate"><span class="pre">2</span></code>)</p></td>
+<td><p>the call is refused: bad usage, a protocol violation, a corrupt attempt context — also what is returned when <code class="docutils literal notranslate"><span class="pre">HTTK_WORKFLOW_PYTHON</span></code> is unset</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Reading a value is therefore an ordinary conditional:</p>
+<div class="highlight-fortran notranslate"><div class="highlight"><pre><span></span><span class="kt">integer</span><span class="w"> </span><span class="kd">::</span><span class="w"> </span><span class="n">status</span>
+<span class="kt">character</span><span class="p">(</span><span class="nb">len</span><span class="o">=</span><span class="p">:),</span><span class="w"> </span><span class="k">allocatable</span><span class="w"> </span><span class="kd">::</span><span class="w"> </span><span class="n">energy</span>
+<span class="k">call </span><span class="n">httk_workflow_state_get</span><span class="p">(</span><span class="s2">"energy"</span><span class="p">,</span><span class="w"> </span><span class="n">energy</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="p">)</span>
+<span class="k">if</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="n">HTTK_WORKFLOW_OK</span><span class="p">)</span><span class="w"> </span><span class="k">then</span><span class="w">  </span><span class="c">! equivalently: if (allocated(energy))</span>
+<span class="w">  </span><span class="c">! resume from energy</span>
+<span class="k">end if</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">httk_workflow_run</span></code> returns the classified outcome of the program it ran instead:
+<code class="docutils literal notranslate"><span class="pre">0</span></code>, <code class="docutils literal notranslate"><span class="pre">22</span></code> for a nonzero exit, <code class="docutils literal notranslate"><span class="pre">124</span></code> for a timeout whose process group was
+terminated, and <code class="docutils literal notranslate"><span class="pre">125</span></code> when a checker or diagnostic stopped it.</p>
+</section>
+<section id="the-examples-relax-fortran-walkthrough">
+<h2>The <code class="docutils literal notranslate"><span class="pre">examples/relax_fortran</span></code> walkthrough<a class="headerlink" href="#the-examples-relax-fortran-walkthrough" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">examples/relax_fortran/relax.f90</span></code> has the <strong>same three-step shape</strong> as
+<code class="docutils literal notranslate"><span class="pre">examples/relax_c</span></code> (it is not a line-for-line port), in three <code class="docutils literal notranslate"><span class="pre">bind(c)</span></code> step
+functions built entirely on the procedures above:</p>
+<ul class="simple">
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">prepare</span></code></strong> stages the payload POSCAR into the workdir — reading the <code class="docutils literal notranslate"><span class="pre">poscar</span></code>
+parameter (default <code class="docutils literal notranslate"><span class="pre">files/POSCAR</span></code>) into an allocatable with a byte-exact stream
+copy — fails by name (<code class="docutils literal notranslate"><span class="pre">httk_workflow_fail(&quot;vasp.input_missing&quot;,</span> <span class="pre">…)</span></code>) when it is
+absent, copies an optional INCAR, notes progress with
+<code class="docutils literal notranslate"><span class="pre">httk_workflow_runlog_note</span></code>, and <code class="docutils literal notranslate"><span class="pre">httk_workflow_advance(&quot;run&quot;)</span></code>.</p></li>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">run</span></code></strong> resolves the VASP command with <code class="docutils literal notranslate"><span class="pre">httk_workflow_setting(&quot;vasp.command&quot;,</span> <span class="pre">…)</span></code> — falling back to a <code class="docutils literal notranslate"><span class="pre">vasp_command</span></code> parameter, and failing
+<code class="docutils literal notranslate"><span class="pre">vasp.command_missing</span></code> when neither is set — word-splits it on whitespace, runs
+it under supervision with <code class="docutils literal notranslate"><span class="pre">httk_workflow_run</span></code>, records
+<code class="docutils literal notranslate"><span class="pre">state_set(&quot;classification&quot;,</span> <span class="pre">&quot;completed&quot;)</span></code> and advances to <code class="docutils literal notranslate"><span class="pre">publish</span></code> on
+success, and <code class="docutils literal notranslate"><span class="pre">httk_workflow_fail(&quot;vasp.failed&quot;,</span> <span class="pre">…)</span></code> otherwise.</p></li>
+<li><p><strong><code class="docutils literal notranslate"><span class="pre">publish</span></code></strong> stages the finished files into the job’s transactional data with
+<code class="docutils literal notranslate"><span class="pre">httk_workflow_put</span></code> when the job has a data directory, and
+<code class="docutils literal notranslate"><span class="pre">httk_workflow_succeed</span></code>.</p></li>
+</ul>
+<p>Two divergences from the C example follow from the SDK, not the workflow: a value
+with significant trailing whitespace is trimmed at the C boundary, and a single
+whitespace-separated command token wider than the example’s fixed <code class="docutils literal notranslate"><span class="pre">ARG_WIDTH</span></code>
+(4096) makes <code class="docutils literal notranslate"><span class="pre">run</span></code> fail loudly rather than truncate. Neither affects an ordinary
+VASP command.</p>
+<p>Build and describe it:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">cd examples/relax_fortran</span>
+<span class="go">make</span>
+<span class="go">./relax --describe</span>
+</pre></div>
+</div>
+<p>Then drive it exactly like <code class="docutils literal notranslate"><span class="pre">docs/quickstart.md</span></code>, naming the compiled binary as the
+runner and the mock VASP as the command:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk project init --name relax-fortran .</span>
+<span class="go">httk workflow workspace init --name default .</span>
+<span class="go">httk workflow job new --workflow ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon</span>
+<span class="go">httk workflow workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default</span>
+<span class="go">httk workflow run</span>
+<span class="go">httk workflow collect</span>
+</pre></div>
+</div>
+<p>The runner reads the <code class="docutils literal notranslate"><span class="pre">poscar</span></code> parameter (default <code class="docutils literal notranslate"><span class="pre">files/POSCAR</span></code>), so the POSCAR is
+staged with <code class="docutils literal notranslate"><span class="pre">--file</span> <span class="pre">POSCAR=POSCAR</span></code> and the first step is named with <code class="docutils literal notranslate"><span class="pre">--step</span> <span class="pre">prepare</span></code>. The finished calculation lands in <code class="docutils literal notranslate"><span class="pre">jobs/*/data/vasp/</span></code>, and because every
+language SDK publishes through the one bridge, those files are the same bytes the
+Python, Bash, and C relaxation runners publish.</p>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="native_rust_api.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Native Rust runner API</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="native_c_api.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Native C runner API</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Native modern-Fortran runner API</a><ul>
+<li><a class="reference internal" href="#a-complete-runner">A complete runner</a></li>
+<li><a class="reference internal" href="#step-handlers-and-dispatch">Step handlers and dispatch</a></li>
+<li><a class="reference internal" href="#strings-and-ownership-across-the-c-boundary">Strings and ownership across the C boundary</a></li>
+<li><a class="reference internal" href="#the-fortran-function-table">The Fortran function table</a></li>
+<li><a class="reference internal" href="#exit-codes">Exit codes</a></li>
+<li><a class="reference internal" href="#the-examples-relax-fortran-walkthrough">The <code class="docutils literal notranslate"><span class="pre">examples/relax_fortran</span></code> walkthrough</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=fe42cd0d"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../_static/selector.js?v=e591e119"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:main","versionPathDepth":2};</script>
+    </body>
+</html>

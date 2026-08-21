@@ -1,0 +1,757 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../../../../../genindex.html"><link rel="search" title="Search" href="../../../../../search.html"><link rel="next" title="httk.workflow.hookapi" href="../hookapi/index.html"><link rel="prev" title="httk.workflow.errors" href="../errors/index.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>httk.workflow.executors - httk-workflow dev:main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:main) — content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../../../index.html"><div class="brand">httk-workflow dev:main documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../../../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:main documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../../../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../../../../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_protocol_api.html">The filesystem protocol API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../runtime_helpers.html">Native runner helpers</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../../../sdks/index.html">Runner SDKs</a><input aria-label="Toggle navigation of Runner SDKs" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/sdk_parity.html">Python and Bash authoring parity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_bash_api.html">Native Bash runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_c_api.html">Native C runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_fortran_api.html">Native modern-Fortran runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_rust_api.html">Native Rust runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_perl_api.html">Native Perl runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_ada_api.html">Native Ada runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_cpp_api.html">Native C++ runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_java_api.html">Native Java runner API</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../vasp_runners.html">Packaged VASP runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_packages.html">Workflow packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_languages.html">Workflow-language runner realizations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../taskmanager.html">Task-manager usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_cli.html">Project and workflow command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../adapter_authoring.html">Writing a remote adapter</a></li>
+<li class="toctree-l1 current has-children"><a class="reference internal" href="../../../../index.html">Reference</a><input aria-label="Toggle navigation of Reference" checked="" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l2 current has-children"><a class="reference internal" href="../index.html">httk.workflow</a><input aria-label="Toggle navigation of httk.workflow" checked="" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="../adapter_protocol/index.html">httk.workflow.adapter_protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../adapters/index.html">httk.workflow.adapters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../collecting/index.html">httk.workflow.collecting</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../compat/index.html">httk.workflow.compat</a><input aria-label="Toggle navigation of httk.workflow.compat" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../compat/v1/index.html">httk.workflow.compat.v1</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../configuration/index.html">httk.workflow.configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../errors/index.html">httk.workflow.errors</a></li>
+<li class="toctree-l3 current current-page"><a class="current reference internal" href="#">httk.workflow.executors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../hookapi/index.html">httk.workflow.hookapi</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../hygiene/index.html">httk.workflow.hygiene</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../manifests/index.html">httk.workflow.manifests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../projects/index.html">httk.workflow.projects</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../protocol/index.html">httk.workflow.protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../provenance/index.html">httk.workflow.provenance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../runtime/index.html">httk.workflow.runtime</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../runtime_utils/index.html">httk.workflow.runtime_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../scaffold/index.html">httk.workflow.scaffold</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../sdk/index.html">httk.workflow.sdk</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../shell_bridge/index.html">httk.workflow.shell_bridge</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../supervision/index.html">httk.workflow.supervision</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../transfers/index.html">httk.workflow.transfers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../vasp/index.html">httk.workflow.vasp</a></li>
+</ul>
+</li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-6" name="toctree-checkbox-6" role="switch" type="checkbox"/><label for="toctree-checkbox-6"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../notebooks/examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_filesystem_api.html">Workflow filesystem API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../../../../../_sources/reference/autoapi/httk/workflow/executors/index.rst.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="module-httk.workflow.executors">
+<span id="httk-workflow-executors"></span><h1>httk.workflow.executors<a class="headerlink" href="#module-httk.workflow.executors" title="Link to this heading">¶</a></h1>
+<p>Define runner-executor contracts used by the workflow manager.</p>
+<section id="classes">
+<h2>Classes<a class="headerlink" href="#classes" title="Link to this heading">¶</a></h2>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch" title="httk.workflow.executors.AttemptLaunch"><code class="xref py py-obj docutils literal notranslate"><span class="pre">AttemptLaunch</span></code></a></p></td>
+<td><p>Paths and context needed to construct an attempt command.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.executors.OutcomeCommit" title="httk.workflow.executors.OutcomeCommit"><code class="xref py py-obj docutils literal notranslate"><span class="pre">OutcomeCommit</span></code></a></p></td>
+<td><p>Describe a published outcome being committed by the authoritative manager.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.executors.RunnerExecutor" title="httk.workflow.executors.RunnerExecutor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RunnerExecutor</span></code></a></p></td>
+<td><p>Execution behavior selected by <code class="docutils literal notranslate"><span class="pre">runner.executor</span></code> in <code class="docutils literal notranslate"><span class="pre">job.json</span></code>.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.executors.PathRunnerExecutor" title="httk.workflow.executors.PathRunnerExecutor"><code class="xref py py-obj docutils literal notranslate"><span class="pre">PathRunnerExecutor</span></code></a></p></td>
+<td><p>Execute the runner path directly from the payload or staged copy.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="module-contents">
+<h2>Module Contents<a class="headerlink" href="#module-contents" title="Link to this heading">¶</a></h2>
+<dl class="py class">
+<dt class="sig sig-object py" id="httk.workflow.executors.AttemptLaunch">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.executors.</span></span><span class="sig-name descname"><span class="pre">AttemptLaunch</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#AttemptLaunch"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.AttemptLaunch" title="Link to this definition">¶</a></dt>
+<dd><p>Paths and context needed to construct an attempt command.</p>
+<p><code class="docutils literal notranslate"><span class="pre">runner</span></code> is the executable the manager resolved for this attempt. A
+payload runner is the file inside <code class="docutils literal notranslate"><span class="pre">payload</span></code>; a shared runner is the
+verified copy the manager staged below <code class="docutils literal notranslate"><span class="pre">control</span></code>, never the original.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>job</strong> – Immutable job definition being attempted.</p></li>
+<li><p><strong>marker</strong> – Authoritative marker for the attempt.</p></li>
+<li><p><strong>payload</strong> – Immutable job payload directory.</p></li>
+<li><p><strong>workdir</strong> – Directory in which the runner executes.</p></li>
+<li><p><strong>control</strong> – Attempt-control directory.</p></li>
+<li><p><strong>context_path</strong> – Path of the serialized runner context.</p></li>
+<li><p><strong>context</strong> – Runner context members.</p></li>
+<li><p><strong>runner</strong> – Resolved executable, or no value to use the payload runner.</p></li>
+<li><p><strong>workflow_prelude</strong> – Shell text run in a login shell before the runner, or empty for none.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.AttemptLaunch.job">
+<span class="sig-name descname"><span class="pre">job</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">httk.workflow.models.JobDefinition</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#AttemptLaunch.job"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.AttemptLaunch.job" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.AttemptLaunch.marker">
+<span class="sig-name descname"><span class="pre">marker</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">httk.workflow.models.Marker</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#AttemptLaunch.marker"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.AttemptLaunch.marker" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.AttemptLaunch.payload">
+<span class="sig-name descname"><span class="pre">payload</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#AttemptLaunch.payload"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.AttemptLaunch.payload" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.AttemptLaunch.workdir">
+<span class="sig-name descname"><span class="pre">workdir</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#AttemptLaunch.workdir"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.AttemptLaunch.workdir" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.AttemptLaunch.control">
+<span class="sig-name descname"><span class="pre">control</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#AttemptLaunch.control"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.AttemptLaunch.control" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.AttemptLaunch.context_path">
+<span class="sig-name descname"><span class="pre">context_path</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#AttemptLaunch.context_path"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.AttemptLaunch.context_path" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.AttemptLaunch.context">
+<span class="sig-name descname"><span class="pre">context</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><span class="pre">collections.abc.Mapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#AttemptLaunch.context"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.AttemptLaunch.context" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.AttemptLaunch.runner">
+<span class="sig-name descname"><span class="pre">runner</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a><span class="w"> </span><span class="p"><span class="pre">|</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/constants.html#None" title="(in Python v3.14)"><span class="pre">None</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">None</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#AttemptLaunch.runner"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.AttemptLaunch.runner" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.AttemptLaunch.workflow_prelude">
+<span class="sig-name descname"><span class="pre">workflow_prelude</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">''</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#AttemptLaunch.workflow_prelude"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.AttemptLaunch.workflow_prelude" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py property">
+<dt class="sig sig-object py" id="httk.workflow.executors.AttemptLaunch.runner_command">
+<span class="property"><span class="k"><span class="pre">property</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">runner_command</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#AttemptLaunch.runner_command"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.AttemptLaunch.runner_command" title="Link to this definition">¶</a></dt>
+<dd><p>Return the executable to run, defaulting to the payload runner.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="httk.workflow.executors.OutcomeCommit">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.executors.</span></span><span class="sig-name descname"><span class="pre">OutcomeCommit</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#OutcomeCommit"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.OutcomeCommit" title="Link to this definition">¶</a></dt>
+<dd><p>Describe a published outcome being committed by the authoritative manager.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>job</strong> – Immutable job definition producing the outcome.</p></li>
+<li><p><strong>marker</strong> – Authoritative marker being committed.</p></li>
+<li><p><strong>payload</strong> – Immutable job payload directory.</p></li>
+<li><p><strong>outcome_path</strong> – Path of the published outcome.</p></li>
+<li><p><strong>outcome</strong> – Outcome members.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.OutcomeCommit.job">
+<span class="sig-name descname"><span class="pre">job</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">httk.workflow.models.JobDefinition</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#OutcomeCommit.job"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.OutcomeCommit.job" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.OutcomeCommit.marker">
+<span class="sig-name descname"><span class="pre">marker</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><span class="pre">httk.workflow.models.Marker</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#OutcomeCommit.marker"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.OutcomeCommit.marker" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.OutcomeCommit.payload">
+<span class="sig-name descname"><span class="pre">payload</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#OutcomeCommit.payload"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.OutcomeCommit.payload" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.OutcomeCommit.outcome_path">
+<span class="sig-name descname"><span class="pre">outcome_path</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#OutcomeCommit.outcome_path"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.OutcomeCommit.outcome_path" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.OutcomeCommit.outcome">
+<span class="sig-name descname"><span class="pre">outcome</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><span class="pre">collections.abc.Mapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><span class="pre">Any</span><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#OutcomeCommit.outcome"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.OutcomeCommit.outcome" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="httk.workflow.executors.RunnerExecutor">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.executors.</span></span><span class="sig-name descname"><span class="pre">RunnerExecutor</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#RunnerExecutor"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.RunnerExecutor" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <code class="xref py py-obj docutils literal notranslate"><span class="pre">Protocol</span></code></p>
+<p>Execution behavior selected by <code class="docutils literal notranslate"><span class="pre">runner.executor</span></code> in <code class="docutils literal notranslate"><span class="pre">job.json</span></code>.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.RunnerExecutor.name">
+<span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#RunnerExecutor.name"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.RunnerExecutor.name" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.executors.RunnerExecutor.validate">
+<span class="sig-name descname"><span class="pre">validate</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">job</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">payload</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#RunnerExecutor.validate"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.RunnerExecutor.validate" title="Link to this definition">¶</a></dt>
+<dd><p>Validate executor-specific immutable payload requirements.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.executors.RunnerExecutor.command">
+<span class="property"><span class="k"><span class="pre">abstractmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">command</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">launch</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#RunnerExecutor.command"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.RunnerExecutor.command" title="Link to this definition">¶</a></dt>
+<dd><p>Return the command argument vector for one attempt.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.executors.RunnerExecutor.commit_outcome">
+<span class="sig-name descname"><span class="pre">commit_outcome</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">commit</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#RunnerExecutor.commit_outcome"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.RunnerExecutor.commit_outcome" title="Link to this definition">¶</a></dt>
+<dd><p>Complete executor-specific idempotent work before the marker advances.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.executors.RunnerExecutor.reconcile">
+<span class="sig-name descname"><span class="pre">reconcile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">workspace</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#RunnerExecutor.reconcile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.RunnerExecutor.reconcile" title="Link to this definition">¶</a></dt>
+<dd><p>Repair executor-specific derived views; never alter authoritative state.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.executors.RunnerExecutor.marker_changed">
+<span class="sig-name descname"><span class="pre">marker_changed</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">workspace</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">marker</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#RunnerExecutor.marker_changed"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.RunnerExecutor.marker_changed" title="Link to this definition">¶</a></dt>
+<dd><p>Refresh derived views after an authoritative marker transition.</p>
+<dl class="field-list simple">
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="httk.workflow.executors.PathRunnerExecutor">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.executors.</span></span><span class="sig-name descname"><span class="pre">PathRunnerExecutor</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#PathRunnerExecutor"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.PathRunnerExecutor" title="Link to this definition">¶</a></dt>
+<dd><p>Execute the runner path directly from the payload or staged copy.</p>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.executors.PathRunnerExecutor.name">
+<span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'path'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#PathRunnerExecutor.name"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.PathRunnerExecutor.name" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.executors.PathRunnerExecutor.validate">
+<span class="sig-name descname"><span class="pre">validate</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">job</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">payload</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#PathRunnerExecutor.validate"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.PathRunnerExecutor.validate" title="Link to this definition">¶</a></dt>
+<dd><p>Validate the payload runner when the job runs one.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>job</strong> (<em>httk.workflow.models.JobDefinition</em>) – Job definition whose runner is checked.</p></li>
+<li><p><strong>payload</strong> (<a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><em>pathlib.Path</em></a>) – Immutable job payload directory.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><code class="docutils literal notranslate"><span class="pre">None</span></code>.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="../errors/index.html#httk.workflow.errors.FormatError" title="httk.workflow.errors.FormatError"><strong>httk.workflow.errors.FormatError</strong></a> – If a payload runner is missing or not a file.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.executors.PathRunnerExecutor.command">
+<span class="sig-name descname"><span class="pre">command</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">launch</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#PathRunnerExecutor.command"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.PathRunnerExecutor.command" title="Link to this definition">¶</a></dt>
+<dd><p>Build the command for one path-runner attempt.</p>
+<p>When the launch carries a workflow prelude, the runner is wrapped in a
+login shell that runs the prelude (under <code class="docutils literal notranslate"><span class="pre">set</span> <span class="pre">-e</span></code>) then execs the
+runner, so a failing prelude line aborts before the runner starts and
+the runner inherits the initialized environment.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>launch</strong> (<a class="reference internal" href="#httk.workflow.executors.AttemptLaunch" title="httk.workflow.executors.AttemptLaunch"><em>AttemptLaunch</em></a>) – Attempt paths and runner context.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Argument vector for the runner process.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Sequence" title="(in Python v3.14)">collections.abc.Sequence</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.executors.PathRunnerExecutor.commit_outcome">
+<span class="sig-name descname"><span class="pre">commit_outcome</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">commit</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#PathRunnerExecutor.commit_outcome"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.PathRunnerExecutor.commit_outcome" title="Link to this definition">¶</a></dt>
+<dd><p>Complete path-executor outcome work before the marker advances.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>commit</strong> (<a class="reference internal" href="#httk.workflow.executors.OutcomeCommit" title="httk.workflow.executors.OutcomeCommit"><em>OutcomeCommit</em></a>) – Published outcome and its job context.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><code class="docutils literal notranslate"><span class="pre">None</span></code>.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.executors.PathRunnerExecutor.reconcile">
+<span class="sig-name descname"><span class="pre">reconcile</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">workspace</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#PathRunnerExecutor.reconcile"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.PathRunnerExecutor.reconcile" title="Link to this definition">¶</a></dt>
+<dd><p>Reconcile path-executor derived state.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>workspace</strong> (<em>httk.workflow.workspace.Workspace</em>) – Workspace whose derived state is reconciled.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><code class="docutils literal notranslate"><span class="pre">None</span></code>.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="httk.workflow.executors.PathRunnerExecutor.marker_changed">
+<span class="sig-name descname"><span class="pre">marker_changed</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">workspace</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">marker</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/executors.html#PathRunnerExecutor.marker_changed"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.executors.PathRunnerExecutor.marker_changed" title="Link to this definition">¶</a></dt>
+<dd><p>Refresh path-executor state after a marker transition.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>workspace</strong> (<em>httk.workflow.workspace.Workspace</em>) – Workspace containing the changed marker.</p></li>
+<li><p><strong>marker</strong> (<em>httk.workflow.models.Marker</em>) – Newly authoritative marker.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p><code class="docutils literal notranslate"><span class="pre">None</span></code>.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p>None</p>
+</dd>
+</dl>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="../hookapi/index.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">httk.workflow.hookapi</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="../errors/index.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">httk.workflow.errors</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">httk.workflow.executors</a><ul>
+<li><a class="reference internal" href="#classes">Classes</a></li>
+<li><a class="reference internal" href="#module-contents">Module Contents</a><ul>
+<li><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch"><code class="docutils literal notranslate"><span class="pre">AttemptLaunch</span></code></a><ul>
+<li><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch.job"><code class="docutils literal notranslate"><span class="pre">AttemptLaunch.job</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch.marker"><code class="docutils literal notranslate"><span class="pre">AttemptLaunch.marker</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch.payload"><code class="docutils literal notranslate"><span class="pre">AttemptLaunch.payload</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch.workdir"><code class="docutils literal notranslate"><span class="pre">AttemptLaunch.workdir</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch.control"><code class="docutils literal notranslate"><span class="pre">AttemptLaunch.control</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch.context_path"><code class="docutils literal notranslate"><span class="pre">AttemptLaunch.context_path</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch.context"><code class="docutils literal notranslate"><span class="pre">AttemptLaunch.context</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch.runner"><code class="docutils literal notranslate"><span class="pre">AttemptLaunch.runner</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch.workflow_prelude"><code class="docutils literal notranslate"><span class="pre">AttemptLaunch.workflow_prelude</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.AttemptLaunch.runner_command"><code class="docutils literal notranslate"><span class="pre">AttemptLaunch.runner_command</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#httk.workflow.executors.OutcomeCommit"><code class="docutils literal notranslate"><span class="pre">OutcomeCommit</span></code></a><ul>
+<li><a class="reference internal" href="#httk.workflow.executors.OutcomeCommit.job"><code class="docutils literal notranslate"><span class="pre">OutcomeCommit.job</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.OutcomeCommit.marker"><code class="docutils literal notranslate"><span class="pre">OutcomeCommit.marker</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.OutcomeCommit.payload"><code class="docutils literal notranslate"><span class="pre">OutcomeCommit.payload</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.OutcomeCommit.outcome_path"><code class="docutils literal notranslate"><span class="pre">OutcomeCommit.outcome_path</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.OutcomeCommit.outcome"><code class="docutils literal notranslate"><span class="pre">OutcomeCommit.outcome</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#httk.workflow.executors.RunnerExecutor"><code class="docutils literal notranslate"><span class="pre">RunnerExecutor</span></code></a><ul>
+<li><a class="reference internal" href="#httk.workflow.executors.RunnerExecutor.name"><code class="docutils literal notranslate"><span class="pre">RunnerExecutor.name</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.RunnerExecutor.validate"><code class="docutils literal notranslate"><span class="pre">RunnerExecutor.validate()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.RunnerExecutor.command"><code class="docutils literal notranslate"><span class="pre">RunnerExecutor.command()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.RunnerExecutor.commit_outcome"><code class="docutils literal notranslate"><span class="pre">RunnerExecutor.commit_outcome()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.RunnerExecutor.reconcile"><code class="docutils literal notranslate"><span class="pre">RunnerExecutor.reconcile()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.RunnerExecutor.marker_changed"><code class="docutils literal notranslate"><span class="pre">RunnerExecutor.marker_changed()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#httk.workflow.executors.PathRunnerExecutor"><code class="docutils literal notranslate"><span class="pre">PathRunnerExecutor</span></code></a><ul>
+<li><a class="reference internal" href="#httk.workflow.executors.PathRunnerExecutor.name"><code class="docutils literal notranslate"><span class="pre">PathRunnerExecutor.name</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.PathRunnerExecutor.validate"><code class="docutils literal notranslate"><span class="pre">PathRunnerExecutor.validate()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.PathRunnerExecutor.command"><code class="docutils literal notranslate"><span class="pre">PathRunnerExecutor.command()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.PathRunnerExecutor.commit_outcome"><code class="docutils literal notranslate"><span class="pre">PathRunnerExecutor.commit_outcome()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.PathRunnerExecutor.reconcile"><code class="docutils literal notranslate"><span class="pre">PathRunnerExecutor.reconcile()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.executors.PathRunnerExecutor.marker_changed"><code class="docutils literal notranslate"><span class="pre">PathRunnerExecutor.marker_changed()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../../../_static/documentation_options.js?v=fe42cd0d"></script>
+    <script src="../../../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../../../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../../../../../_static/selector.js?v=e591e119"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:main","versionPathDepth":2};</script>
+    </body>
+</html>

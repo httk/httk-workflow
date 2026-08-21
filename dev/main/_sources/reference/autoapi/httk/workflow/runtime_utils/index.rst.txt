@@ -1,0 +1,67 @@
+httk.workflow.runtime_utils
+===========================
+
+.. py:module:: httk.workflow.runtime_utils
+
+.. autoapi-nested-parse::
+
+   Safe replacements for small conveniences used by shell runners.
+
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.runtime_utils.evaluate_expression
+   httk.workflow.runtime_utils.render_template
+   httk.workflow.runtime_utils.compress_files
+   httk.workflow.runtime_utils.decompress_files
+
+
+Module Contents
+---------------
+
+.. py:function:: evaluate_expression(expression)
+
+   Evaluate a bounded arithmetic expression without Python ``eval``.
+
+   :param expression: Supply the arithmetic expression to evaluate.
+   :return: The evaluated scalar result.
+   :raises ValueError: If the expression contains an unsupported element.
+
+
+.. py:function:: render_template(template_path, output_path, values)
+
+   Render ``string.Template`` placeholders from an explicit mapping.
+
+   :param template_path: Locate the source template.
+   :param output_path: Locate the atomically replaced output file.
+   :param values: Supply placeholder values.
+   :return: The rendered output path.
+   :raises KeyError: If the template names a missing value.
+
+
+.. py:function:: compress_files(paths, *, method = 'bz2', remove_source = False)
+
+   Compress regular files atomically with a stdlib codec.
+
+   :param paths: Locate the regular files to compress.
+   :param method: Select ``bz2``, ``gz``, or ``xz`` compression.
+   :param remove_source: Remove each source after successful compression.
+   :return: The compressed output paths.
+   :raises ValueError: If a method or source file is invalid.
+
+
+.. py:function:: decompress_files(paths, *, remove_source = False)
+
+   Decompress ``.bz2``, ``.gz``, or ``.xz`` files atomically.
+
+   :param paths: Locate the compressed files to decompress.
+   :param remove_source: Remove each source after successful decompression.
+   :return: The decompressed output paths.
+   :raises ValueError: If a source is not a supported regular compressed file.
+   :raises FileExistsError: If a decompressed output already exists.
+
+

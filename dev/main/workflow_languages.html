@@ -1,0 +1,835 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="./">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Task-manager usage" href="taskmanager.html"><link rel="prev" title="Collecting results" href="collecting.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Workflow-language runner realizations - httk-workflow dev:main documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:main) — content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="index.html"><div class="brand">httk-workflow dev:main documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:main documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_protocol_api.html">The filesystem protocol API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtime_helpers.html">Native runner helpers</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="sdks/index.html">Runner SDKs</a><input aria-label="Toggle navigation of Runner SDKs" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="sdks/sdk_parity.html">Python and Bash authoring parity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_bash_api.html">Native Bash runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_c_api.html">Native C runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_fortran_api.html">Native modern-Fortran runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_rust_api.html">Native Rust runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_perl_api.html">Native Perl runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_ada_api.html">Native Ada runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_cpp_api.html">Native C++ runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_java_api.html">Native Java runner API</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="vasp_runners.html">Packaged VASP runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_packages.html">Workflow packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="collecting.html">Collecting results</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Workflow-language runner realizations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="taskmanager.html">Task-manager usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_cli.html">Project and workflow command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adapter_authoring.html">Writing a remote adapter</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="reference/index.html">Reference</a><input aria-label="Toggle navigation of Reference" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/index.html">httk.workflow</a><input aria-label="Toggle navigation of httk.workflow" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/adapter_protocol/index.html">httk.workflow.adapter_protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/adapters/index.html">httk.workflow.adapters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/collecting/index.html">httk.workflow.collecting</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/compat/index.html">httk.workflow.compat</a><input aria-label="Toggle navigation of httk.workflow.compat" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/compat/v1/index.html">httk.workflow.compat.v1</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/configuration/index.html">httk.workflow.configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/errors/index.html">httk.workflow.errors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/executors/index.html">httk.workflow.executors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/hookapi/index.html">httk.workflow.hookapi</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/hygiene/index.html">httk.workflow.hygiene</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/manifests/index.html">httk.workflow.manifests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/projects/index.html">httk.workflow.projects</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/protocol/index.html">httk.workflow.protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/provenance/index.html">httk.workflow.provenance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/runtime/index.html">httk.workflow.runtime</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/runtime_utils/index.html">httk.workflow.runtime_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/scaffold/index.html">httk.workflow.scaffold</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/sdk/index.html">httk.workflow.sdk</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/shell_bridge/index.html">httk.workflow.shell_bridge</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/supervision/index.html">httk.workflow.supervision</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/transfers/index.html">httk.workflow.transfers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/vasp/index.html">httk.workflow.vasp</a></li>
+</ul>
+</li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-6" name="toctree-checkbox-6" role="switch" type="checkbox"/><label for="toctree-checkbox-6"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="notebooks/examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_filesystem_api.html">Workflow filesystem API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="details/runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="_sources/workflow_languages.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section class="tex2jax_ignore mathjax_ignore" id="workflow-language-runner-realizations">
+<h1>Workflow-language runner realizations<a class="headerlink" href="#workflow-language-runner-realizations" title="Link to this heading">¶</a></h1>
+<p><em>For workflows written as CWL, PWD, jobflow Maker documents, or httk v1 task
+templates.</em></p>
+<p>The language integrations are runner realizations, not import commands. A
+document or template is resolved into an ordinary job by <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code>; the job is
+claimed, retried, checkpointed, journalled, and collected by the normal
+workflow machinery.</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Language</p></th>
+<th class="head"><p>Bare document or package form</p></th>
+<th class="head"><p>Installed runner</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>CWL</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span> <span class="pre">--workspace</span> <span class="pre">WS</span> <span class="pre">--workflow</span> <span class="pre">flow.cwl</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pkg:httk.workflow.languages.cwl/cwl_runner.py</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>PWD</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span> <span class="pre">--workspace</span> <span class="pre">WS</span> <span class="pre">--workflow</span> <span class="pre">graph.json</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pkg:httk.workflow.languages.pwd/pwd_runner.py</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>jobflow</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span> <span class="pre">--workspace</span> <span class="pre">WS</span> <span class="pre">--workflow</span> <span class="pre">maker.json</span></code>, or a package with <code class="docutils literal notranslate"><span class="pre">language</span> <span class="pre">=</span> <span class="pre">&quot;jobflow&quot;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pkg:httk.workflow.languages.jobflow/jobflow_runner.py</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>httk-v1</p></td>
+<td><p>a bare task directory with <code class="docutils literal notranslate"><span class="pre">--format</span> <span class="pre">httk-v1</span></code>, or a package with <code class="docutils literal notranslate"><span class="pre">language</span> <span class="pre">=</span> <span class="pre">&quot;httk-v1&quot;</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pkg:httk.workflow.languages.httk_v1/v1_runner.py</span></code> through the ordinary <code class="docutils literal notranslate"><span class="pre">path</span></code> runner</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The CWL realization needs <code class="docutils literal notranslate"><span class="pre">httk-workflow[cwl]</span></code> when the document is prepared.
+The normalized plan is carried by the job, so the machine executing the job
+does not need the parser extra.</p>
+<p>The jobflow realization needs no extra when a job is prepared or collected.
+The machine that runs the job needs <code class="docutils literal notranslate"><span class="pre">httk-workflow[jobflow]</span></code>; use
+<code class="docutils literal notranslate"><span class="pre">httk-workflow[atomate2]</span></code> as well when the Maker comes from atomate2. The
+Maker module named by the manifest or document must be importable in that
+runner environment. This is the reverse of CWL’s parser placement.</p>
+<section id="language-packages">
+<h2>Language packages<a class="headerlink" href="#language-packages" title="Link to this heading">¶</a></h2>
+<p>A package selects a language in <code class="docutils literal notranslate"><span class="pre">[workflow.runner]</span></code>. The language supplies its
+steps, instantiate behavior, runner, workdir contract, and default
+collector. A package may override the default with <code class="docutils literal notranslate"><span class="pre">[workflow.collect]</span></code>.
+Language inputs are consumed by that realization, so <code class="docutils literal notranslate"><span class="pre">destination</span></code> is forbidden
+and <code class="docutils literal notranslate"><span class="pre">[workflow.instantiate]</span></code> is implied and forbidden. The optional <code class="docutils literal notranslate"><span class="pre">port</span></code> key
+maps a package input or output name to a document or language port; omitted
+ports use the package name. Statically known ports are checked against the
+document and duplicates are errors.</p>
+<p>Language registrations expose a <code class="docutils literal notranslate"><span class="pre">collector</span></code> field and a
+<code class="docutils literal notranslate"><span class="pre">has_default_collector</span></code> flag. For languages with defaults, package resolution
+uses <code class="docutils literal notranslate"><span class="pre">httk.workflow.languages.&lt;mod&gt;:collect</span></code>; CWL, PWD, and jobflow set the
+flag true, while httk-v1 sets it false.</p>
+<section id="cwl-package">
+<h3>CWL package<a class="headerlink" href="#cwl-package" title="Link to this heading">¶</a></h3>
+<p>This is the same shape used by the package fixtures:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[workflow]</span>
+<span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"example.cwl"</span>
+
+<span class="k">[workflow.runner]</span>
+<span class="n">language</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"cwl"</span>
+<span class="n">document</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"echo.cwl"</span>
+
+<span class="k">[workflow.inputs.message]</span>
+<span class="n">entry_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"strings"</span>
+
+<span class="k">[workflow.outputs.spoken]</span>
+<span class="n">entry_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"strings"</span>
+</pre></div>
+</div>
+<p>The CWL document is parsed and normalized during preparation. Its input values
+are staged according to the CWL schema; output ports become declared output
+roles. A single CWL <code class="docutils literal notranslate"><span class="pre">File</span></code> output is served and stored as a standard <code class="docutils literal notranslate"><span class="pre">files</span></code>
+entry, with a workspace-relative POSIX <code class="docutils literal notranslate"><span class="pre">url</span></code>, file <code class="docutils literal notranslate"><span class="pre">name</span></code>, size, and flat
+<code class="docutils literal notranslate"><span class="pre">sha256</span></code>; media types are left unset unless a collector knows them explicitly.
+Lists of files deliberately remain descriptor values inside a
+<code class="docutils literal notranslate"><span class="pre">DataRecord</span></code>, preserving list shape for callers; the asymmetry keeps one file
+addressable as an entry while a list remains one role value.</p>
+</section>
+<section id="pwd-package">
+<h3>PWD package<a class="headerlink" href="#pwd-package" title="Link to this heading">¶</a></h3>
+<p>PWD modules are package members when <code class="docutils literal notranslate"><span class="pre">modules</span></code> is used. <code class="docutils literal notranslate"><span class="pre">module_path</span></code> names
+additional import roots, and <code class="docutils literal notranslate"><span class="pre">allowed_modules</span></code> is a module-prefix allowlist:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[workflow]</span>
+<span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"example.pwd"</span>
+
+<span class="k">[workflow.runner]</span>
+<span class="n">language</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"pwd"</span>
+<span class="n">document</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"workflow.json"</span>
+<span class="n">modules</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">"module.py"</span><span class="p">]</span>
+<span class="n">module_path</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">"."</span><span class="p">]</span>
+<span class="n">allowed_modules</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[</span><span class="s2">"module"</span><span class="p">]</span>
+
+<span class="k">[workflow.inputs.message]</span>
+<span class="n">entry_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"strings"</span>
+
+<span class="k">[workflow.outputs.result]</span>
+<span class="n">entry_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"strings"</span>
+</pre></div>
+</div>
+<p>The whole graph executes as one job in topological order. The runner writes
+<code class="docutils literal notranslate"><span class="pre">pwd-outputs.json</span></code>; each completed node is checkpointed in <code class="docutils literal notranslate"><span class="pre">pwd_results</span></code> and
+<code class="docutils literal notranslate"><span class="pre">pwd_completed</span></code>. <code class="docutils literal notranslate"><span class="pre">modules</span></code> are staged into <code class="docutils literal notranslate"><span class="pre">files/</span></code>; a document too large for
+the parameter budget is staged as <code class="docutils literal notranslate"><span class="pre">files/pwd.json</span></code>.</p>
+<p>A PWD document is code: it imports and calls the <code class="docutils literal notranslate"><span class="pre">module.function</span></code> names it
+contains. There is no sandbox. <code class="docutils literal notranslate"><span class="pre">allowed_modules</span></code> records and enforces a prefix
+allowlist when a document is less trusted. An untrusted PWD document must not
+be run merely because it passed format validation.</p>
+</section>
+<section id="jobflow-package">
+<h3>jobflow package<a class="headerlink" href="#jobflow-package" title="Link to this heading">¶</a></h3>
+<p>The jobflow realization runs a jobflow <code class="docutils literal notranslate"><span class="pre">Maker</span></code> and is intended especially for
+atomate2, whose workflows are jobflow Makers. It accepts exactly one of a
+Maker import specification or a Monty-serialized Maker document. The import
+form constructs the Maker with <code class="docutils literal notranslate"><span class="pre">Class(**parameters)</span></code>:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[workflow]</span>
+<span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"example.jobflow"</span>
+
+<span class="k">[workflow.runner]</span>
+<span class="n">language</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"jobflow"</span>
+<span class="n">maker</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"atomate2.vasp.flows.core:DoubleRelaxMaker"</span>
+
+<span class="k">[workflow.parameters.name]</span>
+<span class="n">type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"string"</span>
+<span class="n">default</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"double relax"</span>
+<span class="n">description</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"The atomate2 Maker name."</span>
+
+<span class="k">[workflow.inputs.structure]</span>
+<span class="n">entry_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"structures"</span>
+<span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"structure"</span>
+<span class="n">description</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"The starting structure."</span>
+<span class="n">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"initial_structure"</span>
+
+<span class="k">[workflow.outputs.result]</span>
+<span class="n">entry_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"structures"</span>
+<span class="n">port</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"output"</span>
+<span class="n">role</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"relaxed_structure"</span>
+<span class="n">description</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"The resolved final jobflow output."</span>
+</pre></div>
+</div>
+<p>The <code class="docutils literal notranslate"><span class="pre">maker</span></code> value is a <code class="docutils literal notranslate"><span class="pre">module:Class</span></code> specification. The document form names
+a relative JSON member instead:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[workflow.runner]</span>
+<span class="n">language</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"jobflow"</span>
+<span class="n">document</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"maker.json"</span>
+</pre></div>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">maker.json</span></code> is a Monty-serialized Maker document with string <code class="docutils literal notranslate"><span class="pre">&#64;module</span></code> and
+<code class="docutils literal notranslate"><span class="pre">&#64;class</span></code> members; <code class="docutils literal notranslate"><span class="pre">document_from_maker</span></code> serializes an MSONable Maker into this
+form. Declared <code class="docutils literal notranslate"><span class="pre">[workflow.parameters.*]</span></code> are Maker constructor configuration,
+not arbitrary httk runner settings. A per-job <code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span> <span class="pre">--parameter</span></code> value
+overrides its manifest default. In the document form, the runner applies
+declared values with <code class="docutils literal notranslate"><span class="pre">dataclasses.replace</span></code>, so a Maker receiving document
+parameters must support that operation.</p>
+<p>Declared <code class="docutils literal notranslate"><span class="pre">[workflow.inputs.NAME]</span></code> values are passed to <code class="docutils literal notranslate"><span class="pre">make()</span></code> using their
+<code class="docutils literal notranslate"><span class="pre">port</span></code> labels (or their manifest names when <code class="docutils literal notranslate"><span class="pre">port</span></code> is omitted). Literal JSON
+values are decoded with Monty. A path input is staged under <code class="docutils literal notranslate"><span class="pre">files/inputs/</span></code>;
+<code class="docutils literal notranslate"><span class="pre">.json</span></code> files are Monty-decoded and other path inputs are loaded with
+<code class="docutils literal notranslate"><span class="pre">pymatgen.Structure.from_file</span></code>. The Maker’s <code class="docutils literal notranslate"><span class="pre">&#64;module</span></code>, and the modules needed
+by its serialized job functions, must be importable wherever the jobs run.</p>
+<p>The parent httk job is an event-driven scheduler. It creates one httk child
+job for each jobflow job as soon as its dependencies settle; it wakes when any
+live child reaches a terminal state, so independent branches can run in
+parallel across manager workers. The scheduler state and a file-backed
+jobflow <code class="docutils literal notranslate"><span class="pre">JobStore</span></code> are checkpointed in the parent’s persistent workdir, so
+re-activation and crash recovery resume from those files. No MongoDB service is
+used. Jobflow response semantics are preserved for <code class="docutils literal notranslate"><span class="pre">replace</span></code>, <code class="docutils literal notranslate"><span class="pre">detour</span></code>,
+<code class="docutils literal notranslate"><span class="pre">addition</span></code>, <code class="docutils literal notranslate"><span class="pre">stop_children</span></code>, and <code class="docutils literal notranslate"><span class="pre">stop_jobflow</span></code>; children of a replacing or
+detouring job wait for the whole replacement or detour sub-flow.</p>
+<p>The runner writes <code class="docutils literal notranslate"><span class="pre">jobflow-outputs.json</span></code> with one primary <code class="docutils literal notranslate"><span class="pre">output</span></code> port, set to
+the flow’s resolved final output. If jobs return <code class="docutils literal notranslate"><span class="pre">stored_data</span></code>, that mapping is
+passed through as an additional output. The default collector maps these
+values to declared roles and returns <code class="docutils literal notranslate"><span class="pre">DataRecord</span></code> values. FileRecord outputs
+are not implemented yet, and there is no separate jobflow output-port model
+beyond <code class="docutils literal notranslate"><span class="pre">output</span></code> and the optional <code class="docutils literal notranslate"><span class="pre">stored_data</span></code> passthrough.
+To collect <code class="docutils literal notranslate"><span class="pre">stored_data</span></code> as a declared package output, give an output table
+<code class="docutils literal notranslate"><span class="pre">port</span> <span class="pre">=</span> <span class="pre">&quot;stored_data&quot;</span></code>.</p>
+<p>Failures use jobflow-specific codes such as <code class="docutils literal notranslate"><span class="pre">jobflow.missing_dependency</span></code>,
+<code class="docutils literal notranslate"><span class="pre">jobflow.document_invalid</span></code>, <code class="docutils literal notranslate"><span class="pre">jobflow.maker_config_failed</span></code>,
+<code class="docutils literal notranslate"><span class="pre">jobflow.input_invalid</span></code>, <code class="docutils literal notranslate"><span class="pre">jobflow.make_failed</span></code>, <code class="docutils literal notranslate"><span class="pre">jobflow.job_failed</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">jobflow.flow_failed</span></code>.</p>
+<p>For atomate2 VASP workflows, execution settings belong to atomate2: use its
+<code class="docutils literal notranslate"><span class="pre">~/.atomate2.yaml</span></code> and <code class="docutils literal notranslate"><span class="pre">ATOMATE2_VASP_CMD</span></code> configuration. They are not httk
+workflow settings. Atomate2 workflows are jobflow Makers; this realization is
+not a FireWorks runner.</p>
+</section>
+<section id="httk-v1-package">
+<h3>httk-v1 package<a class="headerlink" href="#httk-v1-package" title="Link to this heading">¶</a></h3>
+<p>The v1 form has no document member and uses the ordinary manager:</p>
+<div class="highlight-toml notranslate"><div class="highlight"><pre><span></span><span class="k">[workflow]</span>
+<span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"example.v1"</span>
+
+<span class="k">[workflow.runner]</span>
+<span class="n">language</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"httk-v1"</span>
+<span class="n">taskset</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"vasp"</span>
+<span class="n">attempts</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">10</span>
+
+<span class="k">[workflow.inputs.structure]</span>
+<span class="n">entry_type</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"structures"</span>
+
+<span class="k">[workflow.collect]</span>
+<span class="n">file</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">"collect.py"</span>
+</pre></div>
+</div>
+<p>The source directory must contain executable <code class="docutils literal notranslate"><span class="pre">ht_steps</span></code> or <code class="docutils literal notranslate"><span class="pre">ht_run</span></code>, including
+<code class="docutils literal notranslate"><span class="pre">.template</span></code> forms. <code class="docutils literal notranslate"><span class="pre">taskset</span></code> selects the claim pool and <code class="docutils literal notranslate"><span class="pre">attempts</span></code> sets the v1
+retry budget. <code class="docutils literal notranslate"><span class="pre">data_mode</span></code> and <code class="docutils literal notranslate"><span class="pre">workdir_mode</span></code> are forbidden: the realization
+forces no transactional data and persistent <code class="docutils literal notranslate"><span class="pre">ht.run.current</span></code>. The packaged
+<code class="docutils literal notranslate"><span class="pre">v1_runner.py</span></code> runs through the normal <code class="docutils literal notranslate"><span class="pre">path</span></code> executor, with no v1-specific
+manager or capability. See <a class="reference internal" href="v1_compatibility.html"><span class="doc">httk v1 task compatibility</span></a> for the environment entries
+and legacy runtime behavior.</p>
+</section>
+</section>
+<section id="bare-documents-and-one-shot-jobs">
+<h2>Bare documents and one-shot jobs<a class="headerlink" href="#bare-documents-and-one-shot-jobs" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">job</span> <span class="pre">new</span></code> recognizes a bare CWL document, a PWD <code class="docutils literal notranslate"><span class="pre">.json</span></code> graph, a jobflow Maker
+<code class="docutils literal notranslate"><span class="pre">.json</span></code> document, or a bare v1 template directory when its format is explicit:</p>
+<div class="highlight-console notranslate"><div class="highlight"><pre><span></span><span class="go">httk workflow job new --workspace WS --workflow flow.cwl --input message=echo</span>
+<span class="go">httk workflow job new --workspace WS --workflow workflow.json \</span>
+<span class="go">  --parameter pwd_module_path='["."]'</span>
+<span class="go">httk workflow job new --workspace WS --workflow maker.json</span>
+<span class="go">httk workflow job new --workspace WS --workflow ./v1-template --format httk-v1 \</span>
+<span class="go">  --parameter structure=structures/si.cif</span>
+</pre></div>
+</div>
+<p>Use the generic <code class="docutils literal notranslate"><span class="pre">--format</span> <span class="pre">LANG</span></code> option for any bare document or directory when
+matching by path is not appropriate. <code class="docutils literal notranslate"><span class="pre">cwl</span></code>, <code class="docutils literal notranslate"><span class="pre">pwd</span></code>, and <code class="docutils literal notranslate"><span class="pre">jobflow</span></code> select their
+corresponding bare document readers; <code class="docutils literal notranslate"><span class="pre">httk-v1</span></code> requires a directory and is
+never auto-matched. A manifest package directory and a registered workflow id
+reject <code class="docutils literal notranslate"><span class="pre">--format</span></code> because their language is already declared.</p>
+<p>The resolver synthesizes an anonymous workflow with id <code class="docutils literal notranslate"><span class="pre">&lt;language&gt;.&lt;stem&gt;</span></code>.
+Document input ports become hook-consumed inputs; document outputs become
+<code class="docutils literal notranslate"><span class="pre">records</span></code>-typed outputs and the resolver generates the declaration. A bare
+jobflow Maker document exposes only its <code class="docutils literal notranslate"><span class="pre">output</span></code> result, so inputs must be
+embedded in a Maker document or declared in a package. Bare PWD module roots
+come from <code class="docutils literal notranslate"><span class="pre">pwd_module_path</span></code>. Bare v1 template globals come from <code class="docutils literal notranslate"><span class="pre">--parameter</span></code>
+values.</p>
+<p><code class="docutils literal notranslate"><span class="pre">--input-from</span></code> may batch a document or package input. Campaign preparation is
+shared: the workflow is resolved and prepared once, then instantiated once per
+job. For httk-v1, the source package is snapshotted at preparation, so edits
+made during a campaign cannot leak into later jobs. Symlinks in a v1 package
+are rejected. Language-produced parameters are reserved; a caller collision is
+an error. <code class="docutils literal notranslate"><span class="pre">publish=</span></code> is ignored for language workflows because their
+realizations supply installed runners rather than copying them to the workspace
+runner store.</p>
+</section>
+<section id="collection">
+<h2>Collection<a class="headerlink" href="#collection" title="Link to this heading">¶</a></h2>
+<p>The collector chooses a registered provider’s collector first. A language
+job without a provider falls back through its job <code class="docutils literal notranslate"><span class="pre">workflow_language</span></code> parameter
+to the language default:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Language</p></th>
+<th class="head"><p>Default output document</p></th>
+<th class="head"><p>Default behavior</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p>CWL</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">cwl-outputs.json</span></code></p></td>
+<td><p>map ports to declared roles; single <code class="docutils literal notranslate"><span class="pre">File</span></code> values become <code class="docutils literal notranslate"><span class="pre">files</span></code> entries and lists remain <code class="docutils literal notranslate"><span class="pre">DataRecord</span></code> values</p></td>
+</tr>
+<tr class="row-odd"><td><p>PWD</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">pwd-outputs.json</span></code></p></td>
+<td><p>map ports to declared roles and create <code class="docutils literal notranslate"><span class="pre">DataRecord</span></code> values</p></td>
+</tr>
+<tr class="row-even"><td><p>jobflow</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">jobflow-outputs.json</span></code></p></td>
+<td><p>map <code class="docutils literal notranslate"><span class="pre">output</span></code> and optional <code class="docutils literal notranslate"><span class="pre">stored_data</span></code> to declared roles and create <code class="docutils literal notranslate"><span class="pre">DataRecord</span></code> values</p></td>
+</tr>
+<tr class="row-odd"><td><p>httk-v1</p></td>
+<td><p>none</p></td>
+<td><p>degrade unless the package declares <code class="docutils literal notranslate"><span class="pre">[workflow.collect]</span></code></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The registered provider’s custom hook is authoritative. Such a package records
+<code class="docutils literal notranslate"><span class="pre">workflow_collect</span> <span class="pre">=</span> <span class="pre">&quot;package&quot;</span></code> in the job; a provider-less collection
+degrades with a registration hint rather than silently running a language
+default. The <code class="docutils literal notranslate"><span class="pre">allow_job_collector</span></code> pinned-tree fallback is attempted only
+after the language fallback and only when its digest and manifest match the
+job. A failed language or hook collector degrades that job and does not
+stop collection of its siblings.</p>
+<p>The default CWL/PWD/jobflow collectors read the output JSON from the workdir or
+transactional data tree, map document ports to manifest roles, and return
+<code class="docutils literal notranslate"><span class="pre">DataRecord</span></code> values. CWL single <code class="docutils literal notranslate"><span class="pre">File</span></code> outputs additionally require a readable
+path inside the workspace, workdir, or data tree and become standard <code class="docutils literal notranslate"><span class="pre">files</span></code>
+entries; file lists retain their descriptor values and record sha256 evidence.</p>
+</section>
+<section id="cwl-supported-subset">
+<h2>CWL supported subset<a class="headerlink" href="#cwl-supported-subset" title="Link to this heading">¶</a></h2>
+<p>CWL is parsed by cwl-utils and normalized into a self-contained JSON plan.
+<code class="docutils literal notranslate"><span class="pre">run:</span></code> references are inlined. The runner executes these features:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Feature</p></th>
+<th class="head"><p>Supported</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">class</span></code></p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">Workflow</span></code>, <code class="docutils literal notranslate"><span class="pre">CommandLineTool</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">cwlVersion</span></code></p></td>
+<td><p>v1.0, v1.1, v1.2; older versions are upgraded when cwl-upgrader is installed</p></td>
+</tr>
+<tr class="row-even"><td><p>types</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">File</span></code>, <code class="docutils literal notranslate"><span class="pre">Directory</span></code>, <code class="docutils literal notranslate"><span class="pre">string</span></code>, <code class="docutils literal notranslate"><span class="pre">int</span></code>, <code class="docutils literal notranslate"><span class="pre">long</span></code>, <code class="docutils literal notranslate"><span class="pre">float</span></code>, <code class="docutils literal notranslate"><span class="pre">double</span></code>, <code class="docutils literal notranslate"><span class="pre">boolean</span></code>, <code class="docutils literal notranslate"><span class="pre">Any</span></code>, arrays, optional forms</p></td>
+</tr>
+<tr class="row-odd"><td><p>command</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">baseCommand</span></code>, <code class="docutils literal notranslate"><span class="pre">arguments</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>input bindings</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">position</span></code>, <code class="docutils literal notranslate"><span class="pre">prefix</span></code>, <code class="docutils literal notranslate"><span class="pre">separate</span></code>, <code class="docutils literal notranslate"><span class="pre">itemSeparator</span></code>, plain-reference <code class="docutils literal notranslate"><span class="pre">valueFrom</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>outputs</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">outputBinding.glob</span></code> with <code class="docutils literal notranslate"><span class="pre">loadContents</span></code>, <code class="docutils literal notranslate"><span class="pre">stdout</span></code>, <code class="docutils literal notranslate"><span class="pre">stderr</span></code> shortcuts</p></td>
+</tr>
+<tr class="row-even"><td><p>redirection</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">stdout</span></code>, <code class="docutils literal notranslate"><span class="pre">stderr</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>step inputs</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">source</span></code>, <code class="docutils literal notranslate"><span class="pre">default</span></code>, <code class="docutils literal notranslate"><span class="pre">linkMerge</span></code> (<code class="docutils literal notranslate"><span class="pre">merge_nested</span></code>, <code class="docutils literal notranslate"><span class="pre">merge_flattened</span></code>), plain-reference <code class="docutils literal notranslate"><span class="pre">valueFrom</span></code></p></td>
+</tr>
+<tr class="row-even"><td><p>scatter</p></td>
+<td><p>one input, or equal-length inputs with <code class="docutils literal notranslate"><span class="pre">scatterMethod:</span> <span class="pre">dotproduct</span></code></p></td>
+</tr>
+<tr class="row-odd"><td><p>subworkflows</p></td>
+<td><p>any depth</p></td>
+</tr>
+<tr class="row-even"><td><p>conditionals</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">when</span></code> as one plain parameter reference</p></td>
+</tr>
+<tr class="row-odd"><td><p>requirements</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">EnvVarRequirement</span></code> and <code class="docutils literal notranslate"><span class="pre">ToolTimeLimit</span></code> honoured; resource and feature requirements recorded</p></td>
+</tr>
+<tr class="row-even"><td><p>expressions</p></td>
+<td><p><code class="docutils literal notranslate"><span class="pre">$(inputs.x)</span></code>, <code class="docutils literal notranslate"><span class="pre">$(inputs.x.path)</span></code>, <code class="docutils literal notranslate"><span class="pre">$(runtime.outdir)</span></code>, and interpolated plain references</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The following are refused before submission:</p>
+<div class="table-wrapper colwidths-auto docutils container">
+<table class="docutils align-default">
+<thead>
+<tr class="row-odd"><th class="head"><p>Refused</p></th>
+<th class="head"><p>Why</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">InlineJavascriptRequirement</span></code>, <code class="docutils literal notranslate"><span class="pre">${…}</span></code>, computed <code class="docutils literal notranslate"><span class="pre">$(…)</span></code></p></td>
+<td><p>no JavaScript engine</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">ExpressionTool</span></code>, <code class="docutils literal notranslate"><span class="pre">Operation</span></code></p></td>
+<td><p>no executable process</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">ShellCommandRequirement</span></code>, <code class="docutils literal notranslate"><span class="pre">stdin</span></code></p></td>
+<td><p>the runner uses an argument vector, not a shell command line</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">InitialWorkDirRequirement</span></code></p></td>
+<td><p>the runner stages named inputs, not a listing-built workdir</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">SchemaDefRequirement</span></code>, record and enum types</p></td>
+<td><p>outside the supported type set</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">nested_crossproduct</span></code>, <code class="docutils literal notranslate"><span class="pre">flat_crossproduct</span></code></p></td>
+<td><p>only <code class="docutils literal notranslate"><span class="pre">dotproduct</span></code> scatter is implemented</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">streamable</span></code>, <code class="docutils literal notranslate"><span class="pre">secondaryFiles</span></code></p></td>
+<td><p>whole named files only</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">outputEval</span></code></p></td>
+<td><p>glob matches are collected unchanged</p></td>
+</tr>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">InplaceUpdateRequirement</span></code></p></td>
+<td><p>tools do not write input files</p></td>
+</tr>
+<tr class="row-odd"><td><p>CWL v1.2 loops and complex <code class="docutils literal notranslate"><span class="pre">when</span></code></p></td>
+<td><p>no loop or computed conditional support</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code class="docutils literal notranslate"><span class="pre">DockerRequirement</span></code> is recorded as the <code class="docutils literal notranslate"><span class="pre">docker</span></code> capability and warned about;
+the runner executes directly and does not pull, build, or enter an image.
+Unsupported hints are dropped with a warning. Failures include
+<code class="docutils literal notranslate"><span class="pre">cwl.tool_failed</span></code>, <code class="docutils literal notranslate"><span class="pre">cwl.input_missing</span></code>, <code class="docutils literal notranslate"><span class="pre">cwl.output_missing</span></code>,
+<code class="docutils literal notranslate"><span class="pre">cwl.scatter_invalid</span></code>, <code class="docutils literal notranslate"><span class="pre">cwl.unsatisfiable</span></code>, and <code class="docutils literal notranslate"><span class="pre">cwl.child_invalid</span></code>.</p>
+</section>
+<section id="python-api-and-registry">
+<h2>Python API and registry<a class="headerlink" href="#python-api-and-registry" title="Link to this heading">¶</a></h2>
+<p>The language registry is available through
+<code class="docutils literal notranslate"><span class="pre">httk.workflow.languages.available_languages()</span></code>, <code class="docutils literal notranslate"><span class="pre">language(name)</span></code>,
+<code class="docutils literal notranslate"><span class="pre">match_document(path)</span></code>, <code class="docutils literal notranslate"><span class="pre">runner_path(package,</span> <span class="pre">name)</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">runner_reference(package,</span> <span class="pre">name)</span></code>. The language-specific loaders remain
+available at <code class="docutils literal notranslate"><span class="pre">httk.workflow.languages.cwl.load_cwl_plan</span></code> and
+<code class="docutils literal notranslate"><span class="pre">httk.workflow.languages.pwd.load_pwd_document</span></code>. Jobflow exposes
+<code class="docutils literal notranslate"><span class="pre">httk.workflow.languages.jobflow.document_from_maker</span></code> for creating a document
+from an MSONable Maker.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">httk.workflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">Workspace</span><span class="p">,</span> <span class="n">new_job</span>
+
+<span class="n">workspace</span> <span class="o">=</span> <span class="n">Workspace</span><span class="p">(</span><span class="s2">"workflow-workspace"</span><span class="p">)</span>
+<span class="n">job</span> <span class="o">=</span> <span class="n">new_job</span><span class="p">(</span><span class="n">workspace</span><span class="p">,</span> <span class="s2">"flow.cwl"</span><span class="p">,</span> <span class="n">inputs</span><span class="o">=</span><span class="p">{</span><span class="s2">"message"</span><span class="p">:</span> <span class="s2">"echo"</span><span class="p">})</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">job</span><span class="o">.</span><span class="n">job_key</span><span class="p">)</span>
+</pre></div>
+</div>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="taskmanager.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Task-manager usage</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="collecting.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Collecting results</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Workflow-language runner realizations</a><ul>
+<li><a class="reference internal" href="#language-packages">Language packages</a><ul>
+<li><a class="reference internal" href="#cwl-package">CWL package</a></li>
+<li><a class="reference internal" href="#pwd-package">PWD package</a></li>
+<li><a class="reference internal" href="#jobflow-package">jobflow package</a></li>
+<li><a class="reference internal" href="#httk-v1-package">httk-v1 package</a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#bare-documents-and-one-shot-jobs">Bare documents and one-shot jobs</a></li>
+<li><a class="reference internal" href="#collection">Collection</a></li>
+<li><a class="reference internal" href="#cwl-supported-subset">CWL supported subset</a></li>
+<li><a class="reference internal" href="#python-api-and-registry">Python API and registry</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="_static/documentation_options.js?v=fe42cd0d"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=fd10adb8"></script>
+    <script src="_static/selector.js?v=e591e119"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:main","versionPathDepth":2};</script>
+    </body>
+</html>

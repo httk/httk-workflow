@@ -1,0 +1,503 @@
+httk.workflow.languages.cwl
+===========================
+
+.. py:module:: httk.workflow.languages.cwl
+
+.. autoapi-nested-parse::
+
+   Run one CWL document as one *httk₂* job.
+
+   The `Common Workflow Language <https://www.commonwl.org/>`_ is supported here as
+   a workflow **language**, not as an execution engine. A document is parsed and
+   validated with `cwl-utils <https://github.com/common-workflow-language/cwl-utils>`_,
+   normalized into one self-contained JSON plan, and then executed entirely by
+   *httk₂*'s own packaged ``cwl_runner.py`` on *httk₂*'s own manager: claims, leases,
+   attempts, checkpoints, labeled children and journalled state frames are the same
+   ones every other job of a workspace gets. **cwltool is not used, not bundled and
+   never invoked.**
+
+   .. code-block:: python
+
+       from httk.workflow import Workspace, new_job
+
+       workspace = Workspace.initialize("workflow-workspace")
+       job = new_job(workspace, "flow.cwl", inputs={"message": "hello"})
+       print(job.job_key)
+
+   Parsing needs the optional extra::
+
+       pip install httk-workflow[cwl]
+
+   which brings *cwl-utils* and *cwl-upgrader*. Nothing else in *httk-workflow*
+   depends on either, and the packaged runner that executes the normalized plan
+   needs neither: the plan is plain JSON, so the machine that *runs* an imported CWL
+   job does not need a CWL library at all.
+
+   The supported subset
+   --------------------
+
+   Supported: ``Workflow`` and ``CommandLineTool`` of CWL v1.0, v1.1 and v1.2
+   (older versions are upgraded when *cwl-upgrader* is installed); ``baseCommand``
+   and ``arguments``; input bindings with ``position``, ``prefix``, ``separate``
+   and ``itemSeparator``; the types ``File``, ``Directory``, ``string``, ``int``,
+   ``long``, ``float``, ``double``, ``boolean``, ``Any``, arrays of those, and
+   optional (``?``) forms of all of them; ``stdout``/``stderr`` shortcuts and
+   ``stdout``/``stderr`` redirection; output collection through
+   ``outputBinding.glob`` with ``loadContents``; ``EnvVarRequirement``,
+   ``ResourceRequirement`` (recorded), ``ToolTimeLimit`` (honoured),
+   ``successCodes``; workflow steps with ``source``, ``default``, ``linkMerge`` and
+   plain-reference ``valueFrom``; single-input ``scatter`` and ``dotproduct``
+   ``scatter``; subworkflows; and ``when`` written as one plain parameter
+   reference.
+
+   Rejected, always with the feature name and where it was found: any JavaScript
+   (``InlineJavascriptRequirement``, ``${...}`` bodies, and anything inside
+   ``$(...)`` beyond a plain ``inputs.x``/``runtime.x`` reference), ``ExpressionTool``
+   and ``Operation``, ``nested_crossproduct`` and ``flat_crossproduct``,
+   ``streamable`` inputs and outputs, ``secondaryFiles``, ``outputEval``,
+   ``ShellCommandRequirement``, ``SchemaDefRequirement``,
+   ``InitialWorkDirRequirement``, ``stdin`` redirection, record and enum schemas,
+   and CWL v1.2 loops.
+
+   ``DockerRequirement`` is neither rejected nor honoured: it is recorded as the
+   required capability ``docker`` on the job — so only a manager declaring that
+   capability will claim it — and reported as a warning, because *httk₂* runs the
+   command directly and does not pull, build or enter the image.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.languages.cwl.FILES_DIRECTORY
+   httk.workflow.languages.cwl.PACKAGE
+   httk.workflow.languages.cwl.RUNNER
+   httk.workflow.languages.cwl.DOCUMENT_FILE
+   httk.workflow.languages.cwl.INPUTS_FILE
+   httk.workflow.languages.cwl.STAGED_DIRECTORY
+   httk.workflow.languages.cwl.DOCKER_CAPABILITY
+   httk.workflow.languages.cwl.LANGUAGE
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.workflow.languages.cwl.LanguageOutputsMissingError
+   httk.workflow.languages.cwl.UnsupportedCwlError
+   httk.workflow.languages.cwl.CwlImportError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.languages.cwl.LanguagePorts
+   httk.workflow.languages.cwl.LanguageRequest
+   httk.workflow.languages.cwl.LanguageScaffold
+   httk.workflow.languages.cwl.WorkflowLanguage
+   httk.workflow.languages.cwl.CwlNotes
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.languages.cwl.runner_reference
+   httk.workflow.languages.cwl.payload_relative
+   httk.workflow.languages.cwl.load_cwl_plan
+   httk.workflow.languages.cwl.collect
+   httk.workflow.languages.cwl.load_cwl_inputs
+   httk.workflow.languages.cwl.stage_cwl_inputs
+
+
+Package Contents
+----------------
+
+.. py:exception:: LanguageOutputsMissingError
+
+   Bases: :py:obj:`ValueError`
+
+
+   A language job has no readable published outputs document.
+
+
+.. py:class:: LanguagePorts
+
+   The named input and output ports of one language document.
+
+   :param inputs: Names of the document's input ports.
+   :param outputs: Names of the document's output ports.
+
+
+   .. py:attribute:: inputs
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: outputs
+      :type:  tuple[str, Ellipsis]
+
+
+.. py:class:: LanguageRequest
+
+   The data supplied when preparing one language workflow.
+
+   :param workflow_id: Identify the workflow being prepared.
+   :param directory: Locate the workflow package, when it has one.
+   :param document: Locate the source workflow document, when it has one.
+   :param runner_options: Supply options for the language runner.
+   :param inputs: Describe the workflow inputs.
+   :param outputs: Describe the requested workflow outputs.
+   :param parameters: Describe the declared workflow parameters.
+   :param environment: Describe the declared workflow environment.
+   :param excluded_members: Package members the realization must not stage.
+
+
+   .. py:attribute:: workflow_id
+      :type:  str
+
+
+   .. py:attribute:: directory
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: document
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: runner_options
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: inputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: outputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: environment
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: excluded_members
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+.. py:class:: LanguageScaffold
+
+   The files, runner, and hooks prepared for one language workflow.
+
+   :param documents: Text or byte documents to write into the payload.
+   :param files: Files to stage into the payload.
+   :param parameters: Job parameters produced by preparation.
+   :param runner: Runner description for the job, when one is supplied.
+   :param runner_executor: Select the runner executor.
+   :param payload_runner: Name a runner staged in the payload.
+   :param workdir_path: Name the workdir below the job payload.
+   :param required_capabilities: Require these manager capabilities.
+   :param reserved_parameters: Names reserved for per-job realization output.
+   :param warnings: Preserve preparation warnings.
+   :param instantiate: Supply the per-job hook called after input staging.
+   :param finalize: Transform the per-job ``JobSpec`` immediately before its payload is prepared.
+
+
+   .. py:attribute:: documents
+      :type:  collections.abc.Mapping[str, str | bytes]
+
+
+   .. py:attribute:: files
+      :type:  collections.abc.Mapping[str, pathlib.Path]
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: runner
+      :type:  collections.abc.Mapping[str, object] | None
+
+
+   .. py:attribute:: runner_executor
+      :type:  str
+      :value: 'path'
+
+
+
+   .. py:attribute:: payload_runner
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: workdir_path
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: required_capabilities
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: reserved_parameters
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: warnings
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: instantiate
+      :type:  collections.abc.Callable[[httk.workflow.scaffold.InstantiateContext], object] | None
+      :value: None
+
+
+
+   .. py:attribute:: finalize
+      :type:  collections.abc.Callable[[httk.workflow.runtime_builders.JobSpec], httk.workflow.runtime_builders.JobSpec] | None
+      :value: None
+
+
+
+.. py:class:: WorkflowLanguage
+
+   The operations a workflow language exposes to the common layer.
+
+   :param name: Name the language.
+   :param steps: Declare the runner's steps.
+   :param initial_step: Select the runner's initial step.
+   :param matches: Identify documents belonging to the language.
+   :param ports: Read the input and output ports of a document.
+   :param validate_runner: Validate runner options for a document.
+   :param prepare: Prepare a language request for execution.
+   :param collect: Convert a completed job record into language outputs.
+   :param document_policy: State whether package manifests require, allow, or forbid a source document.
+   :param open_ports: Skip manifest port validation when document ports cannot be enumerated statically.
+   :param has_default_collector: Provide a default collector path.
+   :param allows_modes: Permit manifest data and workdir mode overrides.
+   :param environment: Declare language-provided environment metadata.
+   :param required_modules: Name the importable modules a job of this language needs at run time.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: steps
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: initial_step
+      :type:  str
+
+
+   .. py:attribute:: matches
+      :type:  collections.abc.Callable[[pathlib.Path], bool]
+
+
+   .. py:attribute:: ports
+      :type:  collections.abc.Callable[[pathlib.Path], LanguagePorts]
+
+
+   .. py:attribute:: validate_runner
+      :type:  collections.abc.Callable[[collections.abc.Mapping[str, object], pathlib.Path], None]
+
+
+   .. py:attribute:: prepare
+      :type:  collections.abc.Callable[[LanguageRequest], LanguageScaffold]
+
+
+   .. py:attribute:: collect
+      :type:  collections.abc.Callable[[httk.workflow.collecting.JobRecord], collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: document_policy
+      :type:  DocumentPolicy
+      :value: 'required'
+
+
+
+   .. py:attribute:: open_ports
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: has_default_collector
+      :type:  bool
+      :value: True
+
+
+
+   .. py:attribute:: allows_modes
+      :type:  bool
+      :value: True
+
+
+
+   .. py:attribute:: environment
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: required_modules
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+.. py:function:: runner_reference(package, name)
+
+   Return the ``runner`` member of a ``job.json`` running one packaged runner.
+
+   The reserved ``pkg:`` form names the runner inside its own consumer package,
+   and the digest is taken from the installed bytes, which is exactly what the
+   manager verifies before it stages and executes them.
+
+
+.. py:data:: FILES_DIRECTORY
+   :value: 'files'
+
+
+.. py:function:: payload_relative(name)
+
+   Return where one staged file lands inside a payload.
+
+   A bare name lands in :data:`~httk.workflow.scaffold.FILES_DIRECTORY`, so ``POSCAR`` becomes
+   ``files/POSCAR`` — where the packaged runners read it — and a name that
+   carries a directory of its own is used exactly as it is written.
+
+   :param name: Name the staged file within the payload.
+   :return: The validated payload-relative destination.
+   :raises httk.workflow.errors.FormatError: If the name uses a reserved payload member.
+   :raises ValueError: If the name is empty or absolute.
+
+
+.. py:data:: PACKAGE
+   :value: 'httk.workflow.languages.cwl'
+
+
+.. py:data:: RUNNER
+   :value: 'cwl_runner.py'
+
+
+.. py:data:: DOCUMENT_FILE
+   :value: 'files/workflow.cwl.json'
+
+
+.. py:data:: INPUTS_FILE
+   :value: 'files/inputs.json'
+
+
+.. py:data:: STAGED_DIRECTORY
+   :value: 'files/inputs'
+
+
+.. py:data:: DOCKER_CAPABILITY
+   :value: 'docker'
+
+
+.. py:exception:: UnsupportedCwlError
+
+   Bases: :py:obj:`ValueError`
+
+
+   One CWL feature outside the subset *httk₂* executes.
+
+
+.. py:exception:: CwlImportError
+
+   Bases: :py:obj:`ValueError`
+
+
+   A CWL document that cannot be read, parsed or staged at all.
+
+
+.. py:class:: CwlNotes
+
+   What one normalization pass accumulates besides the plan itself.
+
+   A note is never a refusal: everything here was accepted, and every entry is
+   something an operator should nevertheless be told — a container that will not
+   be entered, a hint that was dropped — or something the job must carry, like
+   the capabilities a document implies.
+
+   :param warnings: Collect accepted caveats in discovery order.
+   :param capabilities: Collect manager capabilities required by the document.
+
+
+   .. py:attribute:: warnings
+      :type:  list[str]
+      :value: []
+
+
+
+   .. py:attribute:: capabilities
+      :type:  set[str]
+
+
+.. py:function:: load_cwl_plan(workflow_path)
+
+   Parse, check and normalize one CWL document into the plan httk executes.
+
+   :param workflow_path: Read the CWL document at this path.
+   :return: The normalized plan and accepted import notes.
+   :raises httk.workflow.languages.cwl.CwlImportError: If the document cannot be read or parsed.
+   :raises OSError: If accessing the workflow path fails while reading its declared version.
+   :raises UnicodeError: If the workflow path is not valid UTF-8 while reading its declared version.
+   :raises httk.workflow.languages.cwl.UnsupportedCwlError: If the document uses an unsupported CWL feature.
+
+
+.. py:function:: collect(record)
+
+   Convert one CWL runner output document into provenance-capable records.
+
+
+.. py:data:: LANGUAGE
+
+.. py:function:: load_cwl_inputs(inputs_path)
+
+   Read one CWL input object, as YAML when a YAML reader is installed.
+
+   :param inputs_path: Read the CWL input object at this path.
+   :return: The input values keyed by CWL input name.
+   :raises httk.workflow.languages.cwl.CwlImportError: If the input object cannot be read or is not a mapping.
+   :raises OSError: If the input path cannot be read.
+   :raises UnicodeError: If the input path is not valid UTF-8.
+
+
+.. py:function:: stage_cwl_inputs(values, base, documents, files)
+
+   Return the input object with every File and Directory staged in the payload.
+
+   A staged entry carries a payload-relative ``payload`` member instead of a
+   ``path``, so the job is self-contained: it travels to another machine with
+   the files its first tool reads.
+
+   :param values: Stage these decoded CWL input values.
+   :param base: Resolve relative input paths from this directory.
+   :param documents: Add literal files and normalized documents to this mapping.
+   :param files: Add source files to this mapping for payload staging.
+   :return: The input values rewritten with payload-relative paths.
+   :raises httk.workflow.languages.cwl.CwlImportError: If a local input path is missing or invalid.
+   :raises httk.workflow.languages.cwl.UnsupportedCwlError: If an input uses an unsupported CWL feature.
+
+

@@ -1,0 +1,184 @@
+httk.workflow.hygiene
+=====================
+
+.. py:module:: httk.workflow.hygiene
+
+.. autoapi-nested-parse::
+
+   Describe and repair a project, its remotes, and its workspace.
+
+   Everything here answers an operator question about state that already exists:
+   *what is this project*, *what is this remote configured to do*, *what is wrong
+   with this project and can it be fixed*. Nothing here is on the execution path of
+   a job, and every repair is explicit — :func:`project_doctor` reports by default
+   and only changes something when it is asked to.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.hygiene.PROJECT_DESCRIPTION_FORMAT
+   httk.workflow.hygiene.REMOTE_DESCRIPTION_FORMAT
+   httk.workflow.hygiene.DOCTOR_REPORT_FORMAT
+   httk.workflow.hygiene.DOCTOR_FRAME_FORMAT
+   httk.workflow.hygiene.TMP_MAXIMUM_AGE_SECONDS
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.hygiene.Finding
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.hygiene.describe_project
+   httk.workflow.hygiene.describe_remote
+   httk.workflow.hygiene.remove_remote
+   httk.workflow.hygiene.project_doctor
+
+
+Module Contents
+---------------
+
+.. py:data:: PROJECT_DESCRIPTION_FORMAT
+   :value: 'httk-project-description'
+
+
+.. py:data:: REMOTE_DESCRIPTION_FORMAT
+   :value: 'httk-remote-description'
+
+
+.. py:data:: DOCTOR_REPORT_FORMAT
+   :value: 'httk-project-doctor'
+
+
+.. py:data:: DOCTOR_FRAME_FORMAT
+   :value: 'httk-workflow-doctor'
+
+
+.. py:data:: TMP_MAXIMUM_AGE_SECONDS
+   :value: 86400
+
+
+.. py:function:: describe_project(project_root = None, *, verify = True)
+
+   Describe one project: its metadata, its keys, its workspace, its manifest.
+
+   *verify* walks the tree to classify the manifest, which is what makes the
+   description say whether the project is *currently* described by what it
+   signed; by design, pass ``False`` for a cheap answer when verification is
+   not required, because that skips the tree walk.
+
+   :param project_root: Project directory, or the discovered project.
+   :param verify: Whether to verify the project manifest contents.
+   :return: JSON-compatible project description.
+
+
+.. py:function:: describe_remote(name, *, project = None)
+
+   Describe one remote: where it lives, what it is, how it is configured.
+
+   Credential values never appear. A remote's settings are reported with the
+   file each one came from, and for a setting stored in the manifest-excluded
+   ``credentials.json`` only its *name* is reported: a description an operator
+   can paste into a bug report must never carry a password.
+
+   :param name: Remote bundle name.
+   :param project: Project directory used for project-local lookup.
+   :return: JSON-compatible remote description.
+   :raises ValueError: If the remote name is invalid or unknown.
+
+
+.. py:function:: remove_remote(name, *, project = None)
+
+   Remove one remote bundle, refusing while a transfer still needs it.
+
+   A sealed bundle that has not been acknowledged is work this remote still
+   owes an answer about, and the adapter is how that answer is fetched.
+   Removing the remote would leave the transfer with no way home, so it is
+   refused by name — retire or fetch the transfer first.
+
+   :param name: Remote bundle name.
+   :param project: Project directory used for project-local lookup.
+   :return: JSON-compatible removal result.
+   :raises ValueError: If the remote is invalid, unknown, or still has transfers.
+
+
+.. py:class:: Finding
+
+   Describe one thing the doctor looked at and what it found.
+
+   :param check: Check name.
+   :param status: Check result status.
+   :param message: Human-readable result.
+   :param repairable: Whether the finding can be repaired automatically.
+   :param repaired: Whether this run repaired the finding.
+   :param action: Repair action, when one was taken.
+   :param details: Structured result details.
+
+
+   .. py:attribute:: check
+      :type:  str
+
+
+   .. py:attribute:: status
+      :type:  str
+
+
+   .. py:attribute:: message
+      :type:  str
+
+
+   .. py:attribute:: repairable
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: repaired
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: action
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: details
+      :type:  dict[str, object]
+
+
+   .. py:method:: as_mapping()
+
+      Return the JSON representation of this finding.
+
+      :return: JSON-compatible finding members.
+
+
+
+.. py:function:: project_doctor(project_root = None, *, repair = False)
+
+   Check one project for the conditions that quietly break it later.
+
+   Every check reports; a check that can be fixed automatically is fixed only
+   when *repair* is asked for, and a run that repaired anything says exactly
+   what it did — in the log and, when the project has a workspace, in that
+   workspace's journal, so the repair is part of its durable history.
+
+   :param project_root: Project directory, or the discovered project.
+   :param repair: Whether to apply automatic repairs.
+   :return: JSON-compatible doctor report.
+
+

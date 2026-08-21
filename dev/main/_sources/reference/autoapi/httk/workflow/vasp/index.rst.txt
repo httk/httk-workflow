@@ -1,0 +1,793 @@
+httk.workflow.vasp
+==================
+
+.. py:module:: httk.workflow.vasp
+
+.. autoapi-nested-parse::
+
+   Small, dependency-free VASP runner helpers for native v2 workflows.
+
+   This is an independent, data-oriented interface rather than a port of the
+   historic ``VASP_*`` Python or shell APIs. Historical authorship is documented
+   in ``v1_runtime/NOTICE``.
+
+   The implementation is split across cohesive sibling modules — ``inputs``,
+   ``diagnostics``, ``remedies``, and ``reports`` — and this package is a thin
+   public facade that re-exports their surface unchanged. Importing the package
+   also registers the packaged VASP workflows with the generic scaffold (see the
+   ``workflows`` module), which is how ``httk workflow job new --workflow
+   vasp-relax`` resolves a runner the scaffold never names.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.vasp.VASP_RESTART_ARTIFACTS
+   httk.workflow.vasp.DEFAULT_KPOINT_CENTERING
+   httk.workflow.vasp.KPOINT_CENTERINGS
+   httk.workflow.vasp.DEFAULT_REMEDY_HISTORY
+   httk.workflow.vasp.REMEDY_OPERATIONS
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.vasp.PoscarHeader
+   httk.workflow.vasp.PotcarAssembly
+   httk.workflow.vasp.PotcarChoice
+   httk.workflow.vasp.VaspPreparationOptions
+   httk.workflow.vasp.RemedyPolicy
+   httk.workflow.vasp.VaspRemedyDecision
+   httk.workflow.vasp.VaspRunReport
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.vasp.clean_outcar
+   httk.workflow.vasp.clean_vasp_outputs
+   httk.workflow.vasp.diagnose_vasp_files
+   httk.workflow.vasp.last_oszicar_energy
+   httk.workflow.vasp.last_vasprun_volume
+   httk.workflow.vasp.outcar_plane_wave_count
+   httk.workflow.vasp.outcar_potim
+   httk.workflow.vasp.validate_vasp_workdir
+   httk.workflow.vasp.assemble_potcar
+   httk.workflow.vasp.automatic_kpoint_grid
+   httk.workflow.vasp.calculate_nbands
+   httk.workflow.vasp.contcar_to_poscar
+   httk.workflow.vasp.derive_seed
+   httk.workflow.vasp.normalize_poscar_handedness
+   httk.workflow.vasp.potcar_summary
+   httk.workflow.vasp.prepare_vasp_inputs
+   httk.workflow.vasp.rattle_poscar
+   httk.workflow.vasp.read_incar
+   httk.workflow.vasp.read_poscar_header
+   httk.workflow.vasp.scale_poscar_lattice
+   httk.workflow.vasp.suggested_magnetic_moments
+   httk.workflow.vasp.update_incar
+   httk.workflow.vasp.write_automatic_kpoints
+   httk.workflow.vasp.apply_vasp_remedy
+   httk.workflow.vasp.job_remedy_history_path
+   httk.workflow.vasp.plan_vasp_remedy
+   httk.workflow.vasp.register_remedy_policy
+   httk.workflow.vasp.remedy_policy
+   httk.workflow.vasp.remedy_policy_names
+   httk.workflow.vasp.run_vasp
+
+
+Package Contents
+----------------
+
+.. py:data:: VASP_RESTART_ARTIFACTS
+   :type:  tuple[str, Ellipsis]
+   :value: ('CONTCAR', 'vasp-run-report.json')
+
+
+.. py:function:: clean_outcar(path = 'OUTCAR', output = 'OUTCAR.cleaned')
+
+   Remove the largest reproducible k-point detail blocks from OUTCAR.
+
+   :param path: Read the OUTCAR file at this path.
+   :param output: Write the cleaned OUTCAR to this path.
+   :return: The cleaned output path.
+
+
+.. py:function:: clean_vasp_outputs(directory = '.', *, keep = (), also_remove = ())
+
+   Remove standard rerun outputs while preserving declared names.
+
+   The files in :data:`VASP_RESTART_ARTIFACTS` — ``CONTCAR`` and
+   ``vasp-run-report.json`` — are kept even without *keep*, because they are what
+   the remedy machinery and restart promotion read: a pre-run cleanup that
+   deletes them destroys the evidence of the run it is cleaning up after. Name
+   them in *also_remove* to delete them anyway.
+
+   :param directory: Remove outputs from this directory.
+   :param keep: Preserve these output names.
+   :param also_remove: Allow restart artifacts to be removed by naming them here.
+   :return: The paths removed from the directory.
+   :raises ValueError: If an output to remove is not a regular file.
+
+
+.. py:function:: diagnose_vasp_files(directory = '.')
+
+   Diagnose completion and final convergence from VASP output files.
+
+   :param directory: Read VASP output files from this directory.
+   :return: Diagnostics inferred from the available output files.
+
+
+.. py:function:: last_oszicar_energy(path = 'OSZICAR')
+
+   Return the final ``E0`` value, or ``None`` when it is absent.
+
+   :param path: Read the OSZICAR file at this path.
+   :return: The final parsed ``E0`` value, or ``None`` when no value is found.
+
+
+.. py:function:: last_vasprun_volume(path = 'vasprun.xml')
+
+   Return the final volume reported by ``vasprun.xml``.
+
+   :param path: Read the vasprun XML file at this path.
+   :return: The final parsed volume, or ``None`` when no volume is found.
+
+
+.. py:function:: outcar_plane_wave_count(path = 'OUTCAR')
+
+   Return OUTCAR's maximum plane-wave count.
+
+   :param path: Read the OUTCAR file at this path.
+   :return: The parsed maximum plane-wave count, or ``None`` when absent.
+
+
+.. py:function:: outcar_potim(path = 'OUTCAR')
+
+   Return the last optimizer step size from OUTCAR.
+
+   :param path: Read the OUTCAR file at this path.
+   :return: The last parsed optimizer step size, or ``None`` when absent.
+
+
+.. py:function:: validate_vasp_workdir(path = '.', *, maximum_length = 240)
+
+   Validate VASP's conservative absolute-path length constraint.
+
+   :param path: Resolve and validate this workdir path.
+   :param maximum_length: Reject resolved paths longer than this byte length.
+   :return: The resolved workdir path.
+   :raises ValueError: If the limit is invalid or the resolved path is too long.
+
+
+.. py:data:: DEFAULT_KPOINT_CENTERING
+   :value: 'Monkhorst-Pack'
+
+
+.. py:data:: KPOINT_CENTERINGS
+   :value: ('Gamma', 'Monkhorst-Pack')
+
+
+.. py:class:: PoscarHeader
+
+   The VASP-5 header information needed by execution helpers.
+
+   :param comment: Preserve the POSCAR comment line.
+   :param scale: Preserve the universal POSCAR scale.
+   :param lattice: Preserve the three lattice vectors.
+   :param species: Preserve the VASP-5 species names.
+   :param counts: Preserve the atom count for each species.
+
+
+   .. py:attribute:: comment
+      :type:  str
+
+
+   .. py:attribute:: scale
+      :type:  float
+
+
+   .. py:attribute:: lattice
+      :type:  tuple[tuple[float, float, float], Ellipsis]
+
+
+   .. py:attribute:: species
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: counts
+      :type:  tuple[int, Ellipsis]
+
+
+.. py:class:: PotcarAssembly
+
+   One assembled POTCAR and the provenance of every piece in it.
+
+   :param path: Record the assembled POTCAR path.
+   :param library: Record the pseudopotential library root.
+   :param choices: Record the selected potential for each species.
+   :param provenance: Record the provenance output path.
+
+
+   .. py:attribute:: path
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: library
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: choices
+      :type:  tuple[PotcarChoice, Ellipsis]
+
+
+   .. py:attribute:: provenance
+      :type:  pathlib.Path
+
+
+   .. py:method:: as_mapping()
+
+      Serialize the assembly provenance.
+
+      :return: The JSON-compatible provenance mapping.
+
+
+
+.. py:class:: PotcarChoice
+
+   Which pseudopotential of a library one species was given.
+
+   The suffix policy of :func:`assemble_potcar` silently prefers one PAW variant
+   over another, and the choice changes the numbers a calculation produces, so
+   every choice is recorded: the variant directory, the suffix that selected it,
+   the full source path, its digest, and the ``TITEL`` the potential names
+   itself with.
+
+   :param species: Record the POSCAR species name.
+   :param variant: Record the selected pseudopotential directory name.
+   :param suffix: Record the suffix selected for the species.
+   :param source: Record the source potential path.
+   :param sha256: Record the source file digest.
+   :param titel: Record the potential's ``TITEL`` value, when present.
+
+
+   .. py:attribute:: species
+      :type:  str
+
+
+   .. py:attribute:: variant
+      :type:  str
+
+
+   .. py:attribute:: suffix
+      :type:  str
+
+
+   .. py:attribute:: source
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: sha256
+      :type:  str
+
+
+   .. py:attribute:: titel
+      :type:  str | None
+
+
+   .. py:method:: as_mapping()
+
+      Serialize the potential choice.
+
+      :return: The JSON-compatible choice mapping.
+
+
+
+.. py:class:: VaspPreparationOptions
+
+   Options for dependency-free VASP input preparation.
+
+   ``accuracy_per_atom`` is the target total-energy accuracy in eV per atom:
+   ``EDIFFG`` is set to that budget for the whole cell and ``EDIFF`` to the same
+   budget divided by ``ediff_margin``, so the electronic loop converges roughly
+   one and a half orders of magnitude tighter than the ionic loop it feeds. The
+   margin of ``33`` is a heuristic, empirical default carried over from *httk*
+   v1, not a derived quantity.
+
+   :param kpoint_density: Set the reciprocal-length k-point density.
+   :param centering: Select the automatic k-point centering.
+   :param accuracy_per_atom: Set the target total-energy accuracy, or disable derived accuracy tags when unset.
+   :param ediff_margin: Divide the cell accuracy by this margin for ``EDIFF``.
+   :param pseudopotential_library: Assemble POTCAR from this library when set.
+   :param parallel_tag: Set the selected parallel INCAR tag when set.
+   :param parallel_value: Set the value for the selected parallel tag.
+   :param normalize_handedness: Normalize a left-handed POSCAR before preparation.
+   :param incar_tags: Apply these explicit INCAR tags before derived defaults.
+
+
+   .. py:attribute:: kpoint_density
+      :type:  float
+      :value: 20.0
+
+
+
+   .. py:attribute:: centering
+      :type:  str
+      :value: 'Monkhorst-Pack'
+
+
+
+   .. py:attribute:: accuracy_per_atom
+      :type:  float | None
+      :value: 0.001
+
+
+
+   .. py:attribute:: ediff_margin
+      :type:  float
+      :value: 33.0
+
+
+
+   .. py:attribute:: pseudopotential_library
+      :type:  str | os.PathLike[str] | None
+      :value: None
+
+
+
+   .. py:attribute:: parallel_tag
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: parallel_value
+      :type:  int | None
+      :value: None
+
+
+
+   .. py:attribute:: normalize_handedness
+      :type:  bool
+      :value: True
+
+
+
+   .. py:attribute:: incar_tags
+      :type:  collections.abc.Mapping[str, object]
+
+
+.. py:function:: assemble_potcar(library, *, poscar = 'POSCAR', output = 'POTCAR', suffix_preference = ('_3', '_2', '_d', '_sv', '_pv', '', '_h', '_s'), provenance = None)
+
+   Assemble POTCAR from explicit species and a configurable suffix policy.
+
+   The suffix policy decides which PAW variant each species gets, so the result
+   describes what it chose: the returned :class:`PotcarAssembly` names every
+   potential, and the same record is written next to the POTCAR as
+   ``<POTCAR>.provenance.json`` unless *provenance* names another file.
+
+   :param library: Search this pseudopotential library root.
+   :param poscar: Read species names from this POSCAR.
+   :param output: Write the assembled POTCAR to this path.
+   :param suffix_preference: Try these species suffixes in order.
+   :param provenance: Write provenance to this path, or beside the POTCAR when unset.
+   :return: The assembled POTCAR and its provenance.
+   :raises FileNotFoundError: If a species has no matching potential.
+
+
+.. py:function:: automatic_kpoint_grid(density, *, poscar = 'POSCAR', minimum = 3, equal = False, bump = 0)
+
+   Calculate a reciprocal-length automatic grid.
+
+   :param density: Scale reciprocal lengths by this positive density.
+   :param poscar: Read lattice vectors from this POSCAR.
+   :param minimum: Enforce this minimum value in each grid direction.
+   :param equal: Use the largest direction value for all directions.
+   :param bump: Add this nonnegative amount to each calculated direction.
+   :return: The three automatic grid dimensions.
+   :raises ValueError: If an argument is invalid or the lattice is singular.
+
+
+.. py:function:: calculate_nbands(*, poscar = 'POSCAR', potcar = 'POTCAR', incar = 'INCAR', divisor = None)
+
+   Calculate a conservative VASP band count from input metadata.
+
+   The count is a heuristic, deliberately generous margin over VASP's own
+   default of roughly half the valence electrons plus half the atom count: too
+   few bands is a run that stops with ``TOO FEW BANDS`` or converges to the wrong
+   state, while a handful of extra empty bands costs only time. The spin-polarized
+   branch adds ``0.6 * electrons`` plus a magnetization- or atom-count-derived
+   margin, and the maximum of the candidate formulas wins; the numbers themselves
+   are empirical defaults carried over from *httk* v1. The result is rounded up to
+   an even number, and to a multiple of *divisor* when a parallel band divisor
+   (``NPAR``) is in play, because VASP would otherwise round NBANDS up itself and
+   report a changed value.
+
+   :param poscar: Read species and atom counts from this POSCAR.
+   :param potcar: Read valence counts from this POTCAR.
+   :param incar: Read spin and magnetization tags from this INCAR.
+   :param divisor: Round the result up to a multiple of this positive divisor.
+   :return: The conservative even band count.
+   :raises ValueError: If the divisor or required input metadata is invalid.
+
+
+.. py:function:: contcar_to_poscar(contcar = 'CONTCAR', *, reference = 'POSCAR', output = 'POSCAR')
+
+   Replace CONTCAR's comment with the reference POSCAR comment.
+
+   :param contcar: Read the relaxed structure from this CONTCAR path.
+   :param reference: Read the replacement comment from this POSCAR path.
+   :param output: Write the resulting POSCAR to this path.
+   :return: The written POSCAR path.
+   :raises ValueError: If either input file is empty.
+
+
+.. py:function:: derive_seed(entropy)
+
+   Derive one reproducible 63-bit seed from a caller-supplied string.
+
+   The string is the caller's own identity of the perturbation — an attempt
+   ordinal, a job key, a remedy step — so the same attempt always derives the
+   same seed and two different attempts derive different ones, without anything
+   reading a clock or a global random state.
+
+   :param entropy: Identify the perturbation with this nonempty string.
+   :return: The reproducible seed.
+   :raises ValueError: If entropy is not a nonempty string.
+
+
+.. py:function:: normalize_poscar_handedness(path = 'POSCAR')
+
+   Make a left-handed POSCAR lattice right-handed without moving sites.
+
+   :param path: Normalize the POSCAR file at this path.
+   :return: The normalized POSCAR path.
+
+
+.. py:function:: potcar_summary(path = 'POTCAR', output = 'POTCAR.summary')
+
+   Write a non-potential metadata summary suitable for logs.
+
+   :param path: Read POTCAR metadata from this path.
+   :param output: Write the summary to this path.
+   :return: The written summary path.
+
+
+.. py:function:: prepare_vasp_inputs(options = None, *, directory = '.')
+
+   Prepare POSCAR, POTCAR, KPOINTS, and INCAR with recorded choices.
+
+   ``incar_tags`` is applied to the INCAR first and wins over everything derived
+   afterwards: the derived values are defaults for what the caller did not say,
+   so an explicit ``EDIFF``, ``MAGMOM``, or ``NBANDS`` survives preparation, and
+   an explicit ``ISPIN`` is what the band-count heuristic reads.
+
+   :param options: Use these preparation options, or their defaults when unset.
+   :param directory: Prepare the VASP inputs in this directory.
+   :return: A record of prepared files and selected input choices.
+   :raises ValueError: If the workdir, options, or input metadata is invalid.
+
+
+.. py:function:: rattle_poscar(path = 'POSCAR', *, amplitude = 0.01, seed = None, entropy = None)
+
+   Apply a deterministic bounded perturbation to POSCAR site coordinates.
+
+   A perturbation has to be reproducible *and* different between two attempts of
+   the same calculation, so this function never invents entropy of its own:
+   either *seed* names the stream explicitly, or *entropy* is a string
+   :func:`derive_seed` turns into one — typically something attempt-derived, such
+   as ``f"{job_key}:{attempt_ordinal}"``. Giving neither is refused rather than
+   silently repeated, because two retries that rattle identically are two
+   identical calculations.
+
+   :param path: Update site coordinates in this POSCAR.
+   :param amplitude: Bound each coordinate perturbation by this value.
+   :param seed: Use this random seed when supplied.
+   :param entropy: Derive a seed from this string when supplied.
+   :return: The updated POSCAR path.
+   :raises ValueError: If the perturbation settings or coordinate rows are invalid.
+
+
+.. py:function:: read_incar(path = 'INCAR')
+
+   Read the last value of each simple INCAR assignment.
+
+   :param path: Read the INCAR file at this path.
+   :return: Upper-case INCAR tags mapped to their last values.
+
+
+.. py:function:: read_poscar_header(path = 'POSCAR')
+
+   Read a VASP-5 POSCAR header without interpreting site coordinates.
+
+   :param path: Read the POSCAR file at this path.
+   :return: The parsed POSCAR header.
+   :raises ValueError: If the header is too short or malformed.
+
+
+.. py:function:: scale_poscar_lattice(factor, path = 'POSCAR')
+
+   Multiply POSCAR's universal linear scale by a positive factor.
+
+   :param factor: Multiply the current scale by this positive finite value.
+   :param path: Update the POSCAR file at this path.
+   :return: The updated POSCAR path.
+   :raises ValueError: If the factor or POSCAR scale line is invalid.
+
+
+.. py:function:: suggested_magnetic_moments(path = 'POSCAR')
+
+   Return the explicit comment override or a five-per-atom default.
+
+   The five Bohr magnetons per atom are a heuristic starting guess, not a
+   physical prediction: a deliberately high initial moment lets a spin-polarized
+   relaxation fall into a low-spin solution, whereas starting too low tends to keep
+   it there, so overestimating is the safer direction. The value of five is the
+   empirical default carried over from *httk* v1. Encode a per-structure choice in
+   the POSCAR comment as ``[MAGMOM=...]``.
+
+   :param path: Read the POSCAR comment and species counts from this path.
+   :return: The explicit or generated MAGMOM value.
+
+
+.. py:function:: update_incar(values, path = 'INCAR')
+
+   Atomically replace selected INCAR tags while preserving other lines.
+
+   VASP allows several ``;``-separated assignments per line, and
+   :func:`read_incar` reads them all, so an update has to rewrite the individual
+   statements of a line rather than drop or keep the whole line: updating
+   ``ISYM`` in ``ISPIN = 2 ; ISYM = 2`` leaves ``ISPIN = 2`` and appends the new
+   ``ISYM``, instead of leaving a line that still assigns the old value.
+
+   :param values: Replace these INCAR tag assignments.
+   :param path: Update the INCAR file at this path.
+   :return: The updated INCAR path.
+   :raises ValueError: If a tag name is empty or invalid.
+
+
+.. py:function:: write_automatic_kpoints(grid, path = 'KPOINTS', *, centering = DEFAULT_KPOINT_CENTERING)
+
+   Write a standard automatic KPOINTS file.
+
+   The centering defaults to :data:`DEFAULT_KPOINT_CENTERING` here, in
+   :class:`~httk.workflow.vasp.inputs.VaspPreparationOptions`, and in the Bash bridge, so a workflow that
+   hits a k-point failure class still has the ``Gamma`` remedy available.
+
+   :param grid: Write these three positive grid dimensions.
+   :param path: Write the KPOINTS file to this path.
+   :param centering: Use this supported k-point centering.
+   :return: The written KPOINTS path.
+   :raises ValueError: If the grid or centering is unsupported.
+
+
+.. py:data:: DEFAULT_REMEDY_HISTORY
+   :value: '.httk-vasp/remedies.json'
+
+
+.. py:data:: REMEDY_OPERATIONS
+   :value: ('bump_bands', 'bump_kpoints', 'centering', 'contcar_to_poscar', 'equal_kpoints', 'scale_ediff',...
+
+
+.. py:class:: RemedyPolicy
+
+   One named, ordered ladder of bounded remedies.
+
+   A policy is data, not code: *sequences* maps a diagnosed problem to the
+   escalating steps tried for it, *precedence* orders the problems so one
+   diagnosis is remedied at a time, and *refusals* names the problems this policy
+   deliberately has no input remedy for. A group with its own reviewed practice
+   registers its own policy with :func:`register_remedy_policy` instead of
+   editing this module.
+
+   :param name: Identify the registered policy.
+   :param sequences: Map diagnostic codes to ordered remedy changes.
+   :param precedence: Order diagnostic codes for remedy selection.
+   :param refusals: Explain diagnostic codes this policy will not remedy.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: sequences
+      :type:  collections.abc.Mapping[str, RemedySequence]
+
+
+   .. py:attribute:: precedence
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: refusals
+      :type:  collections.abc.Mapping[str, str]
+
+
+.. py:class:: VaspRemedyDecision
+
+   One explicit bounded remedy proposal.
+
+   :param policy: Identify the policy that produced the decision.
+   :param problem: Identify the selected diagnostic problem.
+   :param step: Record the ladder step considered.
+   :param changes: Record the input changes to apply.
+   :param give_up: Mark that no remedy should be applied.
+   :param reason: Explain the decision.
+
+
+   .. py:attribute:: policy
+      :type:  str
+
+
+   .. py:attribute:: problem
+      :type:  str
+
+
+   .. py:attribute:: step
+      :type:  int
+
+
+   .. py:attribute:: changes
+      :type:  tuple[tuple[str, object], Ellipsis]
+
+
+   .. py:attribute:: give_up
+      :type:  bool
+
+
+   .. py:attribute:: reason
+      :type:  str
+
+
+   .. py:method:: as_mapping()
+
+      Serialize the remedy decision.
+
+      :return: The JSON-compatible decision mapping.
+
+
+
+.. py:function:: apply_vasp_remedy(decision, *, directory = '.', history_path = DEFAULT_REMEDY_HISTORY, durable = False)
+
+   Explicitly apply a proposed remedy through a replayable workdir batch.
+
+   The history is recorded before the inputs change, so an application
+   interrupted halfway advances the ladder rather than repeating one remedy for
+   ever. A history file inside the VASP directory is written by the same
+   replayable batch as the inputs; a job-scoped one, which the batch cannot
+   reach, is written atomically just before the batch commits.
+
+   *durable* synchronizes the batch and the job-scoped history on a durable
+   workspace, so a power cut cannot lose a remedy the ladder has already
+   recorded. It defaults to ``False`` for a caller applying a remedy outside an
+   attempt; the Bash bridge sources it from the workspace durability contract.
+
+   :param decision: Apply this previously planned remedy.
+   :param directory: Apply changes in this VASP directory.
+   :param history_path: Read and update the remedy history at this path.
+   :param durable: Synchronize the published batch when true.
+   :return: The committed remedy batch path.
+   :raises ValueError: If the decision gives up or its changes are not applicable.
+
+
+.. py:function:: job_remedy_history_path(payload)
+
+   Return the job-scoped remedy history file of one job payload.
+
+   The escalation ladder is a property of the *job*, not of the directory one
+   attempt happened to run in, so it lives beside the job state in
+   ``<payload>/.httk-job/`` rather than in the workdir. A job with an isolated
+   workdir therefore keeps escalating instead of silently starting the ladder
+   from the beginning on every attempt.
+
+   :param payload: Locate the job payload.
+   :return: The job-scoped remedy history path.
+
+
+.. py:function:: plan_vasp_remedy(diagnostics, *, directory = '.', history_path = DEFAULT_REMEDY_HISTORY, policy = 'reviewed-v1')
+
+   Return, but do not apply, the next remedy of *policy*.
+
+   The decision is validated against the real contents of *directory*: a ladder
+   step whose changes cannot be executed there is skipped, and the first
+   executable step wins. When nothing is left the decision gives up, so a runner
+   only ever hands :func:`apply_vasp_remedy` a remedy it can perform.
+
+   :param diagnostics: Supply diagnostics from the VASP run.
+   :param directory: Inspect and plan changes in this VASP directory.
+   :param history_path: Read the remedy history from this path.
+   :param policy: Select this registered remedy policy.
+   :return: The next applicable remedy decision.
+   :raises ValueError: If the remedy history or policy is invalid.
+
+
+.. py:function:: register_remedy_policy(name, sequences, precedence, *, refusals = None, replace = False)
+
+   Register one named remedy policy and return the normalized result.
+
+   Every problem named in *sequences* must also appear in *precedence*, which is
+   what decides which of several simultaneous diagnostics is acted on, and every
+   change must spell one supported remedy operation, so a policy that cannot be
+   executed is refused when it is registered rather than when a run needs it.
+
+   :param name: Register the policy under this nonempty name.
+   :param sequences: Define ordered changes for each diagnostic code.
+   :param precedence: Order diagnostic codes for selection.
+   :param refusals: Explain diagnostic codes deliberately left without a remedy.
+   :param replace: Replace an existing policy with this definition.
+   :return: The normalized registered policy.
+   :raises ValueError: If the policy is duplicate, incomplete, or unsupported.
+
+
+.. py:function:: remedy_policy(name)
+
+   Return one registered remedy policy, naming the alternatives if absent.
+
+   :param name: Select this registered policy.
+   :return: The selected remedy policy.
+   :raises ValueError: If no policy has this name.
+
+
+.. py:function:: remedy_policy_names()
+
+   Return the names of every registered remedy policy, in registration order.
+
+   :return: Registered policy names in registration order.
+
+
+.. py:class:: VaspRunReport
+
+   Classified result of one supervised VASP execution.
+
+   :param process: Preserve the supervised process result.
+   :param classification: Record the final VASP run classification.
+   :param diagnostics: Preserve live and file-level diagnostics.
+
+
+   .. py:attribute:: process
+      :type:  httk.workflow.supervision.ProcessReport
+
+
+   .. py:attribute:: classification
+      :type:  str
+
+
+   .. py:attribute:: diagnostics
+      :type:  tuple[httk.workflow.supervision.Diagnostic, Ellipsis]
+
+
+   .. py:method:: as_mapping()
+
+      Serialize the report for JSON storage.
+
+      :return: The JSON-compatible report mapping.
+
+
+
+   .. py:method:: write(path)
+
+      Write the report as JSON.
+
+      :param path: Write the report to this path.
+      :return: The report path.
+
+
+
+.. py:function:: run_vasp(argv, *, directory = '.', timeout = None, termination_grace = 10.0, report_path = 'vasp-run-report.json')
+
+   Run VASP with live VASP-5/6 diagnostics and a structured report.
+
+   :param argv: Execute this VASP command argument vector.
+   :param directory: Run VASP in this directory.
+   :param timeout: Stop the process after this duration when set.
+   :param termination_grace: Allow this duration for graceful termination.
+   :param report_path: Write the structured report at this workdir-relative path.
+   :return: The classified VASP run report.
+
+

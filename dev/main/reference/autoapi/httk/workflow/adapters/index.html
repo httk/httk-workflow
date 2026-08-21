@@ -1,0 +1,1143 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../../../../../genindex.html"><link rel="search" title="Search" href="../../../../../search.html"><link rel="next" title="httk.workflow.collecting" href="../collecting/index.html"><link rel="prev" title="httk.workflow.adapter_protocol" href="../adapter_protocol/index.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>httk.workflow.adapters - httk-workflow dev:main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../../../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:main) — content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../../../index.html"><div class="brand">httk-workflow dev:main documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../../../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:main documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../../../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="../../../../../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_protocol_api.html">The filesystem protocol API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../runtime_helpers.html">Native runner helpers</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../../../sdks/index.html">Runner SDKs</a><input aria-label="Toggle navigation of Runner SDKs" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/sdk_parity.html">Python and Bash authoring parity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_bash_api.html">Native Bash runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_c_api.html">Native C runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_fortran_api.html">Native modern-Fortran runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_rust_api.html">Native Rust runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_perl_api.html">Native Perl runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_ada_api.html">Native Ada runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_cpp_api.html">Native C++ runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../../../sdks/native_java_api.html">Native Java runner API</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../vasp_runners.html">Packaged VASP runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_packages.html">Workflow packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_languages.html">Workflow-language runner realizations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../taskmanager.html">Task-manager usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_cli.html">Project and workflow command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../adapter_authoring.html">Writing a remote adapter</a></li>
+<li class="toctree-l1 current has-children"><a class="reference internal" href="../../../../index.html">Reference</a><input aria-label="Toggle navigation of Reference" checked="" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l2 current has-children"><a class="reference internal" href="../index.html">httk.workflow</a><input aria-label="Toggle navigation of httk.workflow" checked="" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul class="current">
+<li class="toctree-l3"><a class="reference internal" href="../adapter_protocol/index.html">httk.workflow.adapter_protocol</a></li>
+<li class="toctree-l3 current current-page"><a class="current reference internal" href="#">httk.workflow.adapters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../collecting/index.html">httk.workflow.collecting</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../compat/index.html">httk.workflow.compat</a><input aria-label="Toggle navigation of httk.workflow.compat" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../compat/v1/index.html">httk.workflow.compat.v1</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../configuration/index.html">httk.workflow.configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../errors/index.html">httk.workflow.errors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../executors/index.html">httk.workflow.executors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../hookapi/index.html">httk.workflow.hookapi</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../hygiene/index.html">httk.workflow.hygiene</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../manifests/index.html">httk.workflow.manifests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../projects/index.html">httk.workflow.projects</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../protocol/index.html">httk.workflow.protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../provenance/index.html">httk.workflow.provenance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../runtime/index.html">httk.workflow.runtime</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../runtime_utils/index.html">httk.workflow.runtime_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../scaffold/index.html">httk.workflow.scaffold</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../sdk/index.html">httk.workflow.sdk</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../shell_bridge/index.html">httk.workflow.shell_bridge</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../supervision/index.html">httk.workflow.supervision</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../transfers/index.html">httk.workflow.transfers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../vasp/index.html">httk.workflow.vasp</a></li>
+</ul>
+</li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-6" name="toctree-checkbox-6" role="switch" type="checkbox"/><label for="toctree-checkbox-6"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../notebooks/examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../workflow_filesystem_api.html">Workflow filesystem API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../details/httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../../../v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../../../../../_sources/reference/autoapi/httk/workflow/adapters/index.rst.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="module-httk.workflow.adapters">
+<span id="httk-workflow-adapters"></span><h1>httk.workflow.adapters<a class="headerlink" href="#module-httk.workflow.adapters" title="Link to this heading">¶</a></h1>
+<p>Versioned JSON remote-adapter bundles.</p>
+<section id="attributes">
+<h2>Attributes<a class="headerlink" href="#attributes" title="Link to this heading">¶</a></h2>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.ADAPTER_OPERATIONS" title="httk.workflow.adapters.ADAPTER_OPERATIONS"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ADAPTER_OPERATIONS</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.ADAPTER_EXECUTABLE" title="httk.workflow.adapters.ADAPTER_EXECUTABLE"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ADAPTER_EXECUTABLE</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.CREDENTIALS_FILE" title="httk.workflow.adapters.CREDENTIALS_FILE"><code class="xref py py-obj docutils literal notranslate"><span class="pre">CREDENTIALS_FILE</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.METADATA_FILE" title="httk.workflow.adapters.METADATA_FILE"><code class="xref py py-obj docutils literal notranslate"><span class="pre">METADATA_FILE</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.ADAPTER_FORMAT" title="httk.workflow.adapters.ADAPTER_FORMAT"><code class="xref py py-obj docutils literal notranslate"><span class="pre">ADAPTER_FORMAT</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.REQUEST_FORMAT" title="httk.workflow.adapters.REQUEST_FORMAT"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REQUEST_FORMAT</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.RESULT_FORMAT" title="httk.workflow.adapters.RESULT_FORMAT"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RESULT_FORMAT</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS" title="httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS"><code class="xref py py-obj docutils literal notranslate"><span class="pre">PERSISTABLE_REMOTE_SETTINGS</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_INIT_COMMAND" title="httk.workflow.adapters.REMOTE_WORKSPACE_INIT_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_INIT_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_DELETE_COMMAND" title="httk.workflow.adapters.REMOTE_WORKSPACE_DELETE_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_DELETE_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_FSCK_COMMAND" title="httk.workflow.adapters.REMOTE_WORKSPACE_FSCK_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_FSCK_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_GC_COMMAND" title="httk.workflow.adapters.REMOTE_WORKSPACE_GC_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_GC_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_LIST_COMMAND" title="httk.workflow.adapters.REMOTE_WORKSPACE_LIST_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_LIST_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_MOVE_COMMAND" title="httk.workflow.adapters.REMOTE_WORKSPACE_MOVE_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_MOVE_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_RECEIVE_COMMAND" title="httk.workflow.adapters.REMOTE_RECEIVE_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_RECEIVE_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_OFFER_COMMAND" title="httk.workflow.adapters.REMOTE_OFFER_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_OFFER_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_RETIRE_COMMAND" title="httk.workflow.adapters.REMOTE_RETIRE_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_RETIRE_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_STATUS_COMMAND" title="httk.workflow.adapters.REMOTE_STATUS_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_STATUS_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_SETTINGS_COMMAND" title="httk.workflow.adapters.REMOTE_WORKSPACE_SETTINGS_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_SETTINGS_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND" title="httk.workflow.adapters.REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_MANAGER_COMMAND" title="httk.workflow.adapters.REMOTE_MANAGER_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_MANAGER_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_JOB_REQUEST_ENVELOPES_COMMAND" title="httk.workflow.adapters.REMOTE_JOB_REQUEST_ENVELOPES_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_JOB_REQUEST_ENVELOPES_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.REMOTE_JOB_PUBLISH_REQUESTS_COMMAND" title="httk.workflow.adapters.REMOTE_JOB_PUBLISH_REQUESTS_COMMAND"><code class="xref py py-obj docutils literal notranslate"><span class="pre">REMOTE_JOB_PUBLISH_REQUESTS_COMMAND</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.SEED_SETTING_MAP" title="httk.workflow.adapters.SEED_SETTING_MAP"><code class="xref py py-obj docutils literal notranslate"><span class="pre">SEED_SETTING_MAP</span></code></a></p></td>
+<td><p></p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="classes">
+<h2>Classes<a class="headerlink" href="#classes" title="Link to this heading">¶</a></h2>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.RemoteTarget" title="httk.workflow.adapters.RemoteTarget"><code class="xref py py-obj docutils literal notranslate"><span class="pre">RemoteTarget</span></code></a></p></td>
+<td><p>Resolved remote bundle.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="functions">
+<h2>Functions<a class="headerlink" href="#functions" title="Link to this heading">¶</a></h2>
+<div class="table-wrapper autosummary longtable docutils container">
+<table class="autosummary longtable docutils align-default">
+<tbody>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.submit_remote_managers" title="httk.workflow.adapters.submit_remote_managers"><code class="xref py py-obj docutils literal notranslate"><span class="pre">submit_remote_managers</span></code></a>(target, name, root, *, count, ...)</p></td>
+<td><p>Submit managers for a far-side workspace name using its probed root.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.probe_remote_workspace" title="httk.workflow.adapters.probe_remote_workspace"><code class="xref py py-obj docutils literal notranslate"><span class="pre">probe_remote_workspace</span></code></a>(target, name, *, timeout[, ...])</p></td>
+<td><p>Return the UUID and current root reported for a remote workspace name.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.seed_application_settings" title="httk.workflow.adapters.seed_application_settings"><code class="xref py py-obj docutils literal notranslate"><span class="pre">seed_application_settings</span></code></a>(bundle)</p></td>
+<td><p>Return the application settings a remote seeds a workspace with.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.metadata_path" title="httk.workflow.adapters.metadata_path"><code class="xref py py-obj docutils literal notranslate"><span class="pre">metadata_path</span></code></a>(bundle)</p></td>
+<td><p>Return the metadata file of one adapter bundle.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.read_metadata" title="httk.workflow.adapters.read_metadata"><code class="xref py py-obj docutils literal notranslate"><span class="pre">read_metadata</span></code></a>(bundle)</p></td>
+<td><p>Read the metadata of one adapter bundle.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.validate_adapter_bundle" title="httk.workflow.adapters.validate_adapter_bundle"><code class="xref py py-obj docutils literal notranslate"><span class="pre">validate_adapter_bundle</span></code></a>(bundle)</p></td>
+<td><p>Validate static adapter metadata and the single dispatcher executable.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.valid_remote_name" title="httk.workflow.adapters.valid_remote_name"><code class="xref py py-obj docutils literal notranslate"><span class="pre">valid_remote_name</span></code></a>(name)</p></td>
+<td><p>Validate and return one remote name.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.resolve_remote" title="httk.workflow.adapters.resolve_remote"><code class="xref py py-obj docutils literal notranslate"><span class="pre">resolve_remote</span></code></a>(value, *[, project])</p></td>
+<td><p>Resolve project-local before global remote definitions.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.project_remote_roots" title="httk.workflow.adapters.project_remote_roots"><code class="xref py py-obj docutils literal notranslate"><span class="pre">project_remote_roots</span></code></a>(project_root)</p></td>
+<td><p>Return where one project keeps its remotes.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.list_remotes" title="httk.workflow.adapters.list_remotes"><code class="xref py py-obj docutils literal notranslate"><span class="pre">list_remotes</span></code></a>([project])</p></td>
+<td><p>List definitions with project entries shadowing global entries.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.add_remote" title="httk.workflow.adapters.add_remote"><code class="xref py py-obj docutils literal notranslate"><span class="pre">add_remote</span></code></a>(name, *, template[, global_scope, project])</p></td>
+<td><p>Copy one maintained adapter template into user/project data.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.split_settings" title="httk.workflow.adapters.split_settings"><code class="xref py py-obj docutils literal notranslate"><span class="pre">split_settings</span></code></a>(settings)</p></td>
+<td><p>Partition <code class="docutils literal notranslate"><span class="pre">--set</span></code> values into persistable settings and credentials.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.read_credentials" title="httk.workflow.adapters.read_credentials"><code class="xref py py-obj docutils literal notranslate"><span class="pre">read_credentials</span></code></a>(bundle)</p></td>
+<td><p>Read remote credentials that never enter a project manifest.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.store_credentials" title="httk.workflow.adapters.store_credentials"><code class="xref py py-obj docutils literal notranslate"><span class="pre">store_credentials</span></code></a>(bundle, settings)</p></td>
+<td><p>Merge <em>settings</em> into the manifest-excluded remote credentials.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.remote_settings" title="httk.workflow.adapters.remote_settings"><code class="xref py py-obj docutils literal notranslate"><span class="pre">remote_settings</span></code></a>(bundle)</p></td>
+<td><p>Return persisted remote settings with credentials merged back in.</p></td>
+</tr>
+<tr class="row-even"><td><p><a class="reference internal" href="#httk.workflow.adapters.import_v1_remote" title="httk.workflow.adapters.import_v1_remote"><code class="xref py py-obj docutils literal notranslate"><span class="pre">import_v1_remote</span></code></a>(source, *[, name, global_scope, project])</p></td>
+<td><p>Map a recognizable legacy executable bundle to the versioned contract.</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference internal" href="#httk.workflow.adapters.run_adapter" title="httk.workflow.adapters.run_adapter"><code class="xref py py-obj docutils literal notranslate"><span class="pre">run_adapter</span></code></a>(bundle, operation, request, *[, timeout])</p></td>
+<td><p>Execute one JSON adapter operation without invoking a shell.</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+</section>
+<section id="module-contents">
+<h2>Module Contents<a class="headerlink" href="#module-contents" title="Link to this heading">¶</a></h2>
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.ADAPTER_OPERATIONS">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">ADAPTER_OPERATIONS</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('configure',</span> <span class="pre">'install',</span> <span class="pre">'invoke',</span> <span class="pre">'push',</span> <span class="pre">'pull',</span> <span class="pre">'start-manager',</span> <span class="pre">'status')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#ADAPTER_OPERATIONS"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.ADAPTER_OPERATIONS" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.ADAPTER_EXECUTABLE">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">ADAPTER_EXECUTABLE</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'adapter'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#ADAPTER_EXECUTABLE"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.ADAPTER_EXECUTABLE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.CREDENTIALS_FILE">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">CREDENTIALS_FILE</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'credentials.json'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#CREDENTIALS_FILE"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.CREDENTIALS_FILE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.METADATA_FILE">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">METADATA_FILE</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'remote.json'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#METADATA_FILE"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.METADATA_FILE" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.ADAPTER_FORMAT">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">ADAPTER_FORMAT</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'httk-computer-adapter'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#ADAPTER_FORMAT"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.ADAPTER_FORMAT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REQUEST_FORMAT">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REQUEST_FORMAT</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'httk-computer-request'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REQUEST_FORMAT"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REQUEST_FORMAT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.RESULT_FORMAT">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">RESULT_FORMAT</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">'httk-computer-result'</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#RESULT_FORMAT"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.RESULT_FORMAT" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">PERSISTABLE_REMOTE_SETTINGS</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#PERSISTABLE_REMOTE_SETTINGS"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_WORKSPACE_INIT_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_WORKSPACE_INIT_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'workspace',</span> <span class="pre">'init')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_WORKSPACE_INIT_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_WORKSPACE_INIT_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_WORKSPACE_DELETE_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_WORKSPACE_DELETE_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'workspace',</span> <span class="pre">'delete')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_WORKSPACE_DELETE_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_WORKSPACE_DELETE_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_WORKSPACE_FSCK_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_WORKSPACE_FSCK_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'workspace',</span> <span class="pre">'fsck')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_WORKSPACE_FSCK_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_WORKSPACE_FSCK_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_WORKSPACE_GC_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_WORKSPACE_GC_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'workspace',</span> <span class="pre">'gc')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_WORKSPACE_GC_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_WORKSPACE_GC_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_WORKSPACE_LIST_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_WORKSPACE_LIST_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'workspace',</span> <span class="pre">'list')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_WORKSPACE_LIST_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_WORKSPACE_LIST_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_WORKSPACE_MOVE_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_WORKSPACE_MOVE_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'workspace',</span> <span class="pre">'move')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_WORKSPACE_MOVE_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_WORKSPACE_MOVE_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_RECEIVE_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_RECEIVE_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'transfer',</span> <span class="pre">'receive')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_RECEIVE_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_RECEIVE_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_OFFER_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_OFFER_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'transfer',</span> <span class="pre">'offer')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_OFFER_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_OFFER_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_RETIRE_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_RETIRE_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'transfer',</span> <span class="pre">'retire')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_RETIRE_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_RETIRE_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_STATUS_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_STATUS_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'workspace',</span> <span class="pre">'status')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_STATUS_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_STATUS_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_WORKSPACE_SETTINGS_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_WORKSPACE_SETTINGS_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'workspace',</span> <span class="pre">'settings')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_WORKSPACE_SETTINGS_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_WORKSPACE_SETTINGS_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'workspace',</span> <span class="pre">'workflow-prelude')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_MANAGER_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_MANAGER_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'manager',</span> <span class="pre">'run')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_MANAGER_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_MANAGER_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_JOB_REQUEST_ENVELOPES_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_JOB_REQUEST_ENVELOPES_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'job',</span> <span class="pre">'request-envelopes')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_JOB_REQUEST_ENVELOPES_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_JOB_REQUEST_ENVELOPES_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.REMOTE_JOB_PUBLISH_REQUESTS_COMMAND">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">REMOTE_JOB_PUBLISH_REQUESTS_COMMAND</span></span><span class="property"><span class="w"> </span><span class="p"><span class="pre">=</span></span><span class="w"> </span><span class="pre">('httk',</span> <span class="pre">'workflow',</span> <span class="pre">'job',</span> <span class="pre">'publish-requests')</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#REMOTE_JOB_PUBLISH_REQUESTS_COMMAND"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.REMOTE_JOB_PUBLISH_REQUESTS_COMMAND" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.submit_remote_managers">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">submit_remote_managers</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">target</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">root</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">count</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">argv_tail</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">adapter</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#submit_remote_managers"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.submit_remote_managers" title="Link to this definition">¶</a></dt>
+<dd><p>Submit managers for a far-side workspace name using its probed root.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>target</strong> (<a class="reference internal" href="#httk.workflow.adapters.RemoteTarget" title="httk.workflow.adapters.RemoteTarget"><em>RemoteTarget</em></a>) – The resolved remote adapter bundle.</p></li>
+<li><p><strong>name</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The remote workspace name.</p></li>
+<li><p><strong>root</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The remote workspace root.</p></li>
+<li><p><strong>count</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – The number of managers to submit.</p></li>
+<li><p><strong>argv_tail</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Sequence" title="(in Python v3.14)"><em>collections.abc.Sequence</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – Additional manager arguments.</p></li>
+<li><p><strong>timeout</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em> | </em><em>None</em>) – The adapter operation timeout.</p></li>
+<li><p><strong>adapter</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Callable" title="(in Python v3.14)"><em>collections.abc.Callable</em></a><em>[</em><em>Ellipsis</em><em>, </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><em>Any</em><em>]</em><em>] </em><em>| </em><em>None</em>) – The adapter callable, or <a class="reference internal" href="#httk.workflow.adapters.run_adapter" title="httk.workflow.adapters.run_adapter"><code class="xref py py-func docutils literal notranslate"><span class="pre">run_adapter()</span></code></a> when omitted.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The adapter result document.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, Any]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.probe_remote_workspace">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">probe_remote_workspace</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">target</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">noun</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'workspace'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">adapter</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#probe_remote_workspace"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.probe_remote_workspace" title="Link to this definition">¶</a></dt>
+<dd><p>Return the UUID and current root reported for a remote workspace name.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>target</strong> (<a class="reference internal" href="#httk.workflow.adapters.RemoteTarget" title="httk.workflow.adapters.RemoteTarget"><em>RemoteTarget</em></a>) – The resolved remote adapter bundle.</p></li>
+<li><p><strong>name</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The remote workspace name.</p></li>
+<li><p><strong>timeout</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em> | </em><em>None</em>) – The adapter operation timeout.</p></li>
+<li><p><strong>noun</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The noun used in diagnostic messages.</p></li>
+<li><p><strong>adapter</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Callable" title="(in Python v3.14)"><em>collections.abc.Callable</em></a><em>[</em><em>Ellipsis</em><em>, </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><em>Any</em><em>]</em><em>] </em><em>| </em><em>None</em>) – The adapter callable, or <a class="reference internal" href="#httk.workflow.adapters.run_adapter" title="httk.workflow.adapters.run_adapter"><code class="xref py py-func docutils literal notranslate"><span class="pre">run_adapter()</span></code></a> when omitted.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The remote workspace identifier and root.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#RuntimeError" title="(in Python v3.14)"><strong>RuntimeError</strong></a> – If the remote status operation fails.</p></li>
+<li><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the remote returns an incompatible status document.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)">tuple</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py data">
+<dt class="sig sig-object py" id="httk.workflow.adapters.SEED_SETTING_MAP">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">SEED_SETTING_MAP</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><span class="pre">collections.abc.Mapping</span></a><span class="p"><span class="pre">[</span></span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">,</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a><span class="p"><span class="pre">]</span></span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#SEED_SETTING_MAP"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.SEED_SETTING_MAP" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.seed_application_settings">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">seed_application_settings</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">bundle</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#seed_application_settings"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.seed_application_settings" title="Link to this definition">¶</a></dt>
+<dd><p>Return the application settings a remote seeds a workspace with.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>bundle</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The adapter bundle path.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The whitelisted application settings derived from the bundle.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, <a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)">object</a>]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="httk.workflow.adapters.RemoteTarget">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">RemoteTarget</span></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#RemoteTarget"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.RemoteTarget" title="Link to this definition">¶</a></dt>
+<dd><p>Resolved remote bundle.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>name</strong> – The remote name.</p></li>
+<li><p><strong>bundle</strong> – The resolved adapter bundle path.</p></li>
+<li><p><strong>project_local</strong> – Whether the bundle came from project data.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.adapters.RemoteTarget.name">
+<span class="sig-name descname"><span class="pre">name</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><span class="pre">str</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#RemoteTarget.name"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.RemoteTarget.name" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.adapters.RemoteTarget.bundle">
+<span class="sig-name descname"><span class="pre">bundle</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><span class="pre">pathlib.Path</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#RemoteTarget.bundle"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.RemoteTarget.bundle" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py attribute">
+<dt class="sig sig-object py" id="httk.workflow.adapters.RemoteTarget.project_local">
+<span class="sig-name descname"><span class="pre">project_local</span></span><span class="property"><span class="p"><span class="pre">:</span></span><span class="w"> </span><a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><span class="pre">bool</span></a></span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#RemoteTarget.project_local"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.RemoteTarget.project_local" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.metadata_path">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">metadata_path</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">bundle</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#metadata_path"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.metadata_path" title="Link to this definition">¶</a></dt>
+<dd><p>Return the metadata file of one adapter bundle.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>bundle</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The adapter bundle path.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The bundle metadata path.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.read_metadata">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">read_metadata</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">bundle</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#read_metadata"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.read_metadata" title="Link to this definition">¶</a></dt>
+<dd><p>Read the metadata of one adapter bundle.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>bundle</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The adapter bundle path.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The decoded metadata document.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the metadata cannot be read as an object.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, Any]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.validate_adapter_bundle">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">validate_adapter_bundle</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">bundle</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#validate_adapter_bundle"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.validate_adapter_bundle" title="Link to this definition">¶</a></dt>
+<dd><p>Validate static adapter metadata and the single dispatcher executable.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>bundle</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The adapter bundle path.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The validated metadata document.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If metadata, the dispatcher, or a required binary is invalid or unavailable.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, Any]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.valid_remote_name">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">valid_remote_name</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#valid_remote_name"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.valid_remote_name" title="Link to this definition">¶</a></dt>
+<dd><p>Validate and return one remote name.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>name</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The remote name to validate.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The validated remote name.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="../errors/index.html#httk.workflow.errors.ResolutionMiss" title="httk.workflow.errors.ResolutionMiss"><strong>httk.workflow.errors.ResolutionMiss</strong></a> – If the name is not valid for remote resolution.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.resolve_remote">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">resolve_remote</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">value</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">project</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#resolve_remote"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.resolve_remote" title="Link to this definition">¶</a></dt>
+<dd><p>Resolve project-local before global remote definitions.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>value</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The remote name to resolve.</p></li>
+<li><p><strong>project</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>] </em><em>| </em><em>None</em>) – The project path, or the discovered project when omitted.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The resolved remote target.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference internal" href="../errors/index.html#httk.workflow.errors.ResolutionMiss" title="httk.workflow.errors.ResolutionMiss"><strong>httk.workflow.errors.ResolutionMiss</strong></a> – If the name is invalid or no bundle is found.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference internal" href="#httk.workflow.adapters.RemoteTarget" title="httk.workflow.adapters.RemoteTarget">RemoteTarget</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.project_remote_roots">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">project_remote_roots</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">project_root</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#project_remote_roots"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.project_remote_roots" title="Link to this definition">¶</a></dt>
+<dd><p>Return where one project keeps its remotes.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>project_root</strong> (<a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)"><em>pathlib.Path</em></a>) – The project root.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The project remote roots in precedence order.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)">tuple</a>[<a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a>, Ellipsis]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.list_remotes">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">list_remotes</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">project</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#list_remotes"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.list_remotes" title="Link to this definition">¶</a></dt>
+<dd><p>List definitions with project entries shadowing global entries.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>project</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>] </em><em>| </em><em>None</em>) – The project path, or the discovered project when omitted.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Remote definitions with scope and bundle path.</p>
+</dd>
+<dt class="field-odd">Return type<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)">list</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, <a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)">object</a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.add_remote">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">add_remote</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">name</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">template</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">global_scope</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">project</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#add_remote"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.add_remote" title="Link to this definition">¶</a></dt>
+<dd><p>Copy one maintained adapter template into user/project data.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>name</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The remote name to create.</p></li>
+<li><p><strong>template</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The maintained adapter template name.</p></li>
+<li><p><strong>global_scope</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Whether to create the remote in global data.</p></li>
+<li><p><strong>project</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>] </em><em>| </em><em>None</em>) – The project path for a project-local remote.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The newly created adapter bundle path.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the name, template, or scope is invalid.</p></li>
+<li><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#FileExistsError" title="(in Python v3.14)"><strong>FileExistsError</strong></a> – If the destination already exists.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.split_settings">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">split_settings</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">settings</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#split_settings"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.split_settings" title="Link to this definition">¶</a></dt>
+<dd><p>Partition <code class="docutils literal notranslate"><span class="pre">--set</span></code> values into persistable settings and credentials.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>settings</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><em>collections.abc.Mapping</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The settings supplied by the caller.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Persistable settings followed by manifest-excluded credentials.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If a setting name is retired or unsupported.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#tuple" title="(in Python v3.14)">tuple</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>], <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, <a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>]]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.read_credentials">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">read_credentials</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">bundle</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#read_credentials"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.read_credentials" title="Link to this definition">¶</a></dt>
+<dd><p>Read remote credentials that never enter a project manifest.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>bundle</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The adapter bundle path.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The stored credential document, or an empty mapping when absent.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the credentials file is not a JSON object.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, Any]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.store_credentials">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">store_credentials</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">bundle</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">settings</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#store_credentials"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.store_credentials" title="Link to this definition">¶</a></dt>
+<dd><p>Merge <em>settings</em> into the manifest-excluded remote credentials.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>bundle</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The adapter bundle path.</p></li>
+<li><p><strong>settings</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><em>collections.abc.Mapping</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – Credential members to merge.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The credentials file path.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the existing credentials file is invalid.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.remote_settings">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">remote_settings</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">bundle</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#remote_settings"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.remote_settings" title="Link to this definition">¶</a></dt>
+<dd><p>Return persisted remote settings with credentials merged back in.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><p><strong>bundle</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The adapter bundle path.</p>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>Persisted settings and manifest-excluded credentials.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If adapter metadata or credentials are invalid.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, Any]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.import_v1_remote">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">import_v1_remote</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">source</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">name</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">global_scope</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">project</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#import_v1_remote"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.import_v1_remote" title="Link to this definition">¶</a></dt>
+<dd><p>Map a recognizable legacy executable bundle to the versioned contract.</p>
+<p>Legacy shell programs are never copied or executed. Only their simple
+assignment-only <code class="docutils literal notranslate"><span class="pre">config</span></code> files are read, and the result uses a maintained
+v2 adapter implementation. What is read is an <em>httk v1</em> computer definition,
+so the legacy names below are the names that tree really uses.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>source</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The legacy executable bundle path.</p></li>
+<li><p><strong>name</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><em>None</em>) – The imported remote name, or the source directory name when omitted.</p></li>
+<li><p><strong>global_scope</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>) – Whether to create the imported remote in global data.</p></li>
+<li><p><strong>project</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>] </em><em>| </em><em>None</em>) – The project path for a project-local import.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The created versioned adapter bundle path.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the legacy bundle cannot be recognized or imported.</p>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/pathlib.html#pathlib.Path" title="(in Python v3.14)">pathlib.Path</a></p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="httk.workflow.adapters.run_adapter">
+<span class="sig-prename descclassname"><span class="pre">httk.workflow.adapters.</span></span><span class="sig-name descname"><span class="pre">run_adapter</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">bundle</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">operation</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">request</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">timeout</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../../../../../_modules/httk/workflow/adapters.html#run_adapter"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#httk.workflow.adapters.run_adapter" title="Link to this definition">¶</a></dt>
+<dd><p>Execute one JSON adapter operation without invoking a shell.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>bundle</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> | </em><a class="reference external" href="https://docs.python.org/3/library/os.html#os.PathLike" title="(in Python v3.14)"><em>os.PathLike</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>]</em>) – The adapter bundle path.</p></li>
+<li><p><strong>operation</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a>) – The adapter operation name.</p></li>
+<li><p><strong>request</strong> (<a class="reference external" href="https://docs.python.org/3/library/collections.abc.html#collections.abc.Mapping" title="(in Python v3.14)"><em>collections.abc.Mapping</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em>, </em><a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><em>object</em></a><em>]</em>) – The operation request members.</p></li>
+<li><p><strong>timeout</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em> | </em><em>None</em>) – The operation timeout, or the bundle default when omitted.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Returns<span class="colon">:</span></dt>
+<dd class="field-even"><p>The adapter result document.</p>
+</dd>
+<dt class="field-odd">Raises<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#TimeoutError" title="(in Python v3.14)"><strong>TimeoutError</strong></a> – If the adapter exceeds its timeout.</p></li>
+<li><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#ValueError" title="(in Python v3.14)"><strong>ValueError</strong></a> – If the request or result violates the adapter protocol.</p></li>
+<li><p><a class="reference external" href="https://docs.python.org/3/library/exceptions.html#RuntimeError" title="(in Python v3.14)"><strong>RuntimeError</strong></a> – If the adapter refuses or fails the operation.</p></li>
+</ul>
+</dd>
+<dt class="field-even">Return type<span class="colon">:</span></dt>
+<dd class="field-even"><p><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)">dict</a>[<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)">str</a>, Any]</p>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="../collecting/index.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">httk.workflow.collecting</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="../adapter_protocol/index.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">httk.workflow.adapter_protocol</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">httk.workflow.adapters</a><ul>
+<li><a class="reference internal" href="#attributes">Attributes</a></li>
+<li><a class="reference internal" href="#classes">Classes</a></li>
+<li><a class="reference internal" href="#functions">Functions</a></li>
+<li><a class="reference internal" href="#module-contents">Module Contents</a><ul>
+<li><a class="reference internal" href="#httk.workflow.adapters.ADAPTER_OPERATIONS"><code class="docutils literal notranslate"><span class="pre">ADAPTER_OPERATIONS</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.ADAPTER_EXECUTABLE"><code class="docutils literal notranslate"><span class="pre">ADAPTER_EXECUTABLE</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.CREDENTIALS_FILE"><code class="docutils literal notranslate"><span class="pre">CREDENTIALS_FILE</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.METADATA_FILE"><code class="docutils literal notranslate"><span class="pre">METADATA_FILE</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.ADAPTER_FORMAT"><code class="docutils literal notranslate"><span class="pre">ADAPTER_FORMAT</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REQUEST_FORMAT"><code class="docutils literal notranslate"><span class="pre">REQUEST_FORMAT</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.RESULT_FORMAT"><code class="docutils literal notranslate"><span class="pre">RESULT_FORMAT</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS"><code class="docutils literal notranslate"><span class="pre">PERSISTABLE_REMOTE_SETTINGS</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_INIT_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_INIT_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_DELETE_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_DELETE_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_FSCK_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_FSCK_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_GC_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_GC_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_LIST_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_LIST_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_MOVE_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_MOVE_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_RECEIVE_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_RECEIVE_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_OFFER_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_OFFER_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_RETIRE_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_RETIRE_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_STATUS_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_STATUS_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_SETTINGS_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_SETTINGS_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_MANAGER_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_MANAGER_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_JOB_REQUEST_ENVELOPES_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_JOB_REQUEST_ENVELOPES_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.REMOTE_JOB_PUBLISH_REQUESTS_COMMAND"><code class="docutils literal notranslate"><span class="pre">REMOTE_JOB_PUBLISH_REQUESTS_COMMAND</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.submit_remote_managers"><code class="docutils literal notranslate"><span class="pre">submit_remote_managers()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.probe_remote_workspace"><code class="docutils literal notranslate"><span class="pre">probe_remote_workspace()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.SEED_SETTING_MAP"><code class="docutils literal notranslate"><span class="pre">SEED_SETTING_MAP</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.seed_application_settings"><code class="docutils literal notranslate"><span class="pre">seed_application_settings()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.RemoteTarget"><code class="docutils literal notranslate"><span class="pre">RemoteTarget</span></code></a><ul>
+<li><a class="reference internal" href="#httk.workflow.adapters.RemoteTarget.name"><code class="docutils literal notranslate"><span class="pre">RemoteTarget.name</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.RemoteTarget.bundle"><code class="docutils literal notranslate"><span class="pre">RemoteTarget.bundle</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.RemoteTarget.project_local"><code class="docutils literal notranslate"><span class="pre">RemoteTarget.project_local</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#httk.workflow.adapters.metadata_path"><code class="docutils literal notranslate"><span class="pre">metadata_path()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.read_metadata"><code class="docutils literal notranslate"><span class="pre">read_metadata()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.validate_adapter_bundle"><code class="docutils literal notranslate"><span class="pre">validate_adapter_bundle()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.valid_remote_name"><code class="docutils literal notranslate"><span class="pre">valid_remote_name()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.resolve_remote"><code class="docutils literal notranslate"><span class="pre">resolve_remote()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.project_remote_roots"><code class="docutils literal notranslate"><span class="pre">project_remote_roots()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.list_remotes"><code class="docutils literal notranslate"><span class="pre">list_remotes()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.add_remote"><code class="docutils literal notranslate"><span class="pre">add_remote()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.split_settings"><code class="docutils literal notranslate"><span class="pre">split_settings()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.read_credentials"><code class="docutils literal notranslate"><span class="pre">read_credentials()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.store_credentials"><code class="docutils literal notranslate"><span class="pre">store_credentials()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.remote_settings"><code class="docutils literal notranslate"><span class="pre">remote_settings()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.import_v1_remote"><code class="docutils literal notranslate"><span class="pre">import_v1_remote()</span></code></a></li>
+<li><a class="reference internal" href="#httk.workflow.adapters.run_adapter"><code class="docutils literal notranslate"><span class="pre">run_adapter()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../../../_static/documentation_options.js?v=fe42cd0d"></script>
+    <script src="../../../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../../../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../../../../../_static/selector.js?v=e591e119"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:main","versionPathDepth":2};</script>
+    </body>
+</html>

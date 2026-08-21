@@ -1,0 +1,369 @@
+httk.workflow.adapters
+======================
+
+.. py:module:: httk.workflow.adapters
+
+.. autoapi-nested-parse::
+
+   Versioned JSON remote-adapter bundles.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.adapters.ADAPTER_OPERATIONS
+   httk.workflow.adapters.ADAPTER_EXECUTABLE
+   httk.workflow.adapters.CREDENTIALS_FILE
+   httk.workflow.adapters.METADATA_FILE
+   httk.workflow.adapters.ADAPTER_FORMAT
+   httk.workflow.adapters.REQUEST_FORMAT
+   httk.workflow.adapters.RESULT_FORMAT
+   httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS
+   httk.workflow.adapters.REMOTE_WORKSPACE_INIT_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_DELETE_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_FSCK_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_GC_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_LIST_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_MOVE_COMMAND
+   httk.workflow.adapters.REMOTE_RECEIVE_COMMAND
+   httk.workflow.adapters.REMOTE_OFFER_COMMAND
+   httk.workflow.adapters.REMOTE_RETIRE_COMMAND
+   httk.workflow.adapters.REMOTE_STATUS_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_SETTINGS_COMMAND
+   httk.workflow.adapters.REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND
+   httk.workflow.adapters.REMOTE_MANAGER_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_REQUEST_ENVELOPES_COMMAND
+   httk.workflow.adapters.REMOTE_JOB_PUBLISH_REQUESTS_COMMAND
+   httk.workflow.adapters.SEED_SETTING_MAP
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.adapters.RemoteTarget
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.adapters.submit_remote_managers
+   httk.workflow.adapters.probe_remote_workspace
+   httk.workflow.adapters.seed_application_settings
+   httk.workflow.adapters.metadata_path
+   httk.workflow.adapters.read_metadata
+   httk.workflow.adapters.validate_adapter_bundle
+   httk.workflow.adapters.valid_remote_name
+   httk.workflow.adapters.resolve_remote
+   httk.workflow.adapters.project_remote_roots
+   httk.workflow.adapters.list_remotes
+   httk.workflow.adapters.add_remote
+   httk.workflow.adapters.split_settings
+   httk.workflow.adapters.read_credentials
+   httk.workflow.adapters.store_credentials
+   httk.workflow.adapters.remote_settings
+   httk.workflow.adapters.import_v1_remote
+   httk.workflow.adapters.run_adapter
+
+
+Module Contents
+---------------
+
+.. py:data:: ADAPTER_OPERATIONS
+   :value: ('configure', 'install', 'invoke', 'push', 'pull', 'start-manager', 'status')
+
+
+.. py:data:: ADAPTER_EXECUTABLE
+   :value: 'adapter'
+
+
+.. py:data:: CREDENTIALS_FILE
+   :value: 'credentials.json'
+
+
+.. py:data:: METADATA_FILE
+   :value: 'remote.json'
+
+
+.. py:data:: ADAPTER_FORMAT
+   :value: 'httk-computer-adapter'
+
+
+.. py:data:: REQUEST_FORMAT
+   :value: 'httk-computer-request'
+
+
+.. py:data:: RESULT_FORMAT
+   :value: 'httk-computer-result'
+
+
+.. py:data:: PERSISTABLE_REMOTE_SETTINGS
+
+.. py:data:: REMOTE_WORKSPACE_INIT_COMMAND
+   :value: ('httk', 'workflow', 'workspace', 'init')
+
+
+.. py:data:: REMOTE_WORKSPACE_DELETE_COMMAND
+   :value: ('httk', 'workflow', 'workspace', 'delete')
+
+
+.. py:data:: REMOTE_WORKSPACE_FSCK_COMMAND
+   :value: ('httk', 'workflow', 'workspace', 'fsck')
+
+
+.. py:data:: REMOTE_WORKSPACE_GC_COMMAND
+   :value: ('httk', 'workflow', 'workspace', 'gc')
+
+
+.. py:data:: REMOTE_WORKSPACE_LIST_COMMAND
+   :value: ('httk', 'workflow', 'workspace', 'list')
+
+
+.. py:data:: REMOTE_WORKSPACE_MOVE_COMMAND
+   :value: ('httk', 'workflow', 'workspace', 'move')
+
+
+.. py:data:: REMOTE_RECEIVE_COMMAND
+   :value: ('httk', 'workflow', 'transfer', 'receive')
+
+
+.. py:data:: REMOTE_OFFER_COMMAND
+   :value: ('httk', 'workflow', 'transfer', 'offer')
+
+
+.. py:data:: REMOTE_RETIRE_COMMAND
+   :value: ('httk', 'workflow', 'transfer', 'retire')
+
+
+.. py:data:: REMOTE_STATUS_COMMAND
+   :value: ('httk', 'workflow', 'workspace', 'status')
+
+
+.. py:data:: REMOTE_WORKSPACE_SETTINGS_COMMAND
+   :value: ('httk', 'workflow', 'workspace', 'settings')
+
+
+.. py:data:: REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND
+   :value: ('httk', 'workflow', 'workspace', 'workflow-prelude')
+
+
+.. py:data:: REMOTE_MANAGER_COMMAND
+   :value: ('httk', 'workflow', 'manager', 'run')
+
+
+.. py:data:: REMOTE_JOB_REQUEST_ENVELOPES_COMMAND
+   :value: ('httk', 'workflow', 'job', 'request-envelopes')
+
+
+.. py:data:: REMOTE_JOB_PUBLISH_REQUESTS_COMMAND
+   :value: ('httk', 'workflow', 'job', 'publish-requests')
+
+
+.. py:function:: submit_remote_managers(target, name, root, *, count, argv_tail, timeout, adapter = None)
+
+   Submit managers for a far-side workspace name using its probed root.
+
+   :param target: The resolved remote adapter bundle.
+   :param name: The remote workspace name.
+   :param root: The remote workspace root.
+   :param count: The number of managers to submit.
+   :param argv_tail: Additional manager arguments.
+   :param timeout: The adapter operation timeout.
+   :param adapter: The adapter callable, or :func:`run_adapter` when omitted.
+   :return: The adapter result document.
+
+
+.. py:function:: probe_remote_workspace(target, name, *, timeout, noun = 'workspace', adapter = None)
+
+   Return the UUID and current root reported for a remote workspace name.
+
+   :param target: The resolved remote adapter bundle.
+   :param name: The remote workspace name.
+   :param timeout: The adapter operation timeout.
+   :param noun: The noun used in diagnostic messages.
+   :param adapter: The adapter callable, or :func:`run_adapter` when omitted.
+   :return: The remote workspace identifier and root.
+   :raises RuntimeError: If the remote status operation fails.
+   :raises ValueError: If the remote returns an incompatible status document.
+
+
+.. py:data:: SEED_SETTING_MAP
+   :type:  collections.abc.Mapping[str, str]
+
+.. py:function:: seed_application_settings(bundle)
+
+   Return the application settings a remote seeds a workspace with.
+
+   :param bundle: The adapter bundle path.
+   :return: The whitelisted application settings derived from the bundle.
+
+
+.. py:class:: RemoteTarget
+
+   Resolved remote bundle.
+
+   :param name: The remote name.
+   :param bundle: The resolved adapter bundle path.
+   :param project_local: Whether the bundle came from project data.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: bundle
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: project_local
+      :type:  bool
+
+
+.. py:function:: metadata_path(bundle)
+
+   Return the metadata file of one adapter bundle.
+
+   :param bundle: The adapter bundle path.
+   :return: The bundle metadata path.
+
+
+.. py:function:: read_metadata(bundle)
+
+   Read the metadata of one adapter bundle.
+
+   :param bundle: The adapter bundle path.
+   :return: The decoded metadata document.
+   :raises ValueError: If the metadata cannot be read as an object.
+
+
+.. py:function:: validate_adapter_bundle(bundle)
+
+   Validate static adapter metadata and the single dispatcher executable.
+
+   :param bundle: The adapter bundle path.
+   :return: The validated metadata document.
+   :raises ValueError: If metadata, the dispatcher, or a required binary is invalid or unavailable.
+
+
+.. py:function:: valid_remote_name(name)
+
+   Validate and return one remote name.
+
+   :param name: The remote name to validate.
+   :return: The validated remote name.
+   :raises httk.workflow.errors.ResolutionMiss: If the name is not valid for remote resolution.
+
+
+.. py:function:: resolve_remote(value, *, project = None)
+
+   Resolve project-local before global remote definitions.
+
+   :param value: The remote name to resolve.
+   :param project: The project path, or the discovered project when omitted.
+   :return: The resolved remote target.
+   :raises httk.workflow.errors.ResolutionMiss: If the name is invalid or no bundle is found.
+
+
+.. py:function:: project_remote_roots(project_root)
+
+   Return where one project keeps its remotes.
+
+   :param project_root: The project root.
+   :return: The project remote roots in precedence order.
+
+
+.. py:function:: list_remotes(project = None)
+
+   List definitions with project entries shadowing global entries.
+
+   :param project: The project path, or the discovered project when omitted.
+   :return: Remote definitions with scope and bundle path.
+
+
+.. py:function:: add_remote(name, *, template, global_scope = False, project = None)
+
+   Copy one maintained adapter template into user/project data.
+
+   :param name: The remote name to create.
+   :param template: The maintained adapter template name.
+   :param global_scope: Whether to create the remote in global data.
+   :param project: The project path for a project-local remote.
+   :return: The newly created adapter bundle path.
+   :raises ValueError: If the name, template, or scope is invalid.
+   :raises FileExistsError: If the destination already exists.
+
+
+.. py:function:: split_settings(settings)
+
+   Partition ``--set`` values into persistable settings and credentials.
+
+   :param settings: The settings supplied by the caller.
+   :return: Persistable settings followed by manifest-excluded credentials.
+   :raises ValueError: If a setting name is retired or unsupported.
+
+
+.. py:function:: read_credentials(bundle)
+
+   Read remote credentials that never enter a project manifest.
+
+   :param bundle: The adapter bundle path.
+   :return: The stored credential document, or an empty mapping when absent.
+   :raises ValueError: If the credentials file is not a JSON object.
+
+
+.. py:function:: store_credentials(bundle, settings)
+
+   Merge *settings* into the manifest-excluded remote credentials.
+
+   :param bundle: The adapter bundle path.
+   :param settings: Credential members to merge.
+   :return: The credentials file path.
+   :raises ValueError: If the existing credentials file is invalid.
+
+
+.. py:function:: remote_settings(bundle)
+
+   Return persisted remote settings with credentials merged back in.
+
+   :param bundle: The adapter bundle path.
+   :return: Persisted settings and manifest-excluded credentials.
+   :raises ValueError: If adapter metadata or credentials are invalid.
+
+
+.. py:function:: import_v1_remote(source, *, name = None, global_scope = False, project = None)
+
+   Map a recognizable legacy executable bundle to the versioned contract.
+
+   Legacy shell programs are never copied or executed. Only their simple
+   assignment-only ``config`` files are read, and the result uses a maintained
+   v2 adapter implementation. What is read is an *httk v1* computer definition,
+   so the legacy names below are the names that tree really uses.
+
+   :param source: The legacy executable bundle path.
+   :param name: The imported remote name, or the source directory name when omitted.
+   :param global_scope: Whether to create the imported remote in global data.
+   :param project: The project path for a project-local import.
+   :return: The created versioned adapter bundle path.
+   :raises ValueError: If the legacy bundle cannot be recognized or imported.
+
+
+.. py:function:: run_adapter(bundle, operation, request, *, timeout = None)
+
+   Execute one JSON adapter operation without invoking a shell.
+
+   :param bundle: The adapter bundle path.
+   :param operation: The adapter operation name.
+   :param request: The operation request members.
+   :param timeout: The operation timeout, or the bundle default when omitted.
+   :return: The adapter result document.
+   :raises TimeoutError: If the adapter exceeds its timeout.
+   :raises ValueError: If the request or result violates the adapter protocol.
+   :raises RuntimeError: If the adapter refuses or fails the operation.
+
+

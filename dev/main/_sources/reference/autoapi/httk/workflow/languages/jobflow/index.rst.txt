@@ -1,0 +1,380 @@
+httk.workflow.languages.jobflow
+===============================
+
+.. py:module:: httk.workflow.languages.jobflow
+
+.. autoapi-nested-parse::
+
+   Prepare atomate2 jobflow Maker workflows for httk workflow jobs.
+
+   Declared workflow parameters are Maker constructor configuration: the runner builds ``Class(**params)`` for the
+   ``maker=`` form and ``dataclasses.replace(maker, **params)`` for the document form, so declared parameters override
+   document Maker fields; language plumbing parameters are reserved-prefixed and never Maker-bound.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.languages.jobflow.FILES_DIRECTORY
+   httk.workflow.languages.jobflow.PACKAGE
+   httk.workflow.languages.jobflow.RUNNER
+   httk.workflow.languages.jobflow.DOCUMENT_FILE
+   httk.workflow.languages.jobflow.STAGED_DIRECTORY
+   httk.workflow.languages.jobflow.DEFAULT_DATA_PREFIX
+   httk.workflow.languages.jobflow.OUTPUTS_FILE
+   httk.workflow.languages.jobflow.LANGUAGE
+
+
+Exceptions
+----------
+
+.. autoapisummary::
+
+   httk.workflow.languages.jobflow.JobflowFormatError
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.languages.jobflow.LanguagePorts
+   httk.workflow.languages.jobflow.LanguageRequest
+   httk.workflow.languages.jobflow.LanguageScaffold
+   httk.workflow.languages.jobflow.WorkflowLanguage
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.languages.jobflow.runner_reference
+   httk.workflow.languages.jobflow.payload_relative
+   httk.workflow.languages.jobflow.collect
+   httk.workflow.languages.jobflow.document_from_maker
+
+
+Package Contents
+----------------
+
+.. py:class:: LanguagePorts
+
+   The named input and output ports of one language document.
+
+   :param inputs: Names of the document's input ports.
+   :param outputs: Names of the document's output ports.
+
+
+   .. py:attribute:: inputs
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: outputs
+      :type:  tuple[str, Ellipsis]
+
+
+.. py:class:: LanguageRequest
+
+   The data supplied when preparing one language workflow.
+
+   :param workflow_id: Identify the workflow being prepared.
+   :param directory: Locate the workflow package, when it has one.
+   :param document: Locate the source workflow document, when it has one.
+   :param runner_options: Supply options for the language runner.
+   :param inputs: Describe the workflow inputs.
+   :param outputs: Describe the requested workflow outputs.
+   :param parameters: Describe the declared workflow parameters.
+   :param environment: Describe the declared workflow environment.
+   :param excluded_members: Package members the realization must not stage.
+
+
+   .. py:attribute:: workflow_id
+      :type:  str
+
+
+   .. py:attribute:: directory
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: document
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: runner_options
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: inputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: outputs
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: environment
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: excluded_members
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+.. py:class:: LanguageScaffold
+
+   The files, runner, and hooks prepared for one language workflow.
+
+   :param documents: Text or byte documents to write into the payload.
+   :param files: Files to stage into the payload.
+   :param parameters: Job parameters produced by preparation.
+   :param runner: Runner description for the job, when one is supplied.
+   :param runner_executor: Select the runner executor.
+   :param payload_runner: Name a runner staged in the payload.
+   :param workdir_path: Name the workdir below the job payload.
+   :param required_capabilities: Require these manager capabilities.
+   :param reserved_parameters: Names reserved for per-job realization output.
+   :param warnings: Preserve preparation warnings.
+   :param instantiate: Supply the per-job hook called after input staging.
+   :param finalize: Transform the per-job ``JobSpec`` immediately before its payload is prepared.
+
+
+   .. py:attribute:: documents
+      :type:  collections.abc.Mapping[str, str | bytes]
+
+
+   .. py:attribute:: files
+      :type:  collections.abc.Mapping[str, pathlib.Path]
+
+
+   .. py:attribute:: parameters
+      :type:  collections.abc.Mapping[str, object]
+
+
+   .. py:attribute:: runner
+      :type:  collections.abc.Mapping[str, object] | None
+
+
+   .. py:attribute:: runner_executor
+      :type:  str
+      :value: 'path'
+
+
+
+   .. py:attribute:: payload_runner
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: workdir_path
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: required_capabilities
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: reserved_parameters
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: warnings
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+   .. py:attribute:: instantiate
+      :type:  collections.abc.Callable[[httk.workflow.scaffold.InstantiateContext], object] | None
+      :value: None
+
+
+
+   .. py:attribute:: finalize
+      :type:  collections.abc.Callable[[httk.workflow.runtime_builders.JobSpec], httk.workflow.runtime_builders.JobSpec] | None
+      :value: None
+
+
+
+.. py:class:: WorkflowLanguage
+
+   The operations a workflow language exposes to the common layer.
+
+   :param name: Name the language.
+   :param steps: Declare the runner's steps.
+   :param initial_step: Select the runner's initial step.
+   :param matches: Identify documents belonging to the language.
+   :param ports: Read the input and output ports of a document.
+   :param validate_runner: Validate runner options for a document.
+   :param prepare: Prepare a language request for execution.
+   :param collect: Convert a completed job record into language outputs.
+   :param document_policy: State whether package manifests require, allow, or forbid a source document.
+   :param open_ports: Skip manifest port validation when document ports cannot be enumerated statically.
+   :param has_default_collector: Provide a default collector path.
+   :param allows_modes: Permit manifest data and workdir mode overrides.
+   :param environment: Declare language-provided environment metadata.
+   :param required_modules: Name the importable modules a job of this language needs at run time.
+
+
+   .. py:attribute:: name
+      :type:  str
+
+
+   .. py:attribute:: steps
+      :type:  tuple[str, Ellipsis]
+
+
+   .. py:attribute:: initial_step
+      :type:  str
+
+
+   .. py:attribute:: matches
+      :type:  collections.abc.Callable[[pathlib.Path], bool]
+
+
+   .. py:attribute:: ports
+      :type:  collections.abc.Callable[[pathlib.Path], LanguagePorts]
+
+
+   .. py:attribute:: validate_runner
+      :type:  collections.abc.Callable[[collections.abc.Mapping[str, object], pathlib.Path], None]
+
+
+   .. py:attribute:: prepare
+      :type:  collections.abc.Callable[[LanguageRequest], LanguageScaffold]
+
+
+   .. py:attribute:: collect
+      :type:  collections.abc.Callable[[httk.workflow.collecting.JobRecord], collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: document_policy
+      :type:  DocumentPolicy
+      :value: 'required'
+
+
+
+   .. py:attribute:: open_ports
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: has_default_collector
+      :type:  bool
+      :value: True
+
+
+
+   .. py:attribute:: allows_modes
+      :type:  bool
+      :value: True
+
+
+
+   .. py:attribute:: environment
+      :type:  collections.abc.Mapping[str, collections.abc.Mapping[str, object]]
+
+
+   .. py:attribute:: required_modules
+      :type:  tuple[str, Ellipsis]
+      :value: ()
+
+
+
+.. py:function:: runner_reference(package, name)
+
+   Return the ``runner`` member of a ``job.json`` running one packaged runner.
+
+   The reserved ``pkg:`` form names the runner inside its own consumer package,
+   and the digest is taken from the installed bytes, which is exactly what the
+   manager verifies before it stages and executes them.
+
+
+.. py:data:: FILES_DIRECTORY
+   :value: 'files'
+
+
+.. py:function:: payload_relative(name)
+
+   Return where one staged file lands inside a payload.
+
+   A bare name lands in :data:`~httk.workflow.scaffold.FILES_DIRECTORY`, so ``POSCAR`` becomes
+   ``files/POSCAR`` — where the packaged runners read it — and a name that
+   carries a directory of its own is used exactly as it is written.
+
+   :param name: Name the staged file within the payload.
+   :return: The validated payload-relative destination.
+   :raises httk.workflow.errors.FormatError: If the name uses a reserved payload member.
+   :raises ValueError: If the name is empty or absolute.
+
+
+.. py:data:: PACKAGE
+   :value: 'httk.workflow.languages.jobflow'
+
+
+.. py:data:: RUNNER
+   :value: 'jobflow_runner.py'
+
+
+.. py:data:: DOCUMENT_FILE
+   :value: 'files/maker.json'
+
+
+.. py:data:: STAGED_DIRECTORY
+   :value: 'files/inputs'
+
+
+.. py:data:: DEFAULT_DATA_PREFIX
+   :value: 'jobflow'
+
+
+.. py:data:: OUTPUTS_FILE
+   :value: 'jobflow-outputs.json'
+
+
+.. py:exception:: JobflowFormatError
+
+   Bases: :py:obj:`ValueError`
+
+
+   A jobflow Maker document or runner configuration is invalid.
+
+
+.. py:function:: collect(record)
+
+   Convert one jobflow runner output document into provenance records.
+
+   :param record: The completed job record containing runner outputs.
+   :return: Output records keyed by their declared workflow roles.
+
+
+.. py:function:: document_from_maker(maker)
+
+   Serialize one MSONable Maker using monty.
+
+   :param maker: A Maker object exposing ``as_dict()``.
+   :return: A sorted, indented JSON Maker document.
+   :raises JobflowFormatError: If *maker* has no usable MSONable document.
+
+   Monty must be installed when this helper is called.
+
+
+.. py:data:: LANGUAGE
+
