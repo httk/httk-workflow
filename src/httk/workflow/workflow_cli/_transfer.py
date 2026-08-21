@@ -13,7 +13,7 @@ from ..errors import ResolutionMiss, WorkflowError
 from ..models import QUIESCENT_KINDS, JobDefinition
 from ..packages import read_build_spec
 from ..precheck import environment_findings
-from ..transfers import TransferCandidate, select_transfer_jobs
+from ..transfers import DEFAULT_OFFER_STATES, TransferCandidate, offer_transfers, select_transfer_jobs
 from ._common import *
 from ._common import (
     _TRANSFER_PROTOCOL,
@@ -586,7 +586,11 @@ def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) ->
     """Seal the finished jobs of this workspace for one that will fetch them."""
 
     workspace = _protocol_workspace(arguments.workspace, context)
-    offer_states = tuple(arguments.state or DEFAULT_OFFER_STATES)
+    offer_states = tuple(
+        arguments.state
+        if arguments.state is not None
+        else (QUIESCENT_KINDS if arguments.jobs else DEFAULT_OFFER_STATES)
+    )
     environment_settings = None
     if arguments.environment_settings:
         try:
@@ -600,6 +604,7 @@ def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) ->
             destination_workspace_id=arguments.destination_workspace_id,
             states=(*offer_states, "transferring"),
             placement=arguments.placement,
+            job_ids=arguments.jobs or None,
             include_transferring=True,
         )
         _environment_advisory(
@@ -614,6 +619,7 @@ def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) ->
         destination_workspace_id=arguments.destination_workspace_id,
         states=offer_states,
         placement=arguments.placement,
+        job_ids=arguments.jobs or None,
     )
     if arguments.json:
         document = {
@@ -659,6 +665,7 @@ def _remote_offer(
     states: Sequence[str] | None,
     placement: str | None,
     timeout: float | None,
+    job_ids: Sequence[str] | None = None,
     environment_settings: Mapping[str, object] | None = None,
     strict_environment: bool = False,
 ) -> list[dict[str, object]]:
@@ -671,8 +678,14 @@ def _remote_offer(
         destination_workspace_id,
         "--json",
     ]
-    for state in states or DEFAULT_OFFER_STATES:
-        argv += ["--state", state]
+    if states is not None:
+        for state in states:
+            argv += ["--state", state]
+    elif not job_ids:
+        for state in DEFAULT_OFFER_STATES:
+            argv += ["--state", state]
+    for job_id in job_ids or ():
+        argv += ["--job", job_id]
     if placement:
         argv += ["--placement", placement]
     if environment_settings is not None:
@@ -705,6 +718,22 @@ def _remote_offer(
     ) as exc:
         raise ValueError("remote offer did not return a transfer offer document") from exc
     return [offer for offer in offers if isinstance(offer, dict)]
+
+
+def _require_offers_for_jobs(offers: Sequence[Mapping[str, object]], jobs: Sequence[str]) -> None:
+    if not jobs:
+        return
+    requested = set(jobs)
+    offered = {str(offer.get("job_id")) for offer in offers}
+    missing = sorted(requested - offered)
+    unexpected = sorted(offered - requested)
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing: {', '.join(missing)}")
+        if unexpected:
+            details.append(f"unexpected: {', '.join(unexpected)}")
+        raise ValueError(f"remote offer did not exactly match requested jobs ({'; '.join(details)})")
 
 
 def _remote_retire(
@@ -745,6 +774,7 @@ def _fetch_jobs_from_remote(
     states: Sequence[str] | None,
     placement: str | None,
     timeout: float | None,
+    jobs: Sequence[str] = (),
     destination_settings: Mapping[str, object] | None = None,
     strict_environment: bool = False,
 ) -> tuple[list[dict[str, object]], list[object]]:
@@ -762,11 +792,13 @@ def _fetch_jobs_from_remote(
         remote_name,
         local.workspace_id,
         states=states,
+        job_ids=jobs,
         placement=placement,
         timeout=timeout,
         environment_settings=destination_settings,
         strict_environment=strict_environment,
     )
+    _require_offers_for_jobs(offers, jobs)
     staging_root = local.control / "transfers" / "incoming"
     acknowledgements: list[dict[str, object]] = []
     for offer in offers:
@@ -846,6 +878,7 @@ def _transfer_remote_to_remote(
     states: Sequence[str] | None,
     placement: str | None,
     timeout: float | None,
+    jobs: Sequence[str] = (),
     destination_settings: Mapping[str, object] | None = None,
     strict_environment: bool = False,
 ) -> tuple[list[dict[str, object]], list[object]]:
@@ -873,11 +906,13 @@ def _transfer_remote_to_remote(
         source_name,
         destination_workspace_id,
         states=states,
+        job_ids=jobs,
         placement=placement,
         timeout=timeout,
         environment_settings=destination_settings,
         strict_environment=strict_environment,
     )
+    _require_offers_for_jobs(offers, jobs)
     acknowledgements: list[dict[str, object]] = []
     with tempfile.TemporaryDirectory(prefix="httk-relay-") as relay:
         for offer in offers:
@@ -1049,6 +1084,7 @@ def _run_transfer_verb(
             target,
             source_binding.name.split(":", 1)[1],
             states=arguments.state,
+            jobs=arguments.jobs,
             placement=arguments.placement,
             timeout=timeout,
             destination_settings=Workspace(destination_binding.path, mutable=False).read_settings(),
@@ -1084,6 +1120,7 @@ def _run_transfer_verb(
         destination_binding,
         context,
         states=arguments.state,
+        jobs=arguments.jobs,
         placement=arguments.placement,
         timeout=timeout,
         destination_settings=destination_settings,
@@ -1120,6 +1157,7 @@ def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> i
     offer = protocol.add_parser("offer")
     offer.add_argument("workspace", metavar="WORKSPACE")
     offer.add_argument("--destination-workspace-id", metavar="UUID", required=True)
+    offer.add_argument("--job", action="append", default=[], dest="jobs", metavar="JOB_ID")
     offer.add_argument("--state", action="append", metavar="STATE", choices=COLLECTABLE_KINDS)
     offer.add_argument("--placement", metavar="PLACEMENT")
     offer.add_argument("--json", action="store_true")

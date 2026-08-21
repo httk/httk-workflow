@@ -12,6 +12,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,9 +26,11 @@ from httk.workflow import (
     job_records,
 )
 from httk.workflow.adapters import add_remote
+from httk.workflow.models import StateFrame
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.transfers import TRANSFER_DIRECTORY, _payload_digest
+from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
 
 pytestmark = pytest.mark.xdist_group("fetch-template")
@@ -209,6 +212,92 @@ def _fetch(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> d
 
 
 # ---------------------------------------------------------------------------
+# Remote operator requests
+# ---------------------------------------------------------------------------
+
+
+def test_job_request_forwards_to_remote_workspace(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    argv = [
+        "job",
+        "request",
+        "cluster:station",
+        pair.ids["pending"],
+        "pause",
+        "--operator",
+        "o",
+        "--reason",
+        "r",
+        "--adapter-timeout",
+        "10",
+    ]
+    assert command(argv, pair.context) == 0
+    capsys.readouterr()
+    ready = list((pair.remote.control / "requests" / "ready").iterdir())
+    assert len(ready) == 1
+    request = json.loads(ready[0].read_text(encoding="utf-8"))
+    assert request["job_id"] == pair.ids["pending"]
+    assert request["action"] == "pause"
+    assert request["operator"] == "o" and request["reason"] == "r"
+
+
+def test_job_request_forwards_leading_dash_reason(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    argv = [
+        "job",
+        "request",
+        "cluster:station",
+        pair.ids["pending"],
+        "pause",
+        "--operator=o",
+        "--reason=-maintenance",
+    ]
+    assert command(argv, pair.context) == 0
+    capsys.readouterr()
+    ready = list((pair.remote.control / "requests" / "ready").iterdir())
+    assert len(ready) == 1
+    request = json.loads(ready[0].read_text(encoding="utf-8"))
+    assert request["reason"] == "-maintenance"
+
+
+def test_job_request_forwards_multiple_ids(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    argv = [
+        "job",
+        "request",
+        "cluster:station",
+        pair.ids["pending"],
+        pair.ids["succeeded"],
+        "pause",
+        "--operator",
+        "o",
+        "--reason",
+        "r",
+    ]
+    assert command(argv, pair.context) == 0
+    capsys.readouterr()
+    ready = list((pair.remote.control / "requests" / "ready").iterdir())
+    assert len(ready) == 2
+    assert {json.loads(path.read_text(encoding="utf-8"))["job_id"] for path in ready} == {
+        pair.ids["pending"],
+        pair.ids["succeeded"],
+    }
+
+
+def test_job_request_relays_remote_failure(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    argv = [
+        "job",
+        "request",
+        "cluster:station",
+        "does-not-exist",
+        "pause",
+        "--operator",
+        "o",
+        "--reason",
+        "r",
+    ]
+    assert command(argv, pair.context) == 2
+    assert "job does not exist: does-not-exist" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # Offering, on the side that ran the work
 # ---------------------------------------------------------------------------
 
@@ -260,6 +349,51 @@ def test_offer_selects_states_and_placements(pair: Pair, capsys: pytest.CaptureF
 
     # A placement no finished job sits below offers nothing.
     assert _offer(pair, capsys, "--placement", "project/later")["offers"] == []
+
+
+def test_offer_by_id_seals_only_the_named_job(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    document = _offer(pair, capsys, "--job", pair.ids["succeeded"])
+    assert {str(offer["job_id"]) for offer in document["offers"]} == {pair.ids["succeeded"]}
+    assert pair.remote.find_marker_by_id(pair.ids["succeeded"]) is None
+    assert pair.remote.find_marker_by_id(pair.ids["failed"]) is not None
+    assert pair.remote.find_marker_by_id(pair.ids["pending"]) is not None
+
+
+def test_offer_by_id_prechecks_all_jobs_before_sealing(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    active = pair.remote.find_marker_by_id(pair.ids["pending"])
+    assert active is not None
+    with pair.remote.open_journal_writer() as writer:
+        pair.remote.transition(writer, active, "running", {"reason": "test"})
+    argv = [
+        "transfer",
+        "offer",
+        str(pair.remote_root),
+        "--destination-workspace-id",
+        pair.local.workspace_id,
+        "--job",
+        pair.ids["succeeded"],
+        "--job",
+        pair.ids["pending"],
+        "--json",
+    ]
+    assert command(argv, pair.context) == 2
+    error = capsys.readouterr().err
+    assert pair.ids["pending"] in error and "not quiescent" in error
+    assert pair.remote.find_marker_by_id(pair.ids["succeeded"]) is not None
+    assert _live_bundles(pair.remote) == []
+
+
+def test_offer_by_id_accepts_a_paused_job_without_state(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    with TaskManager(pair.remote, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        ready = pair.remote.find_marker_by_id(pair.ids["pending"])
+        assert ready is not None
+        state = StateFrame.from_mapping(pair.remote.read_state(ready))
+        manager._transition(ready, "paused", StateFrame.replace(state.carried(), reason="test"))
+    document = _offer(pair, capsys, "--job", pair.ids["pending"])
+    offers = document["offers"]
+    assert len(offers) == 1 and offers[0]["job_id"] == pair.ids["pending"]
+    assert offers[0]["state"] == "paused"
 
 
 def test_offer_refuses_a_state_no_finished_job_can_be_in(
@@ -397,6 +531,87 @@ def test_fetch_selects_states_and_placements(pair: Pair, capsys: pytest.CaptureF
     assert pair.local.find_marker_by_id(pair.ids["succeeded"]) is None
 
     assert _fetch(pair, capsys, "--placement", "project/later")["moved"] == []
+
+
+def test_fetch_by_id_moves_only_the_named_remote_job(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    report = _fetch(pair, capsys, "--job", pair.ids["succeeded"])
+    moved = list(report["moved"])
+    assert len(moved) == 1 and moved[0]["job_id"] == pair.ids["succeeded"]
+    assert pair.remote.find_marker_by_id(pair.ids["failed"]) is not None
+    assert pair.local.find_marker_by_id(pair.ids["succeeded"]) is not None
+
+
+def test_fetch_by_id_rejects_an_unrequested_offer_before_import(
+    pair: Pair,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = pair.ids["succeeded"]
+    unexpected = pair.ids["failed"]
+    monkeypatch.setattr(transfer_cli, "_remote_workspace_probe", lambda *_args, **_kwargs: ("remote-id", "/remote"))
+    monkeypatch.setattr(
+        transfer_cli,
+        "_remote_offer",
+        lambda *_args, **_kwargs: [{"job_id": requested}, {"job_id": unexpected}],
+    )
+    imported: list[str] = []
+
+    def record_import(_workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
+        imported.append(str(bundle))
+        raise AssertionError("import must not run for an unexpected offer")
+
+    monkeypatch.setattr(Workspace, "import_bundle", record_import)
+    with pytest.raises(ValueError, match=f"unexpected: {unexpected}"):
+        transfer_cli._fetch_jobs_from_remote(
+            pair.local,
+            SimpleNamespace(bundle=pair.remote_root),
+            "station",
+            states=None,
+            placement=None,
+            timeout=None,
+            jobs=[requested],
+        )
+    assert imported == []
+
+
+def _relay_pair(root: Path) -> tuple[CLIContext, Path, Path, Path, str, str]:
+    local_root = root / "local"
+    source_root = root / "kappa"
+    destination_root = root / "arrhenius"
+    initialize_project(local_root, name="relay-local")
+    Workspace.initialize(local_root)
+    Workspace.initialize(source_root)
+    Workspace.initialize(destination_root)
+    kappa = add_remote("kappa", template="local", project=local_root)
+    arrhenius = add_remote("arrhenius", template="local", project=local_root)
+    for bundle, workspace_root in ((kappa, source_root), (arrhenius, destination_root)):
+        metadata_path = bundle / "remote.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        metadata["settings"]["workspace_root"] = str(workspace_root)
+        metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    source = Workspace(source_root)
+    runner_source = root / "runners" / "fetch.py"
+    runner_source.parent.mkdir(parents=True, exist_ok=True)
+    runner_source.write_text(_RUNNER, encoding="utf-8")
+    runner = source.publish_runner(runner_source, name="fetch/run.py")
+    selected = _stage(root / "selected", failing=False, runner=runner)
+    other = _stage(root / "other", failing=False, runner=runner)
+    source.submit(root / "selected", "project/relay")
+    source.submit(root / "other", "project/relay")
+    context = CLIContext("httk", local_root)
+    register_ws(context, local_root, "home")
+    register_ws(context, source_root, "source")
+    register_ws(context, destination_root, "destination")
+    return context, source_root, destination_root, local_root, selected, other
+
+
+def test_remote_to_remote_by_id_relays_exactly_one_job(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    context, source_root, destination_root, _local_root, selected, other = _relay_pair(tmp_path / "relay")
+    assert command(["transfer", "kappa:source", "arrhenius:destination", "--job", selected, "--json"], context) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert [entry["job_id"] for entry in report["moved"]] == [selected]
+    assert Workspace(destination_root).find_marker_by_id(selected) is not None
+    assert Workspace(source_root).find_marker_by_id(other) is not None
+    assert Workspace(destination_root).find_marker_by_id(other) is None
 
 
 # ---------------------------------------------------------------------------

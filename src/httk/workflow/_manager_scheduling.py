@@ -150,6 +150,11 @@ def recover_abandoned_claims(manager: Any, logger: Any) -> bool:
                 "skipping claimed job %s: runner executor %s is not served here", marker.job_key, job.runner_executor
             )
             continue
+        if state.pause_requested is not None:
+            logger.info("pausing claimed job %s before launching its attempt", marker.job_key)
+            manager._release_claim(marker, "operator_pause_deferred", state)
+            changed = True
+            continue
         try:
             owner = state.manager_id
         except FormatError as exc:

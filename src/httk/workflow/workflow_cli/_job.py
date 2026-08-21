@@ -1,12 +1,15 @@
 """Runner and job command groups."""
 
 import os
+import time
 
 from ..introspection import read_managers
-from ..models import Marker, ensure_step_known
+from ..models import TERMINAL_KINDS, Marker, ensure_step_known
 from ._common import *
 from ._common import (
     _ERRORS,
+    REMOTE_JOB_REQUEST_COMMAND,
+    _add_adapter_timeout,
     _durable,
     _group,
     _json_value,
@@ -14,6 +17,8 @@ from ._common import (
     _load_inputs,
     _local_root,
     _pairs,
+    _resolve_binding,
+    _run_remote_workspace,
     _sanitize_tag,
 )
 
@@ -258,7 +263,12 @@ def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`job request`, shared with ``httk-taskmanager request``."""
 
     add_workspace_argument(parser, help_text="the workspace holding the job")
-    parser.add_argument("job_id", metavar="JOB_ID", help="the UUID of the job the request is about")
+    parser.add_argument(
+        "job_id",
+        metavar="JOB_ID",
+        nargs="+",
+        help="one or more job UUIDs the request is about",
+    )
     parser.add_argument(
         "action",
         metavar="ACTION",
@@ -292,46 +302,99 @@ def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
             "the hazard is journalled in the resulting state frame"
         ),
     )
+    parser.add_argument("--wait", action="store_true", help="wait until every pause request reaches paused")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        metavar="SECONDS",
+        help="stop waiting after SECONDS (requires --wait)",
+    )
+    _add_adapter_timeout(parser)
     add_durability_arguments(parser)
 
 
 def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Publish one operator request against a job and print its path."""
+    """Publish operator requests against jobs and optionally wait for pauses."""
 
-    workspace = Workspace(
-        _local_root(arguments, context, action="request against it"),
-        durable=_durable(arguments),
-    )
-    marker = workspace.find_marker_by_id(arguments.job_id)
-    if marker is None:
-        raise ValueError(f"job does not exist: {arguments.job_id}")
-    if arguments.action == "override_step" and arguments.step is not None:
-        _prevalidate_override_step(workspace, marker, arguments.step, force=bool(arguments.force))
-    request: dict[str, object] = {
-        "format": "httk-workflow-request",
-        "format_version": 2,
-        "request_id": str(uuid.uuid4()),
-        "job_id": marker.job_id,
-        "job_key": marker.job_key,
-        "placement": marker.placement.as_posix(),
-        "expected_generation": marker.generation,
-        "expected_record_ref": marker.record_ref,
-        "action": arguments.action,
-        "operator": arguments.operator,
-        "reason": arguments.reason,
-        "created_at": utc_now(),
-    }
-    if arguments.priority is not None:
-        request["priority"] = arguments.priority
-    if arguments.step is not None:
-        request["step"] = arguments.step
-    if arguments.force:
-        request["force"] = True
-    # Attribution, when this installation has an identity key: the manager
-    # verifies a signature that is there and accepts a request that has none.
-    print(workspace.publish_request(sign_document(request)))
-    _warn_if_no_live_manager(workspace, marker)
-    return 0
+    if arguments.timeout is not None and not arguments.wait:
+        raise ValueError("--timeout requires --wait")
+    if arguments.wait and arguments.action != "pause":
+        raise ValueError("--wait is only valid with the pause action")
+    if arguments.timeout is not None and arguments.timeout < 0:
+        raise ValueError("--timeout must not be negative")
+
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None and ":" in binding.name
+        tail = [
+            *REMOTE_JOB_REQUEST_COMMAND,
+            binding.name.split(":", 1)[1],
+            *arguments.job_id,
+            arguments.action,
+            f"--operator={arguments.operator}",
+            f"--reason={arguments.reason}",
+        ]
+        for option in ("priority", "step"):
+            value = getattr(arguments, option)
+            if value is not None:
+                tail.append(f"--{option.replace('_', '-')}={value}")
+        for flag in ("force", "wait", "durable", "no_durable"):
+            if getattr(arguments, flag, False):
+                tail.append(f"--{flag.replace('_', '-')}")
+        if arguments.timeout is not None:
+            tail.append(f"--timeout={arguments.timeout}")
+        return _run_remote_workspace(binding, context, tail, timeout=arguments.adapter_timeout)
+
+    workspace = Workspace(root, durable=_durable(arguments))
+    resolved: list[tuple[str, Marker]] = []
+    for job_id in arguments.job_id:
+        marker = workspace.find_marker_by_id(job_id)
+        if marker is None:
+            raise ValueError(f"job does not exist: {job_id}")
+        if arguments.action == "override_step" and arguments.step is not None:
+            _prevalidate_override_step(workspace, marker, arguments.step, force=bool(arguments.force))
+        resolved.append((job_id, marker))
+
+    published: list[tuple[str, Marker, Path]] = []
+    for job_id, marker in resolved:
+        request: dict[str, object] = {
+            "format": "httk-workflow-request",
+            "format_version": 2,
+            "request_id": str(uuid.uuid4()),
+            "job_id": marker.job_id,
+            "job_key": marker.job_key,
+            "placement": marker.placement.as_posix(),
+            "expected_generation": marker.generation,
+            "expected_record_ref": marker.record_ref,
+            "action": arguments.action,
+            "operator": arguments.operator,
+            "reason": arguments.reason,
+            "created_at": utc_now(),
+        }
+        if arguments.priority is not None:
+            request["priority"] = arguments.priority
+        if arguments.step is not None:
+            request["step"] = arguments.step
+        if arguments.force:
+            request["force"] = True
+        # Attribution, when this installation has an identity key: the manager
+        # verifies a signature that is there and accepts a request that has none.
+        path = workspace.publish_request(sign_document(request))
+        published.append((job_id, marker, path))
+        print(path)
+
+    if not arguments.wait:
+        for _, marker, _ in published:
+            _warn_if_no_live_manager(workspace, marker)
+        return 0
+
+    available = True
+    for _, marker, _ in published:
+        available &= _warn_if_no_live_manager(workspace, marker)
+    if not available:
+        print("waiting is pointless until a manager starts", file=sys.stderr)
+        return 1
+    return _wait_for_pauses(workspace, published, timeout=arguments.timeout)
 
 
 def _prevalidate_override_step(workspace: Workspace, marker: Marker, step: str, *, force: bool) -> None:
@@ -375,7 +438,7 @@ def _prevalidate_override_step(workspace: Workspace, marker: Marker, step: str, 
     )
 
 
-def _warn_if_no_live_manager(workspace: Workspace, marker: Marker) -> None:
+def _warn_if_no_live_manager(workspace: Workspace, marker: Marker) -> bool:
     """Warn when no live manager serves the executor a published request needs.
 
     A request only takes effect when a manager applies it, so a request against
@@ -387,13 +450,82 @@ def _warn_if_no_live_manager(workspace: Workspace, marker: Marker) -> None:
     try:
         executor = workspace.load_job(marker).runner_executor
     except (WorkflowError, OSError):
-        return
+        return True
     if any(executor in record.executors for record in read_managers(workspace) if record.alive()):
-        return
+        return True
     print(
         f"no live manager currently serves executor {executor!r}; the request will wait until one starts",
         file=sys.stderr,
     )
+    return False
+
+
+def _wait_for_pauses(
+    workspace: Workspace,
+    published: list[tuple[str, Marker, Path]],
+    *,
+    timeout: float | None,
+) -> int:
+    """Wait for published pause requests and report each final outcome."""
+
+    pending = {path.name: (job_id, marker, path) for job_id, marker, path in published}
+    outcomes: dict[str, str] = {}
+    successful: set[str] = set()
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while pending:
+        for name, (job_id, original, path) in list(pending.items()):
+            marker = workspace.find_marker_by_id(original.job_id)
+            if marker is not None:
+                if marker.kind == "paused":
+                    outcomes[name] = f"{marker.job_key}: paused"
+                    successful.add(name)
+                elif marker.kind in TERMINAL_KINDS:
+                    outcomes[name] = f"{marker.job_key}: {marker.kind} (pause superseded)"
+            if name not in outcomes:
+                retirement = workspace.control / "requests" / "retired" / f"{name}.retirement"
+                if retirement.is_file():
+                    reason = read_json(retirement).get("reason", "unknown reason")
+                    outcomes[name] = f"{job_id}: request retired: {reason}"
+            if name not in outcomes:
+                quarantine = _find_quarantined_request(workspace, name)
+                if quarantine is not None:
+                    outcomes[name] = f"{job_id}: request quarantined ({quarantine})"
+            if name in outcomes:
+                pending.pop(name)
+        if not pending:
+            break
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(1.0, remaining))
+        else:
+            time.sleep(1.0)
+
+    for name, (job_id, _, _) in pending.items():
+        outcomes[name] = f"{job_id}: timeout; still pending (request remains published)"
+    for _, _, path in published:
+        print(outcomes[path.name])
+    return int(len(successful) != len(published))
+
+
+def _find_quarantined_request(workspace: Workspace, request_name: str) -> str | None:
+    """Return a quarantine reason for *request_name*, if one is recorded."""
+
+    quarantine = workspace.control / "quarantine"
+    if not quarantine.is_dir():
+        return None
+    for entry in quarantine.iterdir():
+        report_path = entry / "report.json"
+        if not report_path.is_file():
+            continue
+        try:
+            report = read_json(report_path)
+        except WorkflowError:
+            continue
+        if Path(str(report.get("original_path", ""))).name == request_name:
+            return str(report.get("reason", "invalid request"))
+    return None
 
 
 def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:

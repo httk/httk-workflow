@@ -882,12 +882,70 @@ def select_transfer_jobs(
     return sorted(candidates, key=lambda item: (item.source_placement.as_posix(), item.job_key))
 
 
+def _offer_selection_errors(
+    workspace: Workspace,
+    requested_ids: set[str],
+    candidates: Sequence[TransferCandidate],
+    *,
+    destination_workspace_id: str,
+    states: Sequence[str],
+    placement: str | PurePosixPath | None,
+) -> dict[str, str]:
+    """Explain explicit ids that did not produce an offer candidate."""
+
+    found = {candidate.job_id for candidate in candidates if not candidate.problem}
+    missing = requested_ids - found
+    if not missing:
+        return {}
+    prefix = None if placement is None else normalize_placement(placement).parts
+    reasons: dict[str, str] = {}
+    ledgers = _ledgers(workspace)
+    for job_id in sorted(missing):
+        marker = workspace.find_marker_by_id(job_id)
+        if marker is not None:
+            if marker.kind not in QUIESCENT_KINDS:
+                reasons[job_id] = f"not quiescent (state: {marker.kind})"
+            elif marker.kind not in states:
+                reasons[job_id] = f"filtered by state (state: {marker.kind})"
+            elif prefix is not None and marker.placement.parts[: len(prefix)] != prefix:
+                reasons[job_id] = "filtered by placement"
+            elif _unresolved_join_reference(workspace, marker):
+                reasons[job_id] = "blocked by an unresolved join"
+            else:
+                reasons[job_id] = "not eligible for offering"
+            continue
+        sealed = [
+            ledger
+            for ledger in ledgers
+            if ledger.get("status") == "sealed"
+            and ledger.get("destination_workspace_id") == destination_workspace_id
+            and str(ledger.get("job_id")) == job_id
+        ]
+        if sealed:
+            ledger = sealed[0]
+            if ledger.get("prior_kind") not in states:
+                reasons[job_id] = f"filtered by state (state: {ledger.get('prior_kind')})"
+            elif prefix is not None:
+                source_placement = normalize_placement(str(ledger["source_placement"]))
+                if source_placement.parts[: len(prefix)] != prefix:
+                    reasons[job_id] = "filtered by placement"
+                    continue
+            reasons[job_id] = "sealed bundle is unavailable"
+        else:
+            reasons[job_id] = "not found"
+    for candidate in candidates:
+        if candidate.job_id in requested_ids and candidate.problem:
+            reasons[candidate.job_id] = candidate.problem
+    return reasons
+
+
 def offer_transfers(
     workspace: Workspace,
     *,
     destination_workspace_id: str,
     states: Iterable[str] = DEFAULT_OFFER_STATES,
     placement: str | PurePosixPath | None = None,
+    job_ids: Iterable[str] | None = None,
 ) -> list[dict[str, object]]:
     """Seal every finished job of *workspace* into a bundle for one destination.
 
@@ -906,20 +964,64 @@ def offer_transfers(
     :param destination_workspace_id: Identify the destination workspace.
     :param states: Select quiescent states eligible for offering.
     :param placement: Restrict offers to this placement prefix.
+    :param job_ids: Restrict the offer to these explicit job ids.
     :return: Offered transfer records in placement order.
     :raises ValueError: If the destination id or requested states are invalid.
     """
 
     destination_id = canonical_uuid(destination_workspace_id, "destination_workspace_id")
     kinds = tuple(dict.fromkeys(states))
+    requested_ids = None if job_ids is None else set(job_ids)
+    if requested_ids is not None:
+        # Validate and preflight before recovery can seal an interrupted job.
+        select_transfer_jobs(
+            workspace,
+            destination_workspace_id=destination_id,
+            states=kinds,
+            job_ids=(),
+        )
+        precheck_candidates = select_transfer_jobs(
+            workspace,
+            destination_workspace_id=destination_id,
+            states=(*kinds, "transferring"),
+            placement=placement,
+            job_ids=requested_ids,
+            include_transferring=True,
+        )
+        errors = _offer_selection_errors(
+            workspace,
+            requested_ids,
+            precheck_candidates,
+            destination_workspace_id=destination_id,
+            states=kinds,
+            placement=placement,
+        )
+        if errors:
+            details = "; ".join(f"{job_id}: {reason}" for job_id, reason in sorted(errors.items()))
+            raise ValueError(f"requested transfer jobs are not all eligible: {details}")
     recover_transfers(workspace)
     offers: dict[str, dict[str, object]] = {}
-    for candidate in select_transfer_jobs(
+    sealing_errors: list[str] = []
+    candidates = select_transfer_jobs(
         workspace,
         destination_workspace_id=destination_id,
         states=kinds,
         placement=placement,
-    ):
+        job_ids=requested_ids,
+    )
+    if requested_ids is not None:
+        errors = _offer_selection_errors(
+            workspace,
+            requested_ids,
+            candidates,
+            destination_workspace_id=destination_id,
+            states=kinds,
+            placement=placement,
+        )
+        if errors:
+            details = "; ".join(f"{job_id}: {reason}" for job_id, reason in sorted(errors.items()))
+            raise ValueError(f"requested transfer jobs are not all eligible: {details}")
+    for candidate in candidates:
         if candidate.bundle is not None:
             if candidate.manifest is None:
                 raise FormatError(candidate.problem or f"sealed transfer manifest is unreadable: {candidate.bundle}")
@@ -929,6 +1031,9 @@ def offer_transfers(
             assert candidate.marker is not None
             bundle = detach_job(workspace, candidate.marker.job_id, destination_workspace_id=destination_id)
         except ValueError as exc:
+            if requested_ids is not None:
+                sealing_errors.append(f"{candidate.job_id}: {exc}")
+                continue
             _LOGGER.warning(
                 "not offering %s: %s",
                 candidate.job_key,
@@ -938,6 +1043,12 @@ def offer_transfers(
             continue
         manifest = read_json(bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST)
         offers[str(manifest["transfer_id"])] = _offer_record(manifest, bundle)
+    if sealing_errors:
+        details = "; ".join(sealing_errors)
+        raise ValueError(
+            "requested transfer jobs could not all be sealed: "
+            f"{details}; already-sealed jobs remain sealed and a retry resumes them"
+        )
     return sorted(offers.values(), key=lambda item: (str(item["placement"]), str(item["job_key"])))
 
 

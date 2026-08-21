@@ -379,6 +379,55 @@ def test_a_sealed_but_unsent_bundle_is_offered_again(tmp_path: Path) -> None:
     assert offer_transfers(source, destination_workspace_id=destination.workspace_id, states=("submitted",)) == offers
 
 
+def test_explicit_offer_reports_a_late_sealing_failure_and_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source, destination = _pair(tmp_path)
+    first_payload, first_id = _payload(tmp_path / "first", tag="first")
+    second_payload, second_id = _payload(tmp_path / "second", tag="second")
+    source.submit(first_payload, "jobs")
+    source.submit(second_payload, "jobs")
+    real_detach = transfers_module.detach_job
+
+    def fail_second(
+        workspace: Workspace,
+        job_id: str,
+        *,
+        destination_workspace_id: str,
+        destination_remote: str | None = None,
+        destination_placement: str | PurePosixPath | None = None,
+        transfer_id: str | None = None,
+    ) -> Path:
+        if job_id == second_id:
+            raise ValueError("job became active")
+        return real_detach(
+            workspace,
+            job_id,
+            destination_workspace_id=destination_workspace_id,
+            destination_remote=destination_remote,
+            destination_placement=destination_placement,
+            transfer_id=transfer_id,
+        )
+
+    monkeypatch.setattr(transfers_module, "detach_job", fail_second)
+    with pytest.raises(ValueError, match=f"{second_id}.*already-sealed jobs remain sealed"):
+        offer_transfers(
+            source,
+            destination_workspace_id=destination.workspace_id,
+            states=("submitted",),
+            job_ids=(first_id, second_id),
+        )
+    assert source.find_marker_by_id(second_id) is not None
+    assert source.find_marker_by_id(first_id) is None
+
+    monkeypatch.setattr(transfers_module, "detach_job", real_detach)
+    resumed = offer_transfers(
+        source,
+        destination_workspace_id=destination.workspace_id,
+        states=("submitted",),
+        job_ids=(first_id, second_id),
+    )
+    assert {str(offer["job_id"]) for offer in resumed} == {first_id, second_id}
+
+
 def test_a_source_bundle_already_moved_aside_is_retired_without_a_second_move(tmp_path: Path) -> None:
     source, destination = _pair(tmp_path)
     payload, job_id = _payload(tmp_path)

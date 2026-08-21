@@ -72,9 +72,17 @@ workspace, the far side resolves the plain name in its own registry. The Python
 API keeps `Workspace(path)` for library use; the registry is what the command
 line speaks.
 
-Remote-capable workspace commands use the adapter; this includes status and
-settings. Jobs are created in the local default workspace, then `transfer` moves
-them to a remote workspace for execution.
+Remote-capable workspace commands use the adapter; this includes status,
+settings, and `job request`. Most job commands remain local-only. Jobs are
+created in the local default workspace, then `transfer` moves them to a remote
+workspace for execution.
+
+`job request REMOTE:NAME ...` forwards the request to the owning machine, where
+the plain workspace name is resolved in that machine's registry. An older far
+side that cannot parse the additive forwarded vector fails with its own
+argparse error, which is relayed verbatim. If both are supplied, make
+`--adapter-timeout` longer than `--timeout` or the adapter may cut the session
+off first.
 
 ### `workspace` — the workspace itself, not its jobs
 
@@ -165,12 +173,26 @@ its job or store runner target.
 | --- | --- | --- |
 | `job new WORKSPACE` | scaffold and submit jobs from a workflow | `--workflow` or `--workflow-dir` (one required), `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
 | `job submit WORKSPACE SOURCE` | submit one prepared payload directory | `--placement` (required), `--move` |
-| `job request WORKSPACE JOB_ID ACTION` | publish an operator request | `--operator`, `--reason` (both required), `--priority`, `--step`, `--force` |
+| `job request WORKSPACE JOB_ID ... ACTION` | publish one request per job ID (remote: over the adapter) | `--operator`, `--reason` (both required), `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
 | `job list WORKSPACE` | list the jobs as a cheap table | `--kind`, `--placement`, `--json` |
 | `job show WORKSPACE JOB` | describe one job from its state | `--json` |
 | `job log WORKSPACE JOB` | print the transition history | `--limit`, `--json` |
 | `job why WORKSPACE JOB` | explain why a job is not running | `--json` |
 | `job debug WORKSPACE JOB` | drive one job to a terminal state, in front of you | `--step`, `--placement`, `--follow-children`, `--timeout`, `--log-level` |
+
+An operator `pause` request against `claimed`, `running`, or `committing` is
+deferred: the manager records it and pauses the job at the next attempt
+boundary; a terminal outcome supersedes it. An older manager that does not
+understand this in-flight pause request quarantines it as invalid.
+
+`JOB_ID` is repeatable, so one command publishes one request per job. `--wait`
+is valid only for `pause` and exits 0 only when each requested job was observed
+`paused` at some point during the wait; jobs are confirmed individually, not
+simultaneously. A concurrent operator may already have resumed an earlier job
+when the command exits, and any pause (for example, a runner-declared step
+pause), not specifically this command's published request, may satisfy it.
+Terminal, retired, quarantined, or timed-out requests exit 1. `--timeout
+SECONDS` requires `--wait`; timed-out requests remain published.
 
 `JOB` is a job UUID, a `tag--uuid` job key, or any unique prefix of either.
 
@@ -404,20 +426,28 @@ which stay in this filesystem follows entirely from where the two are bound:
 
 | Direction | What happens | `--job` |
 | --- | --- | --- |
-| local → remote | each named job is detached, its sealed bundle pushed to the remote, and imported there | at least one required |
-| remote → local | the jobs that have finished on the remote are offered, pulled home, imported, and their sources retired | optional; a `--state`/`--placement` filter selects them |
-| local → local | each named job is detached from the source and imported into the destination directly, in this filesystem | at least one required |
-| remote → remote | the client relays: it fetches from the source into local staging and pushes on to the destination (v1; a direct source-to-destination path is deferred) | optional |
+| local → remote | each named job is detached, its sealed bundle pushed to the remote, and imported there | honored; required |
+| remote → local | the selected jobs are offered, pulled home, imported, and their sources retired | honored; optional sweep |
+| local → local | each named job is detached from the source and imported into the destination directly, in this filesystem | honored; required |
+| remote → remote | the client relays the selected offers through local staging and pushes them to the destination (v1; a direct source-to-destination path is deferred) | honored; optional sweep |
 
 `--state` (repeatable, default `succeeded` and `failed`) chooses which finished
-kinds a fetch moves, `--placement` restricts it to one subtree,
+kinds a sweep moves, `--placement` restricts it to one subtree,
 `--destination-placement` lands the jobs somewhere other than the placement they
 had, and `--adapter-timeout` bounds every adapter operation the move runs.
+When `--job` is supplied, each named job must be eligible before any job is
+sealed; by-id moves accept any quiescent state, while an explicit `--state`
+remains an additional filter. With no `--job`, the sweep remains skip-tolerant
+and defaults to `succeeded` and `failed`.
 `--strict-environment` blocks before state moves when a checked destination
 environment is unresolved or cannot be read. Transfer checks intentionally use
 job overrides, destination settings, and declared defaults; they do not use the
 client process environment as a destination substitute. A remote settings read
 that is unavailable produces one immediate warning in non-strict mode.
+
+For remote → remote, repeated `--job` values constrain the source offer before
+the relay pulls anything; omitting them keeps the skip-tolerant terminal-state
+sweep.
 
 Bundles carry sources only for workflows that declare `[workflow.build]`;
 compiled artifacts are machine-local and are never transferred. After importing
@@ -436,7 +466,7 @@ or newer than yours:
 
 ```text
 httk workflow transfer receive --workspace PATH --bundle BUNDLE
-httk workflow transfer offer PATH --destination-workspace-id UUID --json
+httk workflow transfer offer PATH --destination-workspace-id UUID [--job JOB_ID …] --json
 httk workflow transfer retire PATH JOB_ID … --destination-workspace-id UUID --json
 httk workflow workspace status PATH --by-path --json
 httk workflow manager run PATH --by-path
@@ -1058,29 +1088,34 @@ httk workflow transfer kappa:runs default \
 
 `--state` accepts the kinds a stopped job can be in and defaults to `succeeded`
 and `failed`; `--placement` restricts the fetch to one subtree; `--adapter-timeout`
-bounds every adapter operation the fetch runs. A fetched job arrives as an
-ordinary job of the local default workspace, in the terminal state and at the
-placement it had on the remote, so `httk workflow collect` then reports it
-exactly like a job that ran at home.
+bounds every adapter operation the fetch runs. With `--job`, any quiescent state
+is eligible unless an explicit `--state` filters it. A fetched job arrives as an
+ordinary job of the local default workspace, in its offered state and at the
+placement it had on the remote, so `httk workflow collect` then reports terminal
+results exactly like jobs that ran at home.
 
 Under the fetch leg run the two far-side protocol commands, invoked over the
 adapter but usable on their own on the remote itself. They use literal paths
 because they bypass the owning machine's registry:
 
 ```console
-httk workflow transfer offer PATH --destination-workspace-id UUID --json
+httk workflow transfer offer PATH --destination-workspace-id UUID [--job JOB_ID …] --json
 httk workflow transfer retire PATH JOB_ID ... --destination-workspace-id UUID
 ```
 
-`offer` detaches every finished job into its sealed bundle and prints one entry
+`offer` detaches every selected job into its sealed bundle and prints one entry
 per bundle; it requires `--destination-workspace-id`, because a bundle is sealed
-for exactly one destination. `retire` moves the sealed source of an already
+for exactly one destination. `--job` is repeatable, accepts any quiescent state
+when no `--state` is supplied, and fails all-or-nothing if an id is missing or
+filtered. `retire` moves the sealed source of an already
 imported job under `.httk-workflow/transfers/retired/` — a rename, never a
 delete, so a source is only ever whole or moved whole; its
 `--destination-workspace-id` is optional and, when given, refuses a bundle that
 was sealed for somebody else. `offer` narrows what it seals with the same
 `--state` and `--placement` `fetch` passes through; both print their report as
-JSON with `--json` and as tab-separated lines otherwise.
+JSON with `--json` and as tab-separated lines otherwise. A client that sends
+`--job` requires a new far side: an older remote rejects the additive flag with
+its argparse error, which the client relays.
 
 Every step is idempotent and the whole pipeline is resumable: `offer` reports an
 already sealed bundle from its ledger instead of sealing it again, a `pull` onto

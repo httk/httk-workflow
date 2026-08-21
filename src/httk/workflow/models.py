@@ -856,6 +856,9 @@ CARRIED_STATE_MEMBERS = (
     # one recovered from an abandoned claim or a retry, must see the same
     # children. A new activation resets the member.
     "join_summary",
+    # An operator pause requested during an in-flight attempt survives until
+    # the manager reaches the next attempt boundary.
+    "pause_requested",
     # The step set the runner of this job declared, carried forward until a
     # later outcome declares a different one.
     "runner_steps",
@@ -940,6 +943,7 @@ class StateFrame:
         next_step: str = _UNSET,
         join: Mapping[str, object] = _UNSET,
         pause: object = _UNSET,
+        pause_requested: Mapping[str, object] | None = _UNSET,
         failure: Mapping[str, object] = _UNSET,
         job_digest: str = _UNSET,
         join_unresolved: Mapping[str, object] = _UNSET,
@@ -987,6 +991,7 @@ class StateFrame:
         :param next_step: The next activation step.
         :param join: The child join condition.
         :param pause: The pause record.
+        :param pause_requested: The deferred operator pause request.
         :param failure: The failure record.
         :param job_digest: The immutable job digest.
         :param join_unresolved: The persisted first-unresolved child and timestamp of a waiting join.
@@ -1029,6 +1034,7 @@ class StateFrame:
             ("next_step", next_step),
             ("join", join),
             ("pause", pause),
+            ("pause_requested", pause_requested),
             ("failure", failure),
             ("job_digest", job_digest),
             ("join_unresolved", join_unresolved),
@@ -1192,6 +1198,11 @@ class StateFrame:
     def pause(self) -> object:
         """Return the pause record, when present."""
         return self.members.get("pause")
+
+    @property
+    def pause_requested(self) -> Mapping[str, object] | None:
+        """Return the deferred operator pause request, when present."""
+        return self._mapping("pause_requested")
 
     @property
     def cancellation(self) -> Mapping[str, object] | None:

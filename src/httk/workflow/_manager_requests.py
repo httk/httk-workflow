@@ -6,11 +6,27 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from ._util import utc_now
 from .configuration import verify_document
 from .errors import FormatError, TransitionLostError, WorkflowError
 from .models import TERMINAL_KINDS, StateFrame, normalize_placement, parse_job_key, validate_step
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
+_STATE_ENVELOPE_MEMBERS = frozenset(
+    {
+        "format",
+        "format_version",
+        "workspace_id",
+        "job_id",
+        "job_key",
+        "placement",
+        "state_generation",
+        "kind",
+        "previous_record_ref",
+        "created_at",
+        "priority",
+    }
+)
 
 
 class _IndeterminateRequestRead(Exception):
@@ -86,7 +102,15 @@ def action_class(action: object, kind: str) -> str:
         return "cancel"
     if action == "set_priority" and kind in {"submitted", "ready", "waiting", "paused", "failed"}:
         return "set_priority"
-    if action == "pause" and kind in {"submitted", "ready", "waiting"}:
+    if action == "pause" and kind in {
+        "submitted",
+        "ready",
+        "waiting",
+        "claimed",
+        "running",
+        "committing",
+        "paused",
+    }:
         return "pause"
     if action == "continue" and kind in {"failed", "paused"}:
         return "continue"
@@ -120,7 +144,7 @@ def apply(manager: Any, request: Mapping[str, Any]) -> str | None:
         return manager._request_cancel(marker, state, request, operator_key_value)
     if action == "set_priority" and marker.kind in {"submitted", "ready", "waiting", "paused", "failed"}:
         priority = int(request.get("priority", -1))
-        preserved = state.select(("join", "join_summary", "next_step", "pause", "failure"))
+        preserved = state.select(("join", "join_summary", "next_step", "pause", "pause_requested", "failure"))
         manager._transition(
             marker,
             marker.kind,
@@ -128,8 +152,30 @@ def apply(manager: Any, request: Mapping[str, Any]) -> str | None:
             priority=priority,
         )
         return None
+    if action == "pause" and marker.kind in {"claimed", "running", "committing"}:
+        requested_at = request.get("created_at")
+        if not isinstance(requested_at, str) or not requested_at:
+            requested_at = utc_now()
+        manager._transition(
+            marker,
+            marker.kind,
+            StateFrame.replace(
+                StateFrame(
+                    {name: value for name, value in state.members.items() if name not in _STATE_ENVELOPE_MEMBERS}
+                ),
+                pause_requested={
+                    "operator": request.get("operator"),
+                    "reason": request.get("reason"),
+                    "request_id": request.get("request_id"),
+                    "requested_at": requested_at,
+                },
+            ),
+        )
+        return None
     if action == "pause" and marker.kind in {"submitted", "ready", "waiting"}:
         manager._transition(marker, "paused", StateFrame.replace(audit, reason="operator_pause"))
+        return None
+    if action == "pause" and marker.kind == "paused":
         return None
     if action in {"continue", "override_step"} and marker.kind in {"failed", "paused"}:
         hazard = manager._decided_join_hazard(marker, job)
