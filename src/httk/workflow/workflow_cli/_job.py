@@ -269,18 +269,21 @@ def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int
 def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`job request`, shared with ``httk-taskmanager request``."""
 
-    add_workspace_argument(parser, help_text="the workspace holding the job")
-    parser.add_argument(
-        "job_id",
-        metavar="JOB_ID",
-        nargs="+",
-        help="one or more job UUIDs the request is about",
-    )
     parser.add_argument(
         "action",
         metavar="ACTION",
         choices=("continue", "override_step", "cancel", "set_priority", "pause"),
         help="continue, override_step, cancel, set_priority, or pause",
+    )
+    add_workspace_argument(parser, help_text="the workspace holding the job")
+    parser.add_argument(
+        "job_id",
+        metavar="JOB_ID",
+        nargs="+",
+        help=(
+            "one or more job UUIDs the request is about; when giving more than one JOB_ID, "
+            "name the workspace explicitly"
+        ),
     )
     parser.add_argument(
         "--operator",
@@ -323,13 +326,13 @@ def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
 def add_job_request_envelopes_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare the hidden remote envelope-building protocol command."""
 
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the far-side workspace name")
-    parser.add_argument("job_id", metavar="JOB_ID", nargs="+", help="one or more job UUIDs")
     parser.add_argument(
         "action",
         choices=("continue", "override_step", "cancel", "set_priority", "pause"),
         help="the request action",
     )
+    parser.add_argument("workspace", metavar="WORKSPACE", help="the far-side workspace name")
+    parser.add_argument("job_id", metavar="JOB_ID", nargs="+", help="one or more job UUIDs")
     parser.add_argument("--operator", required=True, help="the operator attribution label")
     parser.add_argument("--reason", required=True, help="why the request is being made")
     parser.add_argument("--priority", type=int, help="the new priority")
@@ -511,7 +514,11 @@ def _validate_request_document(
     }
     for member, expected_type in exact_types.items():
         value = document[member]
-        if (type(value) is not expected_type) if isinstance(expected_type, type) else not isinstance(value, expected_type):
+        if (
+            (type(value) is not expected_type)
+            if isinstance(expected_type, type)
+            else not isinstance(value, expected_type)
+        ):
             raise ValueError(f"{label} member {member!r} has the wrong type")
     if type(document["format_version"]) is not int or document["format_version"] != 2:
         raise ValueError(f"{label} member 'format_version' must be integer 2")
@@ -641,9 +648,9 @@ def _request_remote_job(
     remote_name = binding.name.split(":", 1)[1]
     envelope_argv = [
         *REMOTE_JOB_REQUEST_ENVELOPES_COMMAND,
+        arguments.action,
         remote_name,
         *arguments.job_id,
-        arguments.action,
         f"--operator={identity.label}",
         f"--reason={arguments.reason}",
         "--json",
@@ -682,9 +689,7 @@ def _request_remote_job(
     signed: list[str] = []
     for envelope in envelopes:
         signed_document = (
-            dict(envelope)
-            if identity.seed_path is None
-            else sign_document(envelope, seed_path=identity.seed_path)
+            dict(envelope) if identity.seed_path is None else sign_document(envelope, seed_path=identity.seed_path)
         )
         if identity.seed_path is not None and not verify_document(signed_document).valid:
             raise ValueError(f"local signature verification failed for job {envelope['job_id']}")

@@ -188,8 +188,8 @@ ALIASED_TASKMANAGER = (
     (["run", "WS", "--workers", "4", "--idle"], ["manager", "run", "WS", "--workers", "4", "--idle"]),
     (["status", "WS", "--json"], ["workspace", "status", "WS", "--json"]),
     (
-        ["request", "WS", "JOB", "cancel", "--operator", "me", "--reason", "why"],
-        ["job", "request", "WS", "JOB", "cancel", "--operator", "me", "--reason", "why"],
+        ["request", "cancel", "WS", "JOB", "--operator", "me", "--reason", "why"],
+        ["job", "request", "cancel", "WS", "JOB", "--operator", "me", "--reason", "why"],
     ),
 )
 
