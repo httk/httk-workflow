@@ -105,9 +105,9 @@ def _request_args(workspace_name: str, *job_ids: str, action: str = "pause") -> 
     return [
         "job",
         "request",
+        action,
         workspace_name,
         *job_ids,
-        action,
         "--reason",
         "test request",
     ]
@@ -140,6 +140,17 @@ def test_job_request_accepts_tag_prefix_selector(tmp_path: Path, capsys) -> None
     assert request["job_id"] == job_id
 
 
+def test_job_request_uses_default_workspace_with_one_job_id(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.default()
+    payload, job_id = _payload(tmp_path / "source", "default-workspace")
+    workspace.submit(payload, "project/default-workspace")
+
+    assert command(["job", "request", "pause", job_id, "--reason", "default workspace"], _context(tmp_path)) == 0
+    capsys.readouterr()
+    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    assert request["job_id"] == job_id
+
+
 def test_protocol_request_envelopes_and_publish_requests_are_verbatim(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", "protocol")
@@ -150,9 +161,9 @@ def test_protocol_request_envelopes_and_publish_requests_are_verbatim(tmp_path: 
             [
                 "job",
                 "request-envelopes",
+                "pause",
                 workspace_name,
                 job_id,
-                "pause",
                 "--operator=Test User <tester@example.test>",
                 "--reason=protocol",
                 "--json",

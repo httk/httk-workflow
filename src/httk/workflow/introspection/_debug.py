@@ -177,7 +177,7 @@ def debug_job(
             raise ValueError(
                 f"job {marker.job_key} already has a history, so its step cannot be overridden here; "
                 "publish an operator request instead: "
-                "'httk workflow job request WORKSPACE JOB override_step --step STEP --operator NAME --reason WHY'"
+                "'httk workflow job request override_step WORKSPACE JOB --step STEP --operator NAME --reason WHY'"
             )
     final = _drive(
         workspace,

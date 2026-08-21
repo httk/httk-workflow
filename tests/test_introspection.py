@@ -537,7 +537,7 @@ def test_why_reports_a_failed_job_with_its_breadcrumb_and_continue(tmp_path: Pat
     assert "runner exited with status 7" in checks["failure"].detail
     assert "step prepare raised RuntimeError: the inputs are missing" == checks["error breadcrumb"].detail
     assert checks["operator continue"].satisfied is True
-    assert any("continue --operator" in hint for hint in diagnosis.hints)
+    assert any("job request continue WORKSPACE JOB" in hint for hint in diagnosis.hints)
 
     report = describe_job(workspace, marker)
     assert report["error_breadcrumb"]["exception"] == "RuntimeError"
@@ -689,7 +689,7 @@ def test_why_reports_a_paused_job(tmp_path: Path) -> None:
     assert "only an operator request moves it" in diagnosis.summary
     pause = next(check for check in diagnosis.checks if check.name == "pause")
     assert "operator inspection" in pause.detail
-    assert any("continue --operator" in hint for hint in diagnosis.hints)
+    assert any("job request continue WORKSPACE JOB" in hint for hint in diagnosis.hints)
 
 
 # ---------------------------------------------------------------------------

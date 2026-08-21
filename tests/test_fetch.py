@@ -241,9 +241,9 @@ def test_job_request_forwards_to_remote_workspace(pair: Pair, capsys: pytest.Cap
     argv = [
         "job",
         "request",
+        "pause",
         "cluster:station",
         pair.ids["pending"],
-        "pause",
         "--reason",
         "r",
         "--adapter-timeout",
@@ -277,9 +277,9 @@ def test_job_request_remote_uses_selected_identity(pair: Pair, capsys: pytest.Ca
     argv = [
         "job",
         "request",
+        "pause",
         "cluster:station",
         pair.ids["pending"],
-        "pause",
         "--operator",
         "bot",
         "--reason",
@@ -299,9 +299,9 @@ def test_job_request_remote_accepts_tag_prefix_selector(pair: Pair, capsys: pyte
             [
                 "job",
                 "request",
+                "pause",
                 "cluster:station",
                 f"succeeding--{pair.ids['pending'][:8]}",
-                "pause",
                 "--reason",
                 "tag selector",
             ],
@@ -325,9 +325,9 @@ def test_job_request_remote_literal_on_unconfigured_machine_is_unsigned(
             [
                 "job",
                 "request",
+                "pause",
                 "cluster:station",
                 pair.ids["pending"],
-                "pause",
                 "--operator",
                 "External <external@example.test>",
                 "--reason",
@@ -360,9 +360,9 @@ def test_job_request_remote_tamper_is_rejected_before_publish(
             [
                 "job",
                 "request",
+                "pause",
                 "cluster:station",
                 pair.ids["pending"],
-                "pause",
                 "--reason",
                 "r",
             ],
@@ -378,9 +378,9 @@ def test_job_request_forwards_leading_dash_reason(pair: Pair, capsys: pytest.Cap
     argv = [
         "job",
         "request",
+        "pause",
         "cluster:station",
         pair.ids["pending"],
-        "pause",
         "--operator=local",
         "--reason=-maintenance",
     ]
@@ -396,10 +396,10 @@ def test_job_request_forwards_multiple_ids(pair: Pair, capsys: pytest.CaptureFix
     argv = [
         "job",
         "request",
+        "pause",
         "cluster:station",
         pair.ids["pending"],
         pair.ids["succeeded"],
-        "pause",
         "--reason",
         "r",
     ]
@@ -420,9 +420,9 @@ def test_job_request_remote_wait_relays_far_side_result(pair: Pair, capsys: pyte
             [
                 "job",
                 "request",
+                "pause",
                 "cluster:station",
                 pair.ids["pending"],
-                "pause",
                 "--reason",
                 "r",
                 "--wait",
@@ -445,9 +445,9 @@ def test_job_request_remote_manager_records_local_operator_key(pair: Pair, capsy
                 [
                     "job",
                     "request",
+                    "pause",
                     "cluster:station",
                     pair.ids["pending"],
-                    "pause",
                     "--reason",
                     "r",
                 ],
@@ -473,9 +473,9 @@ def test_job_request_relays_remote_failure(pair: Pair, capsys: pytest.CaptureFix
     argv = [
         "job",
         "request",
+        "pause",
         "cluster:station",
         "does-not-exist",
-        "pause",
         "--reason",
         "r",
     ]

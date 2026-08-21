@@ -339,9 +339,9 @@ def test_signed_operator_request_round_trips_and_is_attributed(tmp_path: Path, m
         native_cli.main(
             [
                 "request",
+                "cancel",
                 ws,
                 job_id,
-                "cancel",
                 "--operator",
                 "Me <me@example.org>",
                 "--reason",
@@ -370,9 +370,9 @@ def test_unsigned_operator_request_is_still_accepted(tmp_path: Path, monkeypatch
     assert identity_public_key() is None
     arguments = [
         "request",
+        "cancel",
         ws,
         job_id,
-        "cancel",
         "--operator",
         "Nobody <nobody@example.org>",
         "--reason",

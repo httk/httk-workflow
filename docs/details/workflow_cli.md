@@ -77,7 +77,7 @@ settings, and `job request`. Most job commands remain local-only. Jobs are
 created in the local default workspace, then `transfer` moves them to a remote
 workspace for execution.
 
-`job request REMOTE:NAME ...` asks the owning machine for unsigned envelopes,
+`job request ACTION REMOTE:NAME JOB_ID ...` asks the owning machine for unsigned envelopes,
 signs those envelopes with the control-center identity selected by
 `--operator`, and sends the signed documents back for verbatim publication.
 An older far side that cannot parse the additive protocol vectors fails with
@@ -178,12 +178,14 @@ its job or store runner target.
 | --- | --- | --- |
 | `job new WORKSPACE` | scaffold and submit jobs from a workflow | `--workflow` or `--workflow-dir` (one required), `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
 | `job submit WORKSPACE SOURCE` | submit one prepared payload directory | `--placement` (required), `--move` |
-| `job request WORKSPACE JOB_ID ... ACTION` | publish one request per job ID (remote: over the adapter) | optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
+| `job request ACTION [WORKSPACE] JOB_ID ...` | publish one request per job ID (remote: over the adapter) | optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
 | `job list WORKSPACE` | list the jobs as a cheap table | `--kind`, `--placement`, `--json` |
 | `job show WORKSPACE JOB` | describe one job from its state | `--json` |
 | `job log WORKSPACE JOB` | print the transition history | `--limit`, `--json` |
 | `job why WORKSPACE JOB` | explain why a job is not running | `--json` |
 | `job debug WORKSPACE JOB` | drive one job to a terminal state, in front of you | `--step`, `--placement`, `--follow-children`, `--timeout`, `--log-level` |
+
+When giving more than one `JOB_ID`, name the workspace explicitly.
 
 An operator `pause` request against `claimed`, `running`, or `committing` is
 deferred: the manager records it and pauses the job at the next attempt
@@ -477,7 +479,7 @@ or newer than yours:
 httk workflow transfer receive --workspace PATH --bundle BUNDLE
 httk workflow transfer offer PATH --destination-workspace-id UUID [--job JOB_ID …] --json
 httk workflow transfer retire PATH JOB_ID … --destination-workspace-id UUID --json
-httk workflow job request-envelopes WORKSPACE JOB_ID … ACTION --operator=LABEL --reason=TEXT [--priority N] [--step S] [--force] --json
+httk workflow job request-envelopes ACTION WORKSPACE JOB_ID … --operator=LABEL --reason=TEXT [--priority N] [--step S] [--force] --json
 httk workflow job publish-requests WORKSPACE --document JSON [--document JSON …] [--wait] [--timeout S] [--durable|--no-durable]
 httk workflow workspace status PATH --by-path --json
 httk workflow manager run PATH --by-path

@@ -760,7 +760,7 @@ Stop instantiating new converted jobs first. Let submitted *httk* v1 jobs reach 
 terminal state or cancel them through recorded operator requests:
 
 ```console
-httk workflow job request workflow-workspace JOB_UUID cancel \
+httk workflow job request cancel workflow-workspace JOB_UUID \
   --operator "$USER" \
   --reason "replaced by validated native workflow"
 ```

@@ -458,10 +458,10 @@ Phase 14 campaign recipes add it.
 httk workflow workspace status WORKSPACE
 httk workflow workspace status WORKSPACE --json
 
-httk workflow job request WORKSPACE JOB_UUID pause \
+httk workflow job request pause WORKSPACE JOB_UUID \
   --operator "$USER" --reason "inspection"
 
-httk workflow job request WORKSPACE JOB_UUID continue \
+httk workflow job request continue WORKSPACE JOB_UUID \
   --operator "$USER" --reason "inputs repaired"
 ```
 
@@ -496,7 +496,7 @@ applied. It is attribution and not authorization; see
 **Cancelling a running job** is fenced and verified, not a single signal:
 
 ```console
-httk workflow job request WORKSPACE JOB_UUID cancel \
+httk workflow job request cancel WORKSPACE JOB_UUID \
   --operator "$USER" --reason "wrong inputs"
 ```
 

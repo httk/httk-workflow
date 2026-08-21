@@ -693,7 +693,7 @@ def _continue_checks(job: JobDefinition | None, state: Mapping[str, Any], report
             "'continue' would immediately end the job again with retry_exhausted: " + "; ".join(budgets.describe()),
         )
         report.hint(
-            "use 'httk workflow job request WORKSPACE JOB override_step --step STEP --operator NAME --reason WHY' to start a new activation instead"
+            "use 'httk workflow job request override_step WORKSPACE JOB --step STEP --operator NAME --reason WHY' to start a new activation instead"
         )
         return
     report.check(
@@ -701,7 +701,7 @@ def _continue_checks(job: JobDefinition | None, state: Mapping[str, Any], report
         True,
         "'continue' repeats this activation: " + "; ".join(budgets.describe()),
     )
-    report.hint("resume it with 'httk workflow job request WORKSPACE JOB continue --operator NAME --reason WHY'")
+    report.hint("resume it with 'httk workflow job request continue WORKSPACE JOB --operator NAME --reason WHY'")
 
 
 def _attempt_history_check(workspace: Workspace, marker: Marker, state: Mapping[str, Any], report: _Diagnosing) -> None:

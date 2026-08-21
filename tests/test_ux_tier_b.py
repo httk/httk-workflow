@@ -521,7 +521,7 @@ def test_job_request_warns_when_no_live_manager_serves_the_executor(tmp_path: Pa
 
     assert (
         command(
-            ["job", "request", name, job_id, "cancel", "--operator", "Me <me@example.org>", "--reason", "x"],
+            ["job", "request", "cancel", name, job_id, "--operator", "Me <me@example.org>", "--reason", "x"],
             context,
         )
         == 0
@@ -541,7 +541,7 @@ def test_job_request_is_quiet_when_a_live_manager_serves_the_executor(tmp_path: 
         capsys.readouterr()
         assert (
             command(
-                ["job", "request", name, job_id, "cancel", "--operator", "Me <me@example.org>", "--reason", "x"],
+                ["job", "request", "cancel", name, job_id, "--operator", "Me <me@example.org>", "--reason", "x"],
                 context,
             )
             == 0
@@ -583,9 +583,9 @@ def test_override_step_is_refused_client_side_against_recorded_runner_steps(tmp_
             [
                 "job",
                 "request",
+                "override_step",
                 name,
                 job_id,
-                "override_step",
                 "--step",
                 "bogus",
                 "--operator",
@@ -617,7 +617,7 @@ def test_override_step_force_downgrades_the_refusal_and_publishes(tmp_path: Path
             StateFrame.replace(state.carried(), step="only", runner_steps=["only", "other"], reason="failed"),
         )
     capsys.readouterr()
-    argv = ["job", "request", name, job_id, "override_step", "--step", "recover"]
+    argv = ["job", "request", "override_step", name, job_id, "--step", "recover"]
     argv += ["--operator", "Me <me@example.org>", "--reason", "x", "--force"]
     assert command(argv, context) == 0
     error = capsys.readouterr().err
@@ -637,9 +637,9 @@ def test_override_step_is_allowed_with_a_note_before_runner_steps_are_recorded(t
             [
                 "job",
                 "request",
+                "override_step",
                 name,
                 job_id,
-                "override_step",
                 "--step",
                 "whatever",
                 "--operator",
