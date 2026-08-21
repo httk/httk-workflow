@@ -74,7 +74,7 @@ step_run() {
     command=$(httk_workflow_setting vasp.command "$(httk_workflow_parameter vasp_command '')")
     if [ -z "$command" ]; then
         httk_workflow_fail vasp.command_missing \
-            "no VASP command is configured: set it with httk workflow workspace settings set vasp.command '...', or set HTTK_VASP_COMMAND on the machine that runs this job, or give the job a vasp_command parameter"
+            "no VASP command is configured: set it with httk workflow workspace settings set --key vasp.command --value '...' WORKSPACE, or set HTTK_VASP_COMMAND on the machine that runs this job, or give the job a vasp_command parameter"
         return
     fi
     timeout=$(httk_workflow_parameter timeout 86400)

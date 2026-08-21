@@ -175,7 +175,7 @@ def submit_remote_managers(
         target.bundle,
         "start-manager",
         {
-            "argv": [*REMOTE_MANAGER_COMMAND, name, *argv_tail],
+            "argv": [*REMOTE_MANAGER_COMMAND, "--workspace", name, *argv_tail],
             "workspace": root,
             "count": count,
         },
@@ -207,13 +207,16 @@ def probe_remote_workspace(
     status = runner(
         target.bundle,
         "status",
-        {"argv": [*REMOTE_STATUS_COMMAND, name, "--json"]},
+        {"argv": [*REMOTE_STATUS_COMMAND, "--json", name]},
         timeout=timeout,
     )
     if status.get("returncode") != 0:
         raise RuntimeError(f"{noun} workspace compatibility check failed: {status.get('stderr', '')}")
     try:
-        document = json.loads(str(status.get("stdout", "")))
+        documents = json.loads(str(status.get("stdout", "")))
+        if not isinstance(documents, list) or len(documents) != 1:
+            raise ValueError
+        document = documents[0]
         if (
             document.get("format") != "httk-workflow-status"
             or document.get("format_version") != 2

@@ -1,10 +1,8 @@
 """The examples and the quickstart, executed exactly as they are documented.
 
 The quickstart of ``docs/quickstart.md`` is not paraphrased here: its commands are
-read out of the document itself and run verbatim, with ``httk`` and
-``httk-taskmanager`` shims on ``PATH`` that are the installed console scripts in
-every way that matters — the page uses the canonical ``httk workflow`` spelling,
-and the alias shim is there so that a page falling back to it would still run.
+read out of the document itself and run verbatim, with the ``httk`` console
+script on ``PATH``.
 What the assertions then read is the workspace those commands produced — a
 succeeded job whose published data holds a real OUTCAR and CONTCAR — so the page
 cannot drift from what works.
@@ -25,6 +23,7 @@ from httk.workflow import TaskManager, Workspace
 from httk.workflow.scaffold import new_job
 
 _ROOT = Path(__file__).parents[1]
+_CORE_SOURCE = _ROOT.parents[0] / "httk-core" / "src"
 _EXAMPLES = _ROOT / "examples"
 _QUICKSTART = _ROOT / "docs" / "quickstart.md"
 # The commands of the quickstart page are the ones before the section that
@@ -55,9 +54,9 @@ def _environment(bin_directory: Path) -> dict[str, str]:
     """Return the environment an example runs in: this checkout, on PATH."""
 
     environment = dict(os.environ)
-    environment["PYTHONPATH"] = os.pathsep.join([str(_ROOT / "src"), environment.get("PYTHONPATH", "")]).rstrip(
-        os.pathsep
-    )
+    environment["PYTHONPATH"] = os.pathsep.join(
+        [str(_ROOT / "src"), str(_CORE_SOURCE), environment.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
     environment["PATH"] = os.pathsep.join([str(bin_directory), str(_EXAMPLES), environment.get("PATH", "")])
     environment["HTTK_DATA_HOME"] = str(bin_directory.parent / "data")
     # A test must never depend on a VASP the machine happens to have, nor on the
@@ -69,19 +68,17 @@ def _environment(bin_directory: Path) -> dict[str, str]:
 
 @pytest.fixture()
 def console_scripts(tmp_path: Path) -> Path:
-    """Install ``httk`` and ``httk-taskmanager`` shims and return their directory.
+    """Install an ``httk`` shim and return its directory.
 
-    The published console scripts of the installed distributions do exactly this:
-    run one module's ``main``. Shimming them keeps the documented command names
+    Shimming the published core console script keeps documented command names
     intact in a checkout that was never installed.
     """
 
     directory = tmp_path / "bin"
     directory.mkdir()
-    for name, module in (("httk", "httk.core.cli"), ("httk-taskmanager", "httk.workflow.cli")):
-        script = directory / name
-        script.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m {module} "$@"\n', encoding="utf-8")
-        script.chmod(0o755)
+    script = directory / "httk"
+    script.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m httk.core.cli "$@"\n', encoding="utf-8")
+    script.chmod(0o755)
     return directory
 
 
@@ -126,7 +123,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
 
     # The page really is seven commands, including explicit workspace setup.
     assert sum(1 for line in commands if line.startswith("httk")) == 7
-    assert "httk project init --name quickstart" in commands
+    assert "httk project init --name quickstart ." in commands
     assert any(line.startswith("httk workflow job new --workflow vasp-relax") for line in commands)
 
     completed = _run(
@@ -162,6 +159,9 @@ def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) ->
     # what runs, which is the form a checkout without an install uses.
     empty = tmp_path / "no-scripts"
     empty.mkdir()
+    python3 = empty / "python3"
+    python3.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+    python3.chmod(0o755)
     completed = _run(
         ["bash", str(work / "examples" / "quickstart.sh")],
         cwd=work,

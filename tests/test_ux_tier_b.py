@@ -138,7 +138,7 @@ def test_run_leaf_capability_claims_a_gated_job_and_prints_a_banner(tmp_path: Pa
     workspace.submit(payload, "project/gated")
     name = register_ws(context, workspace.root, "gated-ws")
 
-    assert command(["run", name, "--capability", "docker", "--idle-timeout", "20"], context) == 0
+    assert command(["run", "--workspace", name, "--capability", "docker", "--idle-timeout", "20"], context) == 0
     error = capsys.readouterr().err
     # One unconditional banner line: the workspace, the log path, and what is served.
     assert "serving" in error and str(workspace.root) in error
@@ -154,7 +154,7 @@ def test_run_leaf_without_the_capability_reports_the_gate_and_stays_idle(tmp_pat
     workspace.submit(payload, "project/gated")
     name = register_ws(context, workspace.root, "gated-ws")
 
-    assert command(["run", name, "--idle-timeout", "20"], context) == 0
+    assert command(["run", "--workspace", name, "--idle-timeout", "20"], context) == 0
     error = capsys.readouterr().err
     assert "1 not claimable here (capability=docker: 1)" in error
     marker = workspace.find_marker_by_id(job_id)
@@ -521,7 +521,18 @@ def test_job_request_warns_when_no_live_manager_serves_the_executor(tmp_path: Pa
 
     assert (
         command(
-            ["job", "request", "cancel", name, job_id, "--operator", "Me <me@example.org>", "--reason", "x"],
+            [
+                "job",
+                "request",
+                "cancel",
+                "--workspace",
+                name,
+                job_id,
+                "--operator",
+                "Me <me@example.org>",
+                "--reason",
+                "x",
+            ],
             context,
         )
         == 0
@@ -541,7 +552,18 @@ def test_job_request_is_quiet_when_a_live_manager_serves_the_executor(tmp_path: 
         capsys.readouterr()
         assert (
             command(
-                ["job", "request", "cancel", name, job_id, "--operator", "Me <me@example.org>", "--reason", "x"],
+                [
+                    "job",
+                    "request",
+                    "cancel",
+                    "--workspace",
+                    name,
+                    job_id,
+                    "--operator",
+                    "Me <me@example.org>",
+                    "--reason",
+                    "x",
+                ],
                 context,
             )
             == 0
@@ -584,6 +606,7 @@ def test_override_step_is_refused_client_side_against_recorded_runner_steps(tmp_
                 "job",
                 "request",
                 "override_step",
+                "--workspace",
                 name,
                 job_id,
                 "--step",
@@ -617,8 +640,21 @@ def test_override_step_force_downgrades_the_refusal_and_publishes(tmp_path: Path
             StateFrame.replace(state.carried(), step="only", runner_steps=["only", "other"], reason="failed"),
         )
     capsys.readouterr()
-    argv = ["job", "request", "override_step", name, job_id, "--step", "recover"]
-    argv += ["--operator", "Me <me@example.org>", "--reason", "x", "--force"]
+    argv = [
+        "job",
+        "request",
+        "override_step",
+        "--workspace",
+        name,
+        "--step",
+        "recover",
+        "--operator",
+        "Me <me@example.org>",
+        "--reason",
+        "x",
+        "--force",
+        job_id,
+    ]
     assert command(argv, context) == 0
     error = capsys.readouterr().err
     assert "--force was given" in error
@@ -638,6 +674,7 @@ def test_override_step_is_allowed_with_a_note_before_runner_steps_are_recorded(t
                 "job",
                 "request",
                 "override_step",
+                "--workspace",
                 name,
                 job_id,
                 "--step",
@@ -785,8 +822,8 @@ def test_workspace_managers_lists_the_serving_managers(tmp_path: Path, capsys) -
         human = capsys.readouterr().out
         assert manager.manager_id in human
         assert "live" in human and "capabilities=docker" in human and "runner-modules=httk.workflow" in human
-        assert command(["workspace", "managers", name, "--json"], context) == 0
-        rows = json.loads(capsys.readouterr().out)
+        assert command(["workspace", "managers", "--json", name], context) == 0
+        rows = json.loads(capsys.readouterr().out)[0]
     assert len(rows) == 1
     assert rows[0]["manager_id"] == manager.manager_id and rows[0]["alive"] is True
     assert "httk.workflow" in rows[0]["runner_modules"]

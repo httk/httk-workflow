@@ -45,9 +45,6 @@ Documentation = "https://docs.httk.org/httk-workflow/"
 Repository = "https://github.com/httk/httk-workflow"
 Issues = "https://github.com/httk/httk-workflow/issues"
 
-[project.scripts]
-httk-taskmanager = "httk.workflow.cli:main"
-
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",

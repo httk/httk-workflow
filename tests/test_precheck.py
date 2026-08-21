@@ -108,7 +108,8 @@ def test_precheck_reports_an_unbuilt_platformless_package_and_clears_after_regis
     runner_finding = _runner_finding(finding)
     assert runner_finding["status"] == "problem"
     assert isinstance(runner_finding["problem"], str)
-    assert "httk workflow build --by-path" in runner_finding["problem"]
+    assert "httk workflow build --workspace" in runner_finding["problem"]
+    assert "--by-path --store compiled" in runner_finding["problem"]
     assert "--store compiled" in runner_finding["problem"]
     register_build(
         workspace, runner, PurePosixPath("compiled"), BuildSpec("./build.sh", ("out",)), source_sha256=digest
@@ -127,7 +128,7 @@ def test_precheck_does_not_probe_platform_specific_packages(tmp_path: Path) -> N
     assert _runner_finding(finding) == {
         "status": "indeterminate",
         "problem": "declares platform-specific builds; registration is checked at manager start — run: "
-        f"httk workflow build --by-path {workspace.root} --store compiled",
+        f"httk workflow build --workspace {workspace.root} --by-path --store compiled",
     }
     assert not counter.exists()
 
@@ -168,7 +169,7 @@ def test_precheck_reports_resolution_sources_and_exit_code(tmp_path: Path, capsy
     for index, environment in enumerate(environments):
         workspace.submit(_job(tmp_path, f"job-{index}", environment), "ready")
 
-    assert command(["precheck", name, "--json"], context) == 1
+    assert command(["precheck", "--workspace", name, "--json"], context) == 1
     report = json.loads(capsys.readouterr().out)
     assert report["format"] == "httk-workflow-precheck"
     assert report["summary"] == {
@@ -208,7 +209,7 @@ def test_precheck_flags_a_job_no_live_manager_can_claim(tmp_path: Path, capsys) 
     name = register_ws(context, workspace.root, "claim")
 
     with TaskManager(workspace, heartbeat_interval=0.01):
-        assert command(["precheck", name, "--json"], context) == 1
+        assert command(["precheck", "--workspace", name, "--json"], context) == 1
         report = json.loads(capsys.readouterr().out)
     assert report["summary"]["claim_problems"] == 1
     assert "lacks capabilities docker" in report["jobs"][0]["claim"]["problem"]
@@ -236,7 +237,7 @@ def test_precheck_uses_the_actual_manager_runner_module_allowlist(tmp_path: Path
     name = register_ws(context, workspace.root, "modules")
 
     with TaskManager(workspace, runner_modules=("acme.runners",), heartbeat_interval=0.01):
-        assert command(["precheck", name, "--json"], context) == 1
+        assert command(["precheck", "--workspace", name, "--json"], context) == 1
         report = json.loads(capsys.readouterr().out)
     assert report["summary"]["claim_problems"] == 1
     problem = report["jobs"][0]["claim"]["problem"]
@@ -264,7 +265,7 @@ def test_precheck_flags_a_missing_language_engine_when_nothing_serves_it(tmp_pat
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, workspace.root, "jobflow")
 
-    assert command(["precheck", name, "--json"], context) == 1
+    assert command(["precheck", "--workspace", name, "--json"], context) == 1
     report = json.loads(capsys.readouterr().out)
     assert report["summary"]["language_problems"] == 1
     problem = report["jobs"][0]["language"]["problem"]
@@ -289,7 +290,7 @@ def test_precheck_language_engine_is_indeterminate_when_a_manager_serves_it(
     name = register_ws(context, workspace.root, "jobflow-served")
 
     with TaskManager(workspace, heartbeat_interval=0.01):
-        assert command(["precheck", name, "--json"], context) == 0
+        assert command(["precheck", "--workspace", name, "--json"], context) == 0
         report = json.loads(capsys.readouterr().out)
     assert report["summary"]["language_problems"] == 0
     assert report["summary"]["language_indeterminate"] == 1
@@ -307,7 +308,7 @@ def test_precheck_ignores_a_bare_workflow_language_parameter(tmp_path: Path, cap
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, workspace.root, "not-language")
 
-    assert command(["precheck", name, "--json"], context) == 0
+    assert command(["precheck", "--workspace", name, "--json"], context) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["jobs"][0]["language"] is None
 
@@ -332,7 +333,7 @@ def test_precheck_treats_an_empty_manager_allowlist_as_empty(tmp_path: Path, cap
     name = register_ws(context, workspace.root, "empty-allowlist")
 
     with TaskManager(workspace, runner_modules=[], heartbeat_interval=0.01):
-        assert command(["precheck", name, "--json"], context) == 1
+        assert command(["precheck", "--workspace", name, "--json"], context) == 1
         report = json.loads(capsys.readouterr().out)
     assert report["summary"]["claim_problems"] == 1
     problem = report["jobs"][0]["claim"]["problem"]
@@ -349,7 +350,7 @@ def test_precheck_flags_a_missing_required_input_destination(tmp_path: Path, cap
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, workspace.root, "inputs")
 
-    assert command(["precheck", name, "--json"], context) == 1
+    assert command(["precheck", "--workspace", name, "--json"], context) == 1
     report = json.loads(capsys.readouterr().out)
     assert report["summary"]["input_problems"] == 1
     assert "files/POSCAR" in report["jobs"][0]["inputs"][0]
@@ -364,7 +365,7 @@ def test_precheck_notice_when_no_manager_has_registered(tmp_path: Path, capsys) 
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, workspace.root, "orphan")
 
-    assert command(["precheck", name, "--json"], context) == 0
+    assert command(["precheck", "--workspace", name, "--json"], context) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["summary"]["claim_problems"] == 0
     assert report["manager_notice"] is not None and "no manager" in report["manager_notice"]
@@ -387,7 +388,7 @@ def test_precheck_flags_a_deleted_workspace_runner(tmp_path: Path, capsys) -> No
     workspace.runner_store_path("test/runner").unlink()
     name = register_ws(CLIContext("httk", tmp_path), workspace.root, "runner-check")
 
-    assert command(["precheck", name, "--json"], CLIContext("httk", tmp_path)) == 1
+    assert command(["precheck", "--workspace", name, "--json"], CLIContext("httk", tmp_path)) == 1
     report = json.loads(capsys.readouterr().out)
     assert report["summary"]["runner_problems"] == 1
     assert "not published" in report["jobs"][0]["runner"]["problem"]
@@ -412,7 +413,7 @@ def test_local_transfer_warns_and_strict_mode_moves_nothing(tmp_path: Path, caps
 
     assert (
         command(
-            ["transfer", source_name, destination_name, "--job", marker.job_id, "--strict-environment"],
+            ["transfer", "--job", marker.job_id, "--strict-environment", source_name, destination_name],
             context,
         )
         == 2
@@ -421,7 +422,7 @@ def test_local_transfer_warns_and_strict_mode_moves_nothing(tmp_path: Path, caps
     assert source.find_marker_by_id(marker.job_id) is not None
     assert destination.find_marker_by_id(marker.job_id) is None
 
-    assert command(["transfer", source_name, destination_name, "--job", marker.job_id], context) == 0
+    assert command(["transfer", "--job", marker.job_id, source_name, destination_name], context) == 0
     warning = capsys.readouterr().err
     assert "destination environment unresolved" in warning
     assert destination.find_marker_by_id(marker.job_id) is not None
@@ -449,7 +450,7 @@ def test_transfer_does_not_use_the_client_environment_for_destination_resolution
 
     assert (
         command(
-            ["transfer", source_name, destination_name, "--job", marker.job_id, "--strict-environment"],
+            ["transfer", "--job", marker.job_id, "--strict-environment", source_name, destination_name],
             context,
         )
         == 2
@@ -484,7 +485,7 @@ def test_precheck_plain_installed_runner_without_path_is_indeterminate(tmp_path:
     definition_path.write_text(json.dumps(definition), encoding="utf-8")
     name = register_ws(CLIContext("httk", tmp_path), workspace.root, "installed")
     context = CLIContext("httk", tmp_path)
-    assert command(["precheck", name, "--json"], context) == 0
+    assert command(["precheck", "--workspace", name, "--json"], context) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["jobs"][0]["runner"]["status"] == "indeterminate"
     assert report["summary"]["runner_indeterminate"] == 1
@@ -554,7 +555,7 @@ def test_precheck_rejects_a_prefix_collision_package_runner(tmp_path: Path, caps
     definition_path.write_text(json.dumps(definition), encoding="utf-8")
     name = register_ws(CLIContext("httk", tmp_path), workspace.root, "prefix-collision")
 
-    assert command(["precheck", name, "--json"], CLIContext("httk", tmp_path)) == 1
+    assert command(["precheck", "--workspace", name, "--json"], CLIContext("httk", tmp_path)) == 1
     report = json.loads(capsys.readouterr().out)
     assert "allowlist" in report["jobs"][0]["runner"]["problem"]
 
@@ -761,7 +762,7 @@ def test_full_local_to_remote_unreachable_notice_is_printed_once(tmp_path: Path,
     monkeypatch.setattr(transfer_cli, "_remote_workspace_settings", unavailable)
     monkeypatch.setattr(transfer_cli, "_send_jobs_to_remote", lambda *args, **kwargs: [])
 
-    assert command(["transfer", "home", "cluster:station", "--job", marker.job_id], context) == 0
+    assert command(["transfer", "--job", marker.job_id, "home", "cluster:station"], context) == 0
     assert capsys.readouterr().err.count("could not be prechecked remotely") == 1
 
 

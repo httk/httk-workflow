@@ -83,7 +83,7 @@ def test_collect_degraded_filters_to_the_degraded_lines_only(tmp_path: Path, cap
 
     # Without --allow-job-collector the pinned-tree collector is not run, so the
     # one job degrades: --degraded therefore prints its single line.
-    assert command(["collect", name, "--degraded"], context) == 1
+    assert command(["collect", "--workspace", name, "--degraded"], context) == 1
     lines = capsys.readouterr().out.splitlines()
     summary = json.loads(lines[-1])
     assert summary["format"] == "httk-workflow-collect-summary" and summary["degraded"] == 1
@@ -91,7 +91,7 @@ def test_collect_degraded_filters_to_the_degraded_lines_only(tmp_path: Path, cap
 
     # Allowed, the job collects cleanly, so --degraded filters it out entirely
     # while the summary still reports the whole sweep.
-    assert command(["collect", name, "--degraded", "--allow-job-collector"], context) == 0
+    assert command(["collect", "--workspace", name, "--degraded", "--allow-job-collector"], context) == 0
     lines = capsys.readouterr().out.splitlines()
     summary = json.loads(lines[-1])
     assert summary["collected"] == 1 and summary["degraded"] == 0
@@ -258,7 +258,7 @@ def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_pa
     store_path = tmp_path / "results.sqlite"
     assert (
         command(
-            ["collect", workspace_name, "--allow-job-collector", "--into", str(store_path)],
+            ["collect", "--workspace", workspace_name, "--allow-job-collector", "--into", str(store_path)],
             context,
         )
         == 0
@@ -288,7 +288,7 @@ def test_collect_into_twice_is_idempotent(tmp_path: Path, capsys) -> None:
     context = CLIContext("httk", tmp_path)
     workspace_name = register_ws(context, workspace.root, "collect-twice")
     store_path = tmp_path / "results.sqlite"
-    argv = ["collect", workspace_name, "--allow-job-collector", "--into", str(store_path)]
+    argv = ["collect", "--workspace", workspace_name, "--allow-job-collector", "--into", str(store_path)]
 
     assert command(argv, context) == 0
     first = json.loads(capsys.readouterr().out.splitlines()[0])["stored"]
@@ -318,7 +318,10 @@ def test_collect_into_a_store_with_a_different_layout_teaches(tmp_path: Path, ca
     with Backend.sqlite(store_path) as database:
         SqlStore(database, entry_records={resolve_entry_family("runs"): (resolve_entry_record("core-run"),)})
 
-    assert command(["collect", workspace_name, "--allow-job-collector", "--into", str(store_path)], context) == 2
+    assert (
+        command(["collect", "--workspace", workspace_name, "--allow-job-collector", "--into", str(store_path)], context)
+        == 2
+    )
     err = capsys.readouterr().err
     assert str(store_path) in err
     assert "different set of entry types" in err
@@ -337,7 +340,14 @@ def test_collect_into_reports_an_unknown_entry_type_per_job(tmp_path: Path, caps
     # per-job storage_error is reported, and the sweep no longer claims success.
     assert (
         command(
-            ["collect", workspace_name, "--allow-job-collector", "--into", str(tmp_path / "unknown.sqlite")],
+            [
+                "collect",
+                "--workspace",
+                workspace_name,
+                "--allow-job-collector",
+                "--into",
+                str(tmp_path / "unknown.sqlite"),
+            ],
             context,
         )
         == 1

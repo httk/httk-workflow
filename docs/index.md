@@ -4,15 +4,13 @@ This site documents the *httk-workflow* module. For the full documentation of
 *httk₂*, see [docs.httk.org](https://docs.httk.org).
 
 The module implements a recoverable, language-neutral workflow protocol whose
-source of truth is a single atomically renamed state marker per job. The
-`httk-taskmanager` executable remains a compatibility alias. It presents three
-layers, each with its own import home: the **filesystem protocol**
+source of truth is a single atomically renamed state marker per job. It presents
+three layers, each with its own import home: the **filesystem protocol**
 (`httk.workflow.protocol`), the **execution and authoring** surface
 (`httk.workflow` — `Runner`, `Attempt` — with lower-level helpers in
 `httk.workflow.runtime`), and **orchestration and management** (`Workspace`,
 `TaskManager`, `collect`, and named submodules for transfers, remotes, and
-compatibility). Installations register the canonical `httk workflow` command
-tree and the `httk-taskmanager` alias.
+compatibility). Installations register the `httk workflow` command tree.
 
 *httk₂* workflows are language-independent: runners, hooks, and postprocess
 scripts can be written in any language; a workflow is a manifest plus the
@@ -76,10 +74,10 @@ python -m pip install -e .
 One workspace, one job of a packaged runner, and one manager that runs it:
 
 ```console
-httk project init --name quickstart
-httk workflow workspace init . --name default
+httk project init --name quickstart .
+httk workflow workspace init --name default .
 httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
-httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
+httk workflow workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 httk workflow run
 httk workflow collect
 ```
@@ -89,7 +87,7 @@ without VASP installed. A complete payload prepared some other way is still
 submitted directly:
 
 ```console
-httk workflow job submit workflow-workspace prepared-job --placement project/00
+httk workflow job submit --workspace workflow-workspace --placement project/00 prepared-job
 ```
 
 ```{toctree}

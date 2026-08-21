@@ -45,10 +45,10 @@ END
 ## The seven commands
 
 ```console
-$ httk project init --name quickstart
-$ httk workflow workspace init . --name default
+$ httk project init --name quickstart .
+$ httk workflow workspace init --name default .
 $ httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
-$ httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
+$ httk workflow workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 $ httk workflow run
 $ httk workflow collect --into results.sqlite
 $ httk workflow postprocess --script relaxation-plot
@@ -126,7 +126,7 @@ Point `--input-from structure` at a *directory* and every readable structure
 file in it becomes one job, each tagged after its file:
 
 ```console
-$ httk workflow job new quickstart-workspace --workflow vasp-relax --input-from structure structures/ \
+$ httk workflow job new --workspace quickstart-workspace --workflow vasp-relax --input-from structure structures/ \
       --parameter kpoint_density=30.0 --placement project/screening
 ```
 
@@ -168,7 +168,7 @@ marker.
   and without a runner file.
 - {doc}`collecting` — turning finished jobs into stored results.
 - Running on a cluster — add and configure a remote, initialize `R:NAME`, then
-  `transfer LOCAL R:NAME --job JOB` puts jobs there and `run R:NAME` submits a
+  `transfer --job JOB LOCAL R:NAME` puts jobs there and `run --workspace R:NAME` submits a
   manager through its scheduler; a very large run spread across many workspaces
   is a {doc}`campaigns`. See
   {doc}`workflow_cli`.

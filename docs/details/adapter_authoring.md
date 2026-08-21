@@ -341,18 +341,16 @@ Start one or more task managers on the target.
 
 | Member | Type | Meaning |
 | --- | --- | --- |
-| `argv` | array of nonempty strings, required | the manager command, e.g. `["httk", "workflow", "manager", "run", "/scratch/me/runs"]` |
-| `workspace` | string, optional | the workspace the managers serve |
+| `argv` | array of nonempty strings, required | the manager command, e.g. `["httk", "workflow", "manager", "run", "--workspace", "/scratch/me/runs"]` |
+| `workspace` | string, required | the workspace the managers serve |
 | `count` | positive integer, optional | how many to start, default `1` |
 | `cwd` | string, optional | honoured by process-starting implementations |
 
-The `workspace` member is stated outright by every caller in this package. When
-it is absent the maintained implementation reads it back out of a
-`manager run WORKSPACE` argument vector; that fallback is documented for
-hand-written requests and is not the normal path.
+The `workspace` member is stated outright by every caller in this package and
+is required for hand-written requests too.
 
 ```json
-{"argv": ["httk", "workflow", "manager", "run", "runs"], "count": 2,
+{"argv": ["httk", "workflow", "manager", "run", "--workspace", "runs"], "count": 2,
  "format": "httk-computer-request", "format_version": 2, "operation": "start-manager",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
  "remote_settings": {"host": "login.example.org"},
@@ -387,7 +385,7 @@ command line always wins over the workspace's default.
 
 ## Settings and credentials
 
-`httk workflow remote configure NAME --set KEY=VALUE` splits every assignment
+`httk workflow remote configure --set KEY=VALUE NAME` splits every assignment
 in two, by name:
 
 - keys in {py:data}`httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS` —
@@ -620,10 +618,10 @@ remote:
 ```console
 mkdir -p httk_project/remotes/my-cluster
 cp -a my-cluster/. httk_project/remotes/my-cluster/
-httk workflow remote configure my-cluster --set username=me
+httk workflow remote configure --set username=me my-cluster
 httk workflow remote check my-cluster
-httk workflow workspace init my-cluster:/scratch/me/runs --name runs
-httk workflow manager run my-cluster:runs --workers 8
+httk workflow workspace init --name runs my-cluster:/scratch/me/runs
+httk workflow manager run --workspace my-cluster:runs --workers 8
 ```
 
 Jobs reach the bundle through `transfer SRC DST`; the same adapter operations

@@ -109,7 +109,7 @@ different step. Publish it once in the workspace and every job — parent and
 child — references those bytes by digest:
 
 ```console
-httk workflow runner publish defects.sh --workspace workflow-workspace --name defects/run.sh
+httk workflow runner publish --workspace workflow-workspace --name defects/run.sh defects.sh
 ```
 
 ```python

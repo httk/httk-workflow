@@ -18,7 +18,7 @@ httk_workflow() {
     if command -v httk >/dev/null 2>&1; then
         httk workflow "$@"
     else
-        python -m httk.core.cli workflow "$@"
+        python3 -m httk.core.cli workflow "$@"
     fi
 }
 
@@ -45,8 +45,8 @@ Direct
 END
 
 # 1. The project anchor and an explicit workspace at its root.
-httk_project init --name quickstart
-httk_workflow workspace init . --name default
+httk_project init --name quickstart .
+httk_workflow workspace init --name default .
 
 # 2. One job of the packaged relaxation runner, starting from that structure. The
 #    command prints one tab-separated line with its key and payload.
@@ -57,7 +57,7 @@ httk_workflow job new \
 
 # 3. Workspace state follows the job. Without VASP, the mock beside this file
 #    writes plausible outputs.
-httk_workflow workspace settings set vasp.command "$here/mock_vasp.py"
+httk_workflow workspace settings set --key vasp.command --value "$here/mock_vasp.py" default
 
 # 4. Run every ready job until nothing is left to do.
 httk_workflow run

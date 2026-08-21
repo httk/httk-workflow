@@ -1,6 +1,9 @@
 """Configuration, project, and umbrella-project command groups."""
 
 import sys
+from contextlib import redirect_stdout
+from copy import copy
+from io import StringIO
 
 from ..configuration import (
     _configured_identities,
@@ -12,6 +15,7 @@ from ..configuration import (
 )
 from ._common import *
 from ._common import (
+    _ERRORS,
     _field,
     _group,
     _leaf,
@@ -21,6 +25,47 @@ from ._common import (
 # ---------------------------------------------------------------------------
 # config
 # ---------------------------------------------------------------------------
+
+
+def _batch(
+    arguments: argparse.Namespace,
+    context: CLIContext,
+    handler: Any,
+    attribute: str,
+    noun: str,
+    *,
+    json_output: bool = False,
+) -> int:
+    """Run a leaf once per positional target without duplicating its operation."""
+
+    targets = getattr(arguments, attribute)
+    assert isinstance(targets, list)
+    targets = targets or [None]
+    multiple = len(targets) > 1
+    json_output |= getattr(arguments, "json", False)
+    results: list[object] = []
+    failed = False
+    for target in targets:
+        item = copy(arguments)
+        setattr(item, attribute, target)
+        label = target or "default"
+        try:
+            if json_output:
+                output = StringIO()
+                with redirect_stdout(output):
+                    code = handler(item, context)
+                results.append(json.loads(output.getvalue()))
+            else:
+                if multiple:
+                    print(f"== {noun} {label} ==")
+                code = handler(item, context)
+            failed |= code != 0
+        except _ERRORS as exc:
+            print(f"{noun} {label}: {exc}", file=sys.stderr)
+            failed = True
+    if json_output:
+        print(json.dumps(results, indent=2, sort_keys=True))
+    return 1 if failed else 0
 
 
 def handle_config_init(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -46,6 +91,8 @@ def handle_config_init(arguments: argparse.Namespace, context: CLIContext) -> in
 def handle_config_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Print the whole user configuration, or one member of it."""
 
+    if isinstance(arguments.key, list):
+        return _batch(arguments, context, handle_config_show, "key", "configuration key")
     values = read_config()
     if arguments.key:
         if arguments.key not in values:
@@ -67,6 +114,8 @@ def handle_config_set(arguments: argparse.Namespace, context: CLIContext) -> int
 def handle_config_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Remove one member of the user configuration."""
 
+    if isinstance(arguments.key, list):
+        return _batch(arguments, context, handle_config_unset, "key", "configuration key")
     print(unset_config_key(arguments.key))
     return 0
 
@@ -153,6 +202,8 @@ def handle_config_identity_default(arguments: argparse.Namespace, context: CLICo
 def handle_config_identity_remove(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Remove one named identity while leaving its key files untouched."""
 
+    if isinstance(arguments.short, list):
+        return _batch(arguments, context, handle_config_identity_remove, "short", "identity")
     values = read_config()
     identities = _configured_identities(values)
     short = arguments.short
@@ -214,7 +265,7 @@ def build_config_parser(
     show.add_argument(
         "key",
         metavar="KEY",
-        nargs="?",
+        nargs="*",
         help="one configuration key (default: print everything)",
     )
 
@@ -235,7 +286,7 @@ def build_config_parser(
         description="Remove one member of the user configuration",
         handler=handle_config_unset,
     )
-    remove.add_argument("key", metavar="KEY", help="the configuration key to remove")
+    remove.add_argument("key", metavar="KEY", nargs="+", help="the configuration key to remove")
 
     imported = _leaf(
         group,
@@ -294,7 +345,7 @@ def build_config_parser(
         description="Remove an identity from configuration and leave its key files on disk",
         handler=handle_config_identity_remove,
     )
-    removed.add_argument("short", metavar="SHORT", help="the configured identity short name")
+    removed.add_argument("short", metavar="SHORT", nargs="+", help="the configured identity short name")
 
 
 # ---------------------------------------------------------------------------
@@ -305,13 +356,12 @@ def build_config_parser(
 def handle_project_init(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Create one project directory, its key, and its workspace."""
 
+    if isinstance(arguments.path, list):
+        if arguments.name and len(arguments.path) != 1:
+            raise ValueError("project init --name requires exactly one PATH")
+        return _batch(arguments, context, handle_project_init, "path", "project", json_output=True)
     default_name = Path(arguments.path).resolve().name
-    name = _required(
-        arguments.name,
-        "project name",
-        non_interactive=arguments.non_interactive,
-        default=default_name,
-    )
+    name = arguments.name or default_name
     result = initialize_project(
         arguments.path,
         name=name,
@@ -325,6 +375,10 @@ def handle_project_init(arguments: argparse.Namespace, context: CLIContext) -> i
 def handle_project_import_v1(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Read a legacy ``ht.project`` into an *httk₂* project."""
 
+    if isinstance(arguments.path, list):
+        if (arguments.name or arguments.source) and len(arguments.path) != 1:
+            raise ValueError("project import-v1 --source and --name require exactly one PATH")
+        return _batch(arguments, context, handle_project_import_v1, "path", "project", json_output=True)
     print(
         json.dumps(
             import_v1_project(arguments.path, source=arguments.source, name=arguments.name),
@@ -381,6 +435,8 @@ def _render_project(description: dict[str, Any]) -> str:
 def handle_project_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Describe one project: its metadata, its keys, its workspace, its manifest."""
 
+    if isinstance(arguments.path, list):
+        return _batch(arguments, context, handle_project_show, "path", "project")
     description = describe_project(arguments.path or context.cwd, verify=not arguments.no_verify)
     print(json.dumps(description, indent=2, sort_keys=True) if arguments.json else _render_project(description))
     return 0
@@ -389,6 +445,10 @@ def handle_project_show(arguments: argparse.Namespace, context: CLIContext) -> i
 def handle_project_doctor(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Check one project for the conditions that quietly break it later."""
 
+    if isinstance(arguments.path, list):
+        if arguments.repair and not arguments.path:
+            raise ValueError("project doctor --repair requires at least one PATH")
+        return _batch(arguments, context, handle_project_doctor, "path", "project")
     report = project_doctor(arguments.path or context.cwd, repair=arguments.repair)
     reported = report["findings"]
     findings: list[dict[str, Any]] = [
@@ -409,13 +469,21 @@ def handle_project_doctor(arguments: argparse.Namespace, context: CLIContext) ->
 def handle_project_manifest_create(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Write the signed manifest of one project."""
 
-    print(create_manifest(arguments.project or context.cwd, output=arguments.manifest))
+    if isinstance(arguments.project, list):
+        if arguments.manifest and len(arguments.project) != 1:
+            raise ValueError("project manifest create --manifest requires exactly one PROJECT")
+        return _batch(arguments, context, handle_project_manifest_create, "project", "project")
+    print(create_manifest(arguments.project, output=arguments.manifest))
     return 0
 
 
 def handle_project_manifest_verify(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Verify one project manifest against the tree and its trust anchors."""
 
+    if isinstance(arguments.project, list):
+        if arguments.manifest and len(arguments.project) != 1:
+            raise ValueError("project manifest verify --manifest requires exactly one PROJECT")
+        return _batch(arguments, context, handle_project_manifest_verify, "project", "project")
     verification = verify_manifest(
         arguments.project or context.cwd,
         manifest=arguments.manifest,
@@ -435,7 +503,7 @@ def add_project_doctor_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "path",
         metavar="PATH",
-        nargs="?",
+        nargs="*",
         help="the project to check (default: the nearest project of the working directory)",
     )
     parser.add_argument(
@@ -452,8 +520,8 @@ def add_project_manifest_create_arguments(parser: argparse.ArgumentParser) -> No
     parser.add_argument(
         "project",
         metavar="PROJECT",
-        nargs="?",
-        help="the project (default: the nearest one)",
+        nargs="+",
+        help="one or more projects",
     )
     parser.add_argument(
         "--manifest",
@@ -468,7 +536,7 @@ def add_project_manifest_verify_arguments(parser: argparse.ArgumentParser) -> No
     parser.add_argument(
         "project",
         metavar="PROJECT",
-        nargs="?",
+        nargs="*",
         help="the project (default: the nearest one)",
     )
     parser.add_argument(
@@ -511,9 +579,8 @@ def build_project_parser(
     initialize.add_argument(
         "path",
         metavar="PATH",
-        nargs="?",
-        default=str(context.cwd),
-        help="the directory to make a project (default: the working directory)",
+        nargs="+",
+        help="the directory to make a project",
     )
     initialize.add_argument("--name", metavar="NAME", help="the project name (default: the directory name)")
     initialize.add_argument("--description", metavar="TEXT", default="", help="a one-line description")
@@ -540,9 +607,8 @@ def build_project_parser(
     imported.add_argument(
         "path",
         metavar="PATH",
-        nargs="?",
-        default=str(context.cwd),
-        help="the directory to make a project (default: the working directory)",
+        nargs="+",
+        help="the directory to make a project",
     )
     imported.add_argument("--source", metavar="SOURCE", help="the legacy ht.project directory to read")
     imported.add_argument("--name", metavar="NAME", help="the project name (default: the legacy one)")
@@ -557,7 +623,7 @@ def build_project_parser(
     show.add_argument(
         "path",
         metavar="PATH",
-        nargs="?",
+        nargs="*",
         help="the project to describe (default: the nearest project of the working directory)",
     )
     show.add_argument(

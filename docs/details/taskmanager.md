@@ -2,10 +2,8 @@
 
 *For operators: initializing workspaces, submitting jobs, running managers, and inspecting or repairing what they leave behind.*
 
-Every command below is spelled the canonical way, `httk workflow …`. The
-`httk-taskmanager` executable installed beside it is an alias of the same tree
-(`init`, `submit`, `run`, `status`, and `request`); see
-[the project and workflow command line](workflow_cli.md) for the mapping.
+Every command below is under `httk workflow …`; see
+[the project and workflow command line](workflow_cli.md) for the complete tree.
 
 ## Initialize a workspace
 
@@ -17,7 +15,7 @@ project does not contain workspaces; record its routing explicitly with
 initializes and names a workspace on that remote.
 
 ```console
-httk workflow workspace init runs/WORKSPACE --name WORKSPACE
+httk workflow workspace init --name WORKSPACE runs/WORKSPACE
 ```
 
 A workspace on a cluster is created there over the adapter; its owning machine
@@ -43,17 +41,17 @@ The canonical remote flow keeps scheduler settings with the remote workspace.
 with `pipx install httk-workflow`); `remote check` verifies that:
 
 ```console
-httk workflow remote add kappa --template ssh-slurm
-httk workflow remote configure kappa \
+httk workflow remote add --template ssh-slurm kappa
+httk workflow remote configure \
     --set host=kappa.example.org --set username=rar \
-    --set check_connectivity=yes
+    --set check_connectivity=yes kappa
 httk workflow remote check kappa
 httk workflow workspace init kappa:/scratch/rar/httk/runs
-httk workflow workspace settings set kappa:runs slurm.partition batch
-httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
+httk workflow workspace settings set --key slurm.partition --value batch kappa:runs
+httk workflow workspace settings set --key vasp.command --value "srun -n 32 vasp_std" kappa:runs
 httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
-httk workflow transfer default kappa:runs --job JOB-ID
-httk workflow run kappa:runs --workers 8
+httk workflow transfer --job JOB-ID default kappa:runs
+httk workflow run --workspace kappa:runs --workers 8
 httk workflow workspace status kappa:runs
 ```
 
@@ -71,8 +69,8 @@ They live in `.httk-workflow/format.json` and are read and written with:
 
 ```console
 httk workflow workspace policy show WORKSPACE
-httk workflow workspace policy set WORKSPACE visibility_deadline_seconds 60
-httk workflow workspace policy set WORKSPACE retention.journal_days 90
+httk workflow workspace policy set --key visibility_deadline_seconds --value 60 WORKSPACE
+httk workflow workspace policy set --key retention.journal_days --value 90 WORKSPACE
 ```
 
 | Key | Default | Meaning |
@@ -95,7 +93,7 @@ command and a pseudopotential library. The manager submission profile is also a
 workspace setting, so each workspace can carry its own scheduler requirements.
 
 ```console
-httk workflow workspace settings set WORKSPACE vasp.command '"srun -n 32 vasp_std"'
+httk workflow workspace settings set --key vasp.command --value '"srun -n 32 vasp_std"' WORKSPACE
 httk workflow workspace settings show WORKSPACE
 ```
 
@@ -117,9 +115,9 @@ held when its job was claimed. See {doc}`/vasp_runners` and {doc}`/sdks/sdk_pari
 Use the read-only precheck before starting managers:
 
 ```console
-httk workflow precheck WORKSPACE
-httk workflow precheck WORKSPACE --json
-httk workflow precheck WORKSPACE --runner-search-path PATH
+httk workflow precheck --workspace WORKSPACE
+httk workflow precheck --workspace WORKSPACE --json
+httk workflow precheck --workspace WORKSPACE --runner-search-path PATH
 ```
 
 It reports environment entries resolved from the current process environment,
@@ -170,10 +168,10 @@ Collection is a separate, explicit operation. Configure the retention limits
 once, then run it from a maintenance job or by hand:
 
 ```console
-httk workflow workspace policy set WORKSPACE retention.attempt_control_days 14
-httk workflow workspace policy set WORKSPACE retention.trash_days 14
-httk workflow workspace policy set WORKSPACE retention.journal_days 90
-httk workflow workspace gc WORKSPACE --dry-run
+httk workflow workspace policy set --key retention.attempt_control_days --value 14 WORKSPACE
+httk workflow workspace policy set --key retention.trash_days --value 14 WORKSPACE
+httk workflow workspace policy set --key retention.journal_days --value 90 WORKSPACE
+httk workflow workspace gc --dry-run WORKSPACE
 httk workflow workspace gc WORKSPACE
 ```
 
@@ -190,7 +188,7 @@ A long-lived manager can also do this itself, which is convenient where no
 maintenance job exists:
 
 ```console
-httk workflow manager run WORKSPACE --gc-interval 3600
+httk workflow manager run --workspace WORKSPACE --gc-interval 3600
 ```
 
 The manager then collects at most once per interval, at the end of a tick and
@@ -250,7 +248,7 @@ A prepared payload is a directory containing an immutable `job.json` and its
 runner. Submit it at any arbitrary placement:
 
 ```console
-httk workflow job submit WORKSPACE PAYLOAD --placement project-a/00/17
+httk workflow job submit --workspace WORKSPACE --placement project-a/00/17 PAYLOAD
 ```
 
 Submission copies by default. `--move` performs a same-filesystem rename and
@@ -262,9 +260,9 @@ A partitioned campaign should not copy its runner into every payload. Publish
 the runner once into the workspace runner store instead:
 
 ```console
-httk workflow runner publish ./relax.py --workspace WORKSPACE --name relax.py
+httk workflow runner publish --workspace WORKSPACE --name relax.py ./relax.py
 # A runner directory is published the same way and pinned by its tree digest.
-httk workflow runner publish ./relax-runner --workspace WORKSPACE --name relax-runner
+httk workflow runner publish --workspace WORKSPACE --name relax-runner ./relax-runner
 ```
 
 The command prints the reference to embed in every `job.json` that uses it:
@@ -288,7 +286,7 @@ against the ordered `--runner-search-path` roots of the manager.
 ## Run
 
 ```console
-httk workflow manager run WORKSPACE --workers 8
+httk workflow manager run --workspace WORKSPACE --workers 8
 ```
 
 Safety property: a task manager claims and runs only jobs whose marker, payload
@@ -300,7 +298,7 @@ Without pool configuration, a manager advertises the reserved `default` pool.
 Additional routing and capability labels are explicit:
 
 ```console
-httk workflow manager run WORKSPACE \
+httk workflow manager run --workspace WORKSPACE \
   --pool vasp \
   --capability gpu \
   --workers 4
@@ -427,7 +425,7 @@ only part of the tree, exactly the way pools and capabilities restrict what it
 claims:
 
 ```console
-httk workflow manager run WORKSPACE \
+httk workflow manager run --workspace WORKSPACE \
   --placement-prefix project-a \
   --placement-prefix project-b/2026
 ```
@@ -456,13 +454,13 @@ Phase 14 campaign recipes add it.
 
 ```console
 httk workflow workspace status WORKSPACE
-httk workflow workspace status WORKSPACE --json
+httk workflow workspace status --json WORKSPACE
 
-httk workflow job request pause WORKSPACE JOB_UUID \
-  --operator "$USER" --reason "inspection"
+httk workflow job request pause --workspace WORKSPACE \
+  --operator "$USER" --reason "inspection" JOB_UUID
 
-httk workflow job request continue WORKSPACE JOB_UUID \
-  --operator "$USER" --reason "inputs repaired"
+httk workflow job request continue --workspace WORKSPACE \
+  --operator "$USER" --reason "inputs repaired" JOB_UUID
 ```
 
 An `override_step --step X` request is pre-validated on the client: when the
@@ -496,8 +494,8 @@ applied. It is attribution and not authorization; see
 **Cancelling a running job** is fenced and verified, not a single signal:
 
 ```console
-httk workflow job request cancel WORKSPACE JOB_UUID \
-  --operator "$USER" --reason "wrong inputs"
+httk workflow job request cancel --workspace WORKSPACE \
+  --operator "$USER" --reason "wrong inputs" JOB_UUID
 ```
 
 The manager first renames the marker `running` → `cancelling`, which fences the
@@ -518,9 +516,9 @@ every state marker still resolves to its journal frame.
 
 ```console
 httk workflow workspace fsck WORKSPACE
-httk workflow workspace fsck WORKSPACE --json
-httk workflow workspace fsck WORKSPACE --repair
-httk workflow workspace fsck WORKSPACE --repair --quarantine-unrepairable
+httk workflow workspace fsck --json WORKSPACE
+httk workflow workspace fsck --repair WORKSPACE
+httk workflow workspace fsck --repair --quarantine-unrepairable WORKSPACE
 ```
 
 It reads every marker of every state kind and checks that its record reference
@@ -564,10 +562,10 @@ the journal frame that marker names, and the immutable `job.json` — and none o
 them writes protocol state:
 
 ```console
-httk workflow job list WORKSPACE --kind ready --placement project-a
-httk workflow job show WORKSPACE JOB
-httk workflow job log WORKSPACE JOB --limit 20
-httk workflow job why WORKSPACE JOB
+httk workflow job list --workspace WORKSPACE --kind ready --placement project-a
+httk workflow job show --workspace WORKSPACE JOB
+httk workflow job log --workspace WORKSPACE --limit 20 JOB
+httk workflow job why --workspace WORKSPACE JOB
 ```
 
 `JOB` is a job UUID, a complete `tag--uuid` job key, or any unique prefix of
@@ -631,8 +629,8 @@ WORKSPACE` streams `CollectedJob` summaries, while `--raw` exposes the
 ## The foreground debug runner
 
 ```console
-httk workflow job debug WORKSPACE PAYLOAD --step relax
-httk workflow job debug WORKSPACE JOB --follow-children
+httk workflow job debug --workspace WORKSPACE --step relax PAYLOAD
+httk workflow job debug --workspace WORKSPACE --follow-children JOB
 ```
 
 `job debug` drives exactly one job to a terminal state in the foreground and

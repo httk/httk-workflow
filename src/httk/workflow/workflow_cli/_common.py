@@ -2,9 +2,8 @@
 
 Every command this package offers is one leaf of a single nested
 :mod:`argparse` tree, so the help of a group is argparse's own help, an unknown
-action under a known group is argparse's own error naming that group, and the
-two installed executables are thin aliases that reuse these very parsers and
-handlers rather than a second implementation of them.
+action under a known group is argparse's own error naming that group, with no
+second executable or parser implementation.
 
 The module is laid out group by group. Each group has a ``build_*_parser``
 function that declares its subcommands, and each subcommand has a ``handle_*``
@@ -155,24 +154,6 @@ _ERRORS = (WorkflowError, OSError, ValueError, RuntimeError, TimeoutError)
 #: far-side halves one machine invokes on another. A workspace name can never be
 #: one of these, so the verb never mistakes ``transfer offer`` for a move.
 _TRANSFER_PROTOCOL = ("receive", "offer", "retire")
-
-#: What the two installed executables say about themselves in ``--help``. The
-#: note lives in the epilog rather than on every run, because an alias that
-#: printed a warning would corrupt the output of every script that parses it.
-ALIAS_EPILOG = (
-    "NOTE: `httk workflow ...` is the canonical spelling of every command\n"
-    "below, and this executable is a compatibility alias for it. Both drive\n"
-    "exactly the same parsers and exactly the same code."
-)
-
-TASKMANAGER_EPILOG = (
-    f"{ALIAS_EPILOG}\n\n"
-    "  init     ->  httk workflow workspace init\n"
-    "  submit   ->  httk workflow job submit\n"
-    "  run      ->  httk workflow manager run\n"
-    "  status   ->  httk workflow workspace status\n"
-    "  request  ->  httk workflow job request\n"
-)
 
 Handler = Callable[[argparse.Namespace, CLIContext], int]
 
@@ -542,12 +523,21 @@ def _run_remote_workspace(
     argv_tail: Sequence[str],
     *,
     timeout: float | None = None,
+    unwrap_json_array: bool = False,
 ) -> int:
     """Run one command against a remote binding's workspace and echo its output.
 
     The workspace on the far side resolves its plain name in its own registry.
     Its standard output and error are relayed verbatim and its exit status is
     returned, so a read command reads exactly as it would locally.
+
+    :param binding: Remote-qualified workspace binding.
+    :param context: Current CLI invocation context.
+    :param argv_tail: Complete far-side command argument vector.
+    :param timeout: Adapter timeout override.
+    :param unwrap_json_array: Unwrap the far side's one-target batch response
+        before the local batch wrapper incorporates it.
+    :return: The far-side process exit status.
     """
 
     target = resolve_remote(binding.remote, project=context.cwd)
@@ -558,6 +548,11 @@ def _run_remote_workspace(
         timeout=timeout,
     )
     stdout = str(result.get("stdout", ""))
+    if stdout and unwrap_json_array:
+        values = json.loads(stdout)
+        if not isinstance(values, list) or len(values) > 1:
+            raise ValueError("remote workspace command returned an invalid batch response")
+        stdout = json.dumps(values[0] if values else None, indent=2, sort_keys=True)
     if stdout:
         sys.stdout.write(stdout if stdout.endswith("\n") else stdout + "\n")
     stderr = str(result.get("stderr", ""))
@@ -578,18 +573,25 @@ def _remote_workspace_read(
     """Dispatch one read-style workspace command to a remote binding.
 
     *command* is a pinned far-side vector, e.g. ``REMOTE_STATUS_COMMAND``; the
-    remote plain name is appended, then whichever of *flags* the parsed arguments set. This is the single path every remote-capable read command runs
+    enabled *flags* and *tail* options precede the remote plain name. This is the single path every remote-capable read command runs
     through, so ``status``, ``gc``, ``fsck``, ``job_records``, and the ``job`` reads
     all reach a remote the same way.
     """
 
     if ":" not in binding.name:
         raise ValueError(f"remote workspace binding has no remote-qualified name: {binding.name}")
-    tail = [*command, binding.name.split(":", 1)[1], *tail]
+    enabled_flags: list[str] = []
     for flag in flags:
         if getattr(arguments, flag.lstrip("-").replace("-", "_"), False):
-            tail.append(flag)
-    return _run_remote_workspace(binding, context, tail, timeout=getattr(arguments, "adapter_timeout", None))
+            enabled_flags.append(flag)
+    argv = [*command, *enabled_flags, *tail, binding.name.split(":", 1)[1]]
+    return _run_remote_workspace(
+        binding,
+        context,
+        argv,
+        timeout=getattr(arguments, "adapter_timeout", None),
+        unwrap_json_array=getattr(arguments, "json", False),
+    )
 
 
 def _add_by_path_argument(parser: argparse.ArgumentParser) -> None:

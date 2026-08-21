@@ -31,7 +31,7 @@ def test_plain_init_uses_path_basename_and_explicit_name(tmp_path: Path, capsys)
 
     deep = tmp_path / "deep" / "dir"
     deep.mkdir(parents=True)
-    assert command(["workspace", "init", str(deep), "--name", "named"], context) == 0
+    assert command(["workspace", "init", "--name", "named", str(deep)], context) == 0
     assert command(["workspace", "status", "named"], context) == 0
     capsys.readouterr()
 
@@ -57,16 +57,16 @@ def test_existing_workspace_is_adopted_and_settings_are_refused(tmp_path: Path, 
     root = tmp_path / "existing"
     Workspace.initialize(root)
     context = _context(tmp_path)
-    assert command(["workspace", "init", str(root), "--name", "adopted"], context) == 0
-    assert command(["workspace", "init", str(root), "--name", "other", "--setting", "answer=1"], context) == 2
+    assert command(["workspace", "init", "--name", "adopted", str(root)], context) == 0
+    assert command(["workspace", "init", "--name", "other", "--setting", "answer=1", str(root)], context) == 1
     assert "adopted unchanged" in capsys.readouterr().err
 
 
 def test_init_refuses_a_second_name_for_the_same_canonical_path(tmp_path: Path, capsys) -> None:
     context = _context(tmp_path)
-    assert command(["workspace", "init", "runs", "--name", "first"], context) == 0
+    assert command(["workspace", "init", "--name", "first", "runs"], context) == 0
     capsys.readouterr()
-    assert command(["workspace", "init", str((tmp_path / "runs").resolve()), "--name", "second"], context) == 2
+    assert command(["workspace", "init", "--name", "second", str((tmp_path / "runs").resolve())], context) == 1
     assert "already registered as 'first'" in capsys.readouterr().err
 
 
@@ -77,9 +77,9 @@ def test_remote_init_sends_path_command_and_far_side_registers_name(
     initialize_project(project, name="remote-init")
     fake_remote(project)
     context = _context(project)
-    assert command(["workspace", "init", "cluster:runs/named", "--name", "runs"], context) == 0
+    assert command(["workspace", "init", "--name", "runs", "cluster:runs/named"], context) == 0
     capsys.readouterr()
-    assert any("workspace init runs/named --name runs" in item for item in remote.commands())
+    assert any("workspace init --name runs runs/named" in item for item in remote.commands())
     assert (remote.root / "runs" / "named" / ".httk-workflow" / "format.json").is_file()
     assert command(["workspace", "status", "cluster:runs"], context) == 0
     capsys.readouterr()
@@ -98,7 +98,7 @@ def test_remote_list_is_prefixed_and_local_list_has_paths(tmp_path: Path, remote
     context = _context(project)
     command(["workspace", "init", "cluster:runs"], context)
     capsys.readouterr()
-    command(["workspace", "list", "cluster:", "--json"], context)
+    command(["workspace", "list", "--json", "cluster:"], context)
     rows = json.loads(capsys.readouterr().out)
     assert any(row["name"] == "cluster:runs" for row in rows)
     assert any("workspace list --json" in item for item in remote.commands())
@@ -131,28 +131,28 @@ def test_remote_workspace_adapter_requests_are_exact_argv(tmp_path: Path, monkey
     monkeypatch.setattr(workspace_cli, "_run_adapter", adapter)
     monkeypatch.setattr(workflow_common, "_run_adapter", adapter)
     commands = (
-        ["workspace", "init", "cluster:runs", "--name", "runs"],
-        ["workspace", "status", "cluster:runs", "--json"],
-        ["workspace", "fsck", "cluster:runs", "--json"],
-        ["workspace", "gc", "cluster:runs", "--dry-run", "--json"],
-        ["workspace", "settings", "show", "cluster:runs", "--json"],
-        ["workspace", "list", "cluster:", "--json"],
+        ["workspace", "init", "--name", "runs", "cluster:runs"],
+        ["workspace", "status", "--json", "cluster:runs"],
+        ["workspace", "fsck", "--json", "cluster:runs"],
+        ["workspace", "gc", "--dry-run", "--json", "cluster:runs"],
+        ["workspace", "settings", "show", "--json", "cluster:runs"],
+        ["workspace", "list", "--json", "cluster:"],
         ["workspace", "move", "cluster:runs", "moved"],
-        ["workspace", "delete", "cluster:runs", "--force"],
+        ["workspace", "delete", "--force", "cluster:runs"],
     )
     for argv in commands:
         assert command(argv, context) == 0
         capsys.readouterr()
 
     assert captured == [
-        ("httk", "workflow", "workspace", "init", "runs", "--name", "runs"),
-        ("httk", "workflow", "workspace", "status", "runs", "--json"),
-        ("httk", "workflow", "workspace", "fsck", "runs", "--json"),
-        ("httk", "workflow", "workspace", "gc", "runs", "--dry-run", "--json"),
-        ("httk", "workflow", "workspace", "settings", "show", "runs", "--json"),
+        ("httk", "workflow", "workspace", "init", "--name", "runs", "runs"),
+        ("httk", "workflow", "workspace", "status", "--json", "runs"),
+        ("httk", "workflow", "workspace", "fsck", "--json", "runs"),
+        ("httk", "workflow", "workspace", "gc", "--dry-run", "--json", "runs"),
+        ("httk", "workflow", "workspace", "settings", "show", "--json", "runs"),
         ("httk", "workflow", "workspace", "list", "--json"),
         ("httk", "workflow", "workspace", "move", "runs", "moved"),
-        ("httk", "workflow", "workspace", "delete", "runs", "--force"),
+        ("httk", "workflow", "workspace", "delete", "--force", "runs"),
     ]
 
 
@@ -219,13 +219,13 @@ def test_remote_delete_requires_force_before_contacting_remote(tmp_path: Path, r
     capsys.readouterr()
     before = remote.commands()
 
-    assert command(["workspace", "delete", "cluster:runs"], context) == 2
+    assert command(["workspace", "delete", "cluster:runs"], context) == 1
     assert "requires --force" in capsys.readouterr().err
     assert remote.commands() == before
 
-    assert command(["workspace", "delete", "cluster:runs", "--force"], context) == 0
+    assert command(["workspace", "delete", "--force", "cluster:runs"], context) == 0
     capsys.readouterr()
-    assert any("workspace delete runs --force" in item for item in remote.commands())
+    assert any("workspace delete --force runs" in item for item in remote.commands())
 
 
 def test_move_updates_the_registry_and_refuses_a_fresh_manager(tmp_path: Path, capsys) -> None:
@@ -246,7 +246,7 @@ def test_move_updates_the_registry_and_refuses_a_fresh_manager(tmp_path: Path, c
     assert not (tmp_path / "new" / ".httk-workflow" / "maintenance.lock").exists()
     assert command(["workspace", "fsck", "old"], context) == 0
     capsys.readouterr()
-    assert command(["workspace", "gc", "old", "--dry-run"], context) == 0
+    assert command(["workspace", "gc", "--dry-run", "old"], context) == 0
     capsys.readouterr()
     assert command(["workspace", "move", "old", "newer"], context) == 0
     capsys.readouterr()

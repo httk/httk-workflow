@@ -187,14 +187,17 @@ def test_policy_command_shows_sets_and_refuses(tmp_path: Path, capsys) -> None:
     Workspace.initialize(root)
     context = CLIContext("httk", tmp_path)
     ws = register_ws(context, root)
-    assert command(["workspace", "policy", "show", ws, "--json"], context) == 0
-    assert json.loads(capsys.readouterr().out)["visibility_deadline_seconds"] == 5.0
-    assert command(["workspace", "policy", "set", ws, "visibility_deadline_seconds", "60"], context) == 0
-    assert command(["workspace", "policy", "set", ws, "retention.trash_days", "14"], context) == 0
+    assert command(["workspace", "policy", "show", "--json", ws], context) == 0
+    assert json.loads(capsys.readouterr().out)[0]["visibility_deadline_seconds"] == 5.0
+    assert (
+        command(["workspace", "policy", "set", "--key", "visibility_deadline_seconds", "--value", "60", ws], context)
+        == 0
+    )
+    assert command(["workspace", "policy", "set", "--key", "retention.trash_days", "--value", "14", ws], context) == 0
     capsys.readouterr()
-    assert command(["workspace", "policy", "set", ws, "lease_seconds", "0"], context) == 2
-    assert command(["workspace", "policy", "set", ws, "no_such_key", "1"], context) == 2
-    assert command(["workspace", "policy", "set", ws, "lease_seconds", "not-json"], context) == 2
+    assert command(["workspace", "policy", "set", "--key", "lease_seconds", "--value", "0", ws], context) == 1
+    assert command(["workspace", "policy", "set", "--key", "no_such_key", "--value", "1", ws], context) == 1
+    assert command(["workspace", "policy", "set", "--key", "lease_seconds", "--value", "not-json", ws], context) == 1
     policy = Workspace(root, mutable=False).policy
     assert policy.visibility_deadline_seconds == 60.0
     assert policy.retention.trash_days == 14.0
@@ -331,8 +334,8 @@ def test_fsck_reports_nothing_about_a_healthy_workspace(tmp_path: Path, capsys) 
     report = workspace.check()
     assert report.ok and report.markers_checked == 2 and report.unresolved == 0
     context = CLIContext("httk", tmp_path)
-    assert command(["workspace", "fsck", register_ws(context, tmp_path / "workspace"), "--json"], context) == 0
-    assert json.loads(capsys.readouterr().out)["findings"] == []
+    assert command(["workspace", "fsck", "--json", register_ws(context, tmp_path / "workspace")], context) == 0
+    assert json.loads(capsys.readouterr().out)[0]["findings"] == []
 
 
 def test_fsck_detects_a_corrupted_frame_and_a_deleted_segment(tmp_path: Path) -> None:

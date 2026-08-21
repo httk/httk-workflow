@@ -137,7 +137,7 @@ def test_v1_collect_cli_json_lines(tmp_path: Path, capsys: pytest.CaptureFixture
     package = _package(tmp_path / "package")
     assert (
         command(
-            ["v1", "collect", str(root), "--workflow-dir", str(package)],
+            ["v1", "collect", "--workflow-dir", str(package), str(root)],
             CLIContext("httk", tmp_path),
         )
         == 0

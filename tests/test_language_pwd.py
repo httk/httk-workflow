@@ -281,7 +281,7 @@ def test_registered_pwd_package_degrades_on_truncated_outputs_and_continues(
 
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, workspace.root, "pwd-degrade")
-    assert command(["collect", name], context) == 1
+    assert command(["collect", "--workspace", name], context) == 1
     lines = capsys.readouterr().out.splitlines()
     reports = [json.loads(line) for line in lines[:-1]]
     summary = json.loads(lines[-1])

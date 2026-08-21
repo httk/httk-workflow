@@ -20,9 +20,13 @@ from ._common import _run_adapter as run_adapter
 
 
 def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare :command:`manager run`, shared with ``httk-taskmanager run``."""
+    """Declare :command:`manager run`."""
 
-    add_workspace_argument(parser, help_text="the workspace this manager serves")
+    parser.add_argument(
+        "--workspace",
+        metavar="WORKSPACE",
+        help="the workspace this manager serves (default: this project's workspace, or the per-user default)",
+    )
     parser.add_argument(
         "--pool",
         action="append",
@@ -161,7 +165,11 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
 def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare the streamlined top-level :command:`run` leaf."""
 
-    add_workspace_argument(parser, help_text="the workspace this manager serves")
+    parser.add_argument(
+        "--workspace",
+        metavar="WORKSPACE",
+        help="the workspace this manager serves (default: this project's workspace, or the per-user default)",
+    )
     parser.add_argument(
         "--pool",
         action="append",

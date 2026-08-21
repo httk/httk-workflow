@@ -27,10 +27,10 @@ Drive one relaxation with the compiled binary as the runner. The runner starts a
 the job names the step and stages the file explicitly:
 
 ```console
-httk project init --name relax-c
-httk workflow workspace init . --name default
+httk project init --name relax-c .
+httk workflow workspace init --name default .
 httk workflow job new --workflow ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workflow workspace settings set vasp.command "$PWD/../mock_vasp.py"
+httk workflow workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
 httk workflow run
 httk workflow collect
 ```

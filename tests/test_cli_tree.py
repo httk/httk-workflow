@@ -2,10 +2,8 @@
 
 Everything here is about the command line as an interface rather than about
 what any one command does: that every group answers ``--help``, that a mistyped
-action is reported at the level it was mistyped at, that the two installed
-executables really are aliases of the canonical tree rather than a second
-implementation of it, and that the spellings other machines depend on are
-stable.
+action is reported at the level it was mistyped at, and that the spellings
+other machines depend on are stable.
 """
 
 import argparse
@@ -15,7 +13,6 @@ import pytest
 from httk.core.cli import CLIContext
 
 from httk.workflow import Workspace, workflow_cli
-from httk.workflow import cli as native_cli
 from httk.workflow.projects import initialize_project
 from httk.workflow.runtime_builders import JobSpec, prepare_job_payload
 from httk.workflow.workflow_cli import _campaign, command
@@ -135,7 +132,7 @@ def test_the_removed_spellings_are_absent_from_the_help(tmp_path: Path, capsys) 
 
 def test_postprocess_is_a_single_verb(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    parsed = parser.parse_args(["postprocess", "WS", "--script", "report"])
+    parsed = parser.parse_args(["postprocess", "--workspace", "WS", "--script", "report"])
     assert parsed.handler is workflow_cli.handle_postprocess
     assert parsed.workspace == "WS"
     assert parsed.script == "report"
@@ -175,68 +172,7 @@ def test_a_missing_required_argument_names_the_leaf(tmp_path: Path, capsys) -> N
 
 
 # ---------------------------------------------------------------------------
-# The two executables are aliases, not implementations
-# ---------------------------------------------------------------------------
-
-
-ALIASED_TASKMANAGER = (
-    (["init", "WS"], ["workspace", "init", "WS"]),
-    (
-        ["submit", "WS", "SRC", "--placement", "p/0", "--move"],
-        ["job", "submit", "WS", "SRC", "--placement", "p/0", "--move"],
-    ),
-    (["run", "WS", "--workers", "4", "--idle"], ["manager", "run", "WS", "--workers", "4", "--idle"]),
-    (["status", "WS", "--json"], ["workspace", "status", "WS", "--json"]),
-    (
-        ["request", "cancel", "WS", "JOB", "--operator", "me", "--reason", "why"],
-        ["job", "request", "cancel", "WS", "JOB", "--operator", "me", "--reason", "why"],
-    ),
-)
-
-
-@pytest.mark.parametrize("alias_argv, canonical_argv", ALIASED_TASKMANAGER)
-def test_httk_taskmanager_maps_onto_the_canonical_tree(
-    alias_argv: list[str],
-    canonical_argv: list[str],
-    tmp_path: Path,
-) -> None:
-    canonical = workflow_cli.build_parser("httk workflow", _context(tmp_path)).parse_args(canonical_argv)
-    alias = native_cli._parser().parse_args(alias_argv)  # pyright: ignore[reportPrivateUsage]
-    # The same function, reached with the same values: an alias cannot drift.
-    assert alias.handler is canonical.handler
-    assert _namespace(alias) == _namespace(canonical)
-
-
-def test_the_taskmanager_alias_really_does_the_work_it_names(tmp_path: Path, capsys) -> None:
-    """Not only the same parse: the same effect on the filesystem."""
-
-    root = tmp_path / "workspace"
-    assert native_cli.main(["init", str(root), "--name", "aliased"]) == 0
-    assert "aliased" in capsys.readouterr().out
-    assert (root / ".httk-workflow" / "format.json").is_file()
-
-    assert native_cli.main(["status", "aliased", "--json"]) == 0
-    alias = capsys.readouterr().out
-    assert command(["workspace", "status", "aliased", "--json"], _context(tmp_path)) == 0
-    assert capsys.readouterr().out == alias
-
-
-def test_taskmanager_alias_says_which_spelling_is_canonical(capsys) -> None:
-    native_cli._parser().print_help()  # pyright: ignore[reportPrivateUsage]
-    printed = capsys.readouterr().out
-    assert "httk workflow" in printed and "canonical" in printed
-
-
-def test_the_executables_still_take_their_durability_switch_before_the_command() -> None:
-    parser = native_cli._parser()  # pyright: ignore[reportPrivateUsage]
-    assert parser.parse_args(["init", "WS"]).no_durable is False
-    assert parser.parse_args(["--no-durable", "init", "WS"]).no_durable is True
-    # And after it, which the canonical tree is what makes possible.
-    assert parser.parse_args(["init", "WS", "--no-durable"]).no_durable is True
-
-
-# ---------------------------------------------------------------------------
-# Deprecated spellings keep working
+# Removed spellings and canonical scope options
 # ---------------------------------------------------------------------------
 
 
@@ -244,29 +180,31 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
 
     # But --set on `remote configure` is, and stays, KEY=VALUE settings.
-    assert parser.parse_args(["remote", "configure", "cluster", "--set", "host=a"]).set == ["host=a"]
+    assert parser.parse_args(["remote", "configure", "--set", "host=a", "cluster"]).set == ["host=a"]
     with pytest.raises(SystemExit):
         parser.parse_args(["project", "init", "--default-queue", "batch"])
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["remote", "check", "c", "--timeout", "5"])
+        parser.parse_args(["remote", "check", "--timeout", "5", "c"])
     # The manager's idle wait is bounded by --idle-timeout.
-    assert parser.parse_args(["manager", "run", "WS", "--idle-timeout", "5"]).idle_timeout == 5.0
-    assert parser.parse_args(["manager", "run", "WS"]).idle_timeout == 3600.0
+    assert parser.parse_args(["manager", "run", "--workspace", "WS", "--idle-timeout", "5"]).idle_timeout == 5.0
+    assert parser.parse_args(["manager", "run", "--workspace", "WS"]).idle_timeout == 3600.0
     with pytest.raises(SystemExit):
-        parser.parse_args(["manager", "run", "WS", "--until-" + "idle"])
+        parser.parse_args(["manager", "run", "--workspace", "WS", "--until-" + "idle"])
     with pytest.raises(SystemExit):
-        parser.parse_args(["manager", "run", "WS", "--fore" + "ground"])
+        parser.parse_args(["manager", "run", "--workspace", "WS", "--fore" + "ground"])
     assert parser.parse_args(["run"]).workspace is None
-    assert parser.parse_args(["run", "WS", "--idle"]).idle is True
+    assert parser.parse_args(["run", "--workspace", "WS", "--idle"]).idle is True
     with pytest.raises(SystemExit):
-        parser.parse_args(["manager", "run", "WS", "--timeout", "5"])
+        parser.parse_args(["manager", "run", "--workspace", "WS", "--timeout", "5"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["manager", "run", "WS"])
 
 
 def test_top_level_run_is_manager_run_with_pinned_defaults(tmp_path: Path) -> None:
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    top_level = _namespace(parser.parse_args(["run", "WS", "--workers", "4", "--idle"]))
-    manager = _namespace(parser.parse_args(["manager", "run", "WS", "--workers", "4", "--idle"]))
+    top_level = _namespace(parser.parse_args(["run", "--workspace", "WS", "--workers", "4", "--idle"]))
+    manager = _namespace(parser.parse_args(["manager", "run", "--workspace", "WS", "--workers", "4", "--idle"]))
     assert top_level == manager
 
 
@@ -316,14 +254,11 @@ def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
     """`transfer SRC DST` replaced the old send/fetch/start-manager subcommands."""
 
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    # The verb is one leaf: its handler is handle_transfer and its argument is the
-    # trailing vector its handler parses, so the two workspace names travel there.
-    parsed = parser.parse_args(["transfer", "a", "b", "--job", "J"])
+    parsed = parser.parse_args(["transfer", "--job", "J", "a", "b"])
     assert parsed.handler is workflow_cli.handle_transfer
-    assert parsed.args == ["a", "b", "--job", "J"]
-    # The removed group subcommands no longer parse as group actions: they are just
-    # more of the verb's own trailing vector now.
-    assert parser.parse_args(["transfer", "send", "c", "J"]).args == ["send", "c", "J"]
+    assert (parsed.source, parsed.destination, parsed.jobs) == ("a", "b", ["J"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["transfer", "send", "c", "J"])
 
 
 # ---------------------------------------------------------------------------
@@ -332,17 +267,10 @@ def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
 
 
 def test_the_remote_protocol_spellings_are_stable(tmp_path: Path) -> None:
-    """A transfer composes commands the far side may run on an older httk."""
+    """The private cross-machine protocol retains its declared command vectors."""
 
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
-    # ``transfer receive`` is the frozen import half: the verb leaf parses it as
-    # its own trailing vector and its handler dispatches "receive" at run time to
-    # the still-present handle_transfer_receive.
-    receive = parser.parse_args(["transfer", "receive", "--workspace", "/w", "--bundle", "/b"])
-    assert receive.handler is workflow_cli.handle_transfer
-    assert receive.args[0] == "receive"
     assert callable(workflow_cli.handle_transfer_receive)
-    # The old ``tasks``/``internal`` group spellings are gone.
     with pytest.raises(SystemExit):
         parser.parse_args(["tasks", "receive", "--workspace", "/w", "--bundle", "/b"])
     with pytest.raises(SystemExit):

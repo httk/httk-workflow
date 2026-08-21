@@ -133,9 +133,9 @@ placement, exactly as `httk workflow job list --placement` does.
 ## From the command line
 
 ```console
-httk workflow collect WORKSPACE
-httk workflow collect WORKSPACE --state succeeded --state failed
-httk workflow collect WORKSPACE --placement project/campaign --raw
+httk workflow collect --workspace WORKSPACE
+httk workflow collect --workspace WORKSPACE --state succeeded --state failed
+httk workflow collect --workspace WORKSPACE --placement project/campaign --raw
 ```
 
 The workspace is attached read-only. The default `collect` command prints one
@@ -194,7 +194,7 @@ path, the entry types this sweep needs, and the layout difference, and ends
 `Collect into a new store file.`
 
 ```console
-$ httk workflow collect workflow-workspace | head -1
+$ httk workflow collect --workspace workflow-workspace | head -1
 {"children":{},"data_generation":null,"data_path":null,"declarations":{},"failure":null,
  "format":"httk-workflow-collect","format_version":2,
  "job":{"claim":{"pool":"default","required_capabilities":[]},"data":{"mode":"none"},

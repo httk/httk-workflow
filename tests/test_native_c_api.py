@@ -389,6 +389,7 @@ def _job_new(ws: str, workflow: str, poscar: Path, context: CLIContext) -> int:
     argv = [
         "job",
         "new",
+        "--workspace",
         ws,
         "--workflow",
         workflow,

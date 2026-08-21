@@ -535,21 +535,21 @@ def test_a_concurrent_removal_or_repopulation_is_tolerated(aged: _Fixture, monke
 def test_the_gc_command_prints_a_table_and_json(aged: _Fixture, capsys: pytest.CaptureFixture[str]) -> None:
     context = CLIContext("httk", aged.workspace.root)
     root = register_ws(context, aged.workspace.root)
-    assert command(["workspace", "gc", root, "--dry-run"], context) == 0
+    assert command(["workspace", "gc", "--dry-run", root], context) == 0
     printed = capsys.readouterr().out
     assert "category" in printed and "candidates" in printed
     assert "attempt_control" in printed and "total" in printed
     assert "dry run: nothing was removed" in printed
     assert aged.old_attempts[0].is_dir()
 
-    assert command(["workspace", "gc", root, "--json"], context) == 0
-    document = json.loads(capsys.readouterr().out)
+    assert command(["workspace", "gc", "--json", root], context) == 0
+    document = json.loads(capsys.readouterr().out)[0]
     assert document["format"] == "httk-workflow-gc"
     assert document["dry_run"] is False
     assert document["removed"] > 0
     assert not aged.old_attempts[0].exists()
 
-    assert command(["workspace", "gc"], context) == 0
+    assert command(["workspace", "gc"], context) == 2
     capsys.readouterr()
 
 

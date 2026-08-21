@@ -5,7 +5,7 @@
 # codes, and the same published outcomes: one workflow protocol, two authoring
 # SDKs. Every child job runs this same file at the "relax" step.
 #
-#     httk project init --name campaign
+#     httk project init --name campaign .
 #     httk workflow job new \
 #         --workflow examples/defect_campaign.sh --step characterize \
 #         --parameter sites=3 --parameter diverging=1 --tag campaign

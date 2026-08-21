@@ -227,7 +227,7 @@ def _offer(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> d
 
 
 def _fetch(pair: Pair, capsys: pytest.CaptureFixture[str], *arguments: str) -> dict[str, Any]:
-    argv = ["transfer", "cluster:station", "home", "--json", *arguments]
+    argv = ["transfer", "--json", *arguments, "cluster:station", "home"]
     assert command(argv, pair.context) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -242,6 +242,7 @@ def test_job_request_forwards_to_remote_workspace(pair: Pair, capsys: pytest.Cap
         "job",
         "request",
         "pause",
+        "--workspace",
         "cluster:station",
         pair.ids["pending"],
         "--reason",
@@ -278,6 +279,7 @@ def test_job_request_remote_uses_selected_identity(pair: Pair, capsys: pytest.Ca
         "job",
         "request",
         "pause",
+        "--workspace",
         "cluster:station",
         pair.ids["pending"],
         "--operator",
@@ -300,6 +302,7 @@ def test_job_request_remote_accepts_tag_prefix_selector(pair: Pair, capsys: pyte
                 "job",
                 "request",
                 "pause",
+                "--workspace",
                 "cluster:station",
                 f"succeeding--{pair.ids['pending'][:8]}",
                 "--reason",
@@ -326,6 +329,7 @@ def test_job_request_remote_literal_on_unconfigured_machine_is_unsigned(
                 "job",
                 "request",
                 "pause",
+                "--workspace",
                 "cluster:station",
                 pair.ids["pending"],
                 "--operator",
@@ -361,6 +365,7 @@ def test_job_request_remote_tamper_is_rejected_before_publish(
                 "job",
                 "request",
                 "pause",
+                "--workspace",
                 "cluster:station",
                 pair.ids["pending"],
                 "--reason",
@@ -379,6 +384,7 @@ def test_job_request_forwards_leading_dash_reason(pair: Pair, capsys: pytest.Cap
         "job",
         "request",
         "pause",
+        "--workspace",
         "cluster:station",
         pair.ids["pending"],
         "--operator=local",
@@ -397,6 +403,7 @@ def test_job_request_forwards_multiple_ids(pair: Pair, capsys: pytest.CaptureFix
         "job",
         "request",
         "pause",
+        "--workspace",
         "cluster:station",
         pair.ids["pending"],
         pair.ids["succeeded"],
@@ -421,6 +428,7 @@ def test_job_request_remote_wait_relays_far_side_result(pair: Pair, capsys: pyte
                 "job",
                 "request",
                 "pause",
+                "--workspace",
                 "cluster:station",
                 pair.ids["pending"],
                 "--reason",
@@ -446,6 +454,7 @@ def test_job_request_remote_manager_records_local_operator_key(pair: Pair, capsy
                     "job",
                     "request",
                     "pause",
+                    "--workspace",
                     "cluster:station",
                     pair.ids["pending"],
                     "--reason",
@@ -474,6 +483,7 @@ def test_job_request_relays_remote_failure(pair: Pair, capsys: pytest.CaptureFix
         "job",
         "request",
         "pause",
+        "--workspace",
         "cluster:station",
         "does-not-exist",
         "--reason",
@@ -687,7 +697,7 @@ def test_fetch_resumes_after_an_interruption_between_pull_and_import(
         return real_import(self, bundle)
 
     monkeypatch.setattr(Workspace, "import_bundle", interrupt)
-    argv = ["transfer", "cluster:station", "home", "--json"]
+    argv = ["transfer", "--json", "cluster:station", "home"]
     assert command(argv, pair.context) == 2
     assert interrupted
 
@@ -794,7 +804,7 @@ def _relay_pair(root: Path) -> tuple[CLIContext, Path, Path, Path, str, str]:
 
 def test_remote_to_remote_by_id_relays_exactly_one_job(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     context, source_root, destination_root, _local_root, selected, other = _relay_pair(tmp_path / "relay")
-    assert command(["transfer", "kappa:source", "arrhenius:destination", "--job", selected, "--json"], context) == 0
+    assert command(["transfer", "--job", selected, "--json", "kappa:source", "arrhenius:destination"], context) == 0
     report = json.loads(capsys.readouterr().out)
     assert [entry["job_id"] for entry in report["moved"]] == [selected]
     assert Workspace(destination_root).find_marker_by_id(selected) is not None
@@ -827,7 +837,10 @@ def test_a_fetched_job_collects_locally_as_an_ordinary_result(
     assert failed.failure.details == {"cycles": 3}
 
     # The same thing through the command, which is the documented pipeline.
-    assert command(["collect", "home", "--state", "succeeded", "--state", "failed", "--raw"], pair.context) == 0
+    assert (
+        command(["collect", "--workspace", "home", "--state", "succeeded", "--state", "failed", "--raw"], pair.context)
+        == 0
+    )
     lines = capsys.readouterr().out.splitlines()
     assert json.loads(lines[-1])["format"] == "httk-workflow-collect-summary"
     record_lines = lines[:-1]

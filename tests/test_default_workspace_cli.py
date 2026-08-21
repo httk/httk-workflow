@@ -57,12 +57,12 @@ def test_by_path_requires_an_explicit_path(tmp_path: Path, capsys) -> None:
     assert "--by-path requires an explicit path" in capsys.readouterr().err
 
 
-def test_settings_show_keeps_unknown_workspace_prefix_for_ambiguity(tmp_path: Path, capsys) -> None:
+def test_settings_show_uses_explicit_key_option(tmp_path: Path, capsys) -> None:
     create_workspace("named", tmp_path / "named", settings={"named.value": 7})
     assert command(["workspace", "settings", "show", "named"], _context(tmp_path)) == 0
     assert "named.value" in capsys.readouterr().out
     default = default_workspace(project=tmp_path)
     assert default.path is not None
     Workspace(default.path).set_setting("answer", 42)
-    assert command(["workspace", "settings", "show", "answer"], _context(tmp_path)) == 0
+    assert command(["workspace", "settings", "show", "--key", "answer"], _context(tmp_path)) == 0
     assert capsys.readouterr().out.strip() == "42"

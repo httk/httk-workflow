@@ -11,12 +11,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from httk.core.cli import CLIContext
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow._logging import reset_logging
-from httk.workflow.cli import main as taskmanager_main
 from httk.workflow.journal import JournalWriter
+from httk.workflow.workflow_cli import command
 
 _SUCCEED_RUNNER = """#!/usr/bin/env python3
 import json
@@ -190,9 +191,11 @@ def test_serve_drains_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
 
     stopper = threading.Thread(target=stop_once_running, daemon=True)
     stopper.start()
-    code = taskmanager_main(
+    code = command(
         [
+            "manager",
             "run",
+            "--workspace",
             ws,
             "--idle",
             "--poll-interval",
@@ -200,7 +203,8 @@ def test_serve_drains_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
             "--drain-timeout",
             "20",
             "--json-logs",
-        ]
+        ],
+        CLIContext("httk", tmp_path),
     )
     stopper.join(timeout=5.0)
 
@@ -279,16 +283,19 @@ def test_json_log_records_carry_structured_fields(tmp_path: Path) -> None:
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="logged")
     workspace.submit(payload, "project/logged")
 
-    code = taskmanager_main(
+    code = command(
         [
+            "manager",
             "run",
+            "--workspace",
             ws,
             "--poll-interval",
             "0.02",
             "--idle-timeout",
             "30",
             "--json-logs",
-        ]
+        ],
+        CLIContext("httk", tmp_path),
     )
 
     assert code == 0

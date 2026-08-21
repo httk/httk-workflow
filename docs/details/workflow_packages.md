@@ -52,7 +52,7 @@ The command line can use the directory without registering it:
 
 ```console
 httk workflow describe ./my-workflow
-httk workflow job new WS --workflow-dir ./my-workflow --input structure=POSCAR
+httk workflow job new --workspace WS --workflow-dir ./my-workflow --input structure=POSCAR
 ```
 
 ## Runner realizations
@@ -179,9 +179,9 @@ package self-contained and lets each destination build its own native runner.
 The operational sequence is one foreground registration per platform class:
 
 ```console
-httk workflow build WORKSPACE ./my-workflow
-httk workflow job new WORKSPACE --workflow-dir ./my-workflow --step prepare
-httk workflow run WORKSPACE
+httk workflow build --workspace WORKSPACE ./my-workflow
+httk workflow job new --workspace WORKSPACE --workflow-dir ./my-workflow --step prepare
+httk workflow run --workspace WORKSPACE
 ```
 
 Managers never build. This rejects a thundering herd of managers compiling the
@@ -198,7 +198,7 @@ the source digest, command, platform probe, and time; the sibling `<tag>.log`
 records the command metadata and exit status. Re-registration leaves prior
 generations on disk; remove the tag directory only while no managers are
 running. Use
-`httk workflow build --list WORKSPACE` to inspect registrations. A missing or
+`httk workflow build --workspace WORKSPACE --list` to inspect registrations. A missing or
 stale registration produces structured `runner_not_built`; a failed platform
 probe, build, or artifact collection produces `runner_build_failed`. These
 manager-detected failures are terminal unless the job explicitly opts into
@@ -648,13 +648,13 @@ after preparation do not change later jobs; symlinks are rejected.
 The usual lifecycle is instantiate, run, then collect:
 
 ```console
-httk workflow job new WS --workflow-dir ./my-workflow \\
+httk workflow job new --workspace WS --workflow-dir ./my-workflow \\
     --input-from structure structures/ \\
     --parameter kpoint_density=30.0 \\
     --placement project/screening
-httk workflow run WS
-httk workflow collect WS
-httk workflow collect WS --into results.sqlite
+httk workflow run --workspace WS
+httk workflow collect --workspace WS
+httk workflow collect --workspace WS --into results.sqlite
 ```
 
 `httk workflow describe TARGET [--json]` reports a registered id or alias,

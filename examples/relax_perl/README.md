@@ -22,10 +22,10 @@ Drive one relaxation with the script as the runner, exactly the documented job
 sequence:
 
 ```console
-httk project init --name relax-perl
-httk workflow workspace init . --name default
+httk project init --name relax-perl .
+httk workflow workspace init --name default .
 httk workflow job new --workflow ./relax.pl --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workflow workspace settings set vasp.command "$PWD/../mock_vasp.py"
+httk workflow workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
 httk workflow run
 httk workflow collect
 ```

@@ -9,54 +9,32 @@ Installing *httk-workflow* registers the lazy `workflow` command with
 httk workflow --help
 ```
 
-## Three executables, one tree
+## One command tree
 
-**`httk workflow …` is the canonical spelling of every command in this
+**`httk workflow …` is the spelling of every command in this
 package.** It is one nested command tree: each group answers `--help`, each
 command answers `--help`, and a mistyped action is reported by the group it was
 mistyped in.
-
-One further executable is installed as a thin alias that reuses the canonical
-tree's own parsers and handlers rather than a second implementation. It remains
-supported; prefer the canonical spelling in new work and in anything you write
-down.
-
-| Executable | Alias of | Kept for |
-| --- | --- | --- |
-| `httk workflow` | — | **canonical** |
-| `httk-taskmanager` | `httk workflow workspace`/`job`/`manager` leaves | operators and scripts predating `httk workflow` |
-
-```text
-httk-taskmanager init     ->  httk workflow workspace init
-httk-taskmanager submit   ->  httk workflow job submit
-httk-taskmanager run      ->  httk workflow manager run
-httk-taskmanager status   ->  httk workflow workspace status
-httk-taskmanager request  ->  httk workflow job request
-```
-
-The alias keeps its own flags, including the `--durable`/`--no-durable`
-switch it has always accepted *before* the subcommand. The canonical tree
-carries the same switch on the leaf that acts on it, so both spellings work.
 
 ## The complete tree
 
 ```text
 httk workflow workspace  init | list | default | move | forget | delete | status | managers | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock
 httk workflow runner     publish | describe
-httk workflow build      [WORKSPACE] TARGET
+httk workflow build      [--workspace WORKSPACE] TARGET...
 httk workflow job        new | submit | request | list | show | log | why | debug
 httk workflow describe   TARGET [--json]
-httk workflow precheck   [WORKSPACE] [--placement P] [--json]
+httk workflow precheck   [--workspace WORKSPACE] [--placement P] [--json]
 httk workflow collect
 httk workflow postprocess
-httk workflow run        [WORKSPACE]  (the recommended spelling of `manager run`)
+httk workflow run        [--workspace WORKSPACE]  (the recommended spelling of `manager run`)
 httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-managers
 httk workflow v1         collect
 httk workflow config     init | show | set | unset | import-v1
 httk workflow project    init | import-v1 | show | doctor | manifest create | manifest verify
 httk workflow remote     list | add | configure | check | import-v1 | show | remove
-httk workflow transfer   SRC DST      (plus the protocol spellings: receive | offer | retire)
+httk workflow transfer   [OPTIONS] SRC DST      (plus the protocol spellings: receive | offer | retire)
 ```
 
 ### Workspace selection
@@ -93,31 +71,31 @@ job UUIDs when precise attribution matters.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `workspace init PATH` | create or adopt a workspace and register its basename | `--name`, `--setting`, `--no-durable` |
-| `workspace list [REMOTE:]` | list local or owning-machine workspaces | `--json` |
-| `workspace default [NAME]` | read or record this project's default name | `--unset` |
-| `workspace move NAME DEST_DIR` | move a local workspace and update its registry path | `--no-durable` |
-| `workspace forget NAME` | deregister a name, leaving the workspace on disk | |
-| `workspace delete NAME` | destroy the workspace and deregister it | `--force` (required) |
-| `workspace status NAME` | summarize the authoritative markers (remote: over the adapter) | `--json` |
-| `workspace managers NAME` | list the managers serving the workspace, live or stale | `--json` |
-| `workspace settings show NAME [KEY]` | print the application settings, or one | `--json` |
-| `workspace settings set NAME KEY VALUE` | store one application setting | |
-| `workspace settings unset NAME KEY` | remove one application setting | |
-| `workspace workflow-prelude show NAME [WORKFLOW]` | print the per-workflow preludes, or one | `--json` |
-| `workspace workflow-prelude set NAME WORKFLOW VALUE` | store one workflow's prelude (`VALUE` may be `@FILE`) | `--no-durable` |
-| `workspace workflow-prelude unset NAME WORKFLOW` | remove one workflow's prelude | `--no-durable` |
-| `workspace policy show NAME` | print the workspace policy | `--json` |
-| `workspace policy set NAME KEY VALUE` | store one policy member | `--json` |
-| `workspace fsck NAME` | check every marker against its journal frame (remote: over the adapter) | `--repair`, `--quarantine-unrepairable`, `--json` |
-| `workspace gc NAME` | collect what the retention policy allows (remote: over the adapter) | `--dry-run`, `--json` |
-| `workspace unlock NAME` | release a maintenance lock | `--force` |
+| `workspace init [OPTIONS] PATH...` | create or adopt workspaces and register their basenames | `--name` (one path only), `--setting`, `--no-durable` |
+| `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
+| `workspace default [--unset] [NAME]` | read or record this project's default name | |
+| `workspace move [--no-durable] NAME DEST_DIR` | move a local workspace and update its registry path | |
+| `workspace forget [--force] NAME...` | deregister names, leaving workspaces on disk | |
+| `workspace delete --force NAME...` | destroy workspaces and deregister them | |
+| `workspace status [--json] [NAME...]` | summarize authoritative markers (remote: over the adapter) | |
+| `workspace managers [--json] [NAME...]` | list managers serving workspaces, live or stale | |
+| `workspace settings show [--key KEY] [--json] [NAME...]` | print application settings, or one selected key | |
+| `workspace settings set --key KEY --value VALUE NAME...` | store one application setting in each workspace | |
+| `workspace settings unset --key KEY NAME...` | remove one application setting from each workspace | |
+| `workspace workflow-prelude show [--workflow WORKFLOW] [--json] [NAME...]` | print per-workflow preludes, or one selected workflow | |
+| `workspace workflow-prelude set --workflow WORKFLOW --value VALUE [--no-durable] NAME...` | store one workflow's prelude in each workspace | `VALUE` may be `@FILE` |
+| `workspace workflow-prelude unset --workflow WORKFLOW [--no-durable] NAME...` | remove one workflow's prelude from each workspace | |
+| `workspace policy show [--json] [NAME...]` | print workspace policies | |
+| `workspace policy set --key KEY --value VALUE [--json] NAME...` | store one policy member in each workspace | |
+| `workspace fsck [OPTIONS] [NAME...]` | check markers against journal frames; repair modes require names | `--repair`, `--quarantine-unrepairable`, `--json` |
+| `workspace gc [--dry-run] [--json] NAME...` | collect what retention policies allow (remote: over the adapter) | |
+| `workspace unlock [--force] NAME...` | release maintenance locks | |
 
 `workspace init` creates and registers an explicit workspace. A canonical path may
 have only one registered name:
 
 ```console
-httk workflow workspace init runs/my-workspace --name my-workspace
+httk workflow workspace init --name my-workspace runs/my-workspace
 ```
 
 A workspace on a cluster is addressed as `REMOTE:NAME`; its owning machine
@@ -130,20 +108,20 @@ outbound transfers. Fetch or retire those first, or pass `workspace forget
 
 `workspace move NAME DEST_DIR` is an atomic same-filesystem rename. It refuses
 cross-filesystem moves; stop managers, copy the tree manually, forget the old
-name, and re-register it with `workspace init <newpath> --name NAME` instead.
+name, and re-register it with `workspace init --name NAME <newpath>` instead.
 
 ### `runner` — the shared runners a workspace publishes
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `runner publish FILE_OR_DIRECTORY` | publish one runner file or directory, pinned by digest | `--workspace` (required), `--name`, `--replace` |
-| `runner describe [NAME]` | report the published runners and their digests | `--workspace` (required), `--json` |
+| `runner publish [OPTIONS] FILE_OR_DIRECTORY...` | publish runner files or directories, pinned by digest | `--workspace`, `--name` (one source only), `--replace`, `--json` |
+| `runner describe [OPTIONS] [NAME...]` | report published runners and their digests | `--workspace`, `--json` |
 
 ### `build` — foreground registration of compiled workflow packages
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `build [WORKSPACE] TARGET` | build and register a package, store runner, or job's workspace runner | `--list`, `--json` |
+| `build [OPTIONS] TARGET...` | build and register packages, store runners, or jobs' workspace runners | `--workspace`, `--list`, `--json` |
 
 Directory rows are reported as `tree (inferred)` because the store format
 identifies a tree by its `run` entry. New nested file publishes named `run` are
@@ -153,8 +131,8 @@ the marker is an honest inference rather than provenance metadata.
 The build command has two forms:
 
 ```console
-httk workflow build [WORKSPACE] TARGET [--json]
-httk workflow build [WORKSPACE] --list [--json]
+httk workflow build [--workspace WORKSPACE] [--json] TARGET...
+httk workflow build [--workspace WORKSPACE] [--json] --list
 ```
 
 `TARGET` may be a workflow package directory, a workspace runner-store path,
@@ -176,14 +154,14 @@ its job or store runner target.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `job new WORKSPACE` | scaffold and submit jobs from a workflow | `--workflow` or `--workflow-dir` (one required), `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
-| `job submit WORKSPACE SOURCE` | submit one prepared payload directory | `--placement` (required), `--move` |
-| `job request ACTION [WORKSPACE] JOB_ID ...` | publish one request per job ID (remote: over the adapter) | optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
-| `job list WORKSPACE` | list the jobs as a cheap table | `--kind`, `--placement`, `--json` |
-| `job show WORKSPACE JOB` | describe one job from its state | `--json` |
-| `job log WORKSPACE JOB` | print the transition history | `--limit`, `--json` |
-| `job why WORKSPACE JOB` | explain why a job is not running | `--json` |
-| `job debug WORKSPACE JOB` | drive one job to a terminal state, in front of you | `--step`, `--placement`, `--follow-children`, `--timeout`, `--log-level` |
+| `job new [OPTIONS]` | scaffold and submit jobs from a workflow | `--workspace`, `--workflow` or `--workflow-dir` (one required), `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
+| `job submit [OPTIONS] SOURCE...` | submit prepared payload directories | `--workspace`, `--placement` (required), `--move` |
+| `job request ACTION [OPTIONS] JOB_ID...` | publish one request per job ID (remote: over the adapter) | `--workspace`, optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
+| `job list [OPTIONS]` | list jobs as a cheap table | `--workspace`, `--kind`, `--placement`, `--json` |
+| `job show [OPTIONS] JOB...` | describe jobs from their state | `--workspace`, `--json` |
+| `job log [OPTIONS] JOB...` | print transition histories | `--workspace`, `--limit`, `--json` |
+| `job why [OPTIONS] JOB...` | explain why jobs are not running | `--workspace`, `--json` |
+| `job debug [OPTIONS] JOB` | drive one job to a terminal state in front of you | `--workspace`, `--step`, `--placement`, `--follow-children`, `--timeout`, `--log-level` |
 
 When giving more than one `JOB_ID`, name the workspace explicitly.
 
@@ -239,8 +217,8 @@ unreadable `job.json`; unfulfilled roles alone keep the exit at `0`. See
 | postprocess WORKSPACE | run one declared script for each selected collected job | --script NAME (required), --workflow-dir PKG, --state, --placement, --timeout, --json |
 
 ~~~console
-httk workflow postprocess WS --script relaxation-report
-httk workflow postprocess WS --script report --workflow-dir ./my-workflow --json
+httk workflow postprocess --workspace WS --script relaxation-report
+httk workflow postprocess --workspace WS --script report --workflow-dir ./my-workflow --json
 ~~~
 
 With --json, each result is one JSON object in the
@@ -276,9 +254,9 @@ for their owner; `describe` resolves a plugin name and reports its source as
 ### `precheck` — readiness before an attempt
 
 ```console
-httk workflow precheck WORKSPACE
-httk workflow precheck WORKSPACE --json
-httk workflow precheck WORKSPACE --runner-search-path PATH --runner-search-path OTHER
+httk workflow precheck --workspace WORKSPACE
+httk workflow precheck --workspace WORKSPACE --json
+httk workflow precheck --workspace WORKSPACE --runner-search-path PATH --runner-search-path OTHER
 ```
 
 This read-only report checks `submitted`, `ready`, `waiting`, and `paused` jobs:
@@ -333,8 +311,8 @@ stay non-failing. The JSON summary carries `claim_problems`,
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `run [WORKSPACE]` | run a manager until idle, or keep serving with `--idle` | `--workers`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--adapter-timeout`, `--log-level` |
-| `manager run WORKSPACE` | run a manager locally, or submit managers to a remote workspace's scheduler | `--workers`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `run` | run a manager until idle, or keep serving with `--idle` | `--workspace`, `--workers`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--adapter-timeout`, `--log-level` |
+| `manager run` | run a manager locally, or submit managers to a remote workspace's scheduler | `--workspace`, `--workers`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
 `manager run` follows the binding: a local workspace runs the manager in this
 process as before, and a remote workspace submits managers through the remote's
@@ -388,12 +366,12 @@ separately with `workspace init PATH`:
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `project init [PATH]` | create a project and its key | `--name`, `--description`, `--exclude`, `--non-interactive` |
-| `project import-v1 [PATH]` | read a legacy `ht.project` without creating a workspace | `--source`, `--name` |
-| `project show [PATH]` | describe the project, its keys, workspace default, and manifest | `--no-verify`, `--json` |
-| `project doctor [PATH]` | check, and optionally repair, the project | `--repair`, `--json` |
-| `project manifest create [PROJECT]` | write the signed manifest | `--manifest` |
-| `project manifest verify [PROJECT]` | verify the manifest against the tree | `--manifest`, `--trusted-key` |
+| `project init [OPTIONS] PATH...` | create projects and their keys | `--name` (one path only), `--description`, `--exclude`, `--non-interactive` |
+| `project import-v1 [OPTIONS] PATH...` | read legacy `ht.project` trees without creating workspaces | `--source` and `--name` (one path only) |
+| `project show [OPTIONS] [PATH...]` | describe projects, their keys, workspace defaults, and manifests | `--no-verify`, `--json` |
+| `project doctor [OPTIONS] [PATH...]` | check projects; `--repair` requires explicit paths | `--repair`, `--json` |
+| `project manifest create [--manifest PATH] PROJECT...` | write signed manifests | |
+| `project manifest verify [OPTIONS] [PROJECT...]` | verify manifests against their trees | `--manifest` (one project only), `--trusted-key` |
 
 ### `remote` — the adapters that reach other machines
 
@@ -406,12 +384,12 @@ unambiguous.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `remote list` | list the remotes this project can reach | |
-| `remote add NAME` | create a remote from a packaged adapter template | `--template`, `--global`, `--non-interactive` |
-| `remote configure REMOTE` | run the adapter's `configure` operation | `--set KEY=VALUE`, `--adapter-timeout` |
-| `remote check REMOTE` | check that `httk` answers on the remote | `--set KEY=VALUE`, `--adapter-timeout` |
-| `remote import-v1 SOURCE` | map a legacy *httk* v1 computer bundle | `--name`, `--global` |
-| `remote show NAME` | describe one remote and its settings | `--json` |
-| `remote remove NAME` | remove one remote bundle | `--force` |
+| `remote add [OPTIONS] NAME...` | create remotes from a packaged adapter template | `--template`, `--global`, `--non-interactive` |
+| `remote configure [OPTIONS] REMOTE...` | run adapters' `configure` operation | `--set KEY=VALUE`, `--adapter-timeout` |
+| `remote check [OPTIONS] REMOTE...` | check that `httk` answers on remotes | `--set KEY=VALUE`, `--adapter-timeout` |
+| `remote import-v1 [OPTIONS] SOURCE...` | map legacy *httk* v1 computer bundles | `--name` (one source only), `--global` |
+| `remote show [--json] NAME...` | describe remotes and their settings | |
+| `remote remove [--force] NAME...` | remove remote bundles | |
 
 `remote show` never prints a credential *value*: a remote setting stored in
 the manifest-excluded `credentials.json` is reported by name only, so a
@@ -428,8 +406,8 @@ stands either way. Fetch or retire the transfer first.
 destination — and moves jobs between them, whichever way they point:
 
 ```console
-httk workflow transfer SRC DST [--job JOB_ID …] [--state STATE …] [--placement P] \
-    [--destination-placement P] [--adapter-timeout SECONDS] [--json]
+httk workflow transfer [--job JOB_ID …] [--state STATE …] [--placement P] \
+    [--destination-placement P] [--adapter-timeout SECONDS] [--json] SRC DST
 ```
 
 Both names resolve through the registry, so which legs run over an adapter and
@@ -462,7 +440,7 @@ sweep.
 
 Bundles carry sources only for workflows that declare `[workflow.build]`;
 compiled artifacts are machine-local and are never transferred. After importing
-such a bundle, run `httk workflow build WORKSPACE TARGET` on the destination
+such a bundle, run `httk workflow build --workspace WORKSPACE TARGET` on the destination
 before starting its managers; the import operation repeats this reminder.
 
 ### The protocol spellings, and what is gone
@@ -477,12 +455,12 @@ or newer than yours:
 
 ```text
 httk workflow transfer receive --workspace PATH --bundle BUNDLE
-httk workflow transfer offer PATH --destination-workspace-id UUID [--job JOB_ID …] --json
-httk workflow transfer retire PATH JOB_ID … --destination-workspace-id UUID --json
-httk workflow job request-envelopes ACTION WORKSPACE JOB_ID … --operator=LABEL --reason=TEXT [--priority N] [--step S] [--force] --json
-httk workflow job publish-requests WORKSPACE --document JSON [--document JSON …] [--wait] [--timeout S] [--durable|--no-durable]
-httk workflow workspace status PATH --by-path --json
-httk workflow manager run PATH --by-path
+httk workflow transfer offer --destination-workspace-id UUID [--job JOB_ID …] --json PATH
+httk workflow transfer retire --destination-workspace-id UUID --json PATH JOB_ID …
+httk workflow job request-envelopes ACTION --workspace WORKSPACE --operator=LABEL --reason=TEXT [--priority N] [--step S] [--force] --json JOB_ID …
+httk workflow job publish-requests --workspace WORKSPACE --document JSON [--document JSON …] [--wait] [--timeout S] [--durable|--no-durable]
+httk workflow workspace status --by-path --json PATH
+httk workflow manager run --by-path --workspace PATH
 ```
 
 `receive` is an import half rather than an operator command, so it is not
@@ -493,14 +471,14 @@ machine's workspace.
 
 The pre-release `transfer send`, `transfer fetch`, `transfer start-manager`, and
 `transfer status` verbs are **gone** — they no longer parse. Move to the single
-`transfer SRC DST` verb, and to `manager run NAME` for starting managers (below)
+`transfer SRC DST` verb, and to `manager run --workspace NAME` for starting managers (below)
 and `workspace status NAME` for reading a remote workspace's markers.
 
 | Removed | Now |
 | --- | --- |
-| `transfer send REMOTE JOB …` | `transfer LOCAL REMOTE --job JOB …` |
+| `transfer send REMOTE JOB …` | `transfer --job JOB … LOCAL REMOTE` |
 | `transfer fetch --remote REMOTE --workspace LOCAL` | `transfer REMOTE LOCAL` |
-| `transfer start-manager REMOTE --count N` | `manager run REMOTE --count N` |
+| `transfer start-manager REMOTE --count N` | `manager run --workspace REMOTE --count N` |
 | `transfer status REMOTE` | `workspace status REMOTE` |
 
 An earlier release also renamed two whole groups: `httk workflow computer …`
@@ -535,9 +513,9 @@ alias, runner file, package directory, or bare language document — and needs n
 prepared payload:
 
 ```console
-httk workflow job new WORKSPACE --workflow vasp-relax --input structure=POSCAR --tag silicon
-httk workflow job new WORKSPACE --workflow vasp-relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening
-httk workflow job new WORKSPACE --workflow ./my_runner.py --step characterize --parameter sites=8
+httk workflow job new --workspace WORKSPACE --workflow vasp-relax --input structure=POSCAR --tag silicon
+httk workflow job new --workspace WORKSPACE --workflow vasp-relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening
+httk workflow job new --workspace WORKSPACE --workflow ./my_runner.py --step characterize --parameter sites=8
 ```
 
 `--parameter NAME=VALUE` supplies an opaque implementation knob;
@@ -570,10 +548,10 @@ Run a PWD, CWL, or jobflow document directly with `job new --workflow DOCUMENT`;
 the document or template directory is resolved as a language realization:
 
 ```console
-httk workflow job new WS --workflow flow.cwl --input message=echo
-httk workflow job new WS --workflow workflow.json --parameter pwd_module_path='["."]'
-httk workflow job new WS --workflow maker.json
-httk workflow job new WS --workflow ./v1-template --format httk-v1 --parameter encut=520
+httk workflow job new --workspace WS --workflow flow.cwl --input message=echo
+httk workflow job new --workspace WS --workflow workflow.json --parameter pwd_module_path='["."]'
+httk workflow job new --workspace WS --workflow maker.json
+httk workflow job new --workspace WS --workflow ./v1-template --format httk-v1 --parameter encut=520
 ```
 
 The same `--format` option accepts `cwl`, `pwd`, `jobflow`, and `httk-v1` for
@@ -586,8 +564,8 @@ the supported CWL subset, PWD security, jobflow Makers, and language collection.
 Harvest old v1 results without submitting them:
 
 ```console
-httk workflow v1 collect ROOT --workflow-dir PKG
-httk workflow v1 collect ROOT --workflow-dir PKG --into results.sqlite
+httk workflow v1 collect --workflow-dir PKG ROOT
+httk workflow v1 collect --workflow-dir PKG --into results.sqlite ROOT
 ```
 
 ## Inspecting and debugging jobs
@@ -597,11 +575,11 @@ writing anything, and `job debug` drives a single job to a terminal state in the
 foreground:
 
 ```console
-httk workflow job list WORKSPACE --kind ready
-httk workflow job show WORKSPACE JOB
-httk workflow job log WORKSPACE JOB --limit 20
-httk workflow job why WORKSPACE JOB
-httk workflow job debug WORKSPACE PAYLOAD_OR_JOB --follow-children
+httk workflow job list --workspace WORKSPACE --kind ready
+httk workflow job show --workspace WORKSPACE JOB
+httk workflow job log --workspace WORKSPACE --limit 20 JOB
+httk workflow job why --workspace WORKSPACE JOB
+httk workflow job debug --workspace WORKSPACE --follow-children PAYLOAD_OR_JOB
 ```
 
 `JOB` is a job UUID, a `tag--uuid` job key, or any unique prefix of either, and
@@ -609,7 +587,7 @@ each command takes `--json`. `job debug` exits `0` on success, `3` on failure, a
 `4` when the job stopped without finishing. See
 {doc}`taskmanager` for what each command reports.
 
-`httk workflow collect WORKSPACE` streams one `CollectedJob` summary per finished
+`httk workflow collect --workspace WORKSPACE` streams one `CollectedJob` summary per finished
 job as JSON lines by default. Use `--raw` to stream `JobRecord` records for a
 data layer; see {doc}`/collecting`.
 
@@ -630,7 +608,7 @@ overrides. Legacy `~/.httk` data is read only through `config import-v1`; its
 httk workflow config init --name "A User" --email user@example.org
 httk workflow config set name "Another User"
 httk workflow config unset email
-httk workflow project init . --name example
+httk workflow project init --name example .
 ```
 
 The project *anchor* is owned by *httk-core*, which provides the umbrella
@@ -658,7 +636,7 @@ working directory's parent chain.
 httk workflow project show
 httk workflow project show --json
 httk workflow project doctor
-httk workflow project doctor --repair
+httk workflow project doctor --repair .
 ```
 
 `project show` reports the project's metadata, workspace default and job counts,
@@ -678,7 +656,7 @@ know about rather than something to fail a script on.
 ## Signed manifests
 
 ```console
-httk workflow project manifest create
+httk workflow project manifest create .
 httk workflow project manifest verify
 httk workflow project manifest verify --trusted-key keys/collaborator.pub
 ```
@@ -755,7 +733,7 @@ with a different job.
 
 `httk workflow config init` creates the legacy `identity.seed`/`identity.pub`
 pair below `$XDG_CONFIG_HOME/httk/keys/`. Named identities are managed with
-`httk workflow config identity add SHORT --name NAME --email EMAIL`; each gets
+`httk workflow config identity add --name NAME --email EMAIL SHORT`; each gets
 its own `identity-SHORT.seed`/`.pub` pair. The first named identity becomes the
 default, and `config identity default SHORT` changes it. Removing an identity
 leaves its key files on disk; removing the default with exactly one identity
@@ -808,7 +786,7 @@ can also clear one explicitly:
 
 ```console
 httk workflow workspace unlock WORKSPACE
-httk workflow workspace unlock WORKSPACE --force
+httk workflow workspace unlock --force WORKSPACE
 ```
 
 Without `--force` only a stale lock is removed.
@@ -821,9 +799,9 @@ library — distinct from the engine `policy` above, which tunes scheduling. The
 are stored in the workspace and edited by name:
 
 ```console
-httk workflow workspace settings set my-workspace vasp.command "srun -n 32 vasp_std"
+httk workflow workspace settings set --key vasp.command --value "srun -n 32 vasp_std" my-workspace
 httk workflow workspace settings show my-workspace
-httk workflow workspace settings unset my-workspace vasp.command
+httk workflow workspace settings unset --key vasp.command my-workspace
 ```
 
 A value that parses as JSON is stored as that scalar; a bare word is stored as a
@@ -849,16 +827,16 @@ environment:
 
 - **`environment.prelude`** — the workspace-wide layer, one shell fragment that
   applies to every job. It is an ordinary application setting: `workspace
-  settings set NAME environment.prelude "…"`.
+  settings set --key environment.prelude --value "…" NAME`.
 - **`workflow-prelude`** — the per-workflow layer, keyed by workflow id (the
   `[workflow].id` of the manifest, `=` the job's `workflow`). It applies only to
   jobs of that workflow and runs *after* the workspace-wide prelude:
 
   ```console
-  httk workflow workspace workflow-prelude set my-workspace relax-vasp "module load VASP/6.2.1"
-  httk workflow workspace workflow-prelude set my-workspace relax-vasp @prelude.sh
+  httk workflow workspace workflow-prelude set --workflow relax-vasp --value "module load VASP/6.2.1" my-workspace
+  httk workflow workspace workflow-prelude set --workflow relax-vasp --value @prelude.sh my-workspace
   httk workflow workspace workflow-prelude show my-workspace
-  httk workflow workspace workflow-prelude unset my-workspace relax-vasp
+  httk workflow workspace workflow-prelude unset --workflow relax-vasp my-workspace
   ```
 
   `VALUE` is stored verbatim (never JSON-parsed); `@FILE` reads the shell text
@@ -877,9 +855,9 @@ retention limits — are stored in `format.json` and edited in place:
 
 ```console
 httk workflow workspace policy show WORKSPACE
-httk workflow workspace policy show WORKSPACE --json
-httk workflow workspace policy set WORKSPACE visibility_deadline_seconds 60
-httk workflow workspace policy set WORKSPACE retention.trash_days 14
+httk workflow workspace policy show --json WORKSPACE
+httk workflow workspace policy set --key visibility_deadline_seconds --value 60 WORKSPACE
+httk workflow workspace policy set --key retention.trash_days --value 14 WORKSPACE
 ```
 
 `workspace fsck` verifies that every state marker still resolves to a readable
@@ -888,8 +866,8 @@ good frame of their job:
 
 ```console
 httk workflow workspace fsck WORKSPACE
-httk workflow workspace fsck WORKSPACE --repair --json
-httk workflow workspace fsck WORKSPACE --repair --quarantine-unrepairable
+httk workflow workspace fsck --repair --json WORKSPACE
+httk workflow workspace fsck --repair --quarantine-unrepairable WORKSPACE
 ```
 
 It exits `1` while anything remains for an operator to deal with. See
@@ -904,9 +882,9 @@ orphan is simply left in place. `workspace gc` is the separate, explicit
 collector, driven entirely by the workspace's `policy.retention`:
 
 ```console
-httk workflow workspace gc WORKSPACE --dry-run
+httk workflow workspace gc --dry-run WORKSPACE
 httk workflow workspace gc WORKSPACE
-httk workflow workspace gc WORKSPACE --json
+httk workflow workspace gc --json WORKSPACE
 ```
 
 It prints one row per category with the candidates it found, what it removed,
@@ -923,9 +901,9 @@ and month-old request leftovers — those claimed by a manager that is gone and
 those a manager explicitly retired. Configure the limits to collect the rest:
 
 ```console
-httk workflow workspace policy set WORKSPACE retention.attempt_control_days 14
-httk workflow workspace policy set WORKSPACE retention.trash_days 14
-httk workflow workspace policy set WORKSPACE retention.journal_days 90
+httk workflow workspace policy set --key retention.attempt_control_days --value 14 WORKSPACE
+httk workflow workspace policy set --key retention.trash_days --value 14 WORKSPACE
+httk workflow workspace policy set --key retention.journal_days --value 90 WORKSPACE
 ```
 
 | Category | Retention limit | What goes |
@@ -1006,7 +984,7 @@ configured host, where the manager is submitted with `sbatch`. Only `ssh` and
 | `install` (the `remote check` verb) | checks that `httk` answers on the far side and reports its version | `host`, `username`, `port`, `httk_command` |
 | `push` / `pull` | one `rsync --archive` transfer, creating missing destination components; a `pull` is always the whole remote directory, a `push` is the whole tree or the request's explicit relative `files` batch | `host`, `username`, `port` |
 | `invoke` | runs the request's argument vector on the host, optionally in the request's directory, and returns its status, stdout and stderr | `host`, `username`, `port`, `httk_command` |
-| `status` | the same machinery running `httk workflow workspace status NAME --json` remotely | as `invoke` |
+| `status` | the same machinery running `httk workflow workspace status --json NAME` remotely | as `invoke` |
 | `start-manager` | writes a generated batch script into `WORKSPACE/.httk-workflow/batch/`, then submits it with `sbatch` once, or the request's `count` times | workspace settings `slurm.*`, `manager.workers`, `workspace` |
 
 The generated batch script is a `#!/bin/bash` file carrying one `#SBATCH`
@@ -1017,9 +995,7 @@ request did not already choose one, so an explicit `--workers` always wins. Both
 the submitted job identifiers.
 
 A `start-manager` request names the client-probed workspace root in its
-`workspace` field. When that field is absent the root is read back out of the
-request's `manager run PATH --by-path` argument vector; argv reading is a
-documented fallback for hand-written requests, not the normal path. `local` starts `count` detached processes and
+required `workspace` field. `local` starts `count` detached processes and
 reports their `pids`.
 
 `httk_command` overrides how `httk` is spelled on the far side, for example
@@ -1057,7 +1033,7 @@ that it must be reachable from a *non-interactive* shell: a `module load` or
 conda activation guarded by an interactivity test in `.bashrc` works when you
 log in but not over the adapter's connection. If `httk` deliberately lives
 elsewhere (a project venv, a wrapper script), point the remote at it with
-`remote configure REMOTE --set httk_command="/proj/venv/bin/httk"` instead.
+`remote configure --set httk_command="/proj/venv/bin/httk" REMOTE` instead.
 
 In the adapter protocol this operation keeps its historical spelling
 `install`; the earlier `bootstrap=pip` opt-in that attempted a
@@ -1088,17 +1064,17 @@ Add and configure the machine, make sure *httk-workflow* is installed there
 `remote check`, create its workspace, then send and run a job:
 
 ```console
-httk workflow remote add kappa --template ssh-slurm
-httk workflow remote configure kappa \
+httk workflow remote add --template ssh-slurm kappa
+httk workflow remote configure \
     --set host=kappa.example.org --set username=rar \
-    --set check_connectivity=yes
+    --set check_connectivity=yes kappa
 httk workflow remote check kappa
 httk workflow workspace init kappa:/scratch/rar/httk/runs
-httk workflow workspace settings set kappa:runs slurm.partition batch
-httk workflow workspace settings set kappa:runs vasp.command "srun -n 32 vasp_std"
+httk workflow workspace settings set --key slurm.partition --value batch kappa:runs
+httk workflow workspace settings set --key vasp.command --value "srun -n 32 vasp_std" kappa:runs
 httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
-httk workflow transfer default kappa:runs --job JOB-ID
-httk workflow run kappa:runs --workers 8
+httk workflow transfer --job JOB-ID default kappa:runs
+httk workflow run --workspace kappa:runs --workers 8
 httk workflow workspace status kappa:runs
 ```
 
@@ -1123,8 +1099,8 @@ as a substitute for destination settings.
 To bring stopped jobs home, use the reverse transfer and then collect:
 
 ```console
-httk workflow transfer kappa:runs default \
-    --state succeeded --state failed --placement project/screening --json
+httk workflow transfer --state succeeded --state failed --placement project/screening --json \
+    kappa:runs default
 ```
 
 `--state` accepts the kinds a stopped job can be in and defaults to `succeeded`
@@ -1140,8 +1116,8 @@ adapter but usable on their own on the remote itself. They use literal paths
 because they bypass the owning machine's registry:
 
 ```console
-httk workflow transfer offer PATH --destination-workspace-id UUID [--job JOB_ID …] --json
-httk workflow transfer retire PATH JOB_ID ... --destination-workspace-id UUID
+httk workflow transfer offer --destination-workspace-id UUID [--job JOB_ID …] --json PATH
+httk workflow transfer retire --destination-workspace-id UUID PATH JOB_ID ...
 ```
 
 `offer` detaches every selected job into its sealed bundle and prints one entry

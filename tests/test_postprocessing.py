@@ -148,12 +148,18 @@ def test_postprocess_cli_streams_results_errors_and_workflow_dir(tmp_path: Path,
     context = CLIContext("httk", tmp_path)
     workspace_name = register_ws(context, workspace.root, "postprocess")
 
-    assert command(["postprocess", workspace_name, "--script", "report", "--workflow-dir", str(package)], context) == 0
+    assert (
+        command(
+            ["postprocess", "--workspace", workspace_name, "--script", "report", "--workflow-dir", str(package)],
+            context,
+        )
+        == 0
+    )
     line = capsys.readouterr().out.strip().split("\t")
     assert line[:3] == [record.job_key, "report", "0"]
     assert Path(line[3]).is_dir()
 
-    assert command(["postprocess", workspace_name, "--script", "report", "--json"], context) == 1
+    assert command(["postprocess", "--workspace", workspace_name, "--script", "report", "--json"], context) == 1
     error = json.loads(capsys.readouterr().out)
     assert error["job_key"] == record.job_key
     assert "not registered" in error["error"]
@@ -163,7 +169,17 @@ def test_postprocess_cli_streams_results_errors_and_workflow_dir(tmp_path: Path,
     script.chmod(0o755)
     assert (
         command(
-            ["postprocess", workspace_name, "--script", "report", "--workflow-dir", str(package), "--json"], context
+            [
+                "postprocess",
+                "--workspace",
+                workspace_name,
+                "--script",
+                "report",
+                "--workflow-dir",
+                str(package),
+                "--json",
+            ],
+            context,
         )
         == 1
     )
@@ -182,7 +198,17 @@ def test_postprocess_cli_surfaces_failing_script_stderr(tmp_path: Path, capsys) 
     # The JSON report carries the failing script's stderr tail.
     assert (
         command(
-            ["postprocess", workspace_name, "--script", "report", "--workflow-dir", str(package), "--json"], context
+            [
+                "postprocess",
+                "--workspace",
+                workspace_name,
+                "--script",
+                "report",
+                "--workflow-dir",
+                str(package),
+                "--json",
+            ],
+            context,
         )
         == 1
     )
@@ -191,5 +217,11 @@ def test_postprocess_cli_surfaces_failing_script_stderr(tmp_path: Path, capsys) 
     assert "boom: it failed" in failed["stderr"]
 
     # The human form appends the last stderr line to the row.
-    assert command(["postprocess", workspace_name, "--script", "report", "--workflow-dir", str(package)], context) == 1
+    assert (
+        command(
+            ["postprocess", "--workspace", workspace_name, "--script", "report", "--workflow-dir", str(package)],
+            context,
+        )
+        == 1
+    )
     assert "boom: it failed" in capsys.readouterr().out

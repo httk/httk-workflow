@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import sys
 
 from httk.workflow.compat.v1 import collect_finished_tree
 
@@ -10,39 +11,47 @@ from ._common import CLIContext, _group, _leaf
 
 
 def handle_v1_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Collect finished directories from a pre-existing httk v1 tree."""
+    """Collect finished directories from pre-existing httk v1 trees."""
 
     del context
-    stats: dict[str, object] = {}
-    items = list(collect_finished_tree(arguments.root, workflow_dir=arguments.workflow_dir, stats=stats))
-    reports = (
-        _store_collected(items, arguments.into)
-        if arguments.into is not None
-        else [_collected_mapping(item) for item in items]
-    )
-    for report in reports:
-        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
-    unfinished = stats.get("unfinished_by_status")
-    print(
-        json.dumps(
-            {
-                "format": "httk-workflow-v1-collect-summary",
-                "format_version": 2,
-                "finished": len(items),
-                "unfinished_by_status": dict(sorted(unfinished.items())) if isinstance(unfinished, dict) else {},
-                "skipped_no_rundir": stats.get("skipped_no_rundir", 0),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
-    return 0
+    failed = False
+    for root in arguments.roots:
+        try:
+            stats: dict[str, object] = {}
+            items = list(collect_finished_tree(root, workflow_dir=arguments.workflow_dir, stats=stats))
+            reports = (
+                _store_collected(items, arguments.into)
+                if arguments.into is not None
+                else [_collected_mapping(item) for item in items]
+            )
+            for report in reports:
+                print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+            unfinished = stats.get("unfinished_by_status")
+            print(
+                json.dumps(
+                    {
+                        "format": "httk-workflow-v1-collect-summary",
+                        "format_version": 2,
+                        "finished": len(items),
+                        "unfinished_by_status": dict(sorted(unfinished.items()))
+                        if isinstance(unfinished, dict)
+                        else {},
+                        "skipped_no_rundir": stats.get("skipped_no_rundir", 0),
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            failed = True
+            print(f"{root}: {exc}", file=sys.stderr)
+    return 1 if failed else 0
 
 
 def add_v1_collect_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare v1 collect."""
 
-    parser.add_argument("root", metavar="ROOT", help="the root of a finished httk v1 result tree")
+    parser.add_argument("roots", metavar="ROOT", nargs="+", help="roots of finished httk v1 result trees")
     parser.add_argument(
         "--workflow-dir",
         required=True,

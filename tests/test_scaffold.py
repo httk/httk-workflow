@@ -735,6 +735,7 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
             [
                 "job",
                 "new",
+                "--workspace",
                 ws_name,
                 "--workflow",
                 "vasp-relax",
@@ -775,6 +776,7 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
             [
                 "job",
                 "new",
+                "--workspace",
                 ws_name,
                 "--workflow",
                 "vasp-relax",
@@ -804,15 +806,18 @@ def test_the_command_reports_what_it_cannot_do(
     capsys.readouterr()
 
     # A malformed assignment, an unknown workflow, and an empty structure directory.
-    assert command(["job", "new", name, "--workflow", "vasp-relax", "--input", "bare"], _context(tmp_path)) == 2
+    assert (
+        command(["job", "new", "--workspace", name, "--workflow", "vasp-relax", "--input", "bare"], _context(tmp_path))
+        == 2
+    )
     assert "NAME=VALUE" in capsys.readouterr().err
-    assert command(["job", "new", name, "--workflow", "nope"], _context(tmp_path)) == 2
+    assert command(["job", "new", "--workspace", name, "--workflow", "nope"], _context(tmp_path)) == 2
     assert "unknown workflow" in capsys.readouterr().err
     empty = tmp_path / "empty"
     empty.mkdir()
     assert (
         command(
-            ["job", "new", name, "--workflow", "vasp-relax", "--input-from", "structure", str(empty)],
+            ["job", "new", "--workspace", name, "--workflow", "vasp-relax", "--input-from", "structure", str(empty)],
             _context(tmp_path),
         )
         == 2
@@ -832,6 +837,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
             [
                 "job",
                 "new",
+                "--workspace",
                 name,
                 "--workflow",
                 "vasp-relax",
@@ -868,6 +874,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
             [
                 "job",
                 "new",
+                "--workspace",
                 name,
                 "--workflow",
                 str(runner),
@@ -895,6 +902,7 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
             [
                 "job",
                 "new",
+                "--workspace",
                 name,
                 "--workflow",
                 "vasp-relax",
@@ -910,7 +918,13 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
         == 2
     )
     assert "only one --input-from" in capsys.readouterr().err
-    assert command(["job", "new", name, "--workflow", "vasp-relax", "--from", str(structure)], _context(tmp_path)) == 2
+    assert (
+        command(
+            ["job", "new", "--workspace", name, "--workflow", "vasp-relax", "--from", str(structure)],
+            _context(tmp_path),
+        )
+        == 2
+    )
     assert "unrecognized arguments: --from" in capsys.readouterr().err
 
 
@@ -932,13 +946,14 @@ def test_parameter_from_cif_is_written_as_a_poscar_when_domain_plugins_are_avail
         encoding="utf-8",
     )
     workspace = tmp_path / "cif-workspace"
-    assert command(["workspace", "init", str(workspace), "--name", "cif"], _context(tmp_path)) == 0
+    assert command(["workspace", "init", "--name", "cif", str(workspace)], _context(tmp_path)) == 0
     capsys.readouterr()
     assert (
         command(
             [
                 "job",
                 "new",
+                "--workspace",
                 "cif",
                 "--workflow",
                 "vasp-relax",

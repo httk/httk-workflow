@@ -59,7 +59,7 @@ def test_refusal_reaches_the_cli_without_a_traceback(tmp_path: Path, capsys) -> 
     # the CLI as a clean error rather than a traceback.
     context = CLIContext("httk", project)
     register_ws(context, "/remote/runs", "station", remote="cluster")
-    assert command(["workspace", "status", "cluster:station"], context) == 2
+    assert command(["workspace", "status", "cluster:station"], context) == 1
     captured = capsys.readouterr()
     assert "is not implemented" in captured.err
     assert "Traceback" not in captured.err

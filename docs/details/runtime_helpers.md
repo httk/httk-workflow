@@ -89,7 +89,7 @@ different step. Publish it once in the workspace and every job — parent and
 child — references those bytes by digest:
 
 ```console
-httk workflow runner publish defects.py --workspace workflow-workspace --name defects/run.py
+httk workflow runner publish --workspace workflow-workspace --name defects/run.py defects.py
 ```
 
 ```python

@@ -254,7 +254,7 @@ def test_a_remote_definition_seeds_the_new_workspaces_settings(tmp_path: Path) -
 
     destination = tmp_path / "runs"
     assert (
-        command(["workspace", "init", f"cluster:{destination}", "--name", "station"], CLIContext("httk", project)) == 0
+        command(["workspace", "init", "--name", "station", f"cluster:{destination}"], CLIContext("httk", project)) == 0
     )
     # A `local`-template remote runs the adapter here, so the seeded workspace is
     # the one on disk and its settings carry the remote's command.

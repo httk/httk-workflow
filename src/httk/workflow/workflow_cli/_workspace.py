@@ -2,6 +2,9 @@
 
 import errno
 import os
+from contextlib import redirect_stdout
+from copy import copy
+from io import StringIO
 
 from ..adapters import REMOTE_WORKSPACE_DELETE_COMMAND, REMOTE_WORKSPACE_INIT_COMMAND, seed_application_settings
 from ..configuration import machine_names
@@ -12,6 +15,7 @@ from ..projects import read_project_section, require_project, write_project_sect
 from ..registry import _update_workspace_path, valid_workspace_name
 from ._common import *
 from ._common import (
+    _ERRORS,
     _add_by_path_argument,
     _by_path,
     _durable,
@@ -30,10 +34,51 @@ from ._common import (
 # ---------------------------------------------------------------------------
 
 
-def add_workspace_init_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare :command:`workspace init`, shared with ``httk-taskmanager init``."""
+def _workspace_batch(arguments: argparse.Namespace, context: CLIContext, handler: Any) -> int:
+    """Run a workspace leaf for each parsed target, retaining the leaf's logic."""
 
-    parser.add_argument("workspace", metavar="PATH", help="the local path, or REMOTE:PATH, to initialize")
+    targets = arguments.workspace
+    assert isinstance(targets, list)
+    targets = targets or [None]
+    multiple = len(targets) > 1
+    results: list[object] = []
+    failed = False
+    for target in targets:
+        item = copy(arguments)
+        item.workspace = target
+        label = target or "default"
+        try:
+            if getattr(arguments, "json", False):
+                output = StringIO()
+                with redirect_stdout(output):
+                    code = handler(item, context)
+                results.append(json.loads(output.getvalue()))
+            else:
+                if multiple:
+                    print(f"== workspace {label} ==")
+                code = handler(item, context)
+            failed |= code != 0
+        except _ERRORS as exc:
+            print(f"workspace {label}: {exc}", file=sys.stderr)
+            failed = True
+    if getattr(arguments, "json", False):
+        print(json.dumps(results, indent=2, sort_keys=True))
+    return 1 if failed else 0
+
+
+def _add_workspace_targets(parser: argparse.ArgumentParser, *, help_text: str, required: bool = False) -> None:
+    parser.add_argument(
+        "workspace",
+        metavar="WORKSPACE",
+        nargs="+" if required else "*",
+        help=f"{help_text} (default: this project's workspace, or the per-user default)",
+    )
+
+
+def add_workspace_init_arguments(parser: argparse.ArgumentParser) -> None:
+    """Declare :command:`workspace init`."""
+
+    parser.add_argument("workspace", metavar="PATH", nargs="+", help="the local path, or REMOTE:PATH, to initialize")
     parser.add_argument("--name", metavar="NAME", help="the registry name (default: the path basename)")
     parser.add_argument(
         "--setting",
@@ -55,6 +100,10 @@ def _init_settings(arguments: argparse.Namespace) -> dict[str, object]:
 def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Initialize a local path or ask its owning machine to do so."""
 
+    if isinstance(arguments.workspace, list):
+        if arguments.name and len(arguments.workspace) != 1:
+            raise ValueError("workspace init --name requires exactly one PATH")
+        return _workspace_batch(arguments, context, handle_workspace_init)
     settings = _init_settings(arguments)
     if _by_path(arguments):
         workspace = Workspace.initialize(
@@ -73,12 +122,13 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
         target = resolve_remote(remote, project=context.cwd)
         name = arguments.name or Path(remote_path).name
         valid_workspace_name(name)
-        argv = [*REMOTE_WORKSPACE_INIT_COMMAND, remote_path]
+        argv = list(REMOTE_WORKSPACE_INIT_COMMAND)
         if arguments.name:
             argv += ["--name", name]
         merged = {**seed_application_settings(target.bundle), **settings}
         for key, value in merged.items():
             argv += ["--setting", f"{key}={json.dumps(value)}"]
+        argv.append(remote_path)
         result = _run_adapter(target.bundle, "invoke", {"argv": argv})
         if result.get("returncode") != 0:
             raise RuntimeError(f"remote workspace init failed: {result.get('stderr', '')}")
@@ -102,7 +152,7 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
 
 
 def add_workspace_status_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare :command:`workspace status`, shared with ``httk-taskmanager status``."""
+    """Declare :command:`workspace status`."""
 
     add_workspace_argument(parser, help_text="the workspace to summarize")
     parser.add_argument("--json", action="store_true", help="print the machine-readable status document")
@@ -117,6 +167,10 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
     reads a remote workspace exactly as it reads a local one.
     """
 
+    if isinstance(arguments.workspace, list):
+        if _by_path(arguments) and not arguments.workspace:
+            raise ValueError("--by-path requires an explicit path")
+        return _workspace_batch(arguments, context, handle_workspace_status)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
@@ -168,6 +222,8 @@ def handle_workspace_managers(arguments: argparse.Namespace, context: CLIContext
     live-or-stale liveness against the default lease, and what it serves.
     """
 
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_managers)
     workspace = Workspace(_local_root(arguments, context, action="list its managers"), mutable=False)
     managers = read_managers(workspace)
     if arguments.json:
@@ -212,6 +268,8 @@ def _print_policy(policy: Any, *, as_json: bool) -> int:
 def handle_workspace_policy_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Show the tunables one workspace shares with every process attaching it."""
 
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_policy_show)
     root = _local_root(arguments, context, action="show its policy")
     return _print_policy(Workspace(root, mutable=False).policy, as_json=arguments.json)
 
@@ -219,6 +277,8 @@ def handle_workspace_policy_show(arguments: argparse.Namespace, context: CLICont
 def handle_workspace_policy_set(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Store one policy member of a workspace and print the result."""
 
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_policy_set)
     root = _local_root(arguments, context, action="change its policy")
     # A retention member is addressed directly so that setting one limit does
     # not require restating the whole object as JSON.
@@ -236,6 +296,10 @@ def handle_workspace_policy_set(arguments: argparse.Namespace, context: CLIConte
 def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Check, and optionally repair, the marker-to-journal integrity."""
 
+    if isinstance(arguments.workspace, list):
+        if (arguments.repair or arguments.quarantine_unrepairable) and not arguments.workspace:
+            raise ValueError("workspace fsck repair requires at least one WORKSPACE")
+        return _workspace_batch(arguments, context, handle_workspace_fsck)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
@@ -265,6 +329,8 @@ def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) ->
 def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Free the disk the workspace retention policy says may be freed."""
 
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_gc)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
@@ -296,6 +362,8 @@ def handle_workspace_gc(arguments: argparse.Namespace, context: CLIContext) -> i
 def handle_workspace_unlock(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Release a workspace maintenance lock."""
 
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_unlock)
     workspace = Workspace(_local_root(arguments, context, action="release its lock"))
     print(release_maintenance_lock(workspace, force=arguments.force))
     return 0
@@ -349,6 +417,8 @@ def handle_workspace_list(arguments: argparse.Namespace, context: CLIContext) ->
 def handle_workspace_forget(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Deregister one workspace name, leaving the workspace itself in place."""
 
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_forget)
     binding = forget_workspace(arguments.workspace, force=arguments.force)
     print(f"forgot {binding.name}")
     return 0
@@ -360,6 +430,8 @@ def handle_workspace_delete(arguments: argparse.Namespace, context: CLIContext) 
     Destruction is irreversible, so it is refused without ``--force``.
     """
 
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_delete)
     if _by_path(arguments):
         # The protocol form one machine runs on another: destroy the workspace at
         # a literal path, with no registry involved.
@@ -377,7 +449,7 @@ def handle_workspace_delete(arguments: argparse.Namespace, context: CLIContext) 
         result = _run_adapter(
             target.bundle,
             "invoke",
-            {"argv": [*REMOTE_WORKSPACE_DELETE_COMMAND, name, "--force"]},
+            {"argv": [*REMOTE_WORKSPACE_DELETE_COMMAND, "--force", name]},
         )
         if result.get("returncode") != 0:
             raise RuntimeError(f"remote workspace delete failed: {result.get('stderr', '')}")
@@ -449,7 +521,7 @@ def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) ->
                     raise
                 raise ValueError(
                     "workspace move must stay within one filesystem; stop managers, copy the workspace manually, "
-                    "then forget the old name and run `workspace init <newpath> --name NAME`"
+                    "then forget the old name and run `workspace init --name NAME <newpath>`"
                 ) from exc
             renamed = True
             updated = _update_workspace_path(binding.name, destination, durable=_durable(arguments))
@@ -463,17 +535,8 @@ def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) ->
 def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Show one workspace's application settings, or one named member."""
 
-    ambiguous_key = False
-    if arguments.key is None and arguments.workspace is not None:
-        candidate = arguments.workspace
-        try:
-            resolve_workspace(candidate, project=context.cwd)
-        except ValueError as exc:
-            if not str(exc).startswith("unknown workspace:"):
-                raise
-            arguments.workspace = None
-            arguments.key = candidate
-            ambiguous_key = True
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_settings_show)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
@@ -483,16 +546,12 @@ def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLICo
             (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "show"),
             arguments,
             flags=("--json",),
-            tail=() if arguments.key is None else (arguments.key,),
+            tail=() if arguments.key is None else ("--key", arguments.key),
         )
     workspace = Workspace(root, mutable=False)
     settings = workspace.settings
     if arguments.key is not None:
         if arguments.key not in settings:
-            if ambiguous_key:
-                raise ValueError(
-                    f"{arguments.key!r} is neither a registered workspace nor a setting key of the default workspace"
-                )
             raise ValueError(f"application setting is not set: {arguments.key}")
         print(json.dumps(settings[arguments.key], sort_keys=True))
         return 0
@@ -507,6 +566,8 @@ def handle_workspace_settings_show(arguments: argparse.Namespace, context: CLICo
 def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Store one application setting on a workspace."""
 
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_settings_set)
     value = _json_value(arguments.value, f"setting {arguments.key}")
     binding, root = _resolve_binding(arguments, context)
     if root is None:
@@ -517,7 +578,7 @@ def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLICon
             (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "set"),
             arguments,
             flags=("--durable", "--no-durable"),
-            tail=(arguments.key, arguments.value),
+            tail=("--key", arguments.key, "--value", arguments.value),
         )
     workspace = Workspace(root, durable=_durable(arguments))
     settings = workspace.set_setting(arguments.key, value)
@@ -528,6 +589,8 @@ def handle_workspace_settings_set(arguments: argparse.Namespace, context: CLICon
 def handle_workspace_settings_unset(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Remove one application setting from a workspace."""
 
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_settings_unset)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
@@ -537,7 +600,7 @@ def handle_workspace_settings_unset(arguments: argparse.Namespace, context: CLIC
             (*REMOTE_WORKSPACE_SETTINGS_COMMAND, "unset"),
             arguments,
             flags=("--durable", "--no-durable"),
-            tail=(arguments.key,),
+            tail=("--key", arguments.key),
         )
     workspace = Workspace(root, durable=_durable(arguments))
     workspace.unset_setting(arguments.key)
@@ -569,17 +632,8 @@ def handle_workspace_workflow_prelude_show(arguments: argparse.Namespace, contex
     :return: The process exit status.
     """
 
-    ambiguous_id = False
-    if arguments.workflow is None and arguments.workspace is not None:
-        candidate = arguments.workspace
-        try:
-            resolve_workspace(candidate, project=context.cwd)
-        except ValueError as exc:
-            if not str(exc).startswith("unknown workspace:"):
-                raise
-            arguments.workspace = None
-            arguments.workflow = candidate
-            ambiguous_id = True
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_workflow_prelude_show)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
@@ -589,17 +643,12 @@ def handle_workspace_workflow_prelude_show(arguments: argparse.Namespace, contex
             (*REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND, "show"),
             arguments,
             flags=("--json",),
-            tail=() if arguments.workflow is None else (arguments.workflow,),
+            tail=() if arguments.workflow is None else ("--workflow", arguments.workflow),
         )
     workspace = Workspace(root, mutable=False)
     preludes = workspace.read_workflow_preludes()
     if arguments.workflow is not None:
         if arguments.workflow not in preludes:
-            if ambiguous_id:
-                raise ValueError(
-                    f"{arguments.workflow!r} is neither a registered workspace nor a workflow "
-                    f"with a prelude in the default workspace"
-                )
             raise ValueError(f"no per-workflow prelude is set for workflow: {arguments.workflow}")
         print(preludes[arguments.workflow])
         return 0
@@ -619,6 +668,8 @@ def handle_workspace_workflow_prelude_set(arguments: argparse.Namespace, context
     :return: The process exit status.
     """
 
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_workflow_prelude_set)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
@@ -628,7 +679,7 @@ def handle_workspace_workflow_prelude_set(arguments: argparse.Namespace, context
             (*REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND, "set"),
             arguments,
             flags=("--durable", "--no-durable"),
-            tail=(arguments.workflow, arguments.value),
+            tail=("--workflow", arguments.workflow, "--value", arguments.value),
         )
     # Resolve ``@file`` only for a local store: a remote store forwards the raw
     # argument so the file is read on the far side, as `settings set` forwards.
@@ -647,6 +698,8 @@ def handle_workspace_workflow_prelude_unset(arguments: argparse.Namespace, conte
     :return: The process exit status.
     """
 
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_workflow_prelude_unset)
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None
@@ -656,7 +709,7 @@ def handle_workspace_workflow_prelude_unset(arguments: argparse.Namespace, conte
             (*REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND, "unset"),
             arguments,
             flags=("--durable", "--no-durable"),
-            tail=(arguments.workflow,),
+            tail=("--workflow", arguments.workflow),
         )
     workspace = Workspace(root, durable=_durable(arguments))
     workspace.unset_workflow_prelude(arguments.workflow)
@@ -684,15 +737,17 @@ def build_workspace_parser(
             handler=handle_workspace_init,
         )
     )
-    add_workspace_status_arguments(
-        _leaf(
-            group,
-            "status",
-            summary="summarize the authoritative markers",
-            description="Summarize the authoritative markers of one workspace",
-            handler=handle_workspace_status,
-        )
+    status = _leaf(
+        group,
+        "status",
+        summary="summarize the authoritative markers",
+        description="Summarize the authoritative markers of one workspace",
+        handler=handle_workspace_status,
     )
+    _add_workspace_targets(status, help_text="the workspace to summarize")
+    status.add_argument("--json", action="store_true", help="print the machine-readable status document")
+    _add_by_path_argument(status)
+    add_durability_arguments(status)
     managers = _leaf(
         group,
         "managers",
@@ -700,7 +755,7 @@ def build_workspace_parser(
         description="List every manager registered to serve one workspace, live or stale",
         handler=handle_workspace_managers,
     )
-    add_workspace_argument(managers, help_text="the workspace whose managers to list")
+    _add_workspace_targets(managers, help_text="the workspace whose managers to list")
     managers.add_argument("--json", action="store_true", help="print the managers as one JSON array")
 
     _, policy_actions = _group(
@@ -716,7 +771,7 @@ def build_workspace_parser(
         description="Print the policy of one workflow workspace",
         handler=handle_workspace_policy_show,
     )
-    add_workspace_argument(show, help_text="the workspace whose policy to print")
+    _add_workspace_targets(show, help_text="the workspace whose policy to print")
     show.add_argument("--json", action="store_true", help="print the policy as one JSON object")
     store = _leaf(
         policy_actions,
@@ -725,9 +780,9 @@ def build_workspace_parser(
         description="Store one member of the policy of a workflow workspace",
         handler=handle_workspace_policy_set,
     )
-    add_workspace_argument(store, help_text="the workspace whose policy to change")
-    store.add_argument("key", metavar="KEY", help="one of " + ", ".join(sorted(POLICY_KEYS)))
-    store.add_argument("value", metavar="VALUE", help="the JSON value to store")
+    _add_workspace_targets(store, help_text="the workspace whose policy to change", required=True)
+    store.add_argument("--key", required=True, metavar="KEY", help="one of " + ", ".join(sorted(POLICY_KEYS)))
+    store.add_argument("--value", required=True, metavar="VALUE", help="the JSON value to store")
     store.add_argument(
         "--json",
         action="store_true",
@@ -761,7 +816,7 @@ def build_workspace_parser(
         description="Deregister one workspace name, leaving the workspace itself untouched",
         handler=handle_workspace_forget,
     )
-    forget.add_argument("workspace", metavar="NAME", help="the registered workspace name to forget")
+    forget.add_argument("workspace", metavar="NAME", nargs="+", help="the registered workspace name to forget")
     forget.add_argument(
         "--force", action="store_true", help="deregister the name even when unretired outbound transfers remain"
     )
@@ -773,7 +828,7 @@ def build_workspace_parser(
         description="Destroy a registered workspace and deregister it; refused without --force",
         handler=handle_workspace_delete,
     )
-    delete.add_argument("workspace", metavar="NAME", help="the registered workspace to destroy")
+    delete.add_argument("workspace", metavar="NAME", nargs="+", help="the registered workspace to destroy")
     delete.add_argument("--force", action="store_true", help="confirm the irreversible destruction")
     _add_by_path_argument(delete)
 
@@ -801,13 +856,8 @@ def build_workspace_parser(
         description="Print the application settings of one workspace, or one named setting",
         handler=handle_workspace_settings_show,
     )
-    add_workspace_argument(settings_show, help_text="the workspace whose settings to read")
-    settings_show.add_argument(
-        "key",
-        metavar="KEY",
-        nargs="?",
-        help="print only this setting (default: all of them)",
-    )
+    _add_workspace_targets(settings_show, help_text="the workspace whose settings to read")
+    settings_show.add_argument("--key", metavar="KEY", help="print only this setting (default: all of them)")
     settings_show.add_argument("--json", action="store_true", help="print the settings as one JSON object")
     _add_by_path_argument(settings_show)
     settings_set = _leaf(
@@ -817,9 +867,11 @@ def build_workspace_parser(
         description="Store one application setting on a workspace, e.g. vasp.command",
         handler=handle_workspace_settings_set,
     )
-    add_workspace_argument(settings_set, help_text="the workspace to change")
-    settings_set.add_argument("key", metavar="KEY", help="the dotted setting name, e.g. vasp.command")
-    settings_set.add_argument("value", metavar="VALUE", help="the JSON value, or a bare string, to store")
+    _add_workspace_targets(settings_set, help_text="the workspace to change", required=True)
+    settings_set.add_argument("--key", required=True, metavar="KEY", help="the dotted setting name, e.g. vasp.command")
+    settings_set.add_argument(
+        "--value", required=True, metavar="VALUE", help="the JSON value, or a bare string, to store"
+    )
     _add_by_path_argument(settings_set)
     add_durability_arguments(settings_set)
     settings_unset = _leaf(
@@ -829,8 +881,8 @@ def build_workspace_parser(
         description="Remove one application setting from a workspace",
         handler=handle_workspace_settings_unset,
     )
-    add_workspace_argument(settings_unset, help_text="the workspace to change")
-    settings_unset.add_argument("key", metavar="KEY", help="the dotted setting name to remove")
+    _add_workspace_targets(settings_unset, help_text="the workspace to change", required=True)
+    settings_unset.add_argument("--key", required=True, metavar="KEY", help="the dotted setting name to remove")
     _add_by_path_argument(settings_unset)
     add_durability_arguments(settings_unset)
 
@@ -847,12 +899,9 @@ def build_workspace_parser(
         description="Print the per-workflow preludes of one workspace, or one workflow's prelude",
         handler=handle_workspace_workflow_prelude_show,
     )
-    add_workspace_argument(prelude_show, help_text="the workspace whose preludes to read")
+    _add_workspace_targets(prelude_show, help_text="the workspace whose preludes to read")
     prelude_show.add_argument(
-        "workflow",
-        metavar="WORKFLOW",
-        nargs="?",
-        help="print only this workflow's prelude (default: all of them)",
+        "--workflow", metavar="WORKFLOW", help="print only this workflow's prelude (default: all)"
     )
     prelude_show.add_argument("--json", action="store_true", help="print the preludes as one JSON object")
     _add_by_path_argument(prelude_show)
@@ -863,10 +912,13 @@ def build_workspace_parser(
         description="Store one per-workflow shell prelude on a workspace, keyed by workflow id",
         handler=handle_workspace_workflow_prelude_set,
     )
-    add_workspace_argument(prelude_set, help_text="the workspace to change")
-    prelude_set.add_argument("workflow", metavar="WORKFLOW", help="the workflow id the prelude applies to")
+    _add_workspace_targets(prelude_set, help_text="the workspace to change", required=True)
     prelude_set.add_argument(
-        "value",
+        "--workflow", required=True, metavar="WORKFLOW", help="the workflow id the prelude applies to"
+    )
+    prelude_set.add_argument(
+        "--value",
+        required=True,
         metavar="VALUE",
         help="the shell text to store, or @FILE to read it from a file",
     )
@@ -879,8 +931,10 @@ def build_workspace_parser(
         description="Remove one per-workflow prelude from a workspace",
         handler=handle_workspace_workflow_prelude_unset,
     )
-    add_workspace_argument(prelude_unset, help_text="the workspace to change")
-    prelude_unset.add_argument("workflow", metavar="WORKFLOW", help="the workflow id whose prelude to remove")
+    _add_workspace_targets(prelude_unset, help_text="the workspace to change", required=True)
+    prelude_unset.add_argument(
+        "--workflow", required=True, metavar="WORKFLOW", help="the workflow id whose prelude to remove"
+    )
     _add_by_path_argument(prelude_unset)
     add_durability_arguments(prelude_unset)
 
@@ -891,7 +945,7 @@ def build_workspace_parser(
         description="Check, and optionally repair, the marker-to-journal integrity of a workspace",
         handler=handle_workspace_fsck,
     )
-    add_workspace_argument(fsck, help_text="the workspace to check")
+    _add_workspace_targets(fsck, help_text="the workspace to check")
     fsck.add_argument(
         "--repair",
         action="store_true",
@@ -912,7 +966,7 @@ def build_workspace_parser(
         description="Collect the garbage one workflow workspace has accumulated",
         handler=handle_workspace_gc,
     )
-    add_workspace_argument(collect, help_text="the workspace to collect")
+    _add_workspace_targets(collect, help_text="the workspace to collect", required=True)
     collect.add_argument(
         "--dry-run",
         action="store_true",
@@ -928,7 +982,7 @@ def build_workspace_parser(
         description="Release a stale, or with --force a live, workspace maintenance lock",
         handler=handle_workspace_unlock,
     )
-    add_workspace_argument(unlock, help_text="the workspace whose lock to release")
+    _add_workspace_targets(unlock, help_text="the workspace whose lock to release", required=True)
     unlock.add_argument(
         "--force",
         action="store_true",
