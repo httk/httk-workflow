@@ -9,6 +9,8 @@ import configparser
 import hashlib
 import json
 import os
+import re
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +34,7 @@ __all__ = [
     "IDENTITY_SIGNATURE_MEMBER",
     "ConfigKey",
     "DocumentSignature",
+    "OperatorIdentity",
     "config_home",
     "config_path",
     "data_home",
@@ -45,6 +48,7 @@ __all__ = [
     "machine_names",
     "read_config",
     "remotes_home",
+    "resolve_operator_identity",
     "set_config_key",
     "settable_config_keys",
     "sign_document",
@@ -90,7 +94,12 @@ CONFIG_KEYS: Mapping[str, ConfigKey] = {
     "format_version": ConfigKey("format_version", "the document format version; written by httk", settable=False),
     "imported_from": ConfigKey("imported_from", "the legacy tree config import-v1 read", settable=False),
     "legacy_public_key": ConfigKey("legacy_public_key", "the imported legacy public identity", settable=False),
+    "identities": ConfigKey("identities", "named operator identities", settable=False),
+    "default_identity": ConfigKey("default_identity", "the default named operator identity", settable=False),
 }
+
+_IDENTITY_SHORT = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
+_LITERAL_OPERATOR = re.compile(r"\A\s*(?:(?P<name>[^<>\s](?:[^<>]*[^<>\s])?)\s+)?<(?P<email>[^\s<>]*@[^\s<>]*)>\s*\Z")
 
 
 def settable_config_keys() -> tuple[str, ...]:
@@ -262,67 +271,266 @@ def initialize_config(*, name: str, email: str) -> dict[str, object]:
     return values
 
 
-def identity_key_paths() -> tuple[Path, Path]:
+def identity_key_paths(short: str | None = None) -> tuple[Path, Path]:
     """Return the paths of the local identity seed and public key.
 
+    :param short: Named identity short name, or ``None`` for the legacy key.
     :return: Seed path followed by public-key path.
     """
     root = keys_home()
-    return root / "identity.seed", root / "identity.pub"
+    if short is None:
+        return root / "identity.seed", root / "identity.pub"
+    _validate_identity_short(short)
+    return root / f"identity-{short}.seed", root / f"identity-{short}.pub"
 
 
-def ensure_identity_key() -> tuple[Path, Path]:
+def _validate_identity_short(short: str) -> str:
+    if not isinstance(short, str) or _IDENTITY_SHORT.fullmatch(short) is None:
+        raise ValueError("identity short name must match [a-z0-9][a-z0-9_-]*")
+    return short
+
+
+def _ensure_identity_key_paths(private_path: Path, public_path: Path) -> tuple[Path, Path]:
+    """Create one standard Ed25519 keypair using the legacy key semantics."""
+
+    if private_path.is_symlink() or public_path.is_symlink():
+        raise ValueError(f"refusing symlink identity key path: {private_path} or {public_path}")
+
+    try:
+        private_path.lstat()
+    except FileNotFoundError:
+        seed = ed25519_generate_seed()
+        private_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        created = _write_key_file_atomic(
+            private_path,
+            base64.b64encode(seed).decode("ascii") + "\n",
+            0o600,
+            exclusive=True,
+        )
+        if not created:
+            seed = _read_existing_seed(private_path)
+            reused_seed = True
+        else:
+            reused_seed = False
+    else:
+        seed = _read_existing_seed(private_path)
+        reused_seed = True
+
+    public_text = base64.b64encode(ed25519_public_key(seed)).decode("ascii") + "\n"
+    installed = _write_key_file_atomic(
+        public_path,
+        public_text,
+        0o644,
+        exclusive=not reused_seed,
+    )
+    if not installed and _read_key_file(public_path).strip() != public_text.strip():
+        raise ValueError(f"identity public key already exists and does not match the seed: {public_path}")
+    return private_path, public_path
+
+
+def _read_existing_seed(path: Path) -> bytes:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise ValueError(f"cannot safely read identity seed: {path}") from exc
+    with os.fdopen(descriptor, "rb") as stream:
+        encoded = stream.read().strip()
+        try:
+            seed = base64.b64decode(encoded, validate=True)
+        except ValueError as exc:
+            raise ValueError(
+                f"identity key is not a standard 32-byte Ed25519 seed: {path}; "
+                "use config import-v1 explicitly for legacy material"
+            ) from exc
+        if len(seed) != 32:
+            raise ValueError(
+                f"identity key is not a standard 32-byte Ed25519 seed: {path}; "
+                "use config import-v1 explicitly for legacy material"
+            )
+        os.fchmod(stream.fileno(), 0o600)
+        return seed
+
+
+def _read_key_file(path: Path) -> str:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise ValueError(f"cannot safely read identity key: {path}") from exc
+    with os.fdopen(descriptor, encoding="ascii") as stream:
+        return stream.read()
+
+
+def _write_key_file_atomic(path: Path, text: str, mode: int, *, exclusive: bool = False) -> bool:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if exclusive:
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                return False
+        else:
+            os.replace(temporary, path)
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def ensure_identity_key(short: str | None = None) -> tuple[Path, Path]:
     """Create the user's standard Ed25519 identity key if it is absent.
 
+    :param short: Named identity short name, or ``None`` for the legacy key.
     :return: Seed path followed by public-key path.
     :raises ValueError: If an existing seed is not a standard Ed25519 seed.
     """
 
-    private_path, public_path = identity_key_paths()
-    if private_path.exists():
-        encoded = private_path.read_text(encoding="ascii").strip()
-        seed = base64.b64decode(encoded, validate=True)
-        if len(seed) != 32:
-            raise ValueError(
-                f"identity key is not a standard 32-byte Ed25519 seed: {private_path}; "
-                "use config import-v1 explicitly for legacy material"
-            )
+    paths = identity_key_paths() if short is None else identity_key_paths(short)
+    return _ensure_identity_key_paths(*paths)
+
+
+@dataclass(frozen=True)
+class OperatorIdentity:
+    """One configured operator attribution identity."""
+
+    short: str | None
+    name: str
+    email: str
+    seed_path: Path | None
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} <{self.email}>"
+
+
+def _validate_operator_identity_fields(name: str, email: str) -> None:
+    if any(character in name for character in "<>\r\n"):
+        raise ValueError("identity name must not contain '<', '>', or newlines")
+    if not email or "@" not in email or any(character.isspace() or character in "<>" for character in email):
+        raise ValueError("identity email must be nonempty, contain '@', and contain no whitespace or angle brackets")
+
+
+def _configured_identities(values: Mapping[str, object]) -> dict[str, tuple[str, str]]:
+    raw = values.get("identities")
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        raise ValueError("configuration key 'identities' must be an object")
+    result: dict[str, tuple[str, str]] = {}
+    for short, item in raw.items():
+        _validate_identity_short(short)
+        if (
+            not isinstance(item, Mapping)
+            or not isinstance(item.get("name"), str)
+            or not isinstance(item.get("email"), str)
+        ):
+            raise ValueError(f"identity {short!r} must contain string name and email")
+        _validate_operator_identity_fields(item["name"], item["email"])
+        result[short] = (item["name"], item["email"])
+    return result
+
+
+def _default_operator_identity(values: Mapping[str, object]) -> OperatorIdentity:
+    identities = _configured_identities(values)
+    selected = values.get("default_identity")
+    if "default_identity" in values:
+        if not isinstance(selected, str) or selected not in identities:
+            raise ValueError("config identity default must name a configured identity")
+        short = selected
+    elif len(identities) == 1:
+        short = next(iter(identities))
     else:
-        seed = ed25519_generate_seed()
-        private_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor = os.open(private_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(descriptor, "w", encoding="ascii") as stream:
-            stream.write(base64.b64encode(seed).decode("ascii") + "\n")
-        os.chmod(private_path, 0o600)
-    public_path.write_text(base64.b64encode(ed25519_public_key(seed)).decode("ascii") + "\n", encoding="ascii")
-    return private_path, public_path
+        name = values.get("name")
+        email = values.get("email")
+        if not isinstance(name, str) or not name or not isinstance(email, str) or not email:
+            raise ValueError("configure an identity with httk workflow config identity add")
+        return OperatorIdentity(None, name, email, identity_key_paths()[0])
+    name, email = identities[short]
+    return OperatorIdentity(short, name, email, identity_key_paths(short)[0])
 
 
-def identity_seed() -> bytes | None:
+def _truly_unconfigured(values: Mapping[str, object]) -> bool:
+    if "default_identity" in values:
+        return False
+    if "identities" in values:
+        identities = values["identities"]
+        if not isinstance(identities, Mapping) or identities:
+            return False
+    return all(key not in values or values[key] in (None, "") for key in ("name", "email"))
+
+
+def resolve_operator_identity(selector: str | None) -> OperatorIdentity:
+    """Resolve a configured identity or a literal ``Name <email>`` label."""
+
+    values = read_config()
+    if selector is not None and "<" in selector:
+        literal = _LITERAL_OPERATOR.fullmatch(selector)
+        if literal is None:
+            raise ValueError(
+                'literal identity must match "NAME <EMAIL>" with a closing ">" and an email containing "@"'
+            )
+        name = (literal.group("name") or "").strip()
+        email = literal.group("email")
+        try:
+            seed_path = _default_operator_identity(values).seed_path
+        except ValueError:
+            if not _truly_unconfigured(values):
+                raise
+            seed_path = None
+        return OperatorIdentity(None, name.strip(), email, seed_path)
+    identities = _configured_identities(values)
+    if selector is not None:
+        if selector not in identities:
+            shorts = ", ".join(sorted(identities)) or "(none)"
+            raise ValueError(f"unknown identity {selector!r}; configured identities: {shorts}")
+        name, email = identities[selector]
+        return OperatorIdentity(selector, name, email, identity_key_paths(selector)[0])
+    return _default_operator_identity(values)
+
+
+def identity_seed(seed_path: Path | None = None) -> bytes | None:
     """Return the local identity seed, or ``None`` when no key was created.
 
     Nothing here creates a key. An installation that never ran ``config init``
     simply has no identity, and every caller treats that as *unsigned* rather
     than as an error, which is what keeps a mixed deployment working.
 
+    :param seed_path: Explicit seed path, or ``None`` to resolve the default.
     :return: The local seed, or no value when no valid key exists.
     """
 
-    private_path, _ = identity_key_paths()
+    if seed_path is None:
+        values = read_config()
+        identities = _configured_identities(values)
+        if "default_identity" in values:
+            selected = values["default_identity"]
+            if not isinstance(selected, str) or selected not in identities:
+                raise ValueError("config identity default must name a configured identity")
+            seed_path = identity_key_paths(selected)[0]
+        elif len(identities) == 1:
+            seed_path = identity_key_paths(next(iter(identities)))[0]
+        else:
+            seed_path = identity_key_paths()[0]
     try:
-        seed = base64.b64decode(private_path.read_text(encoding="ascii").strip(), validate=True)
+        seed = base64.b64decode(seed_path.read_text(encoding="ascii").strip(), validate=True)
     except (OSError, UnicodeError, ValueError):
         return None
     return seed if len(seed) == 32 else None
 
 
-def identity_public_key() -> str | None:
+def identity_public_key(seed_path: Path | None = None) -> str | None:
     """Return the recorded local identity public key, or ``None``.
 
+    :param seed_path: Explicit seed path, or ``None`` to resolve the default.
     :return: Encoded public key, or ``None`` when no identity exists.
     """
 
-    seed = identity_seed()
+    seed = identity_seed(seed_path)
     return None if seed is None else "ed25519:" + base64.b64encode(ed25519_public_key(seed)).decode("ascii")
 
 
@@ -341,7 +549,7 @@ def signature_digest(document: Mapping[str, object]) -> bytes:
     return hashlib.sha256(IDENTITY_SIGNATURE_DOMAIN + json_bytes(body)).digest()
 
 
-def sign_document(document: Mapping[str, object]) -> dict[str, object]:
+def sign_document(document: Mapping[str, object], *, seed_path: Path | None = None) -> dict[str, object]:
     """Return *document* with a detached identity signature, when one is possible.
 
     Signing is optional by construction: a caller with no identity key returns
@@ -350,10 +558,11 @@ def sign_document(document: Mapping[str, object]) -> dict[str, object]:
     authorization: nothing is permitted because a document is signed.
 
     :param document: Document to copy and optionally sign.
+    :param seed_path: Explicit seed path, or ``None`` to resolve the default.
     :return: Document with identity members when a local key exists.
     """
 
-    seed = identity_seed()
+    seed = identity_seed(seed_path)
     if seed is None:
         return dict(document)
     body = {

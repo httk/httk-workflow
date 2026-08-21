@@ -324,6 +324,14 @@ def _handle_requests(workspace: Workspace) -> None:
 
 def test_signed_operator_request_round_trips_and_is_attributed(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
+    write_config(
+        {
+            "format": "httk-config",
+            "format_version": 2,
+            "name": "Me",
+            "email": "me@example.org",
+        }
+    )
     ensure_identity_key()
     workspace, job_id = _request_workspace(tmp_path)
     ws = register_ws(None, workspace.root)
@@ -335,7 +343,7 @@ def test_signed_operator_request_round_trips_and_is_attributed(tmp_path: Path, m
                 job_id,
                 "cancel",
                 "--operator",
-                "a-user",
+                "Me <me@example.org>",
                 "--reason",
                 "signed request test",
             ]
@@ -351,7 +359,7 @@ def test_signed_operator_request_round_trips_and_is_attributed(tmp_path: Path, m
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "cancelled"
     state = workspace.read_state(marker)
-    assert state["operator"] == "a-user"
+    assert state["operator"] == "Me <me@example.org>"
     assert state["operator_key"] == identity_public_key()
 
 
@@ -360,7 +368,16 @@ def test_unsigned_operator_request_is_still_accepted(tmp_path: Path, monkeypatch
     workspace, job_id = _request_workspace(tmp_path)
     ws = register_ws(None, workspace.root)
     assert identity_public_key() is None
-    arguments = ["request", ws, job_id, "cancel", "--operator", "nobody", "--reason", "no key"]
+    arguments = [
+        "request",
+        ws,
+        job_id,
+        "cancel",
+        "--operator",
+        "Nobody <nobody@example.org>",
+        "--reason",
+        "no key",
+    ]
     assert native_cli.main(arguments) == 0
     document = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
     assert "signature" not in document and "operator_key" not in document

@@ -1,5 +1,15 @@
 """Configuration, project, and umbrella-project command groups."""
 
+import sys
+
+from ..configuration import (
+    _configured_identities,
+    _validate_operator_identity_fields,
+    ensure_identity_key,
+    identity_key_paths,
+    identity_public_key,
+    write_config,
+)
 from ._common import *
 from ._common import (
     _field,
@@ -65,6 +75,105 @@ def handle_config_import_v1(arguments: argparse.Namespace, context: CLIContext) 
     """Read a legacy ``~/.httk`` configuration into the XDG one."""
 
     print(json.dumps(import_v1_configuration(arguments.source), indent=2, sort_keys=True))
+    return 0
+
+
+def _identity_report(short: str, name: str, email: str, is_default: bool) -> dict[str, object]:
+    seed_path, _ = identity_key_paths(short)
+    return {
+        "short": short,
+        "name": name,
+        "email": email,
+        "public_key": identity_public_key(seed_path),
+        "default": is_default,
+    }
+
+
+def handle_config_identity_add(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Create and configure one named operator identity."""
+
+    values = read_config()
+    identities = _configured_identities(values)
+    if arguments.short in identities:
+        raise ValueError(f"identity already exists: {arguments.short}")
+    identity_key_paths(arguments.short)
+    _validate_operator_identity_fields(arguments.name, arguments.email)
+    had_default = "default_identity" in values
+    previous_default = values.get("default_identity")
+    ensure_identity_key(arguments.short)
+    identities[arguments.short] = (arguments.name, arguments.email)
+    values["identities"] = {short: {"name": name, "email": email} for short, (name, email) in identities.items()}
+    selected_default = arguments.short if len(identities) == 1 or arguments.default else previous_default
+    if len(identities) == 1 or arguments.default or had_default:
+        values["default_identity"] = selected_default
+    write_config(values)
+    print(
+        json.dumps(
+            _identity_report(arguments.short, arguments.name, arguments.email, selected_default == arguments.short)
+        )
+    )
+    return 0
+
+
+def handle_config_identity_list(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """List configured named operator identities."""
+
+    values = read_config()
+    identities = _configured_identities(values)
+    default = values.get("default_identity")
+    if "default_identity" in values and (not isinstance(default, str) or default not in identities):
+        print(
+            f"warning: config identity default {default!r} is not a configured identity",
+            file=sys.stderr,
+        )
+    reports = [_identity_report(short, *identities[short], short == default) for short in sorted(identities)]
+    if arguments.json:
+        print(json.dumps(reports, indent=2, sort_keys=True))
+    else:
+        for report in reports:
+            print(
+                f"{'*' if report['default'] else ' '} {report['short']}\t{report['name']} <{report['email']}>\t{report['public_key']}"
+            )
+    return 0
+
+
+def handle_config_identity_default(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Select the default named operator identity."""
+
+    values = read_config()
+    identities = _configured_identities(values)
+    if arguments.short not in identities:
+        shorts = ", ".join(sorted(identities)) or "(none)"
+        raise ValueError(f"unknown identity {arguments.short!r}; configured identities: {shorts}")
+    values["default_identity"] = arguments.short
+    print(write_config(values))
+    return 0
+
+
+def handle_config_identity_remove(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove one named identity while leaving its key files untouched."""
+
+    values = read_config()
+    identities = _configured_identities(values)
+    short = arguments.short
+    if short not in identities:
+        shorts = ", ".join(sorted(identities)) or "(none)"
+        raise ValueError(f"unknown identity {short!r}; configured identities: {shorts}")
+    default = values.get("default_identity")
+    if default == short and len(identities) > 2:
+        raise ValueError(f"cannot remove default identity {short!r}; choose another default first")
+    identities.pop(short)
+    values["identities"] = {name: {"name": item[0], "email": item[1]} for name, item in identities.items()}
+    if default == short:
+        if len(identities) == 1:
+            values["default_identity"] = next(iter(identities))
+        else:
+            values.pop("default_identity", None)
+    if not identities:
+        values.pop("default_identity", None)
+    write_config(values)
+    seed_path, public_path = identity_key_paths(short)
+    print(f"removed {short}; key files remain: {seed_path}, {public_path}")
     return 0
 
 
@@ -141,6 +250,51 @@ def build_config_parser(
         nargs="?",
         help="the legacy directory (default: ~/.httk)",
     )
+
+    _, identities = _group(
+        group,
+        "identity",
+        summary="manage named operator identities",
+        description="Create, list, select, and remove named operator identities",
+    )
+    add = _leaf(
+        identities,
+        "add",
+        summary="add a named operator identity",
+        description="Create a named operator identity and its Ed25519 signing key",
+        handler=handle_config_identity_add,
+    )
+    add.add_argument("short", metavar="SHORT", help="the short identity name ([a-z0-9][a-z0-9_-]*)")
+    add.add_argument("--name", required=True, metavar="NAME", help="the operator's full name")
+    add.add_argument("--email", required=True, metavar="EMAIL", help="the operator's email address")
+    add.add_argument("--default", action="store_true", help="make this identity the default")
+
+    listed = _leaf(
+        identities,
+        "list",
+        summary="list named operator identities",
+        description="List named operator identities and their public keys",
+        handler=handle_config_identity_list,
+    )
+    listed.add_argument("--json", action="store_true", help="print the identities as JSON")
+
+    selected = _leaf(
+        identities,
+        "default",
+        summary="select the default identity",
+        description="Select the default named operator identity",
+        handler=handle_config_identity_default,
+    )
+    selected.add_argument("short", metavar="SHORT", help="the configured identity short name")
+
+    removed = _leaf(
+        identities,
+        "remove",
+        summary="remove a named operator identity",
+        description="Remove an identity from configuration and leave its key files on disk",
+        handler=handle_config_identity_remove,
+    )
+    removed.add_argument("short", metavar="SHORT", help="the configured identity short name")
 
 
 # ---------------------------------------------------------------------------

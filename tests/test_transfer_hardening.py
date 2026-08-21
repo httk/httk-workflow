@@ -379,7 +379,9 @@ def test_a_sealed_but_unsent_bundle_is_offered_again(tmp_path: Path) -> None:
     assert offer_transfers(source, destination_workspace_id=destination.workspace_id, states=("submitted",)) == offers
 
 
-def test_explicit_offer_reports_a_late_sealing_failure_and_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_offer_reports_a_late_sealing_failure_and_resumes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     source, destination = _pair(tmp_path)
     first_payload, first_id = _payload(tmp_path / "first", tag="first")
     second_payload, second_id = _payload(tmp_path / "second", tag="second")
