@@ -64,15 +64,15 @@ httk workflow workspace init workflow-workspace
 The standalone workspace alias is equivalent:
 
 ```console
-httk-taskmanager init workflow-workspace
+httk workflow workspace init workflow-workspace
 ```
 
 Wrap the task in a converted package and submit it through the normal path:
 
 ```console
-httk workflow job new workflow-workspace --workflow-dir ./legacy-package \
+httk workflow job new --workspace workflow-workspace --workflow-dir ./legacy-package \
   --placement migration/reference/silicon-relax
-httk workflow run workflow-workspace --pool vasp --workers 4
+httk workflow run --workspace workflow-workspace --pool vasp --workers 4
 ```
 
 The exact old source paths remain available below the compatibility
@@ -86,7 +86,7 @@ source "$HTTK_DIR/Execution/tasks/vasp/vasptools.sh"
 Inspect the result through the *httk₂* source of truth:
 
 ```console
-httk workflow workspace status workflow-workspace --json
+httk workflow workspace status --json workflow-workspace
 ```
 
 The packaged v1 runner preserves the persistent `ht.run.current/` workdir,
@@ -108,7 +108,7 @@ httk workflow config import-v1
 Create *httk₂* project metadata from a local `ht.project` without modifying it:
 
 ```console
-httk workflow project import-v1 . --source ./ht.project
+httk workflow project import-v1 --source ./ht.project .
 ```
 
 This imports safe metadata and public identities. It does not import private
@@ -127,10 +127,8 @@ Recognized *httk* v1 computer definitions can be mapped explicitly into
 *httk₂* remotes:
 
 ```console
-httk workflow remote import-v1 ~/.httk/computers/cluster-a \
-  --name cluster-a
-httk workflow workspace init cluster-a:/remote/path/to/workflow-workspace \
-  --name default
+httk workflow remote import-v1 --name cluster-a ~/.httk/computers/cluster-a
+httk workflow workspace init --name default cluster-a:/remote/path/to/workflow-workspace
 ```
 
 `workspace_root` is retired. `workspace init REMOTE:PATH` performs the remote
@@ -149,8 +147,8 @@ normal manager can serve them from the same *httk₂* workspace. Select the
 converted package's `taskset` with the manager pool:
 
 ```console
-httk workflow run workflow-workspace --pool vasp --workers 2
-httk workflow run workflow-workspace --pool vasp-native --workers 2
+httk workflow run --workspace workflow-workspace --pool vasp --workers 2
+httk workflow run --workspace workflow-workspace --pool vasp-native --workers 2
 ```
 
 The shared core-v2 workspace already provides transactional data and detached
@@ -303,9 +301,9 @@ prepare_job_payload(
 Submit and run it:
 
 ```console
-httk workflow job submit native-workspace native-job \
-  --placement migration/native/silicon-relax
-httk workflow manager run native-workspace \
+httk workflow job submit --workspace native-workspace \
+  --placement migration/native/silicon-relax native-job
+httk workflow manager run --workspace native-workspace \
   --pool vasp-native \
 ```
 
@@ -746,7 +744,7 @@ For each migrated job type:
    result publication; verify that restart does not duplicate work or lose the
    authoritative outcome.
 6. Exercise a failed child as well as an all-successful child set.
-7. Verify `httk workflow workspace status workflow-workspace --json` and the journal
+7. Verify `httk workflow workspace status --json workflow-workspace` and the journal
    rather than relying on directory names.
 8. Run several jobs with the intended pool, capabilities, resources, and
    worker count.
@@ -760,9 +758,9 @@ Stop instantiating new converted jobs first. Let submitted *httk* v1 jobs reach 
 terminal state or cancel them through recorded operator requests:
 
 ```console
-httk workflow job request cancel workflow-workspace JOB_UUID \
+httk workflow job request cancel --workspace workflow-workspace \
   --operator "$USER" \
-  --reason "replaced by validated native workflow"
+  --reason "replaced by validated native workflow" JOB_UUID
 ```
 
 Then stop the normal manager serving the converted package's pool while leaving
@@ -814,10 +812,10 @@ package-hook collection; re-scaffold them.
 Submit a one-shot job or a structure campaign:
 
 ```console
-httk workflow job new WS --workflow ./silicon-relax \
+httk workflow job new --workspace WS --workflow ./silicon-relax \
   --format httk-v1 --input-from structure structures/*.cif --parameter encut=520
-httk workflow run WS --pool vasp
-httk workflow collect WS
+httk workflow run --workspace WS --pool vasp
+httk workflow collect --workspace WS
 ```
 
 At preparation, the package is snapshotted and each job gets its own rendered
@@ -853,8 +851,8 @@ collected = collect_finished_tree(
 The CLI equivalent is:
 
 ```console
-httk workflow v1 collect /archive/ht-results \
-  --workflow-dir ./silicon-relax --into results.sqlite
+httk workflow v1 collect --workflow-dir ./silicon-relax \
+  --into results.sqlite /archive/ht-results
 ```
 
 The harvester selects the latest dated `ht.run.*`, reads code metadata from

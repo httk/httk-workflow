@@ -508,7 +508,7 @@ def _maintenance_check(workspace: Workspace, report: _Diagnosing) -> bool:
         False,
         f"launching is paused by the maintenance lock held by {lock.describe()}",
     )
-    report.hint("wait for the maintenance operation, or 'httk workflow workspace unlock WORKSPACE --force'")
+    report.hint("wait for the maintenance operation, or 'httk workflow workspace unlock --force WORKSPACE'")
     return True
 
 
@@ -547,7 +547,7 @@ def _manager_checks(
             False,
             "no manager has ever registered in this workspace",
         )
-        report.hint("start one with 'httk workflow manager run WORKSPACE'")
+        report.hint("start one with 'httk workflow manager run --workspace WORKSPACE'")
         return
     if not live:
         report.check(
@@ -555,7 +555,7 @@ def _manager_checks(
             False,
             f"{len(records)} manager(s) registered here, but none has a live heartbeat",
         )
-        report.hint("start one with 'httk workflow manager run WORKSPACE'")
+        report.hint("start one with 'httk workflow manager run --workspace WORKSPACE'")
         for record in records:
             report.check("stopped manager", None, record.describe())
         return
@@ -592,7 +592,7 @@ def _manager_checks(
     if not accepting:
         report.hint(
             "run a manager that matches, for example "
-            f"'httk workflow manager run WORKSPACE --pool {requirements.pool}"
+            f"'httk workflow manager run --pool {requirements.pool} --workspace WORKSPACE"
             + "".join(f" --capability {name}" for name in sorted(requirements.capabilities))
             + "'"
         )
@@ -693,7 +693,7 @@ def _continue_checks(job: JobDefinition | None, state: Mapping[str, Any], report
             "'continue' would immediately end the job again with retry_exhausted: " + "; ".join(budgets.describe()),
         )
         report.hint(
-            "use 'httk workflow job request override_step WORKSPACE JOB --step STEP --operator NAME --reason WHY' to start a new activation instead"
+            "use 'httk workflow job request override_step --workspace WORKSPACE --step STEP --operator NAME --reason WHY JOB' to start a new activation instead"
         )
         return
     report.check(
@@ -701,7 +701,9 @@ def _continue_checks(job: JobDefinition | None, state: Mapping[str, Any], report
         True,
         "'continue' repeats this activation: " + "; ".join(budgets.describe()),
     )
-    report.hint("resume it with 'httk workflow job request continue WORKSPACE JOB --operator NAME --reason WHY'")
+    report.hint(
+        "resume it with 'httk workflow job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB'"
+    )
 
 
 def _attempt_history_check(workspace: Workspace, marker: Marker, state: Mapping[str, Any], report: _Diagnosing) -> None:
@@ -1051,7 +1053,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
             )
         elif blocking:
             summary = f"this job waits for {len(blocking)} of {len(observations)} child(ren) to become terminal"
-            report.hint("inspect a blocking child with 'httk workflow job why WORKSPACE CHILD_JOB'")
+            report.hint("inspect a blocking child with 'httk workflow job why --workspace WORKSPACE CHILD_JOB'")
         elif observations:
             summary = "every join child is terminal, so the next manager pass resolves this join"
             blocked = False

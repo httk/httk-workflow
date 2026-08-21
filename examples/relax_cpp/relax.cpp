@@ -59,7 +59,7 @@ int step_run() {
     if (!command || command->empty()) {
         Attempt::fail("vasp.command_missing",
                       "no VASP command is configured: set it with httk workflow workspace settings set "
-                      "vasp.command '...', or set HTTK_VASP_COMMAND, or give the job a vasp_command parameter");
+                      "--key vasp.command --value '...' WORKSPACE, or set HTTK_VASP_COMMAND, or give the job a vasp_command parameter");
         return 0;
     }
     const auto timeout = Attempt::parameter("timeout", "86400");

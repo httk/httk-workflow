@@ -265,14 +265,14 @@ def test_remote_status_returns_the_remote_workspace_json(tmp_path: Path, remote:
         "status",
         {
             "remote_settings": {},
-            "argv": ["httk", "workflow", "workspace", "status", str(workspace.root), "--by-path", "--json"],
+            "argv": ["httk", "workflow", "workspace", "status", "--by-path", "--json", str(workspace.root)],
         },
     )
 
     assert result["returncode"] == 0
     reported = json.loads(str(result["stdout"]))
-    assert reported["format"] == "httk-workflow-status"
-    assert reported["workspace_id"] == workspace.workspace_id
+    assert reported[0]["format"] == "httk-workflow-status"
+    assert reported[0]["workspace_id"] == workspace.workspace_id
 
 
 def test_ssh_start_manager_generates_and_submits_the_batch_script(tmp_path: Path, remote: Remote) -> None:
@@ -298,7 +298,7 @@ def test_ssh_start_manager_generates_and_submits_the_batch_script(tmp_path: Path
         "start-manager",
         {
             "remote_settings": {},
-            "argv": ["httk", "workflow", "manager", "run", str(workspace.root)],
+            "argv": ["httk", "workflow", "manager", "run", "--workspace", str(workspace.root), "--by-path"],
             "count": 3,
         },
     )
@@ -315,7 +315,7 @@ def test_ssh_start_manager_generates_and_submits_the_batch_script(tmp_path: Path
     assert "#SBATCH --nodes=2" in script
     assert "#SBATCH --cpus-per-task=16" in script
     assert f"#SBATCH --chdir={workspace.root}" in script
-    assert f"exec httk workflow manager run {workspace.root} --workers 4" in script
+    assert f"exec httk workflow manager run --workspace {workspace.root} --by-path --workers 4" in script
     submissions = sorted(remote.spool.glob("*.json"))
     assert len(submissions) == 3
     for submission in submissions:
@@ -334,7 +334,10 @@ def test_start_manager_without_workspace_settings_has_no_scheduler_directives(tm
     result = run_adapter(
         bundle,
         "start-manager",
-        {"remote_settings": {}, "argv": ["httk", "workflow", "manager", "run", str(workspace.root)]},
+        {
+            "remote_settings": {},
+            "argv": ["httk", "workflow", "manager", "run", "--workspace", str(workspace.root), "--by-path"],
+        },
     )
 
     script = Path(str(result["script"])).read_text(encoding="utf-8")
@@ -358,7 +361,17 @@ def test_start_manager_keeps_an_explicit_worker_count(tmp_path: Path, remote: Re
         "start-manager",
         {
             "remote_settings": {},
-            "argv": ["httk", "workflow", "manager", "run", str(workspace.root), "--workers", "1"],
+            "argv": [
+                "httk",
+                "workflow",
+                "manager",
+                "run",
+                "--workspace",
+                str(workspace.root),
+                "--by-path",
+                "--workers",
+                "1",
+            ],
         },
     )
 
@@ -366,7 +379,7 @@ def test_start_manager_keeps_an_explicit_worker_count(tmp_path: Path, remote: Re
     assert "--workers 1" in script and "--workers 4" not in script
 
 
-def test_start_manager_prefers_the_stated_workspace_over_the_argv_heuristic(
+def test_start_manager_prefers_the_stated_workspace_over_the_configured_default(
     tmp_path: Path,
     remote: Remote,
 ) -> None:
@@ -381,9 +394,7 @@ def test_start_manager_prefers_the_stated_workspace_over_the_argv_heuristic(
         {
             "remote_settings": {},
             "workspace": str(workspace.root),
-            # Reading the workspace back out of this vector is only the
-            # documented fallback, so the stated field has to win over it.
-            "argv": ["httk", "workflow", "manager", "run", str(remote.root / "runs" / "argv")],
+            "argv": ["httk", "workflow", "manager", "run", "--workspace", "other"],
         },
     )
 
@@ -407,14 +418,14 @@ def test_start_manager_from_the_command_line_counts_managers_and_defers_workers(
     # scheduler, subsuming the retired `transfer start-manager` verb.
     register_ws(context, workspace.root, "station", remote="cluster")
 
-    assert command(["manager", "run", "cluster:station", "--count", "2"], context) == 0
+    assert command(["manager", "run", "--workspace", "cluster:station", "--count", "2"], context) == 0
     submitted = json.loads(capsys.readouterr().out)
     assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
     # No --workers on the command line, so the workspace's setting is what runs.
     script = Path(str(submitted["script"])).read_text(encoding="utf-8")
-    assert "exec httk workflow manager run station --workers 4" in script
+    assert "exec httk workflow manager run --workspace station --workers 4" in script
 
-    assert command(["manager", "run", "cluster:station", "--workers", "1"], context) == 0
+    assert command(["manager", "run", "--workspace", "cluster:station", "--workers", "1"], context) == 0
     explicit = json.loads(capsys.readouterr().out)
     assert explicit["count"] == 1 and len(explicit["job_ids"]) == 1
     later = Path(str(explicit["script"])).read_text(encoding="utf-8")
@@ -437,6 +448,7 @@ def test_remote_manager_forwards_execution_options_and_refuses_local_only_option
             [
                 "manager",
                 "run",
+                "--workspace",
                 "cluster:options",
                 "--pool",
                 "gpu",
@@ -482,7 +494,10 @@ def test_remote_manager_forwards_execution_options_and_refuses_local_only_option
     ):
         assert option in script
 
-    assert command(["manager", "run", "cluster:options", "--runner-search-path", "/tmp/runners"], context) == 2
+    assert (
+        command(["manager", "run", "--workspace", "cluster:options", "--runner-search-path", "/tmp/runners"], context)
+        == 2
+    )
     assert "cannot be used with a remote workspace binding" in capsys.readouterr().err
 
 
@@ -502,7 +517,11 @@ def test_local_slurm_start_manager_submits_with_the_local_sbatch(tmp_path: Path,
     result = run_adapter(
         bundle,
         "start-manager",
-        {"remote_settings": {}, "argv": ["httk", "workflow", "manager", "run", str(workspace.root)], "count": 2},
+        {
+            "remote_settings": {},
+            "argv": ["httk", "workflow", "manager", "run", "--workspace", str(workspace.root), "--by-path"],
+            "count": 2,
+        },
     )
 
     script_path = Path(str(result["script"]))
@@ -637,7 +656,7 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     register_ws(context, source_root, "home")
     register_ws(context, destination.root, "station", remote="cluster")
 
-    assert command(["transfer", "home", "cluster:station", "--job", job_id], context) == 0
+    assert command(["transfer", "--job", job_id, "home", "cluster:station"], context) == 0
 
     assert Workspace(source_root).find_marker_by_id(job_id) is None
     marker = destination.find_marker_by_id(job_id)
@@ -648,6 +667,6 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     assert finished is not None and finished.kind == "succeeded"
     # Every step of the flow really crossed the stand-in transport.
     commands = [json.loads(line)["command"] for line in remote.log.read_text(encoding="utf-8").splitlines()]
-    assert any("workspace status station --json" in item for item in commands)
+    assert any("workspace status --json station" in item for item in commands)
     assert any("transfer receive --workspace station --bundle" in item for item in commands)
     assert any(item.startswith("rsync ") or " rsync " in item for item in commands)

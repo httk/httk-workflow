@@ -10,9 +10,9 @@ workflow machinery.
 
 | Language | Bare document or package form | Installed runner |
 | --- | --- | --- |
-| CWL | `job new WS --workflow flow.cwl` | `pkg:httk.workflow.languages.cwl/cwl_runner.py` |
-| PWD | `job new WS --workflow graph.json` | `pkg:httk.workflow.languages.pwd/pwd_runner.py` |
-| jobflow | `job new WS --workflow maker.json`, or a package with `language = "jobflow"` | `pkg:httk.workflow.languages.jobflow/jobflow_runner.py` |
+| CWL | `job new --workspace WS --workflow flow.cwl` | `pkg:httk.workflow.languages.cwl/cwl_runner.py` |
+| PWD | `job new --workspace WS --workflow graph.json` | `pkg:httk.workflow.languages.pwd/pwd_runner.py` |
+| jobflow | `job new --workspace WS --workflow maker.json`, or a package with `language = "jobflow"` | `pkg:httk.workflow.languages.jobflow/jobflow_runner.py` |
 | httk-v1 | a bare task directory with `--format httk-v1`, or a package with `language = "httk-v1"` | `pkg:httk.workflow.languages.httk_v1/v1_runner.py` through the ordinary `path` runner |
 
 The CWL realization needs `httk-workflow[cwl]` when the document is prepared.
@@ -222,11 +222,11 @@ and legacy runtime behavior.
 `.json` document, or a bare v1 template directory when its format is explicit:
 
 ```console
-httk workflow job new WS --workflow flow.cwl --input message=echo
-httk workflow job new WS --workflow workflow.json \
+httk workflow job new --workspace WS --workflow flow.cwl --input message=echo
+httk workflow job new --workspace WS --workflow workflow.json \
   --parameter pwd_module_path='["."]'
-httk workflow job new WS --workflow maker.json
-httk workflow job new WS --workflow ./v1-template --format httk-v1 \
+httk workflow job new --workspace WS --workflow maker.json
+httk workflow job new --workspace WS --workflow ./v1-template --format httk-v1 \
   --parameter structure=structures/si.cif
 ```
 

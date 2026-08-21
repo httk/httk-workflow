@@ -34,16 +34,35 @@ from ._transfer import _protocol_workspace
 # ---------------------------------------------------------------------------
 
 
-def handle_runner_publish(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Publish one runner file or directory into a workspace runner store."""
-
-    reference = Workspace(_local_root(arguments, context, action="publish a runner into it")).publish_runner(
-        arguments.file,
-        name=arguments.name,
-        replace=arguments.replace,
+def _add_workspace_option(parser: argparse.ArgumentParser, *, help_text: str) -> None:
+    parser.add_argument(
+        "--workspace",
+        metavar="WORKSPACE",
+        help=f"{help_text} (default: this project's workspace, or the per-user default)",
     )
-    print(json.dumps(reference, indent=2, sort_keys=True))
-    return 0
+
+
+def handle_runner_publish(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Publish runner files or directories into a workspace runner store."""
+
+    if arguments.name is not None and len(arguments.files) != 1:
+        raise ValueError("--name can be used only when publishing one FILE_OR_DIRECTORY")
+    workspace = Workspace(_local_root(arguments, context, action="publish a runner into it"))
+    references: list[dict[str, object]] = []
+    failed = False
+    for source in arguments.files:
+        try:
+            reference = workspace.publish_runner(source, name=arguments.name, replace=arguments.replace)
+        except _ERRORS as exc:
+            failed = True
+            print(f"{source}: {exc}", file=sys.stderr)
+            continue
+        references.append(reference)
+        if not arguments.json:
+            print(f"{source}: {reference['path']}")
+    if arguments.json:
+        print(json.dumps(references, indent=2, sort_keys=True))
+    return 1 if failed else 0
 
 
 def handle_runner_describe(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -51,42 +70,50 @@ def handle_runner_describe(arguments: argparse.Namespace, context: CLIContext) -
 
     workspace = Workspace(_local_root(arguments, context, action="read its runners"), mutable=False)
     store = workspace.runners
-    if arguments.name is not None:
-        target = workspace.runner_store_path(arguments.name)
-        if not target.is_file() and not target.is_dir():
-            raise ValueError(f"no such workspace runner: {arguments.name}")
-        found = [target]
-    else:
 
-        def published_entries(directory: Path) -> Iterator[Path]:
-            for path in sorted(directory.iterdir()):
-                if path.is_file():
+    def published_entries(directory: Path) -> Iterator[Path]:
+        for path in sorted(directory.iterdir()):
+            if path.is_file():
+                yield path
+            elif path.is_dir():
+                if (path / RUNNER_TREE_ENTRY).is_file():
                     yield path
-                elif path.is_dir():
-                    if (path / RUNNER_TREE_ENTRY).is_file():
-                        yield path
-                    else:
-                        yield from published_entries(path)
+                else:
+                    yield from published_entries(path)
 
-        found = list(published_entries(store)) if store.is_dir() else []
-    references = [
-        {
-            "source": "workspace",
-            "path": path.relative_to(store).as_posix(),
-            "sha256": tree_digest(path) if path.is_dir() else sha256_file(path),
-            "kind": "tree" if path.is_dir() else "file",
-            "inferred": path.is_dir(),
-        }
-        for path in found
-    ]
+    names = arguments.names
+    references: list[dict[str, object]] = []
+    failed = False
+    for name in names or [None]:
+        try:
+            if name is None:
+                found = list(published_entries(store)) if store.is_dir() else []
+            else:
+                target = workspace.runner_store_path(name)
+                if not target.is_file() and not target.is_dir():
+                    raise ValueError(f"no such workspace runner: {name}")
+                found = [target]
+            references.extend(
+                {
+                    "source": "workspace",
+                    "path": path.relative_to(store).as_posix(),
+                    "sha256": tree_digest(path) if path.is_dir() else sha256_file(path),
+                    "kind": "tree" if path.is_dir() else "file",
+                    "inferred": path.is_dir(),
+                }
+                for path in found
+            )
+        except _ERRORS as exc:
+            failed = True
+            print(f"{name}: {exc}", file=sys.stderr)
     if arguments.json:
         print(json.dumps(references, indent=2, sort_keys=True))
-        return 0
+        return 1 if failed else 0
     for reference in references:
         path = workspace.runner_store_path(str(reference["path"]))
         inferred = "\ttree (inferred)" if path.is_dir() else ""
         print(f"{reference['path']}\t{reference['sha256']}{inferred}")
-    return 0
+    return 1 if failed else 0
 
 
 def build_runner_parser(
@@ -108,18 +135,14 @@ def build_runner_parser(
         description="Publish one runner file or directory into a workspace runner store, pinned by digest",
         handler=handle_runner_publish,
     )
-    publish.add_argument("file", metavar="FILE_OR_DIRECTORY", help="the runner file or directory to publish")
-    publish.add_argument(
-        "--workspace",
-        metavar="WORKSPACE",
-        required=True,
-        help="the workspace to publish into",
-    )
+    publish.add_argument("files", metavar="FILE_OR_DIRECTORY", nargs="+", help="runner files or directories to publish")
+    _add_workspace_option(publish, help_text="the workspace to publish into")
     publish.add_argument(
         "--name",
         metavar="NAME",
         help="store name, including any subdirectory (default: the source name)",
     )
+    publish.add_argument("--json", action="store_true", help="print published references as one JSON array")
     publish.add_argument(
         "--replace",
         action="store_true",
@@ -133,13 +156,8 @@ def build_runner_parser(
         description="Report the runners a workspace has published, as the references a job pins",
         handler=handle_runner_describe,
     )
-    describe.add_argument(
-        "name",
-        metavar="NAME",
-        nargs="?",
-        help="one store name (default: every published runner)",
-    )
-    describe.add_argument("--workspace", metavar="WORKSPACE", required=True, help="the workspace to read")
+    describe.add_argument("names", metavar="NAME", nargs="*", help="store names (default: every published runner)")
+    _add_workspace_option(describe, help_text="the workspace to read")
     describe.add_argument("--json", action="store_true", help="print the references as one JSON array")
 
 
@@ -240,10 +258,10 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
 
 
 def add_job_submit_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare :command:`job submit`, shared with ``httk-taskmanager submit``."""
+    """Declare :command:`job submit`."""
 
-    add_workspace_argument(parser, help_text="the workspace to submit into")
-    parser.add_argument("source", metavar="SOURCE", help="the complete payload directory to submit")
+    _add_workspace_option(parser, help_text="the workspace to submit into")
+    parser.add_argument("sources", metavar="SOURCE", nargs="+", help="complete payload directories to submit")
     parser.add_argument(
         "--placement",
         metavar="PLACEMENT",
@@ -251,23 +269,36 @@ def add_job_submit_arguments(parser: argparse.ArgumentParser) -> None:
         help="where the job lands in the tree",
     )
     parser.add_argument("--move", action="store_true", help="rename rather than copy the source")
+    parser.add_argument("--json", action="store_true", help="print submitted markers as one JSON array")
     add_durability_arguments(parser)
 
 
 def handle_job_submit(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Submit one prepared payload directory and print its marker."""
+    """Submit prepared payload directories."""
 
     workspace = Workspace(
         _local_root(arguments, context, action="submit into it"),
         durable=_durable(arguments),
     )
-    marker = workspace.submit(arguments.source, arguments.placement, move=arguments.move)
-    print(marker.path)
-    return 0
+    markers: list[str] = []
+    failed = False
+    for source in arguments.sources:
+        try:
+            marker = workspace.submit(source, arguments.placement, move=arguments.move)
+        except _ERRORS as exc:
+            failed = True
+            print(f"{source}: {exc}", file=sys.stderr)
+            continue
+        markers.append(str(marker.path))
+        if not arguments.json:
+            print(f"{source}: {marker.path}")
+    if arguments.json:
+        print(json.dumps(markers, indent=2))
+    return 1 if failed else 0
 
 
 def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
-    """Declare :command:`job request`, shared with ``httk-taskmanager request``."""
+    """Declare :command:`job request`."""
 
     parser.add_argument(
         "action",
@@ -275,15 +306,12 @@ def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
         choices=("continue", "override_step", "cancel", "set_priority", "pause"),
         help="continue, override_step, cancel, set_priority, or pause",
     )
-    add_workspace_argument(parser, help_text="the workspace holding the job")
+    _add_workspace_option(parser, help_text="the workspace holding the job")
     parser.add_argument(
         "job_id",
         metavar="JOB_ID",
         nargs="+",
-        help=(
-            "one or more job UUIDs the request is about; when giving more than one JOB_ID, "
-            "name the workspace explicitly"
-        ),
+        help="one or more job UUIDs the request is about",
     )
     parser.add_argument(
         "--operator",
@@ -331,7 +359,7 @@ def add_job_request_envelopes_arguments(parser: argparse.ArgumentParser) -> None
         choices=("continue", "override_step", "cancel", "set_priority", "pause"),
         help="the request action",
     )
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the far-side workspace name")
+    parser.add_argument("--workspace", metavar="WORKSPACE", required=True, help="the far-side workspace name")
     parser.add_argument("job_id", metavar="JOB_ID", nargs="+", help="one or more job UUIDs")
     parser.add_argument("--operator", required=True, help="the operator attribution label")
     parser.add_argument("--reason", required=True, help="why the request is being made")
@@ -344,7 +372,7 @@ def add_job_request_envelopes_arguments(parser: argparse.ArgumentParser) -> None
 def add_job_publish_requests_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare the hidden remote request-publication protocol command."""
 
-    parser.add_argument("workspace", metavar="WORKSPACE", help="the far-side workspace name")
+    parser.add_argument("--workspace", metavar="WORKSPACE", required=True, help="the far-side workspace name")
     parser.add_argument(
         "--document",
         action="append",
@@ -649,8 +677,7 @@ def _request_remote_job(
     envelope_argv = [
         *REMOTE_JOB_REQUEST_ENVELOPES_COMMAND,
         arguments.action,
-        remote_name,
-        *arguments.job_id,
+        f"--workspace={remote_name}",
         f"--operator={identity.label}",
         f"--reason={arguments.reason}",
         "--json",
@@ -661,6 +688,7 @@ def _request_remote_job(
             envelope_argv.append(f"--{option}={value}")
     if arguments.force:
         envelope_argv.append("--force")
+    envelope_argv.extend(arguments.job_id)
     result = _run_adapter(
         target.bundle,
         "invoke",
@@ -695,7 +723,7 @@ def _request_remote_job(
             raise ValueError(f"local signature verification failed for job {envelope['job_id']}")
         signed.append(json.dumps(signed_document, separators=(",", ":")))
 
-    publish_argv = [*REMOTE_JOB_PUBLISH_REQUESTS_COMMAND, remote_name]
+    publish_argv = [*REMOTE_JOB_PUBLISH_REQUESTS_COMMAND, f"--workspace={remote_name}"]
     for document_text in signed:
         publish_argv.append(f"--document={document_text}")
     if arguments.wait:
@@ -916,40 +944,71 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
 
 
 def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Describe one job completely from its authoritative state."""
+    """Describe jobs completely from their authoritative state."""
 
     workspace = Workspace(_local_root(arguments, context, action="show its jobs"), mutable=False)
-    report = describe_job(workspace, resolve_job(workspace, arguments.job))
-    print(json.dumps(report, indent=2, sort_keys=True) if arguments.json else render_job(report))
-    return 0
+    reports: list[dict[str, object]] = []
+    failed = False
+    for job in arguments.jobs:
+        try:
+            report = describe_job(workspace, resolve_job(workspace, job))
+        except _ERRORS as exc:
+            failed = True
+            print(f"{job}: {exc}", file=sys.stderr)
+            continue
+        reports.append(report)
+        if not arguments.json:
+            print(f"{job}:")
+            print(render_job(report))
+    if arguments.json:
+        print(json.dumps(reports, indent=2, sort_keys=True))
+    return 1 if failed else 0
 
 
 def handle_job_log(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Print the recorded transition history of one job, oldest first."""
+    """Print recorded transition histories, oldest first."""
 
     if arguments.limit is not None and arguments.limit < 1:
         raise ValueError("--limit must be positive")
     workspace = Workspace(_local_root(arguments, context, action="read its job log"), mutable=False)
-    frames = job_frames(workspace, resolve_job(workspace, arguments.job), limit=arguments.limit)
+    reports: list[dict[str, object]] = []
+    failed = False
+    for job in arguments.jobs:
+        try:
+            frames = job_frames(workspace, resolve_job(workspace, job), limit=arguments.limit)
+        except _ERRORS as exc:
+            failed = True
+            print(f"{job}: {exc}", file=sys.stderr)
+            continue
+        reports.append({"format": JOB_HISTORY_FORMAT, "format_version": 2, "frames": frames})
+        if not arguments.json:
+            print(f"{job}:")
+            print(render_frames(frames))
     if arguments.json:
-        print(
-            json.dumps(
-                {"format": JOB_HISTORY_FORMAT, "format_version": 2, "frames": frames},
-                indent=2,
-            )
-        )
-        return 0
-    print(render_frames(frames))
-    return 0
+        print(json.dumps(reports, indent=2))
+    return 1 if failed else 0
 
 
 def handle_job_why(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Explain why one job is, or is not, making progress."""
+    """Explain why jobs are, or are not, making progress."""
 
     workspace = Workspace(_local_root(arguments, context, action="explain its jobs"), mutable=False)
-    diagnosis = explain_job(workspace, resolve_job(workspace, arguments.job))
-    print(json.dumps(diagnosis.as_mapping(), indent=2, sort_keys=True) if arguments.json else diagnosis.render())
-    return 0
+    diagnoses: list[dict[str, object]] = []
+    failed = False
+    for job in arguments.jobs:
+        try:
+            diagnosis = explain_job(workspace, resolve_job(workspace, job))
+        except _ERRORS as exc:
+            failed = True
+            print(f"{job}: {exc}", file=sys.stderr)
+            continue
+        diagnoses.append(diagnosis.as_mapping())
+        if not arguments.json:
+            print(f"{job}:")
+            print(diagnosis.render())
+    if arguments.json:
+        print(json.dumps(diagnoses, indent=2, sort_keys=True))
+    return 1 if failed else 0
 
 
 def handle_job_debug(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -971,10 +1030,10 @@ def handle_job_debug(arguments: argparse.Namespace, context: CLIContext) -> int:
 
 
 def _add_job_selector(parser: argparse.ArgumentParser) -> None:
-    """Add the workspace and job selector every inspection command shares."""
+    """Add the workspace and job selectors every inspection command shares."""
 
-    add_workspace_argument(parser, help_text="the workspace holding the job")
-    parser.add_argument("job", metavar="JOB", help="job UUID, job key, or any unique prefix of either")
+    _add_workspace_option(parser, help_text="the workspace holding the job")
+    parser.add_argument("jobs", metavar="JOB", nargs="+", help="job UUID, job key, or any unique prefix of either")
 
 
 def build_job_parser(
@@ -996,7 +1055,7 @@ def build_job_parser(
         description="Scaffold and submit jobs from a runner workflow",
         handler=handle_job_new,
     )
-    add_workspace_argument(new, help_text="the workspace to submit into")
+    _add_workspace_option(new, help_text="the workspace to submit into")
     workflow_names = list(registered_workflow_labels())
     workflow_group = new.add_mutually_exclusive_group(required=True)
     workflow_group.add_argument(
@@ -1145,7 +1204,7 @@ def build_job_parser(
         description="List the jobs of one workflow workspace",
         handler=handle_job_list,
     )
-    add_workspace_argument(listing, help_text="the workspace to list")
+    _add_workspace_option(listing, help_text="the workspace to list")
     listing.add_argument(
         "--kind",
         action="append",
@@ -1163,8 +1222,8 @@ def build_job_parser(
     show = _leaf(
         group,
         "show",
-        summary="describe one job from its authoritative state",
-        description="Describe one job from its authoritative state",
+        summary="describe jobs from their authoritative state",
+        description="Describe jobs from their authoritative state",
         handler=handle_job_show,
     )
     _add_job_selector(show)
@@ -1173,8 +1232,8 @@ def build_job_parser(
     log = _leaf(
         group,
         "log",
-        summary="print the transition history of one job",
-        description="Print the recorded transition history of one job, oldest first",
+        summary="print transition histories",
+        description="Print recorded transition histories, oldest first",
         handler=handle_job_log,
     )
     _add_job_selector(log)
@@ -1189,8 +1248,8 @@ def build_job_parser(
     why = _leaf(
         group,
         "why",
-        summary="explain why one job is not running",
-        description="Explain why one job is, or is not, making progress",
+        summary="explain why jobs are not running",
+        description="Explain why jobs are, or are not, making progress",
         handler=handle_job_why,
     )
     _add_job_selector(why)
@@ -1203,7 +1262,7 @@ def build_job_parser(
         description="Drive one job to a terminal state in the foreground, reporting every transition",
         handler=handle_job_debug,
     )
-    add_workspace_argument(debug, help_text="the workspace to debug in")
+    _add_workspace_option(debug, help_text="the workspace to debug in")
     debug.add_argument(
         "job",
         metavar="JOB",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections.abc import Mapping
 from typing import Any
 
@@ -256,11 +257,24 @@ def _render_text(description: Mapping[str, object]) -> str:
 
 
 def handle_workflow_describe(arguments: argparse.Namespace, context: Any) -> int:
-    """Describe one workflow without publishing or touching a workspace."""
+    """Describe workflows without publishing or touching a workspace."""
 
-    description = _workflow_description(arguments.target, arguments.format)
-    print(json.dumps(description, indent=2, sort_keys=True) if arguments.json else _render_text(description))
-    return 0
+    descriptions: list[dict[str, object]] = []
+    failed = False
+    for target in arguments.targets:
+        try:
+            description = _workflow_description(target, arguments.format)
+        except (OSError, ValueError, RuntimeError) as exc:
+            failed = True
+            print(f"{target}: {exc}", file=sys.stderr)
+            continue
+        descriptions.append(description)
+        if not arguments.json:
+            print(f"{target}:")
+            print(_render_text(description))
+    if arguments.json:
+        print(json.dumps(descriptions, indent=2, sort_keys=True))
+    return 1 if failed else 0
 
 
 def build_describe_parser(
@@ -275,10 +289,12 @@ def build_describe_parser(
         description="Describe a registered workflow, runner file, or workflow package directory",
         handler=handle_workflow_describe,
     )
-    describe.add_argument("target", metavar="TARGET", help="workflow id, alias, runner file, or package directory")
+    describe.add_argument(
+        "targets", metavar="TARGET", nargs="+", help="workflow id, alias, runner file, or package directory"
+    )
     describe.add_argument(
         "--format",
         metavar="LANG",
         help="force LANG for a bare workflow document or directory",
     )
-    describe.add_argument("--json", action="store_true", help="print the description as one JSON object")
+    describe.add_argument("--json", action="store_true", help="print descriptions as one JSON array")

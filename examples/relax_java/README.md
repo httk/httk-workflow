@@ -8,11 +8,11 @@ The manifest declares a compiled package. Build and register its classes once
 on each machine before starting a manager:
 
 ```console
-httk workflow build WORKSPACE ./relax_java
-httk workflow job new WORKSPACE --workflow-dir ./relax_java --step prepare \
+httk workflow build --workspace WORKSPACE ./relax_java
+httk workflow job new --workspace WORKSPACE --workflow-dir ./relax_java --step prepare \
     --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workflow run WORKSPACE
-httk workflow collect WORKSPACE
+httk workflow run --workspace WORKSPACE
+httk workflow collect --workspace WORKSPACE
 ```
 
 `make` remains useful for local SDK exploration:

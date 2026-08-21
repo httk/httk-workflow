@@ -53,8 +53,8 @@ The payload carries the structure and the INCAR it starts from:
 ```console
 mkdir -p prepared-job/files
 cp POSCAR INCAR POTCAR prepared-job/files/
-httk project init --name workflow
-httk workflow job submit prepared-job --placement project/si
+httk project init --name workflow .
+httk workflow job submit --placement project/si prepared-job
 httk workflow manager run
 ```
 
@@ -88,7 +88,7 @@ every job — and a workspace bound to a remote is even seeded with it from the
 remote definition when it is created:
 
 ```console
-httk workflow workspace settings set vasp.command "srun -n 32 vasp_std"
+httk workflow workspace settings set --key vasp.command --value "srun -n 32 vasp_std" default
 httk workflow manager run --pool vasp
 ```
 
@@ -148,7 +148,7 @@ The packaged vasp-relax, vasp-relax-bash, and vasp-relax-static workflows
 declare the relaxation-report postprocess script. Run it after collection:
 
 ~~~console
-httk workflow postprocess WS --script relaxation-report
+httk workflow postprocess --workspace WS --script relaxation-report
 ~~~
 
 It reads HTTK_WORKFLOW_DATA_DIR (or HTTK_WORKFLOW_WORKDIR when no
@@ -163,7 +163,7 @@ The same three packaged workflows also declare the relaxation-plot postprocess
 script. Run it after collection:
 
 ~~~console
-httk workflow postprocess WS --script relaxation-plot
+httk workflow postprocess --workspace WS --script relaxation-plot
 ~~~
 
 It reads the preferred published OUTCAR from HTTK_WORKFLOW_DATA_DIR (or
@@ -176,7 +176,7 @@ data or energies are reported and do not make the script fail.
 
 | Code | Meaning |
 | --- | --- |
-| `vasp.command_missing` | no `vasp.command` resolved — set it with `httk workflow workspace settings set vasp.command '...'`, or use `HTTK_VASP_COMMAND` as a deployment override; no `vasp_command` parameter was provided |
+| `vasp.command_missing` | no `vasp.command` resolved — set it with `httk workflow workspace settings set --key vasp.command --value '...' default`, or use `HTTK_VASP_COMMAND` as a deployment override; no `vasp_command` parameter was provided |
 | `vasp.input_missing` | the structure named by `poscar` is not in the payload |
 | `vasp.no_relaxed_structure` | the chained runner's relaxation left no CONTCAR |
 | `vasp.failed` | VASP did not complete and no remedy remained |

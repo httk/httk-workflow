@@ -411,22 +411,13 @@ def _with_workers(argv: Sequence[str], workers: str | None) -> list[str]:
     return [*arguments, "--workers", workers]
 
 
-def _manager_workspace(argv: Sequence[str]) -> str | None:
-    arguments = list(argv)
-    for index in range(1, len(arguments) - 1):
-        if arguments[index] == "run" and arguments[index - 1] == "manager":
-            candidate = arguments[index + 1]
-            return None if candidate.startswith("-") else candidate
-    return None
-
-
-def _workspace(request: Mapping[str, object], settings: Mapping[str, object], argv: Sequence[str]) -> str:
-    """Return the real path; argv fallback is for hand-written path vectors only."""
+def _workspace(request: Mapping[str, object], settings: Mapping[str, object]) -> str:
+    """Return the explicitly requested or configured workspace path."""
 
     value = request.get("workspace")
     if isinstance(value, str) and value:
         return value
-    derived = _manager_workspace(argv) or _text(settings, "workspace")
+    derived = _text(settings, "workspace")
     if derived is None:
         raise ValueError("start-manager needs a workspace path in the request")
     return derived
@@ -651,8 +642,7 @@ def _invoke(kind: str, operation: str, request: Mapping[str, object]) -> None:
 
 def _start_manager(kind: str, request: Mapping[str, object]) -> None:
     settings = _settings(request)
-    raw_argv = _argv(request, "start-manager")
-    workspace = _workspace(request, settings, raw_argv)
+    workspace = _workspace(request, settings)
     workspace_settings = _workspace_settings(kind, settings, workspace)
     argv = _with_workers(_argv(request, "start-manager"), _text(workspace_settings, "manager.workers"))
     if kind == "local":

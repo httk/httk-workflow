@@ -29,10 +29,10 @@ Drive one relaxation with the compiled binary as the runner, exactly the flow of
 `docs/quickstart.md`:
 
 ```console
-httk project init --name relax-rust
-httk workflow workspace init . --name default
+httk project init --name relax-rust .
+httk workflow workspace init --name default .
 httk workflow job new --workflow ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workflow workspace settings set vasp.command "$PWD/../mock_vasp.py"
+httk workflow workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
 httk workflow run
 httk workflow collect
 ```

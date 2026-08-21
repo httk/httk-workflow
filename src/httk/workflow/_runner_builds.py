@@ -54,8 +54,12 @@ def workspace_build_command(workspace: Workspace, store_relative: PurePosixPath)
     root = workspace.root.resolve()
     for binding in list_workspaces():
         if binding.path is not None and Path(binding.path).resolve() == root:
-            return shlex.join(("httk", "workflow", "build", binding.name, "--store", store_relative.as_posix()))
-    return shlex.join(("httk", "workflow", "build", "--by-path", str(root), "--store", store_relative.as_posix()))
+            return shlex.join(
+                ("httk", "workflow", "build", "--workspace", binding.name, "--store", store_relative.as_posix())
+            )
+    return shlex.join(
+        ("httk", "workflow", "build", "--workspace", str(root), "--by-path", "--store", store_relative.as_posix())
+    )
 
 
 def registered_artifacts(

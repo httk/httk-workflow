@@ -130,12 +130,12 @@ def test_workspace_unlock_clears_stale_and_needs_force_for_live(tmp_path: Path, 
     assert not path.exists()
 
     path = _write_lock(project, _lock_json(pid=os.getpid()))
-    assert command(["workspace", "unlock", ws], context) == 2
+    assert command(["workspace", "unlock", ws], context) == 1
     captured = capsys.readouterr()
     assert f"pid {os.getpid()}" in captured.err and "--force" in captured.err
     assert path.is_file()
 
-    assert command(["workspace", "unlock", ws, "--force"], context) == 0
+    assert command(["workspace", "unlock", "--force", ws], context) == 0
     assert "removed live maintenance lock" in capsys.readouterr().out
     assert not path.exists()
 
@@ -143,7 +143,7 @@ def test_workspace_unlock_clears_stale_and_needs_force_for_live(tmp_path: Path, 
 def _configured(project: Path, *settings: str) -> tuple[Path, int]:
     remote = add_remote("cluster", template="local", project=project)
     code = command(
-        ["remote", "configure", "cluster", *[argument for value in settings for argument in ("--set", value)]],
+        ["remote", "configure", *[argument for value in settings for argument in ("--set", value)], "cluster"],
         CLIContext("httk", project),
     )
     return remote, code
@@ -176,9 +176,9 @@ def test_scheduler_setting_is_refused_for_remote_configuration(tmp_path: Path, m
     project = _project(tmp_path, monkeypatch, name="scheduler-settings")
     remote = add_remote("cluster", template="local", project=project)
 
-    code = command(["remote", "configure", "cluster", "--set", "partition=x"], CLIContext("httk", project))
+    code = command(["remote", "configure", "--set", "partition=x", "cluster"], CLIContext("httk", project))
 
-    assert code == 2
+    assert code == 1
     assert "unknown remote setting 'partition'" in capsys.readouterr().err
     assert json.loads((remote / "remote.json").read_text(encoding="utf-8"))["settings"] == {}
     assert not (remote / "credentials.json").exists()
@@ -188,9 +188,9 @@ def test_retired_bootstrap_setting_is_refused_as_unknown(tmp_path: Path, monkeyp
     project = _project(tmp_path, monkeypatch, name="bootstrap-retired")
     remote = add_remote("cluster", template="local", project=project)
 
-    code = command(["remote", "configure", "cluster", "--set", "bootstrap=pip"], CLIContext("httk", project))
+    code = command(["remote", "configure", "--set", "bootstrap=pip", "cluster"], CLIContext("httk", project))
 
-    assert code == 2
+    assert code == 1
     assert "unknown remote setting 'bootstrap'" in capsys.readouterr().err
     assert json.loads((remote / "remote.json").read_text(encoding="utf-8"))["settings"] == {}
     assert not (remote / "credentials.json").exists()
@@ -240,5 +240,5 @@ def test_retired_workspace_root_setting_is_refused_as_unknown(tmp_path: Path, mo
     project = _project(tmp_path, monkeypatch, name="whitelisted")
     destination = tmp_path / "elsewhere"
     _remote, code = _configured(project, f"workspace_root={destination}", "username=someone")
-    assert code == 2
+    assert code == 1
     assert "unknown remote setting 'workspace_root'" in capsys.readouterr().err

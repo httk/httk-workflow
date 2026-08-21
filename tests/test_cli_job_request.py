@@ -106,10 +106,11 @@ def _request_args(workspace_name: str, *job_ids: str, action: str = "pause") -> 
         "job",
         "request",
         action,
+        "--workspace",
         workspace_name,
-        *job_ids,
         "--reason",
         "test request",
+        *job_ids,
     ]
 
 
@@ -145,7 +146,7 @@ def test_job_request_uses_default_workspace_with_one_job_id(tmp_path: Path, caps
     payload, job_id = _payload(tmp_path / "source", "default-workspace")
     workspace.submit(payload, "project/default-workspace")
 
-    assert command(["job", "request", "pause", job_id, "--reason", "default workspace"], _context(tmp_path)) == 0
+    assert command(["job", "request", "pause", "--reason", "default workspace", job_id], _context(tmp_path)) == 0
     capsys.readouterr()
     request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
     assert request["job_id"] == job_id
@@ -162,11 +163,12 @@ def test_protocol_request_envelopes_and_publish_requests_are_verbatim(tmp_path: 
                 "job",
                 "request-envelopes",
                 "pause",
+                "--workspace",
                 workspace_name,
-                job_id,
                 "--operator=Test User <tester@example.test>",
                 "--reason=protocol",
                 "--json",
+                job_id,
             ],
             _context(tmp_path),
         )
@@ -181,6 +183,7 @@ def test_protocol_request_envelopes_and_publish_requests_are_verbatim(tmp_path: 
             [
                 "job",
                 "publish-requests",
+                "--workspace",
                 workspace_name,
                 "--document",
                 json.dumps(signed, separators=(",", ":")),
@@ -225,6 +228,7 @@ def test_publish_requests_resolves_all_jobs_before_publishing(tmp_path: Path, ca
             [
                 "job",
                 "publish-requests",
+                "--workspace",
                 workspace_name,
                 "--document",
                 json.dumps(request(first, first_id)),

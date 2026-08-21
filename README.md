@@ -15,8 +15,7 @@ It provides the `httk.workflow` Python API in three layers — the language-neut
 filesystem protocol (`httk.workflow.protocol`), the execution and authoring
 surface (`httk.workflow` — `Runner`, `Attempt`), and orchestration and management
 (`Workspace`, `TaskManager`, `collect`, and named submodules) — and registers
-`httk workflow`, the canonical command tree for everything below. The
-`httk-taskmanager` remains installed as an alias of that tree. Legacy
+`httk workflow`, the command tree for everything below. Legacy
 `ht_steps`/`ht_run` workflows are converted to packages and execute through
 the normal manager in the same *httk₂* workspace. Jobs communicate through atomically
 published filesystem state, so interrupted managers and calculations can be
@@ -33,9 +32,9 @@ sweep.
 From nothing to a finished VASP relaxation, without writing a runner:
 
 ```console
-httk project init --name quickstart
+httk project init --name quickstart .
 httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
-httk workflow workspace settings set vasp.command "$PWD/examples/mock_vasp.py"
+httk workflow workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 httk workflow run
 httk workflow collect
 ```
@@ -105,7 +104,7 @@ stay serial within their group while the rest of the suite runs in parallel.
   [migration guide](docs/httk_v1_migration_guide.md).
 
 ```console
-httk workflow project init . --name example
-httk workflow project manifest create
+httk workflow project init --name example .
+httk workflow project manifest create .
 httk workflow workspace status
 ```

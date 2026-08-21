@@ -286,10 +286,10 @@ Then drive it exactly like `docs/quickstart.md`, naming the compiled binary as t
 runner and the mock VASP as the command:
 
 ```console
-httk project init --name relax-fortran
-httk workflow workspace init . --name default
+httk project init --name relax-fortran .
+httk workflow workspace init --name default .
 httk workflow job new --workflow ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workflow workspace settings set vasp.command "$PWD/../mock_vasp.py"
+httk workflow workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
 httk workflow run
 httk workflow collect
 ```

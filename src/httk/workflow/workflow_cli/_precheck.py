@@ -19,7 +19,7 @@ from ..precheck import (
     precheck_jobs,
 )
 from ..workspace import Workspace
-from ._common import _leaf, _local_root, add_workspace_argument
+from ._common import _leaf, _local_root
 
 
 def _summary(findings: list[dict[str, object]]) -> dict[str, int]:
@@ -143,7 +143,11 @@ def build_precheck_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         description="Report declared-environment resolution and runner-reference readiness without changing the workspace",
         handler=handle_precheck,
     )
-    add_workspace_argument(parser, help_text="the workspace to precheck")
+    parser.add_argument(
+        "--workspace",
+        metavar="WORKSPACE",
+        help="the workspace to precheck (default: this project's workspace, or the per-user default)",
+    )
     parser.add_argument("--placement", metavar="PLACEMENT", help="check only jobs at or below this placement")
     parser.add_argument(
         "--runner-search-path",

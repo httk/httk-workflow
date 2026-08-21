@@ -54,7 +54,7 @@ public final class Relax {
             attempt.fail(
                     "vasp.command_missing",
                     "no VASP command is configured: set it with "
-                            + "httk workflow workspace settings set vasp.command '...', or set "
+                            + "httk workflow workspace settings set --key vasp.command --value '...' WORKSPACE, or set "
                             + "HTTK_VASP_COMMAND, or give the job a vasp_command parameter",
                     false);
             return 0;

@@ -115,14 +115,14 @@ def _payload_of(workspace: Workspace, job_id: str) -> Path:
 
 
 def _send(campaign: Campaign, capsys: pytest.CaptureFixture[str]) -> None:
-    argv = ["transfer", "home", "cluster:station", "--job", campaign.job_id, "--json"]
+    argv = ["transfer", "--job", campaign.job_id, "--json", "home", "cluster:station"]
     assert command(argv, campaign.context) == 0
     report = json.loads(capsys.readouterr().out)
     assert [str(entry["job_id"]) for entry in report["moved"]] == [campaign.job_id]
 
 
 def _fetch(campaign: Campaign, capsys: pytest.CaptureFixture[str]) -> dict[str, Any]:
-    argv = ["transfer", "cluster:station", "home", "--json"]
+    argv = ["transfer", "--json", "cluster:station", "home"]
     assert command(argv, campaign.context) == 0
     return json.loads(capsys.readouterr().out)
 
@@ -161,7 +161,7 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     # (c) The managers the operator would start really are submitted, with a
     # script that runs this workspace's manager, and the work itself is then
     # done by the manager that batch script would have exec'd.
-    assert command(["manager", "run", "cluster:station", "--count", "2"], campaign.context) == 0
+    assert command(["manager", "run", "--workspace", "cluster:station", "--count", "2"], campaign.context) == 0
     submitted = json.loads(capsys.readouterr().out)
     assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
     spooled = sorted(remote.spool.glob("*.sbatch"))
@@ -169,7 +169,7 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     script = spooled[0].read_text(encoding="utf-8")
     assert script.startswith("#!/bin/bash -l\n")
     assert f"#SBATCH --chdir={campaign.station.root}" in script
-    assert "exec httk workflow manager run station --workers 2" in script
+    assert "exec httk workflow manager run --workspace station --workers 2" in script
     _run_there(campaign)
     finished = campaign.station.find_marker_by_id(campaign.job_id)
     assert finished is not None and finished.kind == "succeeded"
@@ -192,7 +192,7 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     assert campaign.local.runner_store_path(job.runner_path).is_file()
 
     # (e) An ordinary collect of the local workspace reports it.
-    assert command(["collect", "home", "--state", "succeeded", "--raw"], campaign.context) == 0
+    assert command(["collect", "--workspace", "home", "--state", "succeeded", "--raw"], campaign.context) == 0
     lines = capsys.readouterr().out.splitlines()
     assert json.loads(lines[-1])["format"] == "httk-workflow-collect-summary"
     record_lines = lines[:-1]
@@ -215,10 +215,10 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
 
     # Every leg really used the stand-in transport rather than this filesystem.
     commands = remote.commands()
-    assert any("workspace status station --json" in item for item in commands)
+    assert any("workspace status --json station" in item for item in commands)
     assert any("transfer receive --workspace station --bundle" in item for item in commands)
-    assert any("transfer offer station --destination-workspace-id" in item for item in commands)
-    assert any("transfer retire station" in item for item in commands)
+    assert any("transfer offer --destination-workspace-id" in item and item.endswith(" station") for item in commands)
+    assert any("transfer retire --destination-workspace-id" in item for item in commands)
     assert any("sbatch" in item for item in commands)
     assert any(item.startswith("rsync ") or " rsync " in item for item in commands)
 
@@ -239,7 +239,7 @@ def test_a_banner_on_the_remote_stdout_stops_the_fetch_before_anything_is_import
     monkeypatch.setenv("HTTK_FAKE_SSH_BANNER", "*** Welcome to the fake cluster ***")
     monkeypatch.setenv("HTTK_FAKE_SSH_BANNER_WHEN", "transfer offer")
 
-    argv = ["transfer", "cluster:station", "home", "--json"]
+    argv = ["transfer", "--json", "cluster:station", "home"]
     assert command(argv, campaign.context) == 2
     captured = capsys.readouterr()
     assert "remote offer did not return a transfer offer document" in captured.err

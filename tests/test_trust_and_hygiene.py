@@ -16,7 +16,6 @@ from httk.core.crypto import ed25519_generate_seed, ed25519_public_key, ed25519_
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
-from httk.workflow import cli as native_cli
 from httk.workflow.adapters import add_remote, store_credentials
 from httk.workflow.configuration import (
     CONFIG_KEYS,
@@ -192,13 +191,13 @@ def test_resigning_with_a_fresh_key_is_valid_but_not_trusted(tmp_path: Path, mon
     assert "not among this project's trusted keys" in verification.reason
 
     context = CLIContext("httk", project)
-    assert command(["project", "manifest", "verify", str(project)], context) == 3
+    assert command(["project", "manifest", "verify", str(project)], context) == 1
     assert VALID_UNKNOWN_KEY in capsys.readouterr().out
 
     # Naming the key explicitly is the one-off way to accept it.
     public = project / PROJECT_DIRECTORY / "keys" / "project.pub"
-    assert command(["project", "manifest", "verify", str(project), "--trusted-key", str(public)], context) == 0
-    assert command(["project", "manifest", "verify", str(project), "--trusted-key", forged_key], context) == 0
+    assert command(["project", "manifest", "verify", "--trusted-key", str(public), str(project)], context) == 0
+    assert command(["project", "manifest", "verify", "--trusted-key", forged_key, str(project)], context) == 0
     assert verify_manifest(project, trusted_keys=[forged_key]).verdict == VALID_TRUSTED
 
 
@@ -336,17 +335,20 @@ def test_signed_operator_request_round_trips_and_is_attributed(tmp_path: Path, m
     workspace, job_id = _request_workspace(tmp_path)
     ws = register_ws(None, workspace.root)
     assert (
-        native_cli.main(
+        command(
             [
+                "job",
                 "request",
                 "cancel",
+                "--workspace",
                 ws,
                 job_id,
                 "--operator",
                 "Me <me@example.org>",
                 "--reason",
                 "signed request test",
-            ]
+            ],
+            CLIContext("httk", tmp_path),
         )
         == 0
     )
@@ -369,8 +371,10 @@ def test_unsigned_operator_request_is_still_accepted(tmp_path: Path, monkeypatch
     ws = register_ws(None, workspace.root)
     assert identity_public_key() is None
     arguments = [
+        "job",
         "request",
         "cancel",
+        "--workspace",
         ws,
         job_id,
         "--operator",
@@ -378,7 +382,7 @@ def test_unsigned_operator_request_is_still_accepted(tmp_path: Path, monkeypatch
         "--reason",
         "no key",
     ]
-    assert native_cli.main(arguments) == 0
+    assert command(arguments, CLIContext("httk", tmp_path)) == 0
     document = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
     assert "signature" not in document and "operator_key" not in document
 
@@ -652,7 +656,7 @@ def test_project_show_and_doctor_are_reachable_from_the_command_line(
     context = CLIContext("httk", project)
 
     assert command(["project", "show", "--json"], context) == 0
-    description = _fields(json.loads(capsys.readouterr().out))
+    description = _fields(json.loads(capsys.readouterr().out)[0])
     assert description["format"] == "httk-project-description"
     assert description["project"]["name"] == "described-cli"
 
@@ -665,8 +669,8 @@ def test_project_show_and_doctor_are_reachable_from_the_command_line(
     report = capsys.readouterr().out
     assert "manifest" in report and "problem(s)" in report
 
-    assert command(["project", "doctor", "--repair", "--json"], context) == 0
-    repaired = _fields(json.loads(capsys.readouterr().out))
+    assert command(["project", "doctor", "--repair", "--json", str(project)], context) == 0
+    repaired = _fields(json.loads(capsys.readouterr().out)[0])
     assert repaired["format"] == "httk-project-doctor" and repaired["repair"] is True
 
 
@@ -689,7 +693,7 @@ def test_detached_project_manifests_and_reports_its_recorded_workspace(tmp_path:
     assert _by_check(report)["workspace_default"]["status"] == "ok"
     context = CLIContext("httk", project)
     assert command(["project", "show", "--json"], context) == 0
-    assert json.loads(capsys.readouterr().out)["workspace"]["default"]["name"] == "runs"
+    assert json.loads(capsys.readouterr().out)[0]["workspace"]["default"]["name"] == "runs"
 
 
 def test_remote_show_and_remove_are_reachable_from_the_command_line(
@@ -702,8 +706,8 @@ def test_remote_show_and_remove_are_reachable_from_the_command_line(
     store_credentials(bundle, {"password": "hunter2"})
     context = CLIContext("httk", project)
 
-    assert command(["remote", "show", "cluster", "--json"], context) == 0
-    description = _fields(json.loads(capsys.readouterr().out))
+    assert command(["remote", "show", "--json", "cluster"], context) == 0
+    description = _fields(json.loads(capsys.readouterr().out)[0])
     assert description["name"] == "cluster" and description["scope"] == "project"
 
     assert command(["remote", "show", "cluster"], context) == 0
@@ -711,12 +715,12 @@ def test_remote_show_and_remove_are_reachable_from_the_command_line(
     # The name of a credential is reported; its value never is.
     assert "password=<credential>" in rendered and "hunter2" not in rendered
 
-    assert command(["remote", "show", "nowhere"], context) == 2
+    assert command(["remote", "show", "nowhere"], context) == 1
     assert "unknown remote" in capsys.readouterr().err
 
     # --force skips the confirmation this non-interactive test cannot answer.
-    assert command(["remote", "remove", "cluster"], context) == 2
+    assert command(["remote", "remove", "cluster"], context) == 1
     assert "requires --force" in capsys.readouterr().err
     assert bundle.is_dir()
-    assert command(["remote", "remove", "cluster", "--force"], context) == 0
+    assert command(["remote", "remove", "--force", "cluster"], context) == 0
     assert not bundle.exists()

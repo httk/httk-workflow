@@ -138,7 +138,7 @@ def _start_manager_local_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *
     workspace = Workspace.initialize(tmp_path / "workspace")
     if prelude is not None:
         workspace.set_setting("environment.prelude", prelude)
-    argv = ["httk", "workflow", "manager", "run", "station"]
+    argv = ["httk", "workflow", "manager", "run", "--workspace", "station"]
     captured: list[list[str]] = []
 
     def fake_popen(launch_argv, **kwargs):
@@ -152,12 +152,12 @@ def _start_manager_local_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *
 
 
 def test_start_manager_local_wraps_argv_when_prelude_is_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    manager_argv = adapter_runtime._local_httk(["httk", "workflow", "manager", "run", "station"], {})
+    manager_argv = adapter_runtime._local_httk(["httk", "workflow", "manager", "run", "--workspace", "station"], {})
     launched = _start_manager_local_argv(tmp_path, monkeypatch, prelude="module load VASP/6.2.1")
     assert launched == ["bash", "-lc", 'set -e\nmodule load VASP/6.2.1\nexec "$@"', "bash", *manager_argv]
 
 
 def test_start_manager_local_leaves_argv_bare_without_prelude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    manager_argv = adapter_runtime._local_httk(["httk", "workflow", "manager", "run", "station"], {})
+    manager_argv = adapter_runtime._local_httk(["httk", "workflow", "manager", "run", "--workspace", "station"], {})
     launched = _start_manager_local_argv(tmp_path, monkeypatch, prelude=None)
     assert launched == manager_argv

@@ -270,7 +270,15 @@ def test_manager_reports_runner_not_built_then_uses_registered_artifact(tmp_path
     assert failure["code"] == "runner_not_built"
     recovery = str(failure["message"]).split("run: ", 1)[1]
     recovery_argv = shlex.split(recovery)
-    assert recovery_argv[:6] == ["httk", "workflow", "build", workspace_name, "--store", "group/compiled"]
+    assert recovery_argv[:7] == [
+        "httk",
+        "workflow",
+        "build",
+        "--workspace",
+        workspace_name,
+        "--store",
+        "group/compiled",
+    ]
     assert command(["build", *recovery_argv[3:]], context) == 0
     second = new_job(workspace, package)
     pin_nested(second)

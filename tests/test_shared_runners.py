@@ -386,22 +386,24 @@ def test_runner_publish_command_prints_the_job_reference(tmp_path: Path, capsys)
     ws = register_ws(context, workspace.root)
     runner = _runner_file(tmp_path / "source")
     code = workflow_command(
-        ["runner", "publish", str(runner), "--workspace", ws, "--name", "campaign/step.py"],
+        ["runner", "publish", "--workspace", ws, "--name", "campaign/step.py", "--json", str(runner)],
         context,
     )
     assert code == 0
     reference = json.loads(capsys.readouterr().out)
-    assert reference == {
-        "source": "workspace",
-        "path": "campaign/step.py",
-        "sha256": workspace.publish_runner(runner, name="campaign/step.py")["sha256"],
-    }
+    assert reference == [
+        {
+            "source": "workspace",
+            "path": "campaign/step.py",
+            "sha256": workspace.publish_runner(runner, name="campaign/step.py")["sha256"],
+        }
+    ]
     changed = _runner_file(tmp_path / "other", _OTHER_RUNNER, name="step.py")
     conflict = workflow_command(
-        ["runner", "publish", str(changed), "--workspace", ws, "--name", "campaign/step.py"],
+        ["runner", "publish", "--workspace", ws, "--name", "campaign/step.py", str(changed)],
         context,
     )
-    assert conflict == 2
+    assert conflict == 1
     assert "pass replace to overwrite it" in capsys.readouterr().err
     assert (
         workflow_command(
@@ -414,12 +416,13 @@ def test_runner_publish_command_prints_the_job_reference(tmp_path: Path, capsys)
                 "--name",
                 "campaign/step.py",
                 "--replace",
+                "--json",
             ],
             context,
         )
         == 0
     )
-    assert json.loads(capsys.readouterr().out)["sha256"] != reference["sha256"]
+    assert json.loads(capsys.readouterr().out)[0]["sha256"] != reference[0]["sha256"]
 
 
 def test_detached_transfer_carries_the_workspace_runner_it_references(tmp_path: Path) -> None:
@@ -488,10 +491,10 @@ def test_runner_describe_reports_every_published_reference(tmp_path: Path, capsy
     ]
 
     # One name at a time, and a name that was never published is an error.
-    argv = ["runner", "describe", "campaign/step.py", "--workspace", ws, "--json"]
+    argv = ["runner", "describe", "--workspace", ws, "--json", "campaign/step.py"]
     assert workflow_command(argv, context) == 0
     assert json.loads(capsys.readouterr().out) == [{**second, "kind": "file", "inferred": False}]
-    assert workflow_command(["runner", "describe", "campaign/toolbox", "--workspace", ws, "--json"], context) == 0
+    assert workflow_command(["runner", "describe", "--workspace", ws, "--json", "campaign/toolbox"], context) == 0
     assert json.loads(capsys.readouterr().out) == [{**tree, "kind": "tree", "inferred": True}]
-    assert workflow_command(["runner", "describe", "absent.py", "--workspace", ws], context) == 2
+    assert workflow_command(["runner", "describe", "--workspace", ws, "absent.py"], context) == 1
     assert "no such workspace runner" in capsys.readouterr().err

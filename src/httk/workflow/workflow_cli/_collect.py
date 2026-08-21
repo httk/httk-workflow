@@ -206,9 +206,9 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Stream collected workflow summaries, or raw job records."""
 
     workspace = Workspace(_local_root(arguments, context, action="collect from"), mutable=False)
-    if arguments.into is not None and (arguments.raw or arguments.json):
+    if arguments.into is not None and arguments.raw:
         raise ValueError("--into cannot be combined with --raw")
-    if arguments.degraded and (arguments.raw or arguments.json):
+    if arguments.degraded and arguments.raw:
         raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
     skipped = 0
 
@@ -216,17 +216,13 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
         nonlocal skipped
         skipped += 1
 
-    if arguments.raw or arguments.json:
+    if arguments.raw:
         records = job_records(
             workspace,
             states=arguments.state or DEFAULT_COLLECT_STATES,
             placement=arguments.placement,
             on_skipped=_skip,
         )
-        if arguments.json:
-            # The hidden pure-array compatibility form stays a single JSON value.
-            print(json.dumps([record.as_mapping() for record in records], indent=2, sort_keys=True))
-            return 0
         collected = 0
         for record in records:
             print(json.dumps(record.as_mapping(), sort_keys=True, separators=(",", ":")))
@@ -272,7 +268,11 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
         description="Collect finished jobs from one workflow workspace",
         handler=handle_collect,
     )
-    add_workspace_argument(parser, help_text="the workspace to collect from")
+    parser.add_argument(
+        "--workspace",
+        metavar="WORKSPACE",
+        help="the workspace to collect from (default: this project's workspace, or the per-user default)",
+    )
     parser.add_argument(
         "--state",
         action="append",
@@ -287,8 +287,6 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
         help="print only the degraded per-job lines; the summary still counts the whole sweep",
     )
     parser.add_argument("--raw", action="store_true", help="print raw collect records instead of summaries")
-    parser.add_argument("--jsonl", action="store_true", dest="raw", help=argparse.SUPPRESS)
-    parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--allow-job-collector",
         action="store_true",

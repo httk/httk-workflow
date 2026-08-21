@@ -72,9 +72,11 @@ def test_config_is_xdg_isolated_and_private_key_is_0600(tmp_path: Path, monkeypa
     assert not (tmp_path / ".httk").exists()
 
 
-def test_noninteractive_project_init_requires_explicit_name(tmp_path: Path) -> None:
+def test_noninteractive_project_init_uses_directory_name(tmp_path: Path) -> None:
     context = CLIContext("httk", tmp_path)
-    assert command(["project", "init", str(tmp_path / "project"), "--non-interactive"], context) == 2
+    project = tmp_path / "project"
+    assert command(["project", "init", "--non-interactive", str(project)], context) == 0
+    assert json.loads((project / "httk_project" / "project.json").read_text(encoding="utf-8"))["name"] == "project"
 
 
 def test_manifest_determinism_special_names_exclusions_and_tampering(tmp_path: Path) -> None:
@@ -177,6 +179,21 @@ def test_safe_v1_remote_import_uses_maintained_adapter(tmp_path: Path) -> None:
     assert not (imported / "command").exists()
 
 
+def test_cli_imports_multiple_v1_remotes(tmp_path: Path, capsys) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="legacy-import")
+    sources = [tmp_path / "legacy-one", tmp_path / "legacy-two"]
+    for source in sources:
+        source.mkdir()
+        for executable in ("command", "install", "push", "pull", "start-taskmgr"):
+            (source / executable).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (source / "config").write_text('LOCAL_HTTK_DIR="~/Httk-runs"\n', encoding="utf-8")
+
+    assert command(["remote", "import-v1", *(str(source) for source in sources)], CLIContext("httk", project)) == 0
+    output = capsys.readouterr().out
+    assert all(source.name in output for source in sources)
+
+
 def test_transfer_round_trip_is_idempotent(tmp_path: Path) -> None:
     source = Workspace.initialize(tmp_path / "source")
     destination = Workspace.initialize(tmp_path / "destination")
@@ -213,7 +230,7 @@ def test_tasks_send_uses_adapter_status_push_import_and_ack(tmp_path: Path) -> N
     context = CLIContext("httk", source_root)
     register_ws(context, source_root, "home")
     register_ws(context, destination_root, "station", remote="cluster")
-    assert command(["transfer", "home", "cluster:station", "--job", job_id], context) == 0
+    assert command(["transfer", "--job", job_id, "home", "cluster:station"], context) == 0
     imported = Workspace(destination_root).find_marker_by_id(job_id)
     assert imported is not None and imported.kind == "submitted"
     assert Workspace(source_root).find_marker_by_id(job_id) is None
@@ -251,7 +268,7 @@ def test_transfer_send_resumes_after_copy_before_import(tmp_path: Path, monkeypa
     monkeypatch.setattr(workflow_cli, "run_adapter", interrupt_import)
     # A resumed transfer: an interrupted send, retyped, must pick up where it
     # stopped rather than start a second copy.
-    arguments = ["transfer", "home", "cluster:station", "--job", job_id]
+    arguments = ["transfer", "--job", job_id, "home", "cluster:station"]
     assert command(arguments, context) == 2
     assert Workspace(source_root).find_marker_by_id(job_id) is None
     monkeypatch.setattr(workflow_cli, "run_adapter", real_run_adapter)

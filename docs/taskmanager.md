@@ -4,7 +4,7 @@
 leave behind.* The everyday cycle is four commands:
 
 ```console
-$ httk workflow workspace init . --name default
+$ httk workflow workspace init --name default .
 $ httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
 $ httk workflow run                 # serve jobs until idle (--idle keeps serving)
 $ httk workflow workspace status
@@ -23,7 +23,7 @@ carried by two prelude layers, both run under `set -e` so a failing line aborts
 the job instead of running the calculation in a half-set-up environment:
 
 - **Layer 1, `environment.prelude`** — workspace-wide, applies to every job. Set
-  it with `workspace settings set NAME environment.prelude "…"`. For a **slurm**
+  it with `workspace settings set --key environment.prelude --value "…" NAME`. For a **slurm**
   remote it is written into the generated login-shell submit script, so it runs
   once inside the allocation and the manager and every runner it spawns inherit
   it; for a **local** remote it wraps the manager start; a manager you start
@@ -34,7 +34,7 @@ the job instead of running the calculation in a half-set-up environment:
   with `bash -l` (a login shell, so `module` is available):
 
   ```console
-  $ httk workflow workspace workflow-prelude set default relax-vasp "module load VASP/6.2.1"
+  $ httk workflow workspace workflow-prelude set --workflow relax-vasp --value "module load VASP/6.2.1" default
   ```
 
 Enabling either layer runs the manager and runners under a **login shell**,
@@ -49,5 +49,4 @@ command reference.
 
 The full guide, {doc}`details/taskmanager`, covers workspace naming and
 defaults, submission forms, manager scheduling and capabilities, placement,
-requests, inspection and repair (`fsck`, `gc`, `unlock`), and the
-`httk-taskmanager` compatibility alias.
+requests, inspection and repair (`fsck`, `gc`, `unlock`).

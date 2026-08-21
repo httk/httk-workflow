@@ -189,6 +189,14 @@ def dispatch(parser: argparse.ArgumentParser, argv: Sequence[str], context: CLIC
     """
 
     raw_argv = list(argv)
+    if raw_argv == ["transfer"]:
+        raw_argv.append("--help")
+    if len(raw_argv) > 1 and raw_argv[0] == "transfer" and raw_argv[1] in _TRANSFER_PROTOCOL:
+        try:
+            return _dispatch_transfer_protocol(raw_argv[1:], context)
+        except _ERRORS as exc:
+            print(f"{parser.prog}: {exc}", file=sys.stderr)
+            return 2
     # ``argparse`` does not intermingle an optional workspace positional with
     # the protocol's ``<path> --by-path KEY [VALUE]`` tail. Keep the frozen
     # remote vector and move only this hidden switch for the local parse.

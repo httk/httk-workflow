@@ -11,7 +11,7 @@ from ..packages import load_workflow_package
 from ..postprocessing import DEFAULT_POSTPROCESS_TIMEOUT, PostprocessResult, run_postprocess_script
 from ..scaffold import registered_workflow
 from ..workspace import Workspace
-from ._common import _leaf, _local_root, add_workspace_argument
+from ._common import _leaf, _local_root
 
 #: How much of a failing script's stderr to keep in a report, from its tail.
 _STDERR_TAIL_LIMIT = 2000
@@ -111,7 +111,11 @@ def build_postprocess_parser(subparsers: argparse._SubParsersAction[argparse.Arg
         description="Run a manifest-declared postprocess script against collected jobs",
         handler=handle_postprocess,
     )
-    add_workspace_argument(parser, help_text="postprocess jobs from")
+    parser.add_argument(
+        "--workspace",
+        metavar="WORKSPACE",
+        help="the workspace to postprocess (default: this project's workspace, or the per-user default)",
+    )
     parser.add_argument("--script", required=True, metavar="NAME", help="declared postprocess script name")
     parser.add_argument("--workflow-dir", metavar="PKG", help="use this workflow package for every job")
     parser.add_argument(

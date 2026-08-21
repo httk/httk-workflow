@@ -70,8 +70,8 @@ def test_workflow_describe_reports_manifest_step_drift(tmp_path: Path, capsys) -
     out = capsys.readouterr().out
     assert "WARNING: step drift" in out and "gone" in out
 
-    assert command(["describe", str(package), "--json"], context) == 0
-    described = json.loads(capsys.readouterr().out)
+    assert command(["describe", "--json", str(package)], context) == 0
+    described = json.loads(capsys.readouterr().out)[0]
     assert "gone" in described["manifest_step_drift"]
 
 
@@ -109,6 +109,7 @@ def test_job_new_accepts_workflow_dir_and_batches_parameter_sources(tmp_path: Pa
             [
                 "job",
                 "new",
+                "--workspace",
                 workspace,
                 "--workflow-dir",
                 str(package),
@@ -153,7 +154,17 @@ def test_job_new_batch_reconciles_structure_names_and_reports_skips_and_count(tm
 
     assert (
         command(
-            ["job", "new", workspace, "--workflow-dir", str(package), "--input-from", "structure", str(structures)],
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace,
+                "--workflow-dir",
+                str(package),
+                "--input-from",
+                "structure",
+                str(structures),
+            ],
             context,
         )
         == 0
@@ -182,6 +193,7 @@ def test_job_new_batch_tag_prefixes_each_derived_tag(tmp_path: Path, capsys) -> 
             [
                 "job",
                 "new",
+                "--workspace",
                 workspace,
                 "--workflow-dir",
                 str(package),
@@ -217,6 +229,7 @@ def test_job_new_batch_tag_prefix_stays_within_the_tag_syntax(tmp_path: Path, ca
             [
                 "job",
                 "new",
+                "--workspace",
                 workspace,
                 "--workflow-dir",
                 str(package),
@@ -252,6 +265,7 @@ def test_job_new_batch_reports_partial_progress_before_failing(tmp_path: Path, c
             [
                 "job",
                 "new",
+                "--workspace",
                 workspace,
                 "--workflow-dir",
                 str(package),
@@ -280,6 +294,7 @@ def test_job_new_accepts_a_package_path_and_rejects_workflow_selection_errors(tm
             [
                 "job",
                 "new",
+                "--workspace",
                 workspace,
                 "--workflow",
                 str(package),
@@ -290,14 +305,20 @@ def test_job_new_accepts_a_package_path_and_rejects_workflow_selection_errors(tm
         )
         == 0
     )
-    assert command(["job", "new", workspace, "--workflow", str(package), "--workflow-dir", str(package)], context) == 2
+    assert (
+        command(
+            ["job", "new", "--workspace", workspace, "--workflow", str(package), "--workflow-dir", str(package)],
+            context,
+        )
+        == 2
+    )
     assert "not allowed with argument" in capsys.readouterr().err
-    assert command(["job", "new", workspace], context) == 2
+    assert command(["job", "new", "--workspace", workspace], context) == 2
     assert "one of the arguments --workflow --workflow-dir is required" in capsys.readouterr().err
 
     empty = tmp_path / "not-a-package"
     empty.mkdir()
-    assert command(["job", "new", workspace, "--workflow-dir", str(empty)], context) == 2
+    assert command(["job", "new", "--workspace", workspace, "--workflow-dir", str(empty)], context) == 2
     assert "containing httk_workflow.toml" in capsys.readouterr().err
 
 
@@ -319,8 +340,8 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
     assert "collect hook: yes (collect.py), kind=python" in text
     assert not before.exists()
 
-    assert command(["describe", str(package), "--json"], context) == 0
-    directory = json.loads(capsys.readouterr().out)
+    assert command(["describe", "--json", str(package)], context) == 0
+    directory = json.loads(capsys.readouterr().out)[0]
     assert directory["build"] == {"present": False}
     assert directory["hooks"] == {
         "instantiate": {"present": True, "file": "instantiate.py", "kind": "python", "packaged": False},
@@ -330,15 +351,15 @@ def test_workflow_describe_is_read_only_and_resolves_id_alias_and_directory(tmp_
 
     provider = load_workflow_package(package)
     try:
-        assert command(["describe", "tests.cli.package", "--json"], context) == 0
-        by_id = json.loads(capsys.readouterr().out)
+        assert command(["describe", "--json", "tests.cli.package"], context) == 0
+        by_id = json.loads(capsys.readouterr().out)[0]
         assert by_id["format"] == "httk-workflow-workflow-description"
         assert by_id["format_version"] == 2
         assert by_id["source"]["kind"] == "registered-directory"
         assert by_id["workflow"] == provider.workflow_id
 
-        assert command(["describe", "cli-package", "--json"], context) == 0
-        by_alias = json.loads(capsys.readouterr().out)
+        assert command(["describe", "--json", "cli-package"], context) == 0
+        by_alias = json.loads(capsys.readouterr().out)[0]
         assert by_alias["workflow"] == "tests.cli.package"
     finally:
         scaffold._WORKFLOW_PROVIDERS.pop(provider.workflow_id, None)
@@ -351,8 +372,8 @@ def test_workflow_describe_reports_build_registration(tmp_path: Path, capsys) ->
         + '\n[workflow.build]\ncommand = "python build.py"\nplatform = "linux x86_64"\nartifacts = ["build"]\n',
     )
     context = _context(tmp_path)
-    assert command(["describe", str(package), "--json"], context) == 0
-    described = json.loads(capsys.readouterr().out)
+    assert command(["describe", "--json", str(package)], context) == 0
+    described = json.loads(capsys.readouterr().out)[0]
     assert described["build"] == {
         "present": True,
         "command": "python build.py",
@@ -365,8 +386,8 @@ def test_workflow_describe_reports_build_registration(tmp_path: Path, capsys) ->
 
 def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path: Path, capsys) -> None:
     context = _context(tmp_path)
-    assert command(["describe", "vasp-relax", "--json"], context) == 0
-    packaged = json.loads(capsys.readouterr().out)
+    assert command(["describe", "--json", "vasp-relax"], context) == 0
+    packaged = json.loads(capsys.readouterr().out)[0]
     assert packaged["hooks"]["collect"] == {"present": True, "file": None, "kind": None, "packaged": True}
     assert packaged["hooks"]["instantiate"] == {"present": False, "file": None, "kind": None, "packaged": True}
     assert packaged["inputs"]["structure"]["role"] == "initial_structure"
@@ -392,8 +413,8 @@ def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path:
             '[workflow.collect]\nfile = "collect.py"\n\n', ""
         ),
     )
-    assert command(["describe", str(no_hooks), "--json"], context) == 0
-    directory = json.loads(capsys.readouterr().out)
+    assert command(["describe", "--json", str(no_hooks)], context) == 0
+    directory = json.loads(capsys.readouterr().out)[0]
     assert directory["hooks"] == {
         "instantiate": {"present": False, "file": None, "kind": None, "packaged": False},
         "collect": {"present": False, "file": None, "kind": None, "packaged": False},
@@ -461,9 +482,9 @@ def test_workflow_build_registers_and_lists_a_package(tmp_path: Path, capsys) ->
     name = register_ws(context, workspace.root, "build")
     package = _compiled_cli_package(tmp_path / "package")
 
-    assert command(["build", name, str(package)], context) == 0
+    assert command(["build", "--workspace", name, str(package)], context) == 0
     assert "platform probe" in capsys.readouterr().out
-    assert command(["build", name, "--list"], context) == 0
+    assert command(["build", "--workspace", name, "--list"], context) == 0
     assert "any" in capsys.readouterr().out
 
 
@@ -475,14 +496,14 @@ def test_workflow_build_uses_syntactic_path_detection_and_pointer_listings(tmp_p
     workspace.publish_runner(package, name="bare")
 
     # The existing local directory named ``bare`` must not shadow the store selector.
-    assert command(["build", name, "bare"], context) == 0
+    assert command(["build", "--workspace", name, "bare"], context) == 0
     capsys.readouterr()
-    assert command(["build", name, "./bare"], context) == 0
+    assert command(["build", "--workspace", name, "./bare"], context) == 0
     capsys.readouterr()
     current = next(workspace.runner_builds.rglob("current.json"))
     generation = json.loads(current.read_text(encoding="utf-8"))["generation"]
     (current.parent / generation / "artifacts" / "build.json").write_text("{}", encoding="utf-8")
-    assert command(["build", name, "--list", "--json"], context) == 0
+    assert command(["build", "--workspace", name, "--list", "--json"], context) == 0
     rows = json.loads(capsys.readouterr().out)
     stores = {row["store"] for row in rows}
     assert "bare" in stores and len(stores) == 2
@@ -495,9 +516,9 @@ def test_workflow_build_store_option_handles_nested_selectors(tmp_path: Path, ca
     package = _compiled_cli_package(tmp_path / "nested")
     workspace.publish_runner(package, name="group/nested")
 
-    assert command(["build", name, "--store", "group/nested"], context) == 0
+    assert command(["build", "--workspace", name, "--store", "group/nested"], context) == 0
     capsys.readouterr()
-    assert command(["build", name, "group/nested"], context) == 2
+    assert command(["build", "--workspace", name, "group/nested"], context) == 1
     assert "does not exist" in capsys.readouterr().err
 
 
@@ -506,11 +527,11 @@ def test_workflow_build_refuses_a_buildless_package_and_reports_failures(tmp_pat
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, workspace.root, "build-errors")
     buildless = _package(tmp_path / "buildless")
-    assert command(["build", name, str(buildless)], context) == 2
+    assert command(["build", "--workspace", name, str(buildless)], context) == 1
     assert "[workflow.build]" in capsys.readouterr().err
 
     failed = _compiled_cli_package(tmp_path / "failed", build_command="./missing.sh")
-    assert command(["build", name, str(failed)], context) == 2
+    assert command(["build", "--workspace", name, str(failed)], context) == 1
     assert "missing.sh" in capsys.readouterr().err
 
 
@@ -519,8 +540,8 @@ def test_workflow_build_json_is_one_report(tmp_path: Path, capfd) -> None:
     context = CLIContext("httk", tmp_path)
     name = register_ws(context, workspace.root, "build-json")
     package = _compiled_cli_package(tmp_path / "package-json")
-    assert command(["build", name, str(package), "--json"], context) == 0
+    assert command(["build", "--workspace", name, "--json", str(package)], context) == 0
     captured = capfd.readouterr()
-    report = json.loads(captured.out)
+    report = json.loads(captured.out)[0]
     assert report["platform_tag"] == "any"
     assert "compiler-output" in captured.err

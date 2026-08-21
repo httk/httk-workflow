@@ -316,7 +316,7 @@ def test_cli_job_new_accepts_a_bare_cwl_document(package: Path, workspace: Works
     name = register_ws(CLIContext("httk", tmp_path), workspace.root, "bare-cwl")
     assert (
         command(
-            ["job", "new", name, "--workflow", str(package / "echo.cwl"), "--input", "message=hello"],
+            ["job", "new", "--workspace", name, "--workflow", str(package / "echo.cwl"), "--input", "message=hello"],
             CLIContext("httk", tmp_path),
         )
         == 0
@@ -489,7 +489,7 @@ def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: W
     context = CLIContext("httk", tmp_path)
     workspace_name = register_ws(context, workspace.root, "language-collect-into")
     store_path = tmp_path / "results.sqlite"
-    assert command(["collect", workspace_name, "--into", str(store_path)], context) == 0
+    assert command(["collect", "--workspace", workspace_name, "--into", str(store_path)], context) == 0
     report = json.loads(capsys.readouterr().out.splitlines()[0])
     assert report["outputs"]["spoken"]["type"] == "files"
     assert report["stored"]["entries"]
@@ -751,7 +751,7 @@ def test_cli_job_new_surfaces_preparation_warnings_on_stderr(tmp_path: Path, wor
     name = register_ws(CLIContext("httk", tmp_path), workspace.root, "docker-cli")
     assert (
         command(
-            ["job", "new", name, "--workflow-dir", str(package), "--input", "message=contained"],
+            ["job", "new", "--workspace", name, "--workflow-dir", str(package), "--input", "message=contained"],
             CLIContext("httk", tmp_path),
         )
         == 0

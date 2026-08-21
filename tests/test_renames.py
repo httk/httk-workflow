@@ -72,7 +72,7 @@ def test_the_computer_group_is_gone(isolated: Path) -> None:
 
 def test_adding_a_remote_writes_remote_json_below_remotes(isolated: Path) -> None:
     context = CLIContext("httk", isolated)
-    assert command(["remote", "add", "cluster", "--template", "local"], context) == 0
+    assert command(["remote", "add", "--template", "local", "cluster"], context) == 0
 
     bundle = isolated / PROJECT_DIRECTORY / "remotes" / "cluster"
     assert (bundle / METADATA_FILE).is_file()
@@ -83,7 +83,7 @@ def test_adding_a_remote_writes_remote_json_below_remotes(isolated: Path) -> Non
 
 
 def test_a_global_remote_lands_in_the_configuration_home(isolated: Path) -> None:
-    assert command(["remote", "add", "shared", "--template", "local", "--global"], CLIContext("httk", isolated)) == 0
+    assert command(["remote", "add", "--template", "local", "--global", "shared"], CLIContext("httk", isolated)) == 0
     assert (config_home() / "remotes" / "shared" / METADATA_FILE).is_file()
     assert not (data_home() / "computers").exists()
 
@@ -130,30 +130,12 @@ def test_the_deprecated_python_spellings_are_gone() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _sample(action: str) -> list[str]:
-    """The least one transfer subcommand needs in order to parse."""
-
-    if action == "fetch":
-        return ["--remote", "cluster"]
-    if action == "offer":
-        return ["WS", "--destination-workspace-id", "UUID"]
-    if action == "retire":
-        return ["WS", "JOB"]
-    if action == "receive":
-        return ["--workspace", "/w", "--bundle", "/b"]
-    if action == "send":
-        return ["cluster", "JOB"]
-    return ["cluster"]
-
-
 def test_the_transfer_group_is_the_former_remote_group(tmp_path: Path) -> None:
     """The former send/fetch/offer/retire/status verbs are one ``transfer`` verb now."""
 
     parser = cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
-    # Every former per-verb spelling now resolves to the single transfer handler,
-    # which reads the direction from the two workspace names it is given.
-    for action in ("send", "fetch", "offer", "retire", "start-manager", "status", "receive"):
-        assert parser.parse_args(["transfer", action, *_sample(action)]).handler is cli.handle_transfer
+    parsed = parser.parse_args(["transfer", "--job", "J", "source", "destination"])
+    assert parsed.handler is cli.handle_transfer
     # The superseded per-verb handlers are removed, not merely hidden.
     for name in ("handle_transfer_send", "handle_transfer_fetch", "handle_transfer_operation"):
         assert not hasattr(cli, name), f"workflow_cli still exposes the removed handler {name!r}"
@@ -163,11 +145,11 @@ def test_the_transfer_group_is_the_former_remote_group(tmp_path: Path) -> None:
 
 
 def test_the_transfer_commands_name_a_remote(tmp_path: Path) -> None:
-    """The transfer verb captures its workspace names as a trailing vector."""
+    """The transfer verb captures its source and destination after its options."""
 
     parser = cli.build_parser("httk workflow", CLIContext("httk", tmp_path))
-    assert parser.parse_args(["transfer", "src", "dst"]).args == ["src", "dst"]
-    assert parser.parse_args(["transfer", "cluster", "JOB"]).args == ["cluster", "JOB"]
+    parsed = parser.parse_args(["transfer", "--json", "src", "dst"])
+    assert (parsed.source, parsed.destination, parsed.json) == ("src", "dst", True)
     # The superseded ``--computer`` option is gone.
     with pytest.raises(SystemExit):
         parser.parse_args(["transfer", "--computer", "cluster"])
@@ -190,11 +172,6 @@ def test_the_protocol_vectors_send_the_frozen_transfer_spellings() -> None:
     assert cli.REMOTE_RECEIVE_COMMAND == ("httk", "workflow", "transfer", "receive")
     assert cli.REMOTE_OFFER_COMMAND == ("httk", "workflow", "transfer", "offer")
     assert cli.REMOTE_RETIRE_COMMAND == ("httk", "workflow", "transfer", "retire")
-    # And the frozen spelling really resolves to its handler: the transfer verb's
-    # single handler, which dispatches the hidden ``receive`` protocol inside.
-    parser = cli.build_parser("httk workflow", CLIContext("httk", Path.cwd()))
-    parsed = parser.parse_args(["transfer", "receive", "--workspace", "/w", "--bundle", "/b"])
-    assert parsed.handler is cli.handle_transfer and parsed.args[0] == "receive"
     assert callable(cli.handle_transfer_receive)
 
 
@@ -286,7 +263,9 @@ def test_retired_lifecycle_spellings_are_gone() -> None:
         assert "output_types" not in declaration
     parser = cli.build_parser("httk workflow", CLIContext("httk", Path.cwd()))
     with pytest.raises(SystemExit):
-        parser.parse_args(["job", "new", "WS", "--workflow", "vasp-relax", "--parameter-from", "structure", "x"])
+        parser.parse_args(
+            ["job", "new", "--workspace", "WS", "--workflow", "vasp-relax", "--parameter-from", "structure", "x"]
+        )
     root = Path(httk.workflow.__file__).parents[2]
     retired = re.compile(
         r"\b(?:TemplateProvider|register_template|resolve_template|registered_templates|template_provider|"

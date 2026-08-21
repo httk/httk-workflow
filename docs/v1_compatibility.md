@@ -12,9 +12,9 @@ claim pool with `--pool`.
 
 ```console
 httk workflow workspace init WORKSPACE
-httk workflow job new WORKSPACE --workflow-dir ./legacy-package \
+httk workflow job new --workspace WORKSPACE --workflow-dir ./legacy-package \
   --placement project-a/00/17
-httk workflow run WORKSPACE --pool vasp
+httk workflow run --workspace WORKSPACE --pool vasp
 ```
 
 ## Converted packages
@@ -103,7 +103,7 @@ The v1 language declares these workflow environment entries:
 Override these per job with either the CLI or Python API:
 
 ```console
-httk workflow job new WORKSPACE --workflow-dir ./legacy-package \
+httk workflow job new --workspace WORKSPACE --workflow-dir ./legacy-package \
   --environment httk_v1.timeout=3600
 ```
 
@@ -123,7 +123,7 @@ Bare documents and directories are not packages. Use the generic format switch
 when the path does not carry its language:
 
 ```console
-httk workflow job new WORKSPACE --workflow ./old-task \
+httk workflow job new --workspace WORKSPACE --workflow ./old-task \
   --format httk-v1 --parameter encut=520
 ```
 
@@ -153,9 +153,8 @@ once per task, or accepts an `extract=` callback instead; exactly one of
 the sweep continues.
 
 ```console
-httk workflow v1 collect ROOT --workflow-dir PKG
-httk workflow v1 collect ROOT --workflow-dir PKG --into results.sqlite
-httk workflow v1 collect ROOT --workflow-dir PKG --json
+httk workflow v1 collect --workflow-dir PKG ROOT
+httk workflow v1 collect --workflow-dir PKG --into results.sqlite ROOT
 ```
 
 Manifest-backed identity survives moving the tree. Without a manifest, the

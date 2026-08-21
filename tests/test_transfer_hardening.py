@@ -198,23 +198,23 @@ def test_transfer_adapter_requests_are_exact_argv(tmp_path: Path, monkeypatch: p
             "workflow",
             "transfer",
             "offer",
-            "station",
             "--destination-workspace-id",
             "destination-id",
             "--json",
             "--state",
             "succeeded",
+            "station",
         ),
         (
             "httk",
             "workflow",
             "transfer",
             "retire",
-            "station",
-            job_id,
             "--destination-workspace-id",
             "destination-id",
             "--json",
+            "station",
+            job_id,
         ),
         (
             "httk",
@@ -540,10 +540,10 @@ def test_local_transfer_command_reminds_after_importing_a_build_declaring_runner
     source_name = register_ws(context, source.root, "transfer-source")
     destination_name = register_ws(context, destination.root, "transfer-destination")
 
-    assert command(["transfer", source_name, destination_name, "--job", job.job_id], context) == 0
+    assert command(["transfer", "--job", job.job_id, source_name, destination_name], context) == 0
     output = capsys.readouterr().err
     assert "workflow compiled.transfer.command declares a build" in output
-    assert "httk workflow build transfer-destination --store" in output
+    assert "httk workflow build --workspace transfer-destination --store" in output
 
 
 def test_receive_does_not_remind_for_buildless_runner_trees(tmp_path: Path, capsys) -> None:

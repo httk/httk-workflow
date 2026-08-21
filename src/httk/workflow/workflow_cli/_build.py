@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
@@ -15,26 +16,10 @@ from ..introspection import resolve_job
 from ..packages import read_build_spec, source_tree_digest
 from ..scaffold import resolve_workflow
 from ..workspace import Workspace
-from ._common import _add_by_path_argument, _leaf, _local_root
+from ._common import _ERRORS, _add_by_path_argument, _leaf, _local_root
 
 
-def _targets(arguments: argparse.Namespace) -> tuple[str | None, str | None]:
-    values = list(arguments.targets)
-    if arguments.store is not None:
-        if arguments.list or len(values) > 1:
-            raise ValueError("workflow build --store accepts only an optional WORKSPACE")
-        return (values[0] if values else None), None
-    if arguments.list:
-        if len(values) > 1:
-            raise ValueError("workflow build --list accepts at most one WORKSPACE")
-        return (values[0] if values else None), None
-    if not values or len(values) > 2:
-        raise ValueError("workflow build requires TARGET, with optional WORKSPACE before it")
-    return (None, values[0]) if len(values) == 1 else (values[0], values[1])
-
-
-def _workspace(arguments: argparse.Namespace, context: CLIContext, name: str | None) -> Workspace:
-    arguments.workspace = name
+def _workspace(arguments: argparse.Namespace, context: CLIContext) -> Workspace:
     return Workspace(_local_root(arguments, context, action="build workflow runners in it"))
 
 
@@ -151,41 +136,54 @@ def _resolve_store_target(workspace: Workspace, store: str) -> tuple[Path, PureP
 def handle_build(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Build a workflow package in the foreground and register its artifacts."""
 
-    workspace_name, target = _targets(arguments)
-    workspace = _workspace(arguments, context, workspace_name)
+    workspace = _workspace(arguments, context)
     if arguments.list:
         return _list_builds(workspace, as_json=arguments.json)
-    if arguments.store is not None:
-        store_path, store_relative, spec, source_sha256 = _resolve_store_target(workspace, arguments.store)
-    else:
-        assert target is not None
-        store_path, store_relative, spec, source_sha256 = _resolve_target(workspace, target, base=Path(context.cwd))
-    artifacts = register_build(
-        workspace,
-        store_path,
-        store_relative,
-        spec,
-        source_sha256=source_sha256,
-        stdout_to_stderr=arguments.json,
-    )
-    stamp = json.loads((artifacts.parent / "build.json").read_text(encoding="utf-8"))
-    result = {
-        "store": store_relative.as_posix(),
-        "platform": stamp["platform"],
-        "platform_output": stamp["platform_output"],
-        "platform_tag": stamp["platform_tag"],
-        "artifacts": str(artifacts),
-        "built_at": stamp["built_at"],
-    }
+    targets = [arguments.store] if arguments.store is not None else arguments.targets
+    if not targets:
+        raise ValueError("workflow build requires at least one TARGET unless --list is given")
+    results: list[dict[str, object]] = []
+    failed = False
+    for target in targets:
+        try:
+            if arguments.store is not None:
+                store_path, store_relative, spec, source_sha256 = _resolve_store_target(workspace, target)
+            else:
+                store_path, store_relative, spec, source_sha256 = _resolve_target(
+                    workspace, target, base=Path(context.cwd)
+                )
+            artifacts = register_build(
+                workspace,
+                store_path,
+                store_relative,
+                spec,
+                source_sha256=source_sha256,
+                stdout_to_stderr=arguments.json,
+            )
+            stamp = json.loads((artifacts.parent / "build.json").read_text(encoding="utf-8"))
+            result = {
+                "target": target,
+                "store": store_relative.as_posix(),
+                "platform": stamp["platform"],
+                "platform_output": stamp["platform_output"],
+                "platform_tag": stamp["platform_tag"],
+                "artifacts": str(artifacts),
+                "built_at": stamp["built_at"],
+            }
+            results.append(result)
+            if not arguments.json:
+                print(f"{target}:")
+                print(
+                    f"platform probe: command={stamp['platform'] or 'any'} "
+                    f"output={stamp['platform_output']!r} tag={stamp['platform_tag']}"
+                )
+                print(f"registered: {artifacts}")
+        except _ERRORS as exc:
+            failed = True
+            print(f"{target}: {exc}", file=sys.stderr)
     if arguments.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
-    else:
-        print(
-            f"platform probe: command={stamp['platform'] or 'any'} "
-            f"output={stamp['platform_output']!r} tag={stamp['platform_tag']}"
-        )
-        print(f"registered: {artifacts}")
-    return 0
+        print(json.dumps(results, indent=2, sort_keys=True))
+    return 1 if failed else 0
 
 
 def build_build_parser(subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]") -> None:
@@ -201,8 +199,13 @@ def build_build_parser(subparsers: "argparse._SubParsersAction[argparse.Argument
     parser.add_argument(
         "targets",
         nargs="*",
-        metavar="[WORKSPACE] TARGET",
-        help="a package path (absolute, ./, ../, or containing /), store runner path, or job reference; --list accepts WORKSPACE",
+        metavar="TARGET",
+        help="a package path (absolute, ./, ../, or containing /), store runner path, or job reference",
+    )
+    parser.add_argument(
+        "--workspace",
+        metavar="WORKSPACE",
+        help="the workspace to build workflow runners in (default: this project's workspace, or the per-user default)",
     )
     _add_by_path_argument(parser)
     parser.add_argument(

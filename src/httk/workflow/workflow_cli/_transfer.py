@@ -4,6 +4,9 @@ import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
+from contextlib import redirect_stdout
+from copy import copy
+from io import StringIO
 from pathlib import PurePosixPath
 
 from .._runner_builds import workspace_build_command
@@ -16,7 +19,7 @@ from ..precheck import environment_findings
 from ..transfers import DEFAULT_OFFER_STATES, TransferCandidate, offer_transfers, select_transfer_jobs
 from ._common import *
 from ._common import (
-    _TRANSFER_PROTOCOL,
+    _ERRORS,
     _add_adapter_timeout,
     _field,
     _group,
@@ -63,6 +66,44 @@ def _relay_success_stderr(result: Mapping[str, object]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _remote_batch(
+    arguments: argparse.Namespace,
+    context: CLIContext,
+    handler: Any,
+    attribute: str,
+    *,
+    json_output: bool = False,
+) -> int:
+    """Run a remote leaf sequentially, preserving the existing one-remote code."""
+
+    targets = getattr(arguments, attribute)
+    assert isinstance(targets, list)
+    json_output |= getattr(arguments, "json", False)
+    results: list[object] = []
+    failed = False
+    multiple = len(targets) > 1
+    for target in targets:
+        item = copy(arguments)
+        setattr(item, attribute, target)
+        try:
+            if json_output:
+                output = StringIO()
+                with redirect_stdout(output):
+                    code = handler(item, context)
+                results.append(json.loads(output.getvalue()))
+            else:
+                if multiple:
+                    print(f"== remote {target} ==")
+                code = handler(item, context)
+            failed |= code != 0
+        except _ERRORS as exc:
+            print(f"remote {target}: {exc}", file=sys.stderr)
+            failed = True
+    if json_output:
+        print(json.dumps(results, indent=2, sort_keys=True))
+    return 1 if failed else 0
+
+
 def handle_remote_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     """List the remotes this project and this user define."""
 
@@ -73,6 +114,8 @@ def handle_remote_list(arguments: argparse.Namespace, context: CLIContext) -> in
 def handle_remote_add(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Create one remote bundle from a packaged adapter template."""
 
+    if isinstance(arguments.name, list):
+        return _remote_batch(arguments, context, handle_remote_add, "name")
     template = _required(
         arguments.template,
         "adapter template",
@@ -98,6 +141,8 @@ def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIC
     installs anything.
     """
 
+    if isinstance(arguments.remote, list):
+        return _remote_batch(arguments, context, handle_remote_adapter_operation, "remote", json_output=True)
     operation = arguments.operation
     target = resolve_remote(arguments.remote, project=context.cwd)
     settings = _settings(arguments.set)
@@ -135,12 +180,16 @@ def handle_remote_adapter_operation(arguments: argparse.Namespace, context: CLIC
             f"configured; verify httk is available there with: httk workflow remote check {arguments.remote}",
             file=sys.stderr,
         )
-    return 0
+    return 1 if result.get("returncode") not in (None, 0) else 0
 
 
 def handle_remote_import_v1(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Map one recognized legacy httk v1 computer bundle into a remote."""
 
+    if isinstance(arguments.source, list):
+        if arguments.name and len(arguments.source) != 1:
+            raise ValueError("remote import-v1 --name requires exactly one SOURCE")
+        return _remote_batch(arguments, context, handle_remote_import_v1, "source")
     print(
         import_v1_remote(
             arguments.source,
@@ -184,6 +233,8 @@ def _render_remote(description: dict[str, Any]) -> str:
 def handle_remote_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Describe one remote: where it lives, what it is, how it is configured."""
 
+    if isinstance(arguments.name, list):
+        return _remote_batch(arguments, context, handle_remote_show, "name")
     description = describe_remote(arguments.name, project=context.cwd)
     print(json.dumps(description, indent=2, sort_keys=True) if arguments.json else _render_remote(description))
     return 0
@@ -197,6 +248,8 @@ def handle_remote_remove(arguments: argparse.Namespace, context: CLIContext) -> 
     leave that transfer with no way home.
     """
 
+    if isinstance(arguments.name, list):
+        return _remote_batch(arguments, context, handle_remote_remove, "name", json_output=True)
     if not arguments.force:
         if not sys.stdin.isatty():
             raise ValueError(f"removing the remote {arguments.name!r} without a terminal requires --force")
@@ -235,7 +288,7 @@ def build_remote_parser(
         description="Create one remote bundle from a packaged adapter template",
         handler=handle_remote_add,
     )
-    add.add_argument("name", metavar="NAME", help="the name this remote is addressed by")
+    add.add_argument("name", metavar="NAME", nargs="+", help="the name this remote is addressed by")
     add.add_argument(
         "--template",
         metavar="TEMPLATE",
@@ -267,7 +320,9 @@ def build_remote_parser(
             handler=handle_remote_adapter_operation,
         )
         parser.set_defaults(operation=operation)
-        parser.add_argument("remote", metavar="NAME", help="the remote name; ':' addresses a workspace on a remote")
+        parser.add_argument(
+            "remote", metavar="NAME", nargs="+", help="the remote name; ':' addresses a workspace on a remote"
+        )
         parser.add_argument(
             "--set",
             action="append",
@@ -286,11 +341,11 @@ def build_remote_parser(
         group,
         "import-v1",
         summary="map a legacy computer bundle",
-        description="Map one recognized legacy httk v1 computer bundle into a remote adapter bundle",
+        description="Map recognized legacy httk v1 computer bundles into remote adapter bundles",
         handler=handle_remote_import_v1,
     )
-    imported.add_argument("source", metavar="SOURCE", help="the legacy computer directory to read")
-    imported.add_argument("--name", metavar="NAME", help="the name to define (default: the legacy one)")
+    imported.add_argument("source", metavar="SOURCE", nargs="+", help="legacy computer directories to read")
+    imported.add_argument("--name", metavar="NAME", help="the name to define for one source (default: the legacy one)")
     imported.add_argument(
         "--global",
         dest="global_scope",
@@ -305,7 +360,7 @@ def build_remote_parser(
         description="Describe one remote: where it lives, what it is, and how it is configured",
         handler=handle_remote_show,
     )
-    show.add_argument("name", metavar="NAME", help="the remote to describe")
+    show.add_argument("name", metavar="NAME", nargs="+", help="the remote to describe")
     show.add_argument("--json", action="store_true", help="print the description as one JSON document")
 
     remove = _leaf(
@@ -315,7 +370,7 @@ def build_remote_parser(
         description="Remove one remote bundle, refusing while a sealed transfer still needs it",
         handler=handle_remote_remove,
     )
-    remove.add_argument("name", metavar="NAME", help="the remote to remove")
+    remove.add_argument("name", metavar="NAME", nargs="+", help="the remote to remove")
     remove.add_argument(
         "--force",
         action="store_true",
@@ -422,15 +477,18 @@ def _remote_workspace_settings(target: Any, name: str, *, timeout: float | None)
     result = read_adapter(
         target.bundle,
         "invoke",
-        {"argv": [*REMOTE_WORKSPACE_SETTINGS_COMMAND, "show", name, "--json"]},
+        {"argv": [*REMOTE_WORKSPACE_SETTINGS_COMMAND, "show", "--json", name]},
         timeout=timeout,
     )
     if result.get("returncode") != 0:
         raise RuntimeError(f"remote destination settings read failed: {result.get('stderr', '')}")
     try:
-        value = json.loads(str(result.get("stdout", "")))
+        values = json.loads(str(result.get("stdout", "")))
     except json.JSONDecodeError as exc:
         raise ValueError("remote destination settings were not a JSON object") from exc
+    if not isinstance(values, list) or len(values) != 1:
+        raise ValueError("remote destination settings were not a JSON object")
+    value = values[0]
     if not isinstance(value, dict):
         raise ValueError("remote destination settings were not a JSON object")
     return value
@@ -673,7 +731,6 @@ def _remote_offer(
 
     argv = [
         *REMOTE_OFFER_COMMAND,
-        remote_name,
         "--destination-workspace-id",
         destination_workspace_id,
         "--json",
@@ -692,6 +749,7 @@ def _remote_offer(
         argv += ["--environment-settings", json.dumps(environment_settings, sort_keys=True, separators=(",", ":"))]
     if strict_environment:
         argv += ["--strict-environment"]
+    argv.append(remote_name)
     offered = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=timeout)
     if offered.get("returncode") != 0:
         raise RuntimeError(f"remote offer failed: {offered.get('stderr', '')}")
@@ -750,11 +808,11 @@ def _remote_retire(
         return []
     argv = [
         *REMOTE_RETIRE_COMMAND,
-        remote_name,
-        *job_ids,
         "--destination-workspace-id",
         destination_workspace_id,
         "--json",
+        remote_name,
+        *job_ids,
     ]
     response = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=timeout)
     if response.get("returncode") != 0:
@@ -983,62 +1041,14 @@ def handle_transfer(arguments: argparse.Namespace, context: CLIContext) -> int:
     and ``retire`` spellings are the frozen protocol one machine runs on another.
     """
 
-    tokens = list(arguments.args)
-    if tokens and tokens[0] in _TRANSFER_PROTOCOL:
-        return _dispatch_transfer_protocol(tokens, context)
-    return _run_transfer_verb(tokens, context, getattr(arguments, "help_parser", None))
+    return _run_transfer_verb(arguments, context)
 
 
 def _run_transfer_verb(
-    tokens: Sequence[str],
+    arguments: argparse.Namespace,
     context: CLIContext,
-    help_parser: argparse.ArgumentParser | None,
 ) -> int:
-    """Parse and run the ``transfer SRC DST`` verb."""
-
-    if not tokens:
-        if help_parser is not None:
-            help_parser.print_help()
-        return 0
-    parser = argparse.ArgumentParser(prog="httk workflow transfer", description="Move jobs between two workspaces")
-    parser.add_argument("source", metavar="SRC", help="the registered workspace the jobs leave")
-    parser.add_argument("destination", metavar="DST", help="the registered workspace the jobs arrive in")
-    parser.add_argument(
-        "--job",
-        action="append",
-        default=[],
-        dest="jobs",
-        metavar="JOB_ID",
-        help="a job to move (repeatable)",
-    )
-    parser.add_argument(
-        "--state",
-        action="append",
-        metavar="STATE",
-        choices=COLLECTABLE_KINDS,
-        help=f"state kind to move when fetching (repeatable, default: {', '.join(DEFAULT_OFFER_STATES)})",
-    )
-    parser.add_argument(
-        "--placement",
-        metavar="PLACEMENT",
-        help="move only jobs at or below this placement",
-    )
-    parser.add_argument(
-        "--destination-placement",
-        metavar="PLACEMENT",
-        help="where the jobs land (default: their placement)",
-    )
-    _add_adapter_timeout(parser)
-    parser.add_argument(
-        "--strict-environment",
-        action="store_true",
-        help="block before moving state when destination environment precheck is unavailable or unresolved",
-    )
-    parser.add_argument("--json", action="store_true", help="print what moved as one JSON document")
-    try:
-        arguments = parser.parse_args(list(tokens))
-    except SystemExit as exc:
-        return exc.code if isinstance(exc.code, int) else 2
+    """Run the parsed ``transfer [OPTIONS] SRC DST`` verb."""
 
     source_binding = resolve_workspace(arguments.source, project=context.cwd)
     destination_binding = resolve_workspace(arguments.destination, project=context.cwd)
@@ -1182,30 +1192,46 @@ def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> i
 def build_transfer_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
 ) -> None:
-    """Declare the ``transfer`` verb: move jobs between two registered workspaces.
-
-    ``transfer`` takes two workspace names and a few options, so it is one leaf
-    with a trailing argument vector its handler parses. That vector also carries
-    the hidden ``receive``/``offer``/``retire`` protocol spellings one machine
-    runs on another over an adapter, named by the ``REMOTE_*_COMMAND`` vectors
-    above; a workspace can therefore never be named after one of them.
-    """
+    """Declare the ``transfer`` verb: move jobs between two registered workspaces."""
 
     transfer = _leaf(
         subparsers,
         "transfer",
         summary="move jobs between two registered workspaces",
         description=(
-            "Move jobs between two registered workspaces: `transfer SRC DST`. It works whichever way the "
+            "Move jobs between two registered workspaces: `transfer [OPTIONS] SRC DST`. It works whichever way the "
             "workspaces point — local to remote, remote to local, local to local, or remote to remote "
             "(relayed through this client). The hidden receive/offer/retire spellings are protocol."
         ),
         handler=handle_transfer,
     )
-    transfer.set_defaults(help_parser=transfer)
+    transfer.add_argument("source", metavar="SRC", help="the registered workspace the jobs leave")
+    transfer.add_argument("destination", metavar="DST", help="the registered workspace the jobs arrive in")
     transfer.add_argument(
-        "args",
-        nargs=argparse.REMAINDER,
-        metavar="SRC DST [--job JOB_ID] [--state STATE] [--placement P]",
-        help="the source and destination workspace names, and how much to move",
+        "--job",
+        action="append",
+        default=[],
+        dest="jobs",
+        metavar="JOB_ID",
+        help="a job to move (repeatable)",
     )
+    transfer.add_argument(
+        "--state",
+        action="append",
+        metavar="STATE",
+        choices=COLLECTABLE_KINDS,
+        help=f"state kind to move when fetching (repeatable, default: {', '.join(DEFAULT_OFFER_STATES)})",
+    )
+    transfer.add_argument("--placement", metavar="PLACEMENT", help="move only jobs at or below this placement")
+    transfer.add_argument(
+        "--destination-placement",
+        metavar="PLACEMENT",
+        help="where the jobs land (default: their placement)",
+    )
+    _add_adapter_timeout(transfer)
+    transfer.add_argument(
+        "--strict-environment",
+        action="store_true",
+        help="block before moving state when destination environment precheck is unavailable or unresolved",
+    )
+    transfer.add_argument("--json", action="store_true", help="print what moved as one JSON document")

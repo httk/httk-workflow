@@ -8,11 +8,11 @@ Build and register the compiled runner once per platform class, then publish a
 job and start a manager:
 
 ```console
-httk workflow build WORKSPACE ./relax_cpp
-httk workflow job new WORKSPACE --workflow-dir ./relax_cpp --step prepare \
+httk workflow build --workspace WORKSPACE ./relax_cpp
+httk workflow job new --workspace WORKSPACE --workflow-dir ./relax_cpp --step prepare \
     --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workflow run WORKSPACE
-httk workflow collect WORKSPACE
+httk workflow run --workspace WORKSPACE
+httk workflow collect --workspace WORKSPACE
 ```
 
 The manifest's `platform = "uname -sm"` records which platform class produced
