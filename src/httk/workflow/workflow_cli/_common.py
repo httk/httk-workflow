@@ -42,7 +42,6 @@ from .._logging import LOG_LEVELS, add_log_file, configure_logging
 from .._manager_runners import RUNNER_TREE_ENTRY
 from .._util import read_json, utc_now, write_json_atomic
 from ..adapters import (
-    REMOTE_JOB_REQUEST_COMMAND,
     REMOTE_MANAGER_COMMAND,
     REMOTE_OFFER_COMMAND,
     REMOTE_RECEIVE_COMMAND,

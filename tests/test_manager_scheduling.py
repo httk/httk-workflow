@@ -1612,6 +1612,24 @@ def test_apply_io_failure_leaves_request_recoverable_for_next_pass(
         assert workspace.find_marker_by_id(job_id).kind == "cancelled"  # type: ignore[union-attr]
 
 
+def test_malformed_expected_generation_is_quarantined(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="request-bad-generation")
+    workspace.submit(payload, "project/request-bad-generation")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        marker = workspace.find_marker_by_id(job_id)
+        assert marker is not None
+        request_path = _publish_cancel(workspace, marker, expected_generation={})
+        assert manager._handle_requests() is True
+
+    assert not request_path.exists()
+    reports = list((workspace.control / "quarantine").glob("*/report.json"))
+    assert len(reports) == 1
+    assert "expected_generation" in json.loads(reports[0].read_text(encoding="utf-8"))["reason"]
+
+
 def test_owner_request_waits_for_owner_manager(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="request-deferred")

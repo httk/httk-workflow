@@ -1,5 +1,6 @@
 """CLI behavior for repeatable operator requests and pause waiting."""
 
+import argparse
 import json
 import time
 import uuid
@@ -9,7 +10,13 @@ import pytest
 from httk.core.cli import CLIContext
 
 from httk.workflow import TaskManager, Workspace
-from httk.workflow.configuration import ensure_identity_key, identity_key_paths, identity_public_key, write_config
+from httk.workflow.configuration import (
+    ensure_identity_key,
+    identity_key_paths,
+    identity_public_key,
+    sign_document,
+    write_config,
+)
 from httk.workflow.registry import create_workspace
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import command
@@ -122,6 +129,148 @@ def test_repeatable_job_ids_publish_one_request_and_path_each(tmp_path: Path, ca
     assert len(list((workspace.control / "requests" / "ready").iterdir())) == 2
 
 
+def test_job_request_accepts_tag_prefix_selector(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "tagged")
+    workspace.submit(payload, "project/tagged")
+
+    assert command(_request_args(workspace_name, "tagged"), _context(tmp_path)) == 0
+    capsys.readouterr()
+    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    assert request["job_id"] == job_id
+
+
+def test_protocol_request_envelopes_and_publish_requests_are_verbatim(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "protocol")
+    workspace.submit(payload, "project/protocol")
+
+    assert (
+        command(
+            [
+                "job",
+                "request-envelopes",
+                workspace_name,
+                job_id,
+                "pause",
+                "--operator=Test User <tester@example.test>",
+                "--reason=protocol",
+                "--json",
+            ],
+            _context(tmp_path),
+        )
+        == 0
+    )
+    envelope_document = json.loads(capsys.readouterr().out)
+    assert envelope_document["format"] == "httk-workflow-request-envelopes"
+    envelope = envelope_document["envelopes"][0]
+    signed = sign_document(envelope, seed_path=identity_key_paths("tester")[0])
+    assert (
+        command(
+            [
+                "job",
+                "publish-requests",
+                workspace_name,
+                "--document",
+                json.dumps(signed, separators=(",", ":")),
+            ],
+            _context(tmp_path),
+        )
+        == 0
+    )
+    capsys.readouterr()
+    stored = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    assert stored == signed
+
+
+def test_publish_requests_resolves_all_jobs_before_publishing(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, first_id = _payload(tmp_path / "source", "first-protocol")
+    workspace.submit(payload, "project/first-protocol")
+    payload, second_id = _payload(tmp_path / "source", "second-protocol")
+    workspace.submit(payload, "project/second-protocol")
+    first = workspace.find_marker_by_id(first_id)
+    second = workspace.find_marker_by_id(second_id)
+    assert first is not None and second is not None
+
+    def request(marker, job_id: str) -> dict[str, object]:
+        return {
+            "format": "httk-workflow-request",
+            "format_version": 2,
+            "request_id": str(uuid.uuid4()),
+            "job_id": job_id,
+            "job_key": marker.job_key,
+            "placement": marker.placement.as_posix(),
+            "expected_generation": marker.generation,
+            "expected_record_ref": marker.record_ref,
+            "action": "pause",
+            "operator": "Test User <tester@example.test>",
+            "reason": "protocol",
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+
+    assert (
+        command(
+            [
+                "job",
+                "publish-requests",
+                workspace_name,
+                "--document",
+                json.dumps(request(first, first_id)),
+                "--document",
+                json.dumps(request(second, str(uuid.uuid4()))),
+            ],
+            _context(tmp_path),
+        )
+        == 2
+    )
+    capsys.readouterr()
+    assert not list((workspace.control / "requests" / "ready").iterdir())
+
+
+def test_remote_envelope_correspondence_keeps_tag_prefixes_and_rejects_impersonation(
+    tmp_path: Path,
+) -> None:
+    workspace, _ = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "correspondence")
+    workspace.submit(payload, "project/correspondence")
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None
+    envelope = {
+        "format": "httk-workflow-request",
+        "format_version": 2,
+        "request_id": str(uuid.uuid4()),
+        "job_id": marker.job_id,
+        "job_key": marker.job_key,
+        "placement": marker.placement.as_posix(),
+        "expected_generation": marker.generation,
+        "expected_record_ref": marker.record_ref,
+        "action": "pause",
+        "operator": "Test User <tester@example.test>",
+        "reason": "correspondence",
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+    arguments = argparse.Namespace(
+        job_id=[marker.job_key.split("--", 1)[0]],
+        action="pause",
+        reason="correspondence",
+        priority=None,
+        step=None,
+        force=False,
+    )
+    job_cli._validate_remote_envelopes([envelope], arguments, "Test User <tester@example.test>")
+
+    other_id = str(uuid.uuid4())
+    impersonation = {**envelope, "job_id": other_id, "job_key": f"{job_id}--{other_id}"}
+    arguments.job_id = [job_id]
+    with pytest.raises(ValueError, match="UUID selector"):
+        job_cli._validate_remote_envelopes([impersonation], arguments, "Test User <tester@example.test>")
+
+    mismatch = {**envelope, "job_id": other_id, "job_key": f"correspondence--{other_id}"}
+    with pytest.raises(ValueError, match="UUID selector"):
+        job_cli._validate_remote_envelopes([mismatch], arguments, "Test User <tester@example.test>")
+
+
 def test_default_operator_identity_is_recorded_and_signs_request(tmp_path: Path) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", "default")
@@ -132,6 +281,20 @@ def test_default_operator_identity_is_recorded_and_signs_request(tmp_path: Path)
     assert request["operator"] == "Test User <tester@example.test>"
     assert request["operator_key"] == identity_public_key(identity_key_paths("tester")[0])
     assert "signature" in request
+
+
+def test_configured_identity_without_key_fails_loudly(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "missing-key")
+    workspace.submit(payload, "project/missing-key")
+    key_path = identity_key_paths("tester")[0]
+    key_path.unlink()
+
+    assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 2
+    error = capsys.readouterr().err
+    assert f"identity 'tester' has no key file at {key_path}" in error
+    assert "config identity remove tester" in error and "config identity add tester" in error
+    assert not list((workspace.control / "requests" / "ready").iterdir())
 
 
 def test_named_operator_identity_selects_its_key(tmp_path: Path) -> None:

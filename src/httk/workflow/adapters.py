@@ -31,7 +31,8 @@ __all__ = [
     "CREDENTIALS_FILE",
     "METADATA_FILE",
     "PERSISTABLE_REMOTE_SETTINGS",
-    "REMOTE_JOB_REQUEST_COMMAND",
+    "REMOTE_JOB_PUBLISH_REQUESTS_COMMAND",
+    "REMOTE_JOB_REQUEST_ENVELOPES_COMMAND",
     "REMOTE_MANAGER_COMMAND",
     "REMOTE_OFFER_COMMAND",
     "REMOTE_RECEIVE_COMMAND",
@@ -141,7 +142,8 @@ REMOTE_STATUS_COMMAND = ("httk", "workflow", "workspace", "status")
 REMOTE_WORKSPACE_SETTINGS_COMMAND = ("httk", "workflow", "workspace", "settings")
 REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND = ("httk", "workflow", "workspace", "workflow-prelude")
 REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
-REMOTE_JOB_REQUEST_COMMAND = ("httk", "workflow", "job", "request")
+REMOTE_JOB_REQUEST_ENVELOPES_COMMAND = ("httk", "workflow", "job", "request-envelopes")
+REMOTE_JOB_PUBLISH_REQUESTS_COMMAND = ("httk", "workflow", "job", "publish-requests")
 
 
 def submit_remote_managers(
