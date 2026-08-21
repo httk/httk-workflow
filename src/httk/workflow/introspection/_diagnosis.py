@@ -894,6 +894,14 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
     kind = marker.kind
     blocked = kind not in {"claimed", "running", "committing", "succeeded"}
     summary = f"state {kind}"
+    pause_requested = state.get("pause_requested")
+    if isinstance(pause_requested, Mapping):
+        report.check(
+            "pause requested",
+            None,
+            f"by {pause_requested.get('operator') or '-'} ({pause_requested.get('reason') or '-'})"
+            "; will pause at the next attempt boundary",
+        )
     try:
         owner_uid: int | None = marker.path.lstat().st_uid
     except FileNotFoundError:

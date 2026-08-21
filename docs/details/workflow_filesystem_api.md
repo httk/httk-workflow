@@ -777,6 +777,10 @@ Every state frame includes:
 `data_generation` is omitted or `null` when `job.json` declares
 `data.mode: "none"`.
 
+An in-flight operator pause adds the optional `pause_requested` member to the
+state frame; it is carried to the next attempt boundary, then consumed when the
+job enters `paused`, while a terminal outcome supersedes it.
+
 State frames form a backwards-linked history across writer segments. Failure,
 join, operator, and outcome details are embedded in the applicable state frame
 or in another journal frame referenced by it. They do not create per-job
@@ -1083,6 +1087,8 @@ cancellation
 
 operator moves that do not change the kind, or only queue the job
   submitted | ready | waiting ─pause──────────────────────────────> paused
+  claimed | running | committing ─pause───────────────────────────> same kind (deferred)
+  ready | waiting ─attempt boundary───────────────────────────────> paused (when deferred)
   submitted | ready | waiting | paused | failed ─set_priority────> the same kind
 ```
 
@@ -1112,6 +1118,7 @@ Every transition of the core profile, exhaustively:
 | `cancelling` | `cancelled` | The exit of the fenced attempt was verified. |
 | any nonterminal | `cancelled` | Operator `cancel` where no live attempt has to be stopped first. |
 | `submitted`, `ready`, `waiting` | `paused` | Operator `pause`. |
+| `claimed`, `running`, `committing` | the same kind | Operator `pause`, recorded as a sticky deferred request until the next attempt boundary. |
 | `submitted`, `ready`, `waiting`, `paused`, `failed` | the same kind | Operator `set_priority`, which renames the marker to a new priority at the next generation. |
 
 Each row is one verified rename of the same marker; no other rename of a marker
@@ -2167,7 +2174,7 @@ Action validity is deliberately narrow:
 - `continue` and `override_step` apply to `failed` or `paused`;
 - `set_priority` applies only to `submitted`, `ready`, `waiting`, `paused`, or
   `failed`;
-- an operator `pause` applies only to `submitted`, `ready`, or `waiting`;
+- an operator `pause` applies immediately to `submitted`, `ready`, or `waiting`, is deferred from `claimed`, `running`, or `committing` until the next attempt boundary, and is a handled no-op against a job already `paused`; terminal outcomes supersede a pending deferred pause;
 - `relocate` and `transfer` apply only to their permitted quiescent states;
 - `cancel` may target any nonterminal state and uses the explicit fencing and
   process-termination procedure of [Cancellation](#cancellation) for a live
@@ -2181,10 +2188,11 @@ not by editing the job definition. They are additionally refused, without
 `force`, for a job that a decided join already consumed; see
 [Reviving a child a decided join consumed](#reviving-a-child-a-decided-join-consumed).
 
-In particular, `set_priority` and operator `pause` MUST NOT rename a `claimed`,
-`running`, or `committing` marker behind its owning manager. An operator who
-must stop live work uses `cancel`; a pause can be requested after that work is
-released or fenced.
+In particular, `set_priority` MUST NOT rename a `claimed`, `running`, or
+`committing` marker behind its owning manager; an in-flight operator `pause`
+records a sticky `pause_requested` member in a same-kind frame and pauses at
+the next attempt boundary. A manager older than this additive state member
+quarantines such an in-flight pause request as invalid.
 
 A manager claims the request by rename, verifies the exact expected current
 marker, appends the new journal frame, and renames that marker. It resolves the

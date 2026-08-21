@@ -214,6 +214,10 @@ def _publish_cancel(workspace: Workspace, marker: Marker, **overrides: object) -
     return workspace.publish_request(request)
 
 
+def _publish_pause(workspace: Workspace, marker: Marker, *, reason: str = "pause now") -> Path:
+    return _publish_cancel(workspace, marker, action="pause", reason=reason)
+
+
 def _fake_manager(workspace: Workspace, *, heartbeat_age: float | None) -> str:
     """Publish one foreign manager record, optionally with a stale heartbeat."""
 
@@ -866,6 +870,332 @@ def test_cancelling_a_job_with_no_live_attempt_is_terminal_at_once(tmp_path: Pat
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "cancelled"
     assert workspace.read_state(marker)["cancellation"]["verified"] == "no_live_attempt"
+
+
+def test_deferred_pause_is_recorded_and_consumed_at_attempt_boundary(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="deferred")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        running, _ = _fake_running_attempt(
+            workspace,
+            payload,
+            "project/deferred",
+            manager_id=manager.manager_id,
+            pid=os.getpid(),
+            lease_seconds=manager.lease_seconds,
+        )
+        _publish_pause(workspace, running, reason="wait for the current step")
+        assert manager._handle_requests() is True
+        current_running = workspace.find_marker_by_id(job_id)
+        assert current_running is not None and current_running.kind == "running"
+        requested = workspace.read_state(current_running)["pause_requested"]
+        assert requested["operator"] == "tester"
+        assert requested["reason"] == "wait for the current step"
+        assert requested["request_id"]
+        assert requested["requested_at"]
+
+        state = manager._read_frame(current_running)
+        committing = manager._transition(
+            current_running, "committing", StateFrame.replace(state.carried(), reason="outcome_published")
+        )
+        paused = manager._transition(committing, "ready", manager._read_frame(committing).carried())
+
+    assert paused.kind == "paused"
+    final = workspace.read_state(paused)
+    assert "pause_requested" not in final
+    assert final["reason"] == "operator_pause_deferred"
+    assert final["operator"] == "tester"
+    assert final["operator_reason"] == "wait for the current step"
+    assert final["request_id"] == requested["request_id"]
+
+
+def test_deferred_pause_continue_resumes_the_next_activation(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="resume")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        running, _ = _fake_running_attempt(
+            workspace,
+            payload,
+            "project/resume",
+            manager_id=manager.manager_id,
+            pid=os.getpid(),
+            lease_seconds=manager.lease_seconds,
+        )
+        _publish_pause(workspace, running)
+        manager._handle_requests()
+        current_running = workspace.find_marker_by_id(job_id)
+        assert current_running is not None and current_running.kind == "running"
+        state = manager._read_frame(current_running)
+        committing = manager._transition(
+            current_running, "committing", StateFrame.replace(state.carried(), reason="outcome_published")
+        )
+        state = manager._read_frame(committing)
+        manager._advance(committing, workspace.load_job(committing), state, "next", state.carried())
+
+        paused = workspace.find_marker_by_id(job_id)
+        assert paused is not None and paused.kind == "paused"
+        _publish_cancel(workspace, paused, action="continue", reason="resume it")
+        manager._handle_requests()
+
+    ready = workspace.find_marker_by_id(job_id)
+    assert ready is not None and ready.kind == "ready"
+    ready_state = workspace.read_state(ready)
+    assert ready_state["step"] == "next"
+    assert "pause_requested" not in ready_state
+
+
+def test_deferred_pause_is_consumed_by_runner_pause_and_continue_resumes(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="runner-pause")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        running, _ = _fake_running_attempt(
+            workspace,
+            payload,
+            "project/runner-pause",
+            manager_id=manager.manager_id,
+            pid=os.getpid(),
+            lease_seconds=manager.lease_seconds,
+        )
+        _publish_pause(workspace, running, reason="pause after this attempt")
+        manager._handle_requests()
+        current_running = workspace.find_marker_by_id(job_id)
+        assert current_running is not None and current_running.kind == "running"
+        state = manager._read_frame(current_running)
+        attempt_control = state.attempt_control
+        assert attempt_control is not None
+        outcome_ready = workspace.payload_path(current_running.placement, current_running.job_key) / attempt_control
+        outcome_ready = outcome_ready / "outcome.ready"
+        outcome_ready.mkdir()
+        (outcome_ready / "outcome.json").write_text(
+            json.dumps(
+                {
+                    "format": "httk-workflow-outcome",
+                    "format_version": 2,
+                    "job_id": current_running.job_id,
+                    "activation_id": state.activation_id,
+                    "attempt_id": state.attempt_id,
+                    "action": "pause",
+                    "pause": {"reason": "runner requested a pause"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        committing = manager._transition(
+            current_running,
+            "committing",
+            StateFrame.replace(state.carried(), outcome_action="pause", reason="outcome_published"),
+        )
+        manager._process_committing(committing)
+
+        paused = workspace.find_marker_by_id(job_id)
+        assert paused is not None and paused.kind == "paused"
+        paused_state = workspace.read_state(paused)
+        assert "pause_requested" not in paused_state
+        assert paused_state["reason"] == "operator_pause_deferred"
+        _publish_cancel(workspace, paused, action="continue", reason="resume it")
+        assert manager._handle_requests() is True
+
+    ready = workspace.find_marker_by_id(job_id)
+    assert ready is not None and ready.kind == "ready"
+    ready_state = workspace.read_state(ready)
+    assert ready_state["step"] == "only"
+    assert "pause_requested" not in ready_state
+
+
+def test_null_pause_requested_member_is_stripped_before_claim(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="null-pause")
+    workspace.submit(payload, "project/null-pause")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        ready = workspace.find_marker_by_id(job_id)
+        assert ready is not None and ready.kind == "ready"
+        state = manager._read_frame(ready)
+        ready = workspace.transition(
+            manager.writer,
+            ready,
+            "ready",
+            StateFrame.replace(state.carried(), pause_requested=None).as_mapping(),
+        )
+        assert manager._claim_and_launch(ready) is True
+        clean_ready = workspace.find_marker_by_id(job_id)
+        assert clean_ready is not None and clean_ready.kind == "ready"
+
+    assert clean_ready.kind == "ready"
+    assert "pause_requested" not in workspace.read_state(clean_ready)
+
+
+def test_pause_request_for_paused_job_is_idempotent(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="paused-again")
+    workspace.submit(payload, "project/paused-again")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        ready = workspace.find_marker_by_id(job_id)
+        assert ready is not None and ready.kind == "ready"
+        _publish_pause(workspace, ready)
+        assert manager._handle_requests() is True
+        paused = workspace.find_marker_by_id(job_id)
+        assert paused is not None and paused.kind == "paused"
+        before = (paused.generation, paused.record_ref)
+        second_request = _publish_pause(workspace, paused, reason="still paused")
+        assert manager._handle_requests() is True
+
+    after = workspace.find_marker_by_id(job_id)
+    assert after is not None and after.kind == "paused"
+    assert (after.generation, after.record_ref) == before
+    assert not second_request.exists()
+
+
+def test_terminal_outcome_supersedes_deferred_pause(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="terminal")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        running, _ = _fake_running_attempt(
+            workspace,
+            payload,
+            "project/terminal",
+            manager_id=manager.manager_id,
+            pid=os.getpid(),
+            lease_seconds=manager.lease_seconds,
+        )
+        _publish_pause(workspace, running)
+        manager._handle_requests()
+        current_running = workspace.find_marker_by_id(job_id)
+        assert current_running is not None and current_running.kind == "running"
+        terminal = manager._transition(
+            current_running,
+            "succeeded",
+            StateFrame.replace(manager._read_frame(current_running).carried(), reason="succeeded"),
+        )
+
+    assert terminal.kind == "succeeded"
+    assert "pause_requested" not in workspace.read_state(terminal)
+
+
+def test_claimed_deferred_pause_releases_without_launching(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="claimed-pause")
+    workspace.submit(payload, "project/claimed-pause")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        ready = workspace.find_marker_by_id(job_id)
+        assert ready is not None and ready.kind == "ready"
+        claimed = manager._transition(
+            ready,
+            "claimed",
+            StateFrame.replace(
+                manager._read_frame(ready).carried(),
+                manager_id=manager.manager_id,
+                writer_id=manager.writer.writer_id,
+                claim_id=str(uuid.uuid4()),
+                attempt_id=str(uuid.uuid4()),
+                attempt_control=".httk-attempt.claimed-pause",
+                lease_seconds=manager.lease_seconds,
+                matched_pool="default",
+                matched_capabilities=[],
+                reason="claim",
+            ),
+        )
+        _publish_pause(workspace, claimed)
+        assert manager._handle_requests() is True
+        assert manager._recover_abandoned_claims() is True
+        paused = workspace.find_marker_by_id(job_id)
+        assert paused is not None and paused.kind == "paused"
+        assert not manager._running
+
+    state = workspace.read_state(paused)
+    assert state["attempt_ordinal"] == 0
+    assert "pause_requested" not in state
+
+
+def test_claim_path_pauses_a_ready_job_with_a_pending_request(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="ready-pending-pause")
+    workspace.submit(payload, "project/ready-pending-pause")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        ready = workspace.find_marker_by_id(job_id)
+        assert ready is not None and ready.kind == "ready"
+        # Simulate a ready frame left by an older manager that recorded the
+        # additive flag without honoring it at the claim boundary.
+        state = manager._read_frame(ready)
+        ready = workspace.transition(
+            manager.writer,
+            ready,
+            "ready",
+            StateFrame.replace(
+                state.carried(),
+                pause_requested={
+                    "operator": "tester",
+                    "reason": "do not launch",
+                    "request_id": str(uuid.uuid4()),
+                    "requested_at": datetime.now(UTC).isoformat(),
+                },
+            ).as_mapping(),
+        )
+        assert manager._claim_and_launch(ready) is True
+
+    paused = workspace.find_marker_by_id(job_id)
+    assert paused is not None and paused.kind == "paused"
+    assert "pause_requested" not in workspace.read_state(paused)
+
+
+def test_pause_from_ready_remains_immediate(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="ready-pause")
+    workspace.submit(payload, "project/ready-pause")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        ready = workspace.find_marker_by_id(job_id)
+        assert ready is not None and ready.kind == "ready"
+        _publish_pause(workspace, ready, reason="hold before launch")
+        assert manager._handle_requests() is True
+
+    paused = workspace.find_marker_by_id(job_id)
+    assert paused is not None and paused.kind == "paused"
+    state = workspace.read_state(paused)
+    assert state["reason"] == "operator_pause"
+    assert "pause_requested" not in state
+
+
+def test_second_deferred_pause_refreshes_the_sticky_request(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="refresh-pause")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        running, _ = _fake_running_attempt(
+            workspace,
+            payload,
+            "project/refresh-pause",
+            manager_id=manager.manager_id,
+            pid=os.getpid(),
+            lease_seconds=manager.lease_seconds,
+        )
+        _publish_pause(workspace, running, reason="first reason")
+        assert manager._handle_requests() is True
+        current_running = workspace.find_marker_by_id(job_id)
+        assert current_running is not None and current_running.kind == "running"
+        first = workspace.read_state(current_running)["pause_requested"]["request_id"]
+        _publish_pause(workspace, current_running, reason="second reason")
+        assert manager._handle_requests() is True
+
+    refreshed = workspace.find_marker_by_id(job_id)
+    assert refreshed is not None and refreshed.kind == "running"
+    pending = workspace.read_state(refreshed)["pause_requested"]
+    assert pending["reason"] == "second reason"
+    assert pending["request_id"] != first
 
 
 # ---------------------------------------------------------------------------

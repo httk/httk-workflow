@@ -66,6 +66,7 @@ def describe_job(workspace: Workspace, marker: Marker) -> dict[str, Any]:
         },
         "failure": state.get("failure"),
         "pause": state.get("pause"),
+        "pause_requested": state.get("pause_requested"),
         "data_generation": state.get("data_generation"),
         "paths": {
             "payload": str(payload),
@@ -217,6 +218,15 @@ def render_job(report: Mapping[str, Any]) -> str:
     pause = report.get("pause")
     if pause:
         lines.append(_pair("pause", json.dumps(pause, sort_keys=True)))
+    pause_requested = report.get("pause_requested")
+    if isinstance(pause_requested, Mapping):
+        lines.append(
+            _pair(
+                "pause requested",
+                f"by {pause_requested.get('operator') or '-'} ({pause_requested.get('reason') or '-'})"
+                "; will pause at the next attempt boundary",
+            )
+        )
     join = report.get("join")
     if isinstance(join, Mapping):
         lines.append(

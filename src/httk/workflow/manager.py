@@ -45,6 +45,7 @@ from .models import (
     ATTEMPT_CONTROL_PREFIX,
     CARRIED_STATE_MEMBERS,
     CORE_PROFILE,
+    TERMINAL_KINDS,
     JobDefinition,
     Marker,
     StateFrame,
@@ -897,6 +898,42 @@ class TaskManager:
         *,
         priority: int | None = None,
     ) -> Marker:
+        pause_member_present = updates.has("pause_requested")
+        pause_requested = updates.pause_requested
+        if kind in {"ready", "waiting", "paused"} and not pause_member_present:
+            try:
+                current = self._read_frame(marker)
+            except (WorkflowError, OSError):
+                current = None
+            if current is not None:
+                pause_member_present = current.has("pause_requested")
+                pause_requested = current.pause_requested
+        if kind in {"ready", "waiting"} and pause_member_present:
+            retained = {name: value for name, value in updates.members.items() if name != "pause_requested"}
+            if pause_requested is not None:
+                updates = StateFrame.replace(
+                    StateFrame(retained),
+                    operator=pause_requested.get("operator"),
+                    operator_reason=pause_requested.get("reason"),
+                    request_id=pause_requested.get("request_id"),
+                    reason="operator_pause_deferred",
+                )
+                kind = "paused"
+            else:
+                updates = StateFrame(retained)
+        elif kind == "paused" and pause_member_present:
+            retained = {name: value for name, value in updates.members.items() if name != "pause_requested"}
+            updates = StateFrame(retained)
+            if pause_requested is not None:
+                updates = StateFrame.replace(
+                    updates,
+                    operator=pause_requested.get("operator"),
+                    operator_reason=pause_requested.get("reason"),
+                    request_id=pause_requested.get("request_id"),
+                    reason="operator_pause_deferred",
+                )
+        elif kind in {*TERMINAL_KINDS, "cancelling"} and updates.has("pause_requested"):
+            updates = StateFrame({name: value for name, value in updates.members.items() if name != "pause_requested"})
         moved = self.workspace.transition(self.writer, marker, kind, updates.as_mapping(), priority=priority)
         _LOGGER.info(
             "job %s moved from %s to %s (reason %s)",
@@ -1136,6 +1173,9 @@ class TaskManager:
         if loaded is None:
             return False
         job, state = loaded
+        if state.has("pause_requested"):
+            self._transition(marker, "ready", StateFrame.replace(state.carried(), reason="pause_requested"))
+            return True
         attempt_ordinal = (state.attempt_ordinal or 0) + 1
         total_attempts = (state.total_attempts or 0) + 1
         budget_failure = self._attempt_budget_failure(job, attempt_ordinal, total_attempts)
