@@ -26,11 +26,18 @@ from httk.workflow import (
     job_records,
 )
 from httk.workflow.adapters import add_remote
-from httk.workflow.configuration import ensure_identity_key, write_config
+from httk.workflow.configuration import (
+    ensure_identity_key,
+    identity_key_paths,
+    identity_public_key,
+    verify_document,
+    write_config,
+)
 from httk.workflow.models import StateFrame
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.transfers import TRANSFER_DIRECTORY, _payload_digest
+from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
 
@@ -250,6 +257,121 @@ def test_job_request_forwards_to_remote_workspace(pair: Pair, capsys: pytest.Cap
     assert request["job_id"] == pair.ids["pending"]
     assert request["action"] == "pause"
     assert request["operator"] == "Local User <local@example.test>" and request["reason"] == "r"
+    assert verify_document(request).valid
+    assert request["operator_key"] == identity_public_key(identity_key_paths("local")[0])
+
+
+def test_job_request_remote_uses_selected_identity(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    write_config(
+        {
+            "format": "httk-config",
+            "format_version": 2,
+            "identities": {
+                "local": {"name": "Local User", "email": "local@example.test"},
+                "bot": {"name": "Build Bot", "email": "bot@example.test"},
+            },
+            "default_identity": "local",
+        }
+    )
+    ensure_identity_key("bot")
+    argv = [
+        "job",
+        "request",
+        "cluster:station",
+        pair.ids["pending"],
+        "pause",
+        "--operator",
+        "bot",
+        "--reason",
+        "r",
+    ]
+    assert command(argv, pair.context) == 0
+    capsys.readouterr()
+    request = json.loads(next((pair.remote.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    assert request["operator"] == "Build Bot <bot@example.test>"
+    assert request["operator_key"] == identity_public_key(identity_key_paths("bot")[0])
+    assert verify_document(request).valid
+
+
+def test_job_request_remote_accepts_tag_prefix_selector(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    assert (
+        command(
+            [
+                "job",
+                "request",
+                "cluster:station",
+                f"succeeding--{pair.ids['pending'][:8]}",
+                "pause",
+                "--reason",
+                "tag selector",
+            ],
+            pair.context,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    request = json.loads(next((pair.remote.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    assert request["job_id"] == pair.ids["pending"]
+    assert verify_document(request).valid
+
+
+def test_job_request_remote_literal_on_unconfigured_machine_is_unsigned(
+    pair: Pair,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    write_config({"format": "httk-config", "format_version": 2})
+    assert (
+        command(
+            [
+                "job",
+                "request",
+                "cluster:station",
+                pair.ids["pending"],
+                "pause",
+                "--operator",
+                "External <external@example.test>",
+                "--reason",
+                "r",
+            ],
+            pair.context,
+        )
+        == 0
+    )
+    capsys.readouterr()
+    request = json.loads(next((pair.remote.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    assert "operator_key" not in request and "signature" not in request
+
+
+def test_job_request_remote_tamper_is_rejected_before_publish(
+    pair: Pair,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = job_cli.sign_document
+
+    def tamper(document, *, seed_path):
+        signed = original(document, seed_path=seed_path)
+        signed["reason"] = "tampered"
+        return signed
+
+    monkeypatch.setattr(job_cli, "sign_document", tamper)
+    assert (
+        command(
+            [
+                "job",
+                "request",
+                "cluster:station",
+                pair.ids["pending"],
+                "pause",
+                "--reason",
+                "r",
+            ],
+            pair.context,
+        )
+        == 2
+    )
+    assert pair.ids["pending"] in capsys.readouterr().err
+    assert not list((pair.remote.control / "requests" / "ready").iterdir())
 
 
 def test_job_request_forwards_leading_dash_reason(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
@@ -289,6 +411,62 @@ def test_job_request_forwards_multiple_ids(pair: Pair, capsys: pytest.CaptureFix
         pair.ids["pending"],
         pair.ids["succeeded"],
     }
+    assert all(verify_document(json.loads(path.read_text(encoding="utf-8"))).valid for path in ready)
+
+
+def test_job_request_remote_wait_relays_far_side_result(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    assert (
+        command(
+            [
+                "job",
+                "request",
+                "cluster:station",
+                pair.ids["pending"],
+                "pause",
+                "--reason",
+                "r",
+                "--wait",
+                "--timeout",
+                "0",
+            ],
+            pair.context,
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert pair.ids["pending"] in captured.out
+    assert "timeout; still pending" in captured.out
+
+
+def test_job_request_remote_manager_records_local_operator_key(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
+    with TaskManager(pair.remote, heartbeat_interval=0.01) as manager:
+        assert (
+            command(
+                [
+                    "job",
+                    "request",
+                    "cluster:station",
+                    pair.ids["pending"],
+                    "pause",
+                    "--reason",
+                    "r",
+                ],
+                pair.context,
+            )
+            == 0
+        )
+        for _ in range(20):
+            manager.tick()
+            marker = pair.remote.find_marker_by_id(pair.ids["pending"])
+            if marker is not None and marker.kind == "paused":
+                break
+        else:
+            raise AssertionError("remote manager did not apply the request")
+    capsys.readouterr()
+    marker = pair.remote.find_marker_by_id(pair.ids["pending"])
+    assert marker is not None
+    state = pair.remote.read_state(marker)
+    assert state["operator_key"] == identity_public_key(identity_key_paths("local")[0])
 
 
 def test_job_request_relays_remote_failure(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
@@ -302,7 +480,9 @@ def test_job_request_relays_remote_failure(pair: Pair, capsys: pytest.CaptureFix
         "r",
     ]
     assert command(argv, pair.context) == 2
-    assert "job does not exist: does-not-exist" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "no job in" in error and "does-not-exist" in error
+    assert "remote request envelope build failed (exit 2)" in error
 
 
 # ---------------------------------------------------------------------------

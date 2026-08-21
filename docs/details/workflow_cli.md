@@ -77,12 +77,17 @@ settings, and `job request`. Most job commands remain local-only. Jobs are
 created in the local default workspace, then `transfer` moves them to a remote
 workspace for execution.
 
-`job request REMOTE:NAME ...` forwards the request to the owning machine, where
-the plain workspace name is resolved in that machine's registry. An older far
-side that cannot parse the additive forwarded vector fails with its own
-argparse error, which is relayed verbatim. If both are supplied, make
+`job request REMOTE:NAME ...` asks the owning machine for unsigned envelopes,
+signs those envelopes with the control-center identity selected by
+`--operator`, and sends the signed documents back for verbatim publication.
+An older far side that cannot parse the additive protocol vectors fails with
+its own argparse error; upgrade `httk-workflow` on the remote. If both are supplied, make
 `--adapter-timeout` longer than `--timeout` or the adapter may cut the session
-off first.
+off first. An adapter timeout during publication has an indeterminate outcome:
+requests may already be published; retrying creates fresh request IDs, and
+generation pinning makes such duplicates harmless because stale requests
+retire. With prefix or tag selectors, the remote resolves the match; use full
+job UUIDs when precise attribution matters.
 
 ### `workspace` — the workspace itself, not its jobs
 
@@ -472,6 +477,8 @@ or newer than yours:
 httk workflow transfer receive --workspace PATH --bundle BUNDLE
 httk workflow transfer offer PATH --destination-workspace-id UUID [--job JOB_ID …] --json
 httk workflow transfer retire PATH JOB_ID … --destination-workspace-id UUID --json
+httk workflow job request-envelopes WORKSPACE JOB_ID … ACTION --operator=LABEL --reason=TEXT [--priority N] [--step S] [--force] --json
+httk workflow job publish-requests WORKSPACE --document JSON [--document JSON …] [--wait] [--timeout S] [--durable|--no-durable]
 httk workflow workspace status PATH --by-path --json
 httk workflow manager run PATH --by-path
 ```
@@ -764,7 +771,14 @@ the request with that identity's key. Omitting `--operator` selects the
 configured default; a short name selects that identity, while a literal label
 is passed through and signed with the default identity's key.
 
-For remote requests, the control-center identity label is forwarded as attribution while the machine that publishes the request supplies the signature; shipping locally-signed envelopes to remotes is a possible future refinement.
+For remote requests, the control-center identity builds the signature locally
+after the far side returns unsigned envelopes. The remote publishes those
+signed documents verbatim, so attribution and signer are the same identity.
+If a configured identity's key file is missing or unreadable, the request fails
+loudly; remove and re-add it with `httk workflow config identity remove SHORT`
+then `httk workflow config identity add SHORT ...`, or restore the key file.
+The two request protocol spellings are additive; when a remote cannot parse
+them, upgrade `httk-workflow` on the remote.
 
 The selected key signs operator requests (`httk workflow job request …`).
 Transfer acknowledgements always use the DEFAULT identity resolution; they do

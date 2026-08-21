@@ -2,14 +2,19 @@
 
 import os
 import time
+import uuid
 
-from ..configuration import resolve_operator_identity
+from ..adapters import (
+    REMOTE_JOB_PUBLISH_REQUESTS_COMMAND,
+    REMOTE_JOB_REQUEST_ENVELOPES_COMMAND,
+    resolve_remote,
+)
+from ..configuration import OperatorIdentity, identity_seed, resolve_operator_identity, sign_document, verify_document
 from ..introspection import read_managers
-from ..models import TERMINAL_KINDS, Marker, ensure_step_known
+from ..models import TERMINAL_KINDS, Marker, ensure_step_known, parse_job_key
 from ._common import *
 from ._common import (
     _ERRORS,
-    REMOTE_JOB_REQUEST_COMMAND,
     _add_adapter_timeout,
     _durable,
     _group,
@@ -19,9 +24,10 @@ from ._common import (
     _local_root,
     _pairs,
     _resolve_binding,
-    _run_remote_workspace,
+    _run_adapter,
     _sanitize_tag,
 )
+from ._transfer import _protocol_workspace
 
 # ---------------------------------------------------------------------------
 # runner
@@ -314,6 +320,41 @@ def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
     add_durability_arguments(parser)
 
 
+def add_job_request_envelopes_arguments(parser: argparse.ArgumentParser) -> None:
+    """Declare the hidden remote envelope-building protocol command."""
+
+    parser.add_argument("workspace", metavar="WORKSPACE", help="the far-side workspace name")
+    parser.add_argument("job_id", metavar="JOB_ID", nargs="+", help="one or more job UUIDs")
+    parser.add_argument(
+        "action",
+        choices=("continue", "override_step", "cancel", "set_priority", "pause"),
+        help="the request action",
+    )
+    parser.add_argument("--operator", required=True, help="the operator attribution label")
+    parser.add_argument("--reason", required=True, help="why the request is being made")
+    parser.add_argument("--priority", type=int, help="the new priority")
+    parser.add_argument("--step", help="the step to resume at")
+    parser.add_argument("--force", action="store_true", help="accept an override hazard")
+    parser.add_argument("--json", action="store_true", required=True, help=argparse.SUPPRESS)
+
+
+def add_job_publish_requests_arguments(parser: argparse.ArgumentParser) -> None:
+    """Declare the hidden remote request-publication protocol command."""
+
+    parser.add_argument("workspace", metavar="WORKSPACE", help="the far-side workspace name")
+    parser.add_argument(
+        "--document",
+        action="append",
+        dest="documents",
+        required=True,
+        metavar="JSON",
+        help="one complete request document",
+    )
+    parser.add_argument("--wait", action="store_true", help="wait for pause requests to reach paused")
+    parser.add_argument("--timeout", type=float, metavar="SECONDS", help="stop waiting after SECONDS")
+    add_durability_arguments(parser)
+
+
 def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Publish operator requests against jobs and optionally wait for pauses."""
 
@@ -324,40 +365,40 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     if arguments.timeout is not None and arguments.timeout < 0:
         raise ValueError("--timeout must not be negative")
     identity = resolve_operator_identity(arguments.operator)
+    _ensure_identity_key(identity)
 
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None and ":" in binding.name
-        tail = [
-            *REMOTE_JOB_REQUEST_COMMAND,
-            binding.name.split(":", 1)[1],
-            *arguments.job_id,
-            arguments.action,
-            f"--operator={identity.label}",
-            f"--reason={arguments.reason}",
-        ]
-        for option in ("priority", "step"):
-            value = getattr(arguments, option)
-            if value is not None:
-                tail.append(f"--{option.replace('_', '-')}={value}")
-        for flag in ("force", "wait", "durable", "no_durable"):
-            if getattr(arguments, flag, False):
-                tail.append(f"--{flag.replace('_', '-')}")
-        if arguments.timeout is not None:
-            tail.append(f"--timeout={arguments.timeout}")
-        return _run_remote_workspace(binding, context, tail, timeout=arguments.adapter_timeout)
+        return _request_remote_job(binding, context, arguments, identity)
 
     workspace = Workspace(root, durable=_durable(arguments))
+    envelopes = _build_request_envelopes(workspace, arguments, identity.label)
+    published: list[tuple[str, Marker, Path]] = []
+    for job_id, marker, request in envelopes:
+        document = dict(request) if identity.seed_path is None else sign_document(request, seed_path=identity.seed_path)
+        if identity.seed_path is not None and not verify_document(document).valid:
+            raise ValueError(f"local signature verification failed for job {job_id}")
+        path = workspace.publish_request(document)
+        published.append((job_id, marker, path))
+    return _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
+
+
+def _build_request_envelopes(
+    workspace: Workspace,
+    arguments: argparse.Namespace,
+    operator: str,
+) -> list[tuple[str, Marker, dict[str, object]]]:
+    """Resolve jobs and build unsigned operator request envelopes."""
+
     resolved: list[tuple[str, Marker]] = []
-    for job_id in arguments.job_id:
-        marker = workspace.find_marker_by_id(job_id)
-        if marker is None:
-            raise ValueError(f"job does not exist: {job_id}")
+    for selector in arguments.job_id:
+        marker = resolve_job(workspace, selector)
         if arguments.action == "override_step" and arguments.step is not None:
             _prevalidate_override_step(workspace, marker, arguments.step, force=bool(arguments.force))
-        resolved.append((job_id, marker))
+        resolved.append((selector, marker))
 
-    published: list[tuple[str, Marker, Path]] = []
+    envelopes: list[tuple[str, Marker, dict[str, object]]] = []
     for job_id, marker in resolved:
         request: dict[str, object] = {
             "format": "httk-workflow-request",
@@ -369,7 +410,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
             "expected_generation": marker.generation,
             "expected_record_ref": marker.record_ref,
             "action": arguments.action,
-            "operator": identity.label,
+            "operator": operator,
             "reason": arguments.reason,
             "created_at": utc_now(),
         }
@@ -379,14 +420,202 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
             request["step"] = arguments.step
         if arguments.force:
             request["force"] = True
-        # Attribution, when this installation has an identity key: the manager
-        # verifies a signature that is there and accepts a request that has none.
-        document = dict(request) if identity.seed_path is None else sign_document(request, seed_path=identity.seed_path)
-        path = workspace.publish_request(document)
-        published.append((job_id, marker, path))
+        envelopes.append((job_id, marker, request))
+    return envelopes
+
+
+_REQUEST_ACTIONS = frozenset(("continue", "override_step", "cancel", "set_priority", "pause"))
+_REQUEST_MEMBERS = frozenset(
+    {
+        "format",
+        "format_version",
+        "request_id",
+        "job_id",
+        "job_key",
+        "placement",
+        "expected_generation",
+        "expected_record_ref",
+        "action",
+        "operator",
+        "reason",
+        "created_at",
+    }
+)
+_REQUEST_OPTIONAL_MEMBERS = frozenset(("priority", "step", "force"))
+_REQUEST_SIGNATURE_MEMBERS = frozenset(("operator_key", "signature"))
+
+
+def _validate_request_document(
+    document: Mapping[str, object],
+    *,
+    index: int,
+    expected_action: str | None = None,
+    expected_operator: str | None = None,
+    expected_reason: str | None = None,
+    priority: int | None = None,
+    step: str | None = None,
+    force: bool = False,
+    constrain_options: bool = False,
+    allow_signature: bool = False,
+) -> None:
+    """Validate one operator request's exact schema and constrained values.
+
+    :param document: Request document to validate.
+    :param index: Zero-based document index for diagnostics.
+    :param expected_action: Required action when validating a client response.
+    :param expected_operator: Required operator label when validating a client response.
+    :param expected_reason: Required reason when validating a client response.
+    :param priority: Requested priority when client options are constrained.
+    :param step: Requested step when client options are constrained.
+    :param force: Whether the client requested the force member.
+    :param constrain_options: Require optional members to match the client request exactly.
+    :param allow_signature: Permit the optional operator_key/signature pair.
+    :raises ValueError: If a member, type, or constrained value is invalid.
+    """
+
+    label = f"request envelope {index}"
+    if not isinstance(document, Mapping):
+        raise ValueError(f"{label} must be a JSON object")
+    members = set(document)
+    if allow_signature and bool(members & _REQUEST_SIGNATURE_MEMBERS) and not _REQUEST_SIGNATURE_MEMBERS <= members:
+        raise ValueError(f"{label} must contain both operator_key and signature")
+    expected = set(_REQUEST_MEMBERS)
+    if constrain_options:
+        if priority is not None:
+            expected.add("priority")
+        if step is not None:
+            expected.add("step")
+        if force:
+            expected.add("force")
+    else:
+        expected.update(members & _REQUEST_OPTIONAL_MEMBERS)
+    if allow_signature:
+        expected.update(members & _REQUEST_SIGNATURE_MEMBERS)
+    missing = sorted(expected - members)
+    extra = sorted(members - expected)
+    if missing:
+        raise ValueError(f"{label} is missing member {missing[0]!r}")
+    if extra:
+        raise ValueError(f"{label} has unexpected member {extra[0]!r}")
+
+    exact_types: dict[str, type | tuple[type, ...]] = {
+        "request_id": str,
+        "job_id": str,
+        "job_key": str,
+        "placement": str,
+        "expected_generation": int,
+        "expected_record_ref": (str, type(None)),
+        "operator": str,
+        "reason": str,
+        "created_at": str,
+    }
+    for member, expected_type in exact_types.items():
+        value = document[member]
+        if (type(value) is not expected_type) if isinstance(expected_type, type) else not isinstance(value, expected_type):
+            raise ValueError(f"{label} member {member!r} has the wrong type")
+    if type(document["format_version"]) is not int or document["format_version"] != 2:
+        raise ValueError(f"{label} member 'format_version' must be integer 2")
+    if document["format"] != "httk-workflow-request":
+        raise ValueError(f"{label} member 'format' must be 'httk-workflow-request'")
+    action = document["action"]
+    if not isinstance(action, str) or action not in _REQUEST_ACTIONS:
+        raise ValueError(f"{label} member 'action' has an invalid value")
+    if expected_action is not None and action != expected_action:
+        raise ValueError(f"{label} member 'action' disagrees with the requested action")
+    if expected_operator is not None and document["operator"] != expected_operator:
+        raise ValueError(f"{label} member 'operator' disagrees with the requested identity")
+    if expected_reason is not None and document["reason"] != expected_reason:
+        raise ValueError(f"{label} member 'reason' disagrees with the requested reason")
+    if "priority" in document and type(document["priority"]) is not int:
+        raise ValueError(f"{label} member 'priority' has the wrong type")
+    if "step" in document and not isinstance(document["step"], str):
+        raise ValueError(f"{label} member 'step' has the wrong type")
+    if "force" in document and document["force"] is not True:
+        raise ValueError(f"{label} member 'force' must be true")
+    if constrain_options:
+        for member, expected_value in (("priority", priority), ("step", step)):
+            if expected_value is not None and document[member] != expected_value:
+                raise ValueError(f"{label} member {member!r} disagrees with the requested value")
+        if force and document.get("force") is not True:
+            raise ValueError(f"{label} member 'force' disagrees with the requested value")
+    if allow_signature:
+        for member in _REQUEST_SIGNATURE_MEMBERS:
+            if member in document and not isinstance(document[member], str):
+                raise ValueError(f"{label} member {member!r} has the wrong type")
+
+
+def _validate_remote_envelopes(
+    envelopes: list[dict[str, object]],
+    arguments: argparse.Namespace,
+    operator: str,
+) -> None:
+    """Validate leg-one envelopes against the exact local request."""
+
+    if len(envelopes) != len(arguments.job_id):
+        raise ValueError(
+            f"remote returned {len(envelopes)} request envelopes for {len(arguments.job_id)} requested jobs"
+        )
+    for index, (envelope, selector) in enumerate(zip(envelopes, arguments.job_id, strict=True)):
+        _validate_request_document(
+            envelope,
+            index=index,
+            expected_action=arguments.action,
+            expected_operator=operator,
+            expected_reason=arguments.reason,
+            priority=arguments.priority,
+            step=arguments.step,
+            force=bool(arguments.force),
+            constrain_options=True,
+        )
+        job_id = envelope["job_id"]
+        job_key = envelope["job_key"]
+        assert isinstance(job_id, str) and isinstance(job_key, str)
+        try:
+            _, key_job_id = parse_job_key(job_key)
+        except WorkflowError as exc:
+            raise ValueError(f"request envelope {index} member 'job_key' is invalid: {exc}") from exc
+        if key_job_id != job_id:
+            raise ValueError(f"request envelope {index} member 'job_key' disagrees with 'job_id'")
+        try:
+            canonical_selector = str(uuid.UUID(selector)) if len(selector) == 36 else None
+        except ValueError:
+            canonical_selector = None
+        if canonical_selector == selector:
+            if job_id != selector:
+                raise ValueError(f"request envelope {index} does not match UUID selector {selector!r}")
+        elif not (job_id.startswith(selector) or job_key.startswith(selector)):
+            raise ValueError(f"request envelope {index} does not match requested selector {selector!r}")
+
+
+def _ensure_identity_key(identity: OperatorIdentity) -> None:
+    """Refuse a configured identity whose seed file is absent or unreadable.
+
+    :param identity: The identity selected for signing.
+    :raises ValueError: If a configured identity has no usable seed file.
+    """
+
+    if identity.seed_path is not None and identity_seed(identity.seed_path) is None:
+        short = identity.short or "default"
+        raise ValueError(
+            f"identity {short!r} has no key file at {identity.seed_path}; "
+            f"remove it with `httk workflow config identity remove {short}` then re-add it with "
+            f"`httk workflow config identity add {short} ...`, or restore the key file at {identity.seed_path}"
+        )
+
+
+def _complete_job_requests(
+    workspace: Workspace,
+    published: list[tuple[str, Marker, Path]],
+    *,
+    wait: bool,
+    timeout: float | None,
+) -> int:
+    """Print published requests and optionally wait for pause outcomes."""
+
+    for _, _, path in published:
         print(path)
 
-    if not arguments.wait:
+    if not wait:
         for _, marker, _ in published:
             _warn_if_no_live_manager(workspace, marker)
         return 0
@@ -397,7 +626,145 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     if not available:
         print("waiting is pointless until a manager starts", file=sys.stderr)
         return 1
-    return _wait_for_pauses(workspace, published, timeout=arguments.timeout)
+    return _wait_for_pauses(workspace, published, timeout=timeout)
+
+
+def _request_remote_job(
+    binding: WorkspaceBinding,
+    context: CLIContext,
+    arguments: argparse.Namespace,
+    identity: OperatorIdentity,
+) -> int:
+    """Build remotely, sign locally, and publish requests remotely."""
+
+    target = resolve_remote(binding.remote, project=context.cwd)
+    remote_name = binding.name.split(":", 1)[1]
+    envelope_argv = [
+        *REMOTE_JOB_REQUEST_ENVELOPES_COMMAND,
+        remote_name,
+        *arguments.job_id,
+        arguments.action,
+        f"--operator={identity.label}",
+        f"--reason={arguments.reason}",
+        "--json",
+    ]
+    for option in ("priority", "step"):
+        value = getattr(arguments, option)
+        if value is not None:
+            envelope_argv.append(f"--{option}={value}")
+    if arguments.force:
+        envelope_argv.append("--force")
+    result = _run_adapter(
+        target.bundle,
+        "invoke",
+        {"argv": envelope_argv},
+        timeout=arguments.adapter_timeout,
+    )
+    stderr = str(result.get("stderr", ""))
+    if stderr:
+        sys.stderr.write(stderr)
+    if result.get("returncode") != 0:
+        raise RuntimeError(
+            f"remote request envelope build failed (exit {result.get('returncode')}); "
+            "see the relayed remote error above"
+        )
+    try:
+        document = json.loads(str(result.get("stdout", "")))
+        if document.get("format") != "httk-workflow-request-envelopes" or document.get("format_version") != 1:
+            raise ValueError
+        envelopes = document["envelopes"]
+        if not isinstance(envelopes, list) or not all(isinstance(item, dict) for item in envelopes):
+            raise ValueError
+    except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("remote did not return a valid request-envelopes document") from exc
+    _validate_remote_envelopes(envelopes, arguments, identity.label)
+
+    signed: list[str] = []
+    for envelope in envelopes:
+        signed_document = (
+            dict(envelope)
+            if identity.seed_path is None
+            else sign_document(envelope, seed_path=identity.seed_path)
+        )
+        if identity.seed_path is not None and not verify_document(signed_document).valid:
+            raise ValueError(f"local signature verification failed for job {envelope['job_id']}")
+        signed.append(json.dumps(signed_document, separators=(",", ":")))
+
+    publish_argv = [*REMOTE_JOB_PUBLISH_REQUESTS_COMMAND, remote_name]
+    for document_text in signed:
+        publish_argv.append(f"--document={document_text}")
+    if arguments.wait:
+        publish_argv.append("--wait")
+    if arguments.timeout is not None:
+        publish_argv.append(f"--timeout={arguments.timeout}")
+    if getattr(arguments, "durable", False):
+        publish_argv.append("--durable")
+    if getattr(arguments, "no_durable", False):
+        publish_argv.append("--no-durable")
+    published = _run_adapter(
+        target.bundle,
+        "invoke",
+        {"argv": publish_argv},
+        timeout=arguments.adapter_timeout,
+    )
+    stdout = str(published.get("stdout", ""))
+    if stdout:
+        sys.stdout.write(stdout)
+    stderr = str(published.get("stderr", ""))
+    if stderr:
+        sys.stderr.write(stderr)
+    return int(published.get("returncode", 0) or 0)
+
+
+def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Build unsigned operator request envelopes for the remote protocol."""
+
+    workspace = _protocol_workspace(arguments.workspace, context)
+    envelopes = _build_request_envelopes(workspace, arguments, arguments.operator)
+    print(
+        json.dumps(
+            {
+                "format": "httk-workflow-request-envelopes",
+                "format_version": 1,
+                "envelopes": [request for _, _, request in envelopes],
+            },
+            separators=(",", ":"),
+        )
+    )
+    return 0
+
+
+def handle_job_publish_requests(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Publish request documents received from the local signing client."""
+
+    workspace = _protocol_workspace(arguments.workspace, context)
+    documents: list[dict[str, object]] = []
+    for text in arguments.documents:
+        try:
+            document = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"request document is not valid JSON: {exc}") from exc
+        if not isinstance(document, dict):
+            raise ValueError("request document must be a JSON object")
+        _validate_request_document(document, index=len(documents), allow_signature=True)
+        documents.append(document)
+    if arguments.timeout is not None and not arguments.wait:
+        raise ValueError("--timeout requires --wait")
+    if arguments.wait and any(document["action"] != "pause" for document in documents):
+        raise ValueError("--wait is only valid with the pause action")
+    if arguments.timeout is not None and arguments.timeout < 0:
+        raise ValueError("--timeout must not be negative")
+
+    resolved: list[tuple[str, Marker, dict[str, object]]] = []
+    for document in documents:
+        job_id = document["job_id"]
+        assert isinstance(job_id, str)
+        marker = workspace.find_marker_by_id(job_id)
+        if marker is None:
+            raise ValueError(f"job does not exist: {job_id}")
+        resolved.append((job_id, marker, document))
+    published = [(job_id, marker, workspace.publish_request(document)) for job_id, marker, document in resolved]
+    return _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
 
 
 def _prevalidate_override_step(workspace: Workspace, marker: Marker, step: str, *, force: bool) -> None:
@@ -743,6 +1110,26 @@ def build_job_parser(
             summary="publish an operator request",
             description="Publish one operator request against a job of a workspace",
             handler=handle_job_request,
+        )
+    )
+    add_job_request_envelopes_arguments(
+        _leaf(
+            group,
+            "request-envelopes",
+            description="Build unsigned operator request envelopes for a signing client",
+            summary="build unsigned request envelopes",
+            handler=handle_job_request_envelopes,
+            hidden=True,
+        )
+    )
+    add_job_publish_requests_arguments(
+        _leaf(
+            group,
+            "publish-requests",
+            description="Publish signed operator request documents from a signing client",
+            summary="publish signed request documents",
+            handler=handle_job_publish_requests,
+            hidden=True,
         )
     )
 

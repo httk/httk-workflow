@@ -125,9 +125,15 @@ def apply(manager: Any, request: Mapping[str, Any]) -> str | None:
     marker = manager._resolve_request_marker(request)
     if marker is None:
         raise FormatError("request job does not exist")
-    if marker.generation != int(request.get("expected_generation", -1)):
+    expected_generation = request.get("expected_generation")
+    if type(expected_generation) is not int:
+        raise FormatError("request expected_generation must be an integer")
+    expected_record_ref = request.get("expected_record_ref")
+    if expected_record_ref is not None and not isinstance(expected_record_ref, str):
+        raise FormatError("request expected_record_ref must be a string or null")
+    if marker.generation != expected_generation:
         return f"the job is at generation {marker.generation}, not the expected one"
-    if marker.record_ref != request.get("expected_record_ref"):
+    if marker.record_ref != expected_record_ref:
         return "the job state changed after the request was published"
     action = request.get("action")
     state = manager._read_frame(marker)
