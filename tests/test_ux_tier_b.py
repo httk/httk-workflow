@@ -519,7 +519,13 @@ def test_job_request_warns_when_no_live_manager_serves_the_executor(tmp_path: Pa
     workspace.submit(payload, "project/orphan")
     name = register_ws(context, workspace.root, "orphan-ws")
 
-    assert command(["job", "request", name, job_id, "cancel", "--operator", "me", "--reason", "x"], context) == 0
+    assert (
+        command(
+            ["job", "request", name, job_id, "cancel", "--operator", "Me <me@example.org>", "--reason", "x"],
+            context,
+        )
+        == 0
+    )
     error = capsys.readouterr().err
     assert "no live manager currently serves executor 'path'" in error
 
@@ -533,7 +539,13 @@ def test_job_request_is_quiet_when_a_live_manager_serves_the_executor(tmp_path: 
 
     with TaskManager(workspace, heartbeat_interval=0.01):
         capsys.readouterr()
-        assert command(["job", "request", name, job_id, "cancel", "--operator", "me", "--reason", "x"], context) == 0
+        assert (
+            command(
+                ["job", "request", name, job_id, "cancel", "--operator", "Me <me@example.org>", "--reason", "x"],
+                context,
+            )
+            == 0
+        )
         error = capsys.readouterr().err
     assert "no live manager currently serves" not in error
 
@@ -568,7 +580,19 @@ def test_override_step_is_refused_client_side_against_recorded_runner_steps(tmp_
     capsys.readouterr()
     assert (
         command(
-            ["job", "request", name, job_id, "override_step", "--step", "bogus", "--operator", "me", "--reason", "x"],
+            [
+                "job",
+                "request",
+                name,
+                job_id,
+                "override_step",
+                "--step",
+                "bogus",
+                "--operator",
+                "Me <me@example.org>",
+                "--reason",
+                "x",
+            ],
             context,
         )
         != 0
@@ -594,7 +618,7 @@ def test_override_step_force_downgrades_the_refusal_and_publishes(tmp_path: Path
         )
     capsys.readouterr()
     argv = ["job", "request", name, job_id, "override_step", "--step", "recover"]
-    argv += ["--operator", "me", "--reason", "x", "--force"]
+    argv += ["--operator", "Me <me@example.org>", "--reason", "x", "--force"]
     assert command(argv, context) == 0
     error = capsys.readouterr().err
     assert "--force was given" in error
@@ -619,7 +643,7 @@ def test_override_step_is_allowed_with_a_note_before_runner_steps_are_recorded(t
                 "--step",
                 "whatever",
                 "--operator",
-                "me",
+                "Me <me@example.org>",
                 "--reason",
                 "x",
             ],

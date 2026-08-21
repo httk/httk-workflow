@@ -26,6 +26,7 @@ from httk.workflow import (
     job_records,
 )
 from httk.workflow.adapters import add_remote
+from httk.workflow.configuration import ensure_identity_key, write_config
 from httk.workflow.models import StateFrame
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
@@ -164,7 +165,20 @@ def template(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture
-def pair(template: Path, tmp_path: Path) -> Pair:
+def pair(template: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pair:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.delenv("HTTK_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("HTTK_DATA_HOME", raising=False)
+    write_config(
+        {
+            "format": "httk-config",
+            "format_version": 2,
+            "identities": {"local": {"name": "Local User", "email": "local@example.test"}},
+            "default_identity": "local",
+        }
+    )
+    ensure_identity_key("local")
     root = tmp_path / "pair"
     shutil.copytree(template, root, symlinks=True)
     local_root = root / "local"
@@ -223,8 +237,6 @@ def test_job_request_forwards_to_remote_workspace(pair: Pair, capsys: pytest.Cap
         "cluster:station",
         pair.ids["pending"],
         "pause",
-        "--operator",
-        "o",
         "--reason",
         "r",
         "--adapter-timeout",
@@ -237,7 +249,7 @@ def test_job_request_forwards_to_remote_workspace(pair: Pair, capsys: pytest.Cap
     request = json.loads(ready[0].read_text(encoding="utf-8"))
     assert request["job_id"] == pair.ids["pending"]
     assert request["action"] == "pause"
-    assert request["operator"] == "o" and request["reason"] == "r"
+    assert request["operator"] == "Local User <local@example.test>" and request["reason"] == "r"
 
 
 def test_job_request_forwards_leading_dash_reason(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
@@ -247,7 +259,7 @@ def test_job_request_forwards_leading_dash_reason(pair: Pair, capsys: pytest.Cap
         "cluster:station",
         pair.ids["pending"],
         "pause",
-        "--operator=o",
+        "--operator=local",
         "--reason=-maintenance",
     ]
     assert command(argv, pair.context) == 0
@@ -266,8 +278,6 @@ def test_job_request_forwards_multiple_ids(pair: Pair, capsys: pytest.CaptureFix
         pair.ids["pending"],
         pair.ids["succeeded"],
         "pause",
-        "--operator",
-        "o",
         "--reason",
         "r",
     ]
@@ -288,8 +298,6 @@ def test_job_request_relays_remote_failure(pair: Pair, capsys: pytest.CaptureFix
         "cluster:station",
         "does-not-exist",
         "pause",
-        "--operator",
-        "o",
         "--reason",
         "r",
     ]

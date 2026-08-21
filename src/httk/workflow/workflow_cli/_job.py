@@ -3,6 +3,7 @@
 import os
 import time
 
+from ..configuration import resolve_operator_identity
 from ..introspection import read_managers
 from ..models import TERMINAL_KINDS, Marker, ensure_step_known
 from ._common import *
@@ -277,9 +278,9 @@ def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--operator",
-        metavar="NAME",
-        required=True,
-        help="who is asking, recorded in the state frame",
+        metavar="IDENTITY",
+        required=False,
+        help='configured identity short name or a literal "Name <email>"',
     )
     parser.add_argument(
         "--reason",
@@ -322,6 +323,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         raise ValueError("--wait is only valid with the pause action")
     if arguments.timeout is not None and arguments.timeout < 0:
         raise ValueError("--timeout must not be negative")
+    identity = resolve_operator_identity(arguments.operator)
 
     binding, root = _resolve_binding(arguments, context)
     if root is None:
@@ -331,7 +333,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
             binding.name.split(":", 1)[1],
             *arguments.job_id,
             arguments.action,
-            f"--operator={arguments.operator}",
+            f"--operator={identity.label}",
             f"--reason={arguments.reason}",
         ]
         for option in ("priority", "step"):
@@ -367,7 +369,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
             "expected_generation": marker.generation,
             "expected_record_ref": marker.record_ref,
             "action": arguments.action,
-            "operator": arguments.operator,
+            "operator": identity.label,
             "reason": arguments.reason,
             "created_at": utc_now(),
         }
@@ -379,7 +381,8 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
             request["force"] = True
         # Attribution, when this installation has an identity key: the manager
         # verifies a signature that is there and accepts a request that has none.
-        path = workspace.publish_request(sign_document(request))
+        document = dict(request) if identity.seed_path is None else sign_document(request, seed_path=identity.seed_path)
+        path = workspace.publish_request(document)
         published.append((job_id, marker, path))
         print(path)
 

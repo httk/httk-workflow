@@ -173,7 +173,7 @@ its job or store runner target.
 | --- | --- | --- |
 | `job new WORKSPACE` | scaffold and submit jobs from a workflow | `--workflow` or `--workflow-dir` (one required), `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
 | `job submit WORKSPACE SOURCE` | submit one prepared payload directory | `--placement` (required), `--move` |
-| `job request WORKSPACE JOB_ID ... ACTION` | publish one request per job ID (remote: over the adapter) | `--operator`, `--reason` (both required), `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
+| `job request WORKSPACE JOB_ID ... ACTION` | publish one request per job ID (remote: over the adapter) | optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
 | `job list WORKSPACE` | list the jobs as a cheap table | `--kind`, `--placement`, `--json` |
 | `job show WORKSPACE JOB` | describe one job from its state | `--json` |
 | `job log WORKSPACE JOB` | print the transition history | `--limit`, `--json` |
@@ -362,6 +362,10 @@ warning names how many such tasks a harvest saw.
 | `config set KEY VALUE` | store one member | `machine_names` is a comma-separated list of names this machine answers to |
 | `config unset KEY` | remove one member | |
 | `config import-v1 [SOURCE]` | read a legacy `~/.httk` configuration | |
+| `config identity add SHORT` | add a named operator identity and its key | `--name`, `--email`, `--default` |
+| `config identity list` | list named identities and public keys | `--json` |
+| `config identity default SHORT` | select the default named identity | |
+| `config identity remove SHORT` | remove an identity from config, leaving its key files | |
 
 ### `project` — the directory a campaign lives in
 
@@ -740,19 +744,40 @@ with a different job.
 
 ### Operator identity
 
-`httk workflow config init` creates `identity.seed`/`identity.pub` below
-`$XDG_DATA_HOME/httk/keys/`. That key signs the small documents an operator
-publishes: an operator request (`httk workflow job request …`) and a transfer
-acknowledgement. The signature is detached, covers the canonical JSON of the
-whole document, and is domain-separated from every other httk signature.
+`httk workflow config init` creates the legacy `identity.seed`/`identity.pub`
+pair below `$XDG_CONFIG_HOME/httk/keys/`. Named identities are managed with
+`httk workflow config identity add SHORT --name NAME --email EMAIL`; each gets
+its own `identity-SHORT.seed`/`.pub` pair. The first named identity becomes the
+default, and `config identity default SHORT` changes it. Removing an identity
+leaves its key files on disk; removing the default with exactly one identity
+remaining selects that identity automatically, while removal with multiple
+remaining identities requires selecting another default first.
 
-It is optional in both directions, deliberately. An installation with no
-identity key publishes unsigned documents, and a manager or a transfer source
-accepts them exactly as before — so a mixed deployment needs no flag day. A
-signature that *is* present must verify: a request with a broken signature is
-quarantined with the reason, and an acknowledgement with a broken signature will
-not retire a sealed bundle. A verified request records its `operator_key` in the
-journalled state frame beside the operator name and reason.
+The default signing identity resolves in this order: `default_identity`, the
+only configured identity when there is exactly one, then the legacy top-level
+`name`/`email` and `identity.seed`. A selector containing `<` is a literal
+`Name <email>` attribution label (the name may be empty) and uses the resolved
+default identity's key; other selectors must be configured short names.
+
+`job request` records the selected identity's `Name <email>` label and signs
+the request with that identity's key. Omitting `--operator` selects the
+configured default; a short name selects that identity, while a literal label
+is passed through and signed with the default identity's key.
+
+For remote requests, the control-center identity label is forwarded as attribution while the machine that publishes the request supplies the signature; shipping locally-signed envelopes to remotes is a possible future refinement.
+
+The selected key signs operator requests (`httk workflow job request …`).
+Transfer acknowledgements always use the DEFAULT identity resolution; they do
+not carry a per-request identity selection. Signatures are detached, cover the
+canonical JSON of the whole document, and are domain-separated from every
+other httk signature.
+
+Document signing remains optional for lower-level callers, and a manager or a
+transfer source accepts unsigned documents exactly as before. A signature that
+*is* present must verify: a request with a broken signature is quarantined with
+the reason, and an acknowledgement with a broken signature will not retire a
+sealed bundle. A verified request records its `operator_key` in the journalled
+state frame beside the operator name and reason.
 
 The semantics are attribution, not authorization. The key says *which identity
 published this document*; it grants nothing, and no operation is permitted

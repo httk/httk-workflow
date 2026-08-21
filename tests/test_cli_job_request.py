@@ -5,9 +5,11 @@ import time
 import uuid
 from pathlib import Path
 
+import pytest
 from httk.core.cli import CLIContext
 
 from httk.workflow import TaskManager, Workspace
+from httk.workflow.configuration import ensure_identity_key, identity_key_paths, identity_public_key, write_config
 from httk.workflow.registry import create_workspace
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import command
@@ -68,6 +70,23 @@ def _context(root: Path) -> CLIContext:
     return CLIContext("httk", root)
 
 
+@pytest.fixture(autouse=True)
+def _configured_default_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.delenv("HTTK_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("HTTK_DATA_HOME", raising=False)
+    write_config(
+        {
+            "format": "httk-config",
+            "format_version": 2,
+            "identities": {"tester": {"name": "Test User", "email": "tester@example.test"}},
+            "default_identity": "tester",
+        }
+    )
+    ensure_identity_key("tester")
+
+
 def _new_workspace(tmp_path: Path) -> tuple[Workspace, str]:
     root = tmp_path / "workspace"
     name = f"cli-{uuid.uuid4().hex}"
@@ -82,8 +101,6 @@ def _request_args(workspace_name: str, *job_ids: str, action: str = "pause") -> 
         workspace_name,
         *job_ids,
         action,
-        "--operator",
-        "tester",
         "--reason",
         "test request",
     ]
@@ -103,6 +120,110 @@ def test_repeatable_job_ids_publish_one_request_and_path_each(tmp_path: Path, ca
     assert len(output) == 2
     assert all(Path(line).is_file() for line in output)
     assert len(list((workspace.control / "requests" / "ready").iterdir())) == 2
+
+
+def test_default_operator_identity_is_recorded_and_signs_request(tmp_path: Path) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "default")
+    workspace.submit(payload, "project/default")
+
+    assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 0
+    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    assert request["operator"] == "Test User <tester@example.test>"
+    assert request["operator_key"] == identity_public_key(identity_key_paths("tester")[0])
+    assert "signature" in request
+
+
+def test_named_operator_identity_selects_its_key(tmp_path: Path) -> None:
+    write_config(
+        {
+            "format": "httk-config",
+            "format_version": 2,
+            "identities": {
+                "tester": {"name": "Test User", "email": "tester@example.test"},
+                "bot": {"name": "Build Bot", "email": "bot@example.test"},
+            },
+            "default_identity": "tester",
+        }
+    )
+    ensure_identity_key("bot")
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "named")
+    workspace.submit(payload, "project/named")
+
+    assert command(_request_args(workspace_name, job_id) + ["--operator", "bot"], _context(tmp_path)) == 0
+    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    assert request["operator"] == "Build Bot <bot@example.test>"
+    assert request["operator_key"] == identity_public_key(identity_key_paths("bot")[0])
+
+
+def test_unknown_operator_identity_publishes_nothing(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "unknown")
+    workspace.submit(payload, "project/unknown")
+
+    assert command(_request_args(workspace_name, job_id) + ["--operator", "missing"], _context(tmp_path)) == 2
+    assert "configured identities: tester" in capsys.readouterr().err
+    assert not list((workspace.control / "requests" / "ready").iterdir())
+
+
+def test_request_without_any_identity_names_the_config_command(tmp_path: Path, capsys) -> None:
+    write_config({"format": "httk-config", "format_version": 2})
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "no-identity")
+    workspace.submit(payload, "project/no-identity")
+
+    assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 2
+    assert "config identity add" in capsys.readouterr().err
+    assert not list((workspace.control / "requests" / "ready").iterdir())
+
+
+def test_literal_operator_label_is_passed_through(tmp_path: Path) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "literal")
+    workspace.submit(payload, "project/literal")
+
+    assert (
+        command(_request_args(workspace_name, job_id) + ["--operator", "Ext Person <ext@x>"], _context(tmp_path)) == 0
+    )
+    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    assert request["operator"] == "Ext Person <ext@x>"
+
+
+def test_literal_operator_on_empty_machine_publishes_unsigned_request(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data"))
+    monkeypatch.delenv("HTTK_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("HTTK_DATA_HOME", raising=False)
+    ensure_identity_key()
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "literal-empty")
+    workspace.submit(payload, "project/literal-empty")
+
+    assert command(_request_args(workspace_name, job_id) + ["--operator", "Ext <e@x>"], _context(tmp_path)) == 0
+    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    assert request["operator"] == "Ext <e@x>"
+    assert "operator_key" not in request and "signature" not in request
+
+
+def test_legacy_operator_identity_is_used_without_named_identities(tmp_path: Path) -> None:
+    write_config(
+        {
+            "format": "httk-config",
+            "format_version": 2,
+            "name": "Legacy User",
+            "email": "legacy@example.test",
+        }
+    )
+    ensure_identity_key()
+    workspace, workspace_name = _new_workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", "legacy")
+    workspace.submit(payload, "project/legacy")
+
+    assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 0
+    request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
+    assert request["operator"] == "Legacy User <legacy@example.test>"
+    assert request["operator_key"] == identity_public_key(identity_key_paths()[0])
 
 
 def test_wait_returns_zero_when_manager_pauses_jobs(tmp_path: Path, capsys, monkeypatch) -> None:
