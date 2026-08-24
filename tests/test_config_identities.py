@@ -253,3 +253,39 @@ def test_identity_add_rejects_unforwardable_labels(tmp_path: Path, monkeypatch, 
     assert _command(tmp_path, "config", "identity", "add", "bad", "--name", name, "--email", email) == 2
     assert "identity" in capsys.readouterr().err
     assert not identity_key_paths("bad")[0].exists()
+
+
+def test_ambiguous_identities_refuse_signing_like_job_request(tmp_path: Path, monkeypatch) -> None:
+    _isolate(tmp_path, monkeypatch)
+    write_config(
+        {
+            "format": "httk-config",
+            "format_version": 2,
+            "identities": {
+                "alice": {"name": "Alice", "email": "alice@example.test"},
+                "bob": {"name": "Bob", "email": "bob@example.test"},
+            },
+        }
+    )
+    # Two identities and no default is ambiguous. Signing (a transfer
+    # acknowledgement) must refuse just as ``job request`` does, rather than
+    # silently falling back to the legacy identity key.
+    with pytest.raises(ValueError, match="configure an identity"):
+        resolve_operator_identity(None)
+    with pytest.raises(ValueError, match="configure an identity"):
+        identity_seed()
+    with pytest.raises(ValueError, match="configure an identity"):
+        sign_document({"format": "test"})
+
+
+def test_symlinked_seed_is_refused_not_silently_unsigned(tmp_path: Path, monkeypatch) -> None:
+    _isolate(tmp_path, monkeypatch)
+    real_seed, _ = ensure_identity_key("alice")
+    link = tmp_path / "linked.seed"
+    link.symlink_to(real_seed)
+    # A symlinked (or otherwise refused) but valid seed must raise, not map to
+    # None, which would silently produce unsigned documents.
+    with pytest.raises(ValueError):
+        identity_seed(link)
+    # Only a genuinely missing file reads as unsigned.
+    assert identity_seed(tmp_path / "absent.seed") is None

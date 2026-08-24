@@ -630,7 +630,13 @@ def _ensure_identity_key(identity: OperatorIdentity) -> None:
     """
 
     if identity.seed_path is not None and identity_seed(identity.seed_path) is None:
-        short = identity.short or "default"
+        if identity.short is None:
+            raise ValueError(
+                f"the default identity has no key file at {identity.seed_path}; "
+                f"create one with `httk workflow config init`, "
+                f"or restore the key file at {identity.seed_path}"
+            )
+        short = identity.short
         raise ValueError(
             f"identity {short!r} has no key file at {identity.seed_path}; "
             f"remove it with `httk workflow config identity remove {short}` then re-add it with "

@@ -214,6 +214,14 @@ def probe_remote_workspace(
         raise RuntimeError(f"{noun} workspace compatibility check failed: {status.get('stderr', '')}")
     try:
         documents = json.loads(str(status.get("stdout", "")))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{noun} did not return a compatible workflow workspace status") from exc
+    if isinstance(documents, dict):
+        raise ValueError(
+            "remote httk-workflow is older than this client: upgrade the remote "
+            "(workspace status --json returned a single document)"
+        )
+    try:
         if not isinstance(documents, list) or len(documents) != 1:
             raise ValueError
         document = documents[0]

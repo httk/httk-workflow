@@ -17,7 +17,7 @@ from httk.core.cli import CLIContext
 
 from conftest import FAKE_HOST, Remote, fake_remote, register_ws
 from httk.workflow import Workspace, adapter_runtime
-from httk.workflow.adapters import add_remote, run_adapter
+from httk.workflow.adapters import RemoteTarget, add_remote, probe_remote_workspace, run_adapter
 from httk.workflow.manager import TaskManager
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import command
@@ -670,3 +670,25 @@ def test_a_job_reaches_a_remote_workspace_and_runs_there(tmp_path: Path, remote:
     assert any("workspace status --json station" in item for item in commands)
     assert any("transfer receive --workspace station --bundle" in item for item in commands)
     assert any(item.startswith("rsync ") or " rsync " in item for item in commands)
+
+
+def test_probe_remote_workspace_reports_older_remote_returning_single_document(tmp_path: Path) -> None:
+    target = RemoteTarget("far", tmp_path, False)
+
+    def _old_release_adapter(bundle, verb, payload, *, timeout):
+        # A remote on the previous release answers ``status --json`` with a
+        # single status object rather than the current one-element list.
+        return {
+            "returncode": 0,
+            "stdout": json.dumps(
+                {
+                    "format": "httk-workflow-status",
+                    "format_version": 2,
+                    "workspace_id": str(uuid.uuid4()),
+                    "root": "/data/ws",
+                }
+            ),
+        }
+
+    with pytest.raises(ValueError, match="older than this client"):
+        probe_remote_workspace(target, "ws", timeout=None, adapter=_old_release_adapter)

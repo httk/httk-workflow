@@ -328,6 +328,47 @@ def _ensure_identity_key_paths(private_path: Path, public_path: Path) -> tuple[P
     return private_path, public_path
 
 
+def _decode_seed(encoded: bytes, path: Path) -> bytes:
+    try:
+        seed = base64.b64decode(encoded, validate=True)
+    except ValueError as exc:
+        raise ValueError(
+            f"identity key is not a standard 32-byte Ed25519 seed: {path}; "
+            "use config import-v1 explicitly for legacy material"
+        ) from exc
+    if len(seed) != 32:
+        raise ValueError(
+            f"identity key is not a standard 32-byte Ed25519 seed: {path}; "
+            "use config import-v1 explicitly for legacy material"
+        )
+    return seed
+
+
+def _read_seed_no_follow(path: Path) -> bytes:
+    """Read an identity seed via ``O_NOFOLLOW`` without touching its mode.
+
+    A symlinked, unreadable, or malformed seed is refused with a
+    :class:`ValueError`; a genuinely missing file raises
+    :class:`FileNotFoundError` so a probe can treat an absent key as *unsigned*
+    without also swallowing a refusal.
+
+    :param path: The seed file to read.
+    :return: The decoded 32-byte seed.
+    :raises FileNotFoundError: If the seed file does not exist.
+    :raises ValueError: If the seed is a symlink, unreadable, or not a standard seed.
+    """
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise ValueError(f"cannot safely read identity seed: {path}") from exc
+    with os.fdopen(descriptor, "rb") as stream:
+        encoded = stream.read().strip()
+    return _decode_seed(encoded, path)
+
+
 def _read_existing_seed(path: Path) -> bytes:
     try:
         descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -335,18 +376,7 @@ def _read_existing_seed(path: Path) -> bytes:
         raise ValueError(f"cannot safely read identity seed: {path}") from exc
     with os.fdopen(descriptor, "rb") as stream:
         encoded = stream.read().strip()
-        try:
-            seed = base64.b64decode(encoded, validate=True)
-        except ValueError as exc:
-            raise ValueError(
-                f"identity key is not a standard 32-byte Ed25519 seed: {path}; "
-                "use config import-v1 explicitly for legacy material"
-            ) from exc
-        if len(seed) != 32:
-            raise ValueError(
-                f"identity key is not a standard 32-byte Ed25519 seed: {path}; "
-                "use config import-v1 explicitly for legacy material"
-            )
+        seed = _decode_seed(encoded, path)
         os.fchmod(stream.fileno(), 0o600)
         return seed
 
@@ -506,21 +536,22 @@ def identity_seed(seed_path: Path | None = None) -> bytes | None:
 
     if seed_path is None:
         values = read_config()
-        identities = _configured_identities(values)
-        if "default_identity" in values:
-            selected = values["default_identity"]
-            if not isinstance(selected, str) or selected not in identities:
-                raise ValueError("config identity default must name a configured identity")
-            seed_path = identity_key_paths(selected)[0]
-        elif len(identities) == 1:
-            seed_path = identity_key_paths(next(iter(identities)))[0]
-        else:
+        try:
+            seed_path = _default_operator_identity(values).seed_path
+        except ValueError:
+            # A bare installation with only a legacy key and no configured
+            # identity still signs with that key; an installation that has
+            # configured identities but no resolvable default is ambiguous and
+            # must refuse, exactly as ``job request`` does.
+            if not _truly_unconfigured(values):
+                raise
             seed_path = identity_key_paths()[0]
-    try:
-        seed = base64.b64decode(seed_path.read_text(encoding="ascii").strip(), validate=True)
-    except (OSError, UnicodeError, ValueError):
+    if seed_path is None:
         return None
-    return seed if len(seed) == 32 else None
+    try:
+        return _read_seed_no_follow(seed_path)
+    except FileNotFoundError:
+        return None
 
 
 def identity_public_key(seed_path: Path | None = None) -> str | None:

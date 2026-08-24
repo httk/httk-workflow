@@ -587,3 +587,66 @@ def test_every_transfer_ledger_write_is_durability_aware() -> None:
     assert calls
     for call in calls:
         assert any(keyword.arg == "durable" for keyword in call.keywords), ast.unparse(call)
+
+
+def test_offer_selection_state_filter_survives_for_sealed_bundle(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    destination_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+    transfers_dir = workspace.control / "transfers"
+    transfers_dir.mkdir(parents=True, exist_ok=True)
+    (transfers_dir / f"{job_id}.json").write_text(
+        json.dumps(
+            {
+                "status": "sealed",
+                "destination_workspace_id": destination_id,
+                "job_id": job_id,
+                "prior_kind": "failed",
+                "source_placement": "jobs",
+            }
+        ),
+        encoding="utf-8",
+    )
+    # ``failed`` is not among the requested states, so the state filter is the
+    # first and correct diagnosis; it must not be overwritten by the generic
+    # "sealed bundle is unavailable" reason.
+    reasons = transfers_module._offer_selection_errors(
+        workspace,
+        {job_id},
+        [],
+        destination_workspace_id=destination_id,
+        states=("completed",),
+        placement=None,
+    )
+    assert reasons[job_id].startswith("filtered by state")
+
+
+def test_import_refuses_ambiguous_identity_before_mutating(tmp_path: Path) -> None:
+    from httk.workflow.configuration import write_config
+
+    ambiguous = {
+        "format": "httk-config",
+        "format_version": 2,
+        "identities": {
+            "alice": {"name": "Alice", "email": "alice@example.test"},
+            "bob": {"name": "Bob", "email": "bob@example.test"},
+        },
+    }
+    write_config(ambiguous)
+    source, destination = _pair(tmp_path)
+    payload, job_id = _payload(tmp_path)
+    source.submit(payload, "jobs")
+    bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)
+
+    # 2+ identities with no default is ambiguous, so signing the acknowledgement
+    # refuses. That refusal must precede every mutation of the import.
+    with pytest.raises(ValueError, match="configure an identity"):
+        destination.import_bundle(bundle)
+
+    assert destination.find_marker_by_id(job_id) is None
+    assert (bundle / TRANSFER_DIRECTORY).is_dir()
+
+    # Choosing a default identity lets the very same intact bundle import.
+    write_config({**ambiguous, "default_identity": "alice"})
+    destination.import_bundle(bundle)
+    assert destination.find_marker_by_id(job_id) is not None

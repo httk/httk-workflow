@@ -759,7 +759,6 @@ terminal state or cancel them through recorded operator requests:
 
 ```console
 httk workflow job request cancel --workspace workflow-workspace \
-  --operator "$USER" \
   --reason "replaced by validated native workflow" JOB_UUID
 ```
 

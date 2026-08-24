@@ -457,10 +457,10 @@ httk workflow workspace status WORKSPACE
 httk workflow workspace status --json WORKSPACE
 
 httk workflow job request pause --workspace WORKSPACE \
-  --operator "$USER" --reason "inspection" JOB_UUID
+  --reason "inspection" JOB_UUID
 
 httk workflow job request continue --workspace WORKSPACE \
-  --operator "$USER" --reason "inputs repaired" JOB_UUID
+  --reason "inputs repaired" JOB_UUID
 ```
 
 An `override_step --step X` request is pre-validated on the client: when the
@@ -495,7 +495,7 @@ applied. It is attribution and not authorization; see
 
 ```console
 httk workflow job request cancel --workspace WORKSPACE \
-  --operator "$USER" --reason "wrong inputs" JOB_UUID
+  --reason "wrong inputs" JOB_UUID
 ```
 
 The manager first renames the marker `running` → `cancelling`, which fences the

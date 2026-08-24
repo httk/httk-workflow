@@ -55,7 +55,7 @@ settings, and `job request`. Most job commands remain local-only. Jobs are
 created in the local default workspace, then `transfer` moves them to a remote
 workspace for execution.
 
-`job request ACTION REMOTE:NAME JOB_ID ...` asks the owning machine for unsigned envelopes,
+`job request ACTION --workspace REMOTE:NAME JOB_ID ...` asks the owning machine for unsigned envelopes,
 signs those envelopes with the control-center identity selected by
 `--operator`, and sends the signed documents back for verbatim publication.
 An older far side that cannot parse the additive protocol vectors fails with

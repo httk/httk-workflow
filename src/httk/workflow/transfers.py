@@ -14,7 +14,7 @@ from typing import Any
 from httk.core.digests import sha256_file, tree_digest
 
 from ._util import read_json, utc_now, write_json_atomic
-from .configuration import sign_document, verify_document
+from .configuration import identity_seed, sign_document, verify_document
 from .errors import FormatError, WorkflowError, WorkspaceCorruptionError
 from .models import (
     CORE_PROFILE,
@@ -478,6 +478,11 @@ def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[
         return existing_ack
     if manifest["destination_workspace_id"] != workspace.workspace_id:
         raise ValueError("bundle names a different destination workspace")
+    # Signing the acknowledgement is refused for an ambiguous operator
+    # identity (2+ configured identities and no default). Resolve it now,
+    # before any state mutation, so that refusal cannot leave a runner
+    # installed, a marker renamed, or the transfer tree removed.
+    identity_seed()
     # Runners are installed before anything about the job is published, because
     # an imported job must never become schedulable without the runner it pins.
     _install_bundled_runners(workspace, source, manifest)
@@ -925,12 +930,12 @@ def _offer_selection_errors(
             ledger = sealed[0]
             if ledger.get("prior_kind") not in states:
                 reasons[job_id] = f"filtered by state (state: {ledger.get('prior_kind')})"
-            elif prefix is not None:
-                source_placement = normalize_placement(str(ledger["source_placement"]))
-                if source_placement.parts[: len(prefix)] != prefix:
-                    reasons[job_id] = "filtered by placement"
-                    continue
-            reasons[job_id] = "sealed bundle is unavailable"
+            elif prefix is not None and (
+                normalize_placement(str(ledger["source_placement"])).parts[: len(prefix)] != prefix
+            ):
+                reasons[job_id] = "filtered by placement"
+            else:
+                reasons[job_id] = "sealed bundle is unavailable"
         else:
             reasons[job_id] = "not found"
     for candidate in candidates:
