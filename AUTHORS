@@ -1,0 +1,6 @@
+# This file lists significant contributions to the implementation and design of httk-workflow.
+# The source control revision history keeps the full list of direct code contributions.
+# httk can print the references relevant for the routines used in a specific program by: print(httk.core.credits)
+
+Rickard Armiento <rickard-gpg@armiento.net>
+Christopher Tholander <christopher.tholander@gmail.com>: VASP relaxation workflow improvements [https://doi.org/10.1063/1.4971248].

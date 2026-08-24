@@ -42,7 +42,7 @@ register_citation(
         {
             "authors": (
                 {"name": "Christopher Tholander"},
-                {"name": "Carina B. A. Andersson"},
+                {"name": "C. B. Andreas Andersson"},
                 {"name": "Rickard Armiento"},
                 {"name": "Ferenc Tasnádi"},
                 {"name": "Björn Alling"},
