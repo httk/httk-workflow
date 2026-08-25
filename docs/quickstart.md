@@ -117,7 +117,7 @@ running. When something did go wrong, the finished job's results and logs are in
 the payload directory `job new` printed: `run/` is the workdir, `data/` holds the
 published files, and `job log` prints the transitions.
 
-`job debug WORKSPACE JOB` drives one job in the foreground and prints every
+`job debug --workspace WORKSPACE JOB` drives one job in the foreground and prints every
 transition, which is the fastest loop while a runner is still being written.
 
 ## Many jobs at once

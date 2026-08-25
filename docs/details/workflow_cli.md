@@ -214,7 +214,7 @@ unreadable `job.json`; unfulfilled roles alone keep the exit at `0`. See
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| postprocess WORKSPACE | run one declared script for each selected collected job | --script NAME (required), --workflow-dir PKG, --state, --placement, --timeout, --json |
+| postprocess [OPTIONS] | run one declared script for each selected collected job | --workspace WS, --script NAME (required), --workflow-dir PKG, --state, --placement, --timeout, --json |
 
 ~~~console
 httk workflow postprocess --workspace WS --script relaxation-report
@@ -1084,7 +1084,7 @@ on the owning machine.
 
 `transfer default kappa:runs` detaches each selected job from the local default
 workspace and imports it on the remote, at the placement it had here unless
-`--destination-placement` puts it elsewhere. `run kappa:runs` submits the
+`--destination-placement` puts it elsewhere. `run --workspace kappa:runs` submits the
 generated manager through the remote adapter; `--workers` fixes its worker count.
 `manager run` is the advanced spelling for the same operation.
 
