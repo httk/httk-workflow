@@ -333,6 +333,17 @@ resources, or executors this manager serves, or left committing with an
 unreadable definition. This is the command that subsumed the old
 `transfer start-manager`.
 
+For a resource-aware run, advertise the manager's complete allotment:
+
+```console
+httk workflow run --workers 4 \
+  --worker-resource procs 32 --worker-resource mem 128000 \
+  --worker-resource matlab_license_slots 2
+```
+
+Pair this with the workflow manifest's per-step resource requirements; see
+{doc}`taskmanager` for the packing and dynamic-requirement example.
+
 ### `v1` — harvesting finished *httk* v1 trees
 
 | Command | What it does | Notable options |

@@ -325,6 +325,43 @@ capacity when that quotient is zero), so undeclared jobs still occupy one
 worker's share. A dynamic requirement published by an `advance` or `wait`
 outcome applies to the next activation and is retained across retries.
 
+For a workflow that mixes a wide relaxation with dense analysis steps:
+
+Manifest:
+
+```toml
+[workflow.resources]
+procs = 4
+mem = 16000            # MB
+
+[workflow.steps.relax]
+resources = { procs = 32, mem = 120000 }
+
+[workflow.steps.analyse]
+resources = { procs = 1, mem = 2000, matlab_license_slots = 1 }
+```
+
+Manager:
+
+```console
+httk workflow run --workers 4 \
+  --worker-resource procs 32 --worker-resource mem 128000 \
+  --worker-resource matlab_license_slots 2
+```
+
+`procs` and `mem` are special: a job that omits them is assumed to need the
+manager's fair share (`capacity // --workers`), so only jobs declaring both
+can pack more densely than one-per-worker. With the manager above, `relax`
+runs alone, while several `analyse` steps (one proc each) can run alongside,
+at most two at a time because of the two `matlab_license_slots`. A manager
+started without `--worker-resource matlab_license_slots` never runs
+`analyse`; it is reported as `ready_blocked["resources"]` and in the idle
+summary. A job needing a resource the manager lacks or has at 0 is likewise
+never claimed. A dynamic requirement can be supplied by the SDK:
+`a.advance("analyse", resources={"procs": 1, "mem": 2000, "matlab_license_slots": 1})`.
+The Bash bridge equivalent is:
+`httk_workflow_advance analyse --resource procs=1 --resource mem=2000 --resource matlab_license_slots=1`.
+
 Resource labels are otherwise opaque to the manager. `manager.workers` is
 unchanged: it remains the concurrency limit and there is no
 `manager.resources` workspace setting. The command-line capacities are
@@ -349,7 +386,11 @@ adapters supply host `procs` and total host physical memory in MB when the
 caller did not provide those capacities. For multiple local managers, explicit
 resource pairs are per-manager values and remain unchanged; only injected host
 capacities are split across managers with quotient-plus-remainder distribution.
-SLURM adapters let the allocation variables describe the real allocation.
+Under SLURM the manager reads `procs`, `gpus`, `nodes`, and `mem` from the
+allocation unless they are given on the command line. Each manager owns its
+own allotment; a replacement manager taking over a job brings its own
+capacity. SLURM adapters let the allocation variables describe the real
+allocation.
 
 A manager claims work under the workspace's `lease_seconds` unless
 `--lease-seconds` overrides it for that manager alone.

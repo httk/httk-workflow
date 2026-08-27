@@ -139,6 +139,24 @@ executable runner may add `[workflow.steps.NAME]` tables, each allowing only a
 name is an error. `[workflow.steps]` is rejected for language runners because
 their step set is supplied by the language.
 
+For example, a manifest can set workflow defaults and denser per-step
+requirements together:
+
+```toml
+[workflow.resources]
+procs = 4
+mem = 16000            # MB
+
+[workflow.steps.relax]
+resources = { procs = 32, mem = 120000 }
+
+[workflow.steps.analyse]
+resources = { procs = 1, mem = 2000, matlab_license_slots = 1 }
+```
+
+The `relax` and `analyse` declarations override the defaults for those steps;
+the manager's advertised capacities determine whether each activation fits.
+
 ### `[workflow.runner]`: language vocabulary
 
 | Key | CWL/PWD | jobflow | httk-v1 | Meaning |

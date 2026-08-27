@@ -1676,6 +1676,27 @@ def test_resource_capacity_blocks_never_fitting_jobs_and_census_reports_them(tmp
         assert census.ready_blocked["resources"] == {"procs": 1}
 
 
+def test_exhausted_procs_skip_the_ready_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="exhausted")
+    workspace.submit(payload, "project/exhausted")
+    with TaskManager(workspace, resources={"procs": 1}, heartbeat_interval=0.01) as manager:
+        manager._register_submissions()
+        calls = 0
+
+        def record_scan() -> list[tuple[Marker, dict[str, int]]]:
+            nonlocal calls
+            calls += 1
+            return []
+
+        monkeypatch.setattr(manager, "_eligible_ready_with_requirements", record_scan)
+        monkeypatch.setattr(manager, "_available_resources", lambda: {"procs": 0})
+        manager.tick()
+
+    assert calls == 0
+    assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
+
+
 def test_resource_packing_limits_concurrent_attempts(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     jobs: list[tuple[Path, str]] = []

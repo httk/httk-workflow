@@ -242,6 +242,15 @@ def claim_pass(manager: Any, changed: bool, logger: Any) -> bool:
         return changed
     if manager._maintenance_paused():
         return changed
+    if len(manager._running) >= manager.maximum_workers:
+        logger.debug("worker capacity full: not claiming new work")
+        return changed
+    available = manager._available_resources()
+    if ("procs" in manager.resources and available["procs"] == 0) or (
+        "mem" in manager.resources and available["mem"] == 0
+    ):
+        logger.debug("resource capacity exhausted: not claiming new work")
+        return changed
     for marker, requirement in manager._eligible_ready_with_requirements():
         if len(manager._running) >= manager.maximum_workers:
             break

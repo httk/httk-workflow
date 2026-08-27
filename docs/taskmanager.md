@@ -21,6 +21,17 @@ inside an active SLURM allocation, local managers derive `procs`, `mem`,
 `gpus`, and `nodes` from the allocation variables. `--count N` starts N local
 manager processes, each with its own manager directory and log.
 
+For example, a manager can advertise CPUs, memory, and two license slots:
+
+```console
+httk workflow run --workers 4 \
+  --worker-resource procs 32 --worker-resource mem 128000 \
+  --worker-resource matlab_license_slots 2
+```
+
+Workflow and per-step declarations, including dense resource packing, are
+covered in the {doc}`details/taskmanager` resource reference.
+
 ## Environment preludes
 
 Shell setup an HPC job needs — `module load`, `source activate`, `export` — is
