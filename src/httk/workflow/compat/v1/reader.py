@@ -333,7 +333,7 @@ def collect_finished_tree(
             inputs=(),
             artifacts=(),
             outputs=(),
-            immutable_id=task.immutable_id,
+            source_id=task.immutable_id,
             last_modified=task.computation_date,
         )
         try:

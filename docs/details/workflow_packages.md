@@ -654,7 +654,7 @@ httk workflow job new --workspace WS --workflow-dir ./my-workflow \\
     --placement project/screening
 httk workflow run --workspace WS
 httk workflow collect --workspace WS
-httk workflow collect --workspace WS --into results.sqlite
+httk workflow collect --workspace WS --into results.sqlite --id-base httk.workflow
 ```
 
 `httk workflow describe TARGET [--json]` reports a registered id or alias,
@@ -667,6 +667,10 @@ is the CLI shortcut: it opens a file-backed SQLite `SqlStore`, saves output
 entries, runs, and products, and reports stored ids. Entry families and record
 classes are resolved lazily from the core registry; output types may require
 `httk-store` and `httk-atomistic` to be installed.
+
+`--id-base BASE` is required with `--into`; `--id-series SERIES` defaults to
+`1`. Collected edges to outputs without store ids use content ids until the
+outputs are saved, after which `--into` rewrites those edges to the minted ids.
 
 With `--into`, each job's entries, run, and products are stored as one job-level
 operation. A storage failure is reported on that job's summary as

@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote
 
 from httk.core.digests import sha256_file, tree_digest
+from httk.core.storage import content_id
 
 from . import languages
 from ._util import read_json, require_mapping, require_string
@@ -142,6 +143,9 @@ def _core():
 @dataclass(frozen=True)
 class CollectedJob:
     """Represent one job after workflow collecting and provenance assembly.
+
+    Edge ids of not-yet-stored outputs are content ids; ``--into`` rewrites
+    them to the store-minted ids.
 
     :param workflow_id: Identify the workflow that produced the job.
     :param outputs: Map declared output roles to collector results.
@@ -928,7 +932,10 @@ def _provider_output_roles(provider: object | None) -> dict[str, Mapping[str, ob
 def _entry_edge(identity: str, role: str, value: object, declared: Mapping[str, object]) -> httk.core.RunEdge:
     entry_id = getattr(value, "id", None)
     if not isinstance(entry_id, str):
-        raise ValueError(f"{identity}: output role {role!r} has no string entry id")
+        try:
+            entry_id = content_id(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{identity}: output role {role!r} has no string entry id") from exc
     entry_type = getattr(value, "type", None)
     if not isinstance(entry_type, str):
         entry_type = declared.get("entry_type")
@@ -1421,6 +1428,7 @@ def _assemble_collected(
         inputs=run.inputs,
         artifacts=_overlay_edges(run.artifacts, owned),
         outputs=_overlay_edges(run.outputs, owned),
+        source_id=run.source_id,
         immutable_id=run.immutable_id,
         last_modified=run.last_modified,
     )
@@ -1492,6 +1500,9 @@ def collect(
 ) -> Iterator[CollectedJob]:
     """Collect records through registered or explicitly allowed job collectors.
 
+    Edge ids of not-yet-stored outputs are content ids; ``--into`` rewrites
+    them to the store-minted ids.
+
     A fallback reads and verifies the package manifest from the pinned runner
     tree itself. A changed pinned tree raises ``_PinnedTreeError``, which degrades
     that job and does not stop the rest of the sweep; other hook-loading errors
@@ -1530,7 +1541,7 @@ def collect(
                 inputs=(),
                 artifacts=(),
                 outputs=(),
-                immutable_id=identity,
+                source_id=identity,
                 last_modified=None,
             )
             results[index] = _degraded_job(

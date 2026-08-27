@@ -851,7 +851,7 @@ The CLI equivalent is:
 
 ```console
 httk workflow v1 collect --workflow-dir ./silicon-relax \
-  --into results.sqlite /archive/ht-results
+  --into results.sqlite --id-base httk.v1 /archive/ht-results
 ```
 
 The harvester selects the latest dated `ht.run.*`, reads code metadata from

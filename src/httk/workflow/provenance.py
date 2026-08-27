@@ -123,8 +123,9 @@ def run_record(record: JobRecord) -> Run:
     ``$id`` is used. Each edge member must map labels to exactly ``type`` and
     ``id`` string members, and insertion order is preserved.
 
-    ``immutable_id`` is ``"<workspace_id>:<job_id>"``. ``last_modified`` is the
-    latest parseable aware ``finished_at`` timestamp in the attempt timeline;
+    ``source_id`` is ``"<workspace_id>:<job_id>"``. ``immutable_id`` is left for
+    the store to mint. ``last_modified`` is the latest parseable aware
+    ``finished_at`` timestamp in the attempt timeline;
     absent or unparseable timestamps produce ``None``. Children are not folded
     in: each child collects to its own ``Run``, while a parent can name child
     products explicitly in its observed declaration. Runner identity, timeline,
@@ -163,6 +164,6 @@ def run_record(record: JobRecord) -> Run:
         inputs=() if document is None else _edges(identity, document, "inputs"),
         artifacts=() if document is None else _edges(identity, document, "artifacts"),
         outputs=() if document is None else _edges(identity, document, "outputs"),
-        immutable_id=identity,
+        source_id=identity,
         last_modified=_last_modified(record),
     )

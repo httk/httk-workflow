@@ -2,22 +2,100 @@
 
 import argparse
 import json
+import re
+from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-from httk.core import Run
+from httk.core import Run, RunEdge
+from httk.core.storage import content_id, resolve_storage_record
 
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, CollectedJob, collect, job_records
 from ._common import *
 from ._common import _leaf, _local_root
+
+_CONTENT_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _edge_counts(run: Run) -> dict[str, int]:
     return {side: len(getattr(run, side)) for side in ("inputs", "artifacts", "outputs")}
 
 
+def _stored_entry_id(store: Any, entry_type: str, entry_id: str) -> str | None:
+    """Resolve a stored public id or content-id through the destination store."""
+
+    family = next(
+        (candidate for candidate in store.entry_records if getattr(candidate, "type", None) == entry_type),
+        None,
+    )
+    if family is None:
+        return None
+
+    # ``fetch_entry`` is content-id based.  Public ids are queried through the
+    # backing records instead, so an already stored entry id is preserved as-is
+    # rather than being mistaken for a content id.
+    for record_type in store.entry_records[family]:
+        searcher = store.searcher()
+        variable = searcher.variable(record_type)
+        searcher.add(variable.id == entry_id)
+        searcher.output(variable, "entry")
+        try:
+            fetched = next(iter(searcher)).values[0]
+        except StopIteration:
+            continue
+        if isinstance(getattr(fetched, "id", None), str):
+            return entry_id
+
+    fetched = store.fetch_entry(family, entry_id, eager=True)
+    fetched_id = getattr(fetched, "id", None)
+    return fetched_id if isinstance(fetched_id, str) else None
+
+
+def _resolve_entry_id(store: Any, remap: dict[str, str], entry_type: str, entry_id: str) -> str:
+    replacement = remap.get(entry_id)
+    if replacement is not None:
+        return replacement
+    resolved = _stored_entry_id(store, entry_type, entry_id)
+    if resolved is not None:
+        return resolved
+    if _CONTENT_ID_RE.fullmatch(entry_id) is not None:
+        raise ValueError(f"unresolved provenance reference {entry_type}/{entry_id}")
+    # Provenance edges may intentionally point outside this store.  Preserve
+    # those loose served-entry references instead of requiring a local row.
+    return entry_id
+
+
+def _rewrite_run_edges(run: Run, store: Any, remap: dict[str, str]) -> Run:
+    """Rewrite content-id references to ids minted by the destination store."""
+
+    def _rewrite_edges(source_edges: tuple[RunEdge, ...]) -> tuple[RunEdge, ...]:
+        rewritten: list[RunEdge] = []
+        for edge in source_edges:
+            rewritten.append(
+                RunEdge(edge.label, edge.entry_type, _resolve_entry_id(store, remap, edge.entry_type, edge.entry_id))
+            )
+        return tuple(rewritten)
+
+    return replace(
+        run,
+        inputs=_rewrite_edges(run.inputs),
+        artifacts=_rewrite_edges(run.artifacts),
+        outputs=_rewrite_edges(run.outputs),
+    )
+
+
 def _collected_mapping(item: CollectedJob) -> dict[str, object]:
     outputs = item.outputs
+
+    def _output_id(value: object) -> str:
+        entry_id = getattr(value, "id", None)
+        if isinstance(entry_id, str):
+            return entry_id
+        try:
+            return content_id(value)
+        except (TypeError, ValueError):
+            return ""
+
     mapping: dict[str, object] = {
         "format": "httk-workflow-collected",
         "format_version": 2,
@@ -25,8 +103,7 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
         "job_key": item.record.job_key,
         "workflow": item.workflow_id,
         "outputs": {
-            role: {"type": getattr(value, "type", ""), "id": getattr(value, "id", "")}
-            for role, value in outputs.items()
+            role: {"type": getattr(value, "type", ""), "id": _output_id(value)} for role, value in outputs.items()
         },
         "unfulfilled": list(item.unfulfilled),
         "missing_collector": item.missing_collector,
@@ -104,6 +181,11 @@ def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, .
                 failures[index] = "cannot store an output without a string entry type"
                 continue
             required_types.add(entry_type)
+        for edge in (*item.run.inputs, *item.run.artifacts, *item.run.outputs):
+            required_types.add(edge.entry_type)
+        for product in item.products:
+            required_types.add(product.source_type)
+            required_types.add(product.target_type)
 
     configurations: dict[str, tuple[type, tuple[type, ...]]] = {}
     for entry_type in required_types:
@@ -141,11 +223,12 @@ def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, .
     return layout, failures
 
 
-def _store_collected(items: list[CollectedJob], path: str) -> list[dict[str, object]]:
+def _store_collected(items: list[CollectedJob], path: str, *, id_base: str, id_series: str) -> list[dict[str, object]]:
     """Save one bounded collected sweep into a file-backed SQLite store."""
 
     try:
-        from httk.store import Backend, SqlStore
+        from httk.store import Backend, EntryIdScheme, SqlStore
+        from httk.store.backend.schema import SchemaError
         from httk.store.backend.sql import StorageLayoutUpgradeRequiredError
     except ImportError as exc:
         raise ValueError("--into requires httk-store with its database dependencies") from exc
@@ -161,10 +244,10 @@ def _store_collected(items: list[CollectedJob], path: str) -> list[dict[str, obj
             if getattr(value, "type", None)
         }
     )
-    reports: list[dict[str, object]] = []
+    reports = [_collected_mapping(item) for item in items]
     with Backend.sqlite(target) as database:
         try:
-            store = SqlStore(database, entry_records=layout)
+            store = SqlStore(database, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series))
         except StorageLayoutUpgradeRequiredError as exc:
             needs = ", ".join(requested) or "no entry types"
             raise ValueError(
@@ -172,33 +255,82 @@ def _store_collected(items: list[CollectedJob], path: str) -> list[dict[str, obj
                 f"its stored layout differs in {json.dumps(exc.diff, sort_keys=True, default=str)}. "
                 "Collect into a new store file."
             ) from exc
+        stored_output_ids: dict[int, list[str]] = {}
+        remap: dict[str, str] = {}
+
+        # Pass one stores every output and builds a sweep-wide map.  The map is
+        # published only after each job transaction commits, so rolled-back
+        # outputs cannot be referenced by a later job.
         for index, item in enumerate(items):
-            report = _collected_mapping(item)
+            report = reports[index]
             if item.missing_collector is not None:
                 # A degraded job produced no outputs: store nothing, and never a
                 # bare Run, so the store cannot fill with empty provenance.
                 report["stored"] = None
                 report["skipped"] = "degraded"
-                reports.append(report)
                 continue
             error = failures.get(index)
             if error is not None:
                 report["storage_error"] = error
-                reports.append(report)
                 continue
             try:
                 with store.transaction():
-                    entry_ids = []
+                    pending_remap: dict[str, str] = {}
+                    entry_ids: list[str] = []
                     for value in item.outputs.values():
-                        store.save(value)
-                        entry_ids.append(str(cast(Any, value).id))
-                    store.save(item.run)
-                    for product in item.products:
-                        store.save(product)
-                report["stored"] = {"entries": entry_ids, "run": item.run.id}
+                        original_id = getattr(value, "id", None)
+                        sid = store.save(value)
+                        try:
+                            fetched = store.fetch(type(value), sid)
+                        except (SchemaError, TypeError) as exc:
+                            # Structure-family collectors may return a view over
+                            # a storable record; fetch the record backing that
+                            # view when the view class itself is not a dataclass.
+                            try:
+                                record_type = resolve_storage_record(value)
+                            except (SchemaError, TypeError):
+                                raise exc
+                            fetched = store.fetch(record_type, sid)
+                        fetched_id = getattr(fetched, "id", None)
+                        if not isinstance(fetched_id, str):
+                            raise ValueError(f"stored output {type(value).__name__} has no string entry id")
+                        entry_ids.append(fetched_id)
+                        pending_remap[content_id(value)] = fetched_id
+                        if isinstance(original_id, str) and original_id != fetched_id:
+                            pending_remap[original_id] = fetched_id
+                remap.update(pending_remap)
+                stored_output_ids[index] = entry_ids
             except Exception as exc:
                 report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
-            reports.append(report)
+
+        # Pass two resolves all run and product references after every output
+        # in the sweep has contributed to the shared remap.
+        for index, item in enumerate(items):
+            report = reports[index]
+            if index not in stored_output_ids:
+                continue
+            entry_ids = stored_output_ids[index]
+            try:
+                with store.transaction():
+                    rewritten_run = _rewrite_run_edges(item.run, store, remap)
+                    rewritten_products = tuple(
+                        replace(
+                            product,
+                            source_id=_resolve_entry_id(store, remap, product.source_type, product.source_id),
+                            target_id=_resolve_entry_id(store, remap, product.target_type, product.target_id),
+                        )
+                        for product in item.products
+                    )
+                    run_sid = store.save(rewritten_run)
+                    fetched_run = store.fetch(type(rewritten_run), run_sid)
+                    run_id = getattr(fetched_run, "id", None)
+                    if not isinstance(run_id, str):
+                        raise ValueError("stored run has no string entry id")
+                    for product in rewritten_products:
+                        store.save(product)
+                report["stored"] = {"entries": entry_ids, "run": run_id}
+            except Exception as exc:
+                report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
     return reports
 
 
@@ -208,6 +340,8 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
     workspace = Workspace(_local_root(arguments, context, action="collect from"), mutable=False)
     if arguments.into is not None and arguments.raw:
         raise ValueError("--into cannot be combined with --raw")
+    if arguments.into is not None and arguments.id_base is None:
+        raise ValueError("--id-base is required with --into")
     if arguments.degraded and arguments.raw:
         raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
     skipped = 0
@@ -240,7 +374,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
         )
     )
     reports = (
-        _store_collected(items, arguments.into)
+        _store_collected(items, arguments.into, id_base=arguments.id_base, id_series=arguments.id_series)
         if arguments.into is not None
         else [_collected_mapping(item) for item in items]
     )
@@ -296,4 +430,15 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
         "--into",
         metavar="PATH",
         help="save collected entries, runs, and products into a file-backed SQLite store",
+    )
+    parser.add_argument(
+        "--id-base",
+        metavar="BASE",
+        help="entry-id namespace base (required with --into)",
+    )
+    parser.add_argument(
+        "--id-series",
+        metavar="SERIES",
+        default="1",
+        help="entry-id campaign series (default: 1)",
     )

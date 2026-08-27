@@ -17,7 +17,9 @@ When a collected output role is a file-valued single result, its run edge points
 to a standard `files` entry (`type = "files"`); file lists remain values within
 their role record.
 
-The job-embedded declaration governs the Run (immutable facts per job). ProductLinks
+The job-embedded declaration governs the Run (immutable facts per job). The
+collected Run carries the executing system's job identity in `source_id`; its
+store-owned `immutable_id` is left for `httk-store` to mint. ProductLinks
 come from the live registered provider's manifest and therefore apply today's
 curation; otherwise, for the job-pinned fallback, they come from that job's
 own verified pinned manifest and preserve its historical curation,
@@ -176,12 +178,24 @@ collector that answered every record but still exited nonzero.
 
 ### `--into` partial state
 
-With `--into PATH`, each collected job's entries, run, and product links are
+With `--into PATH --id-base BASE`, each collected job's entries, run, and product links are
 saved into a file-backed SQLite store, and its report gains
 `"stored": {...}`. A degraded job stores nothing — its report carries
 `"stored": null, "skipped": "degraded"` and **no** empty `Run` is written, so the
 store never fills with contentless provenance. A job whose entries cannot be
 stored keeps a `"storage_error"` and fails the exit code.
+
+`--id-base` is required with `--into` and names the dot-separated namespace used
+for minted entry ids; `--id-series` selects the campaign series and defaults to
+`1`. Before persistence, edges to output records that do not yet have store ids
+use those records' content ids. The `--into` path uses two passes: it commits
+all job outputs first while building one sweep-wide content-id-to-entry-id map,
+then rewrites and commits runs and product links. References not produced in
+the sweep first keep an already stored public id, then resolve against the
+destination store by content id. Unknown 64-hex content ids make that job a
+storage error while leaving its outputs saved and preventing its run and
+products from being written; other loose external references are retained
+unchanged.
 
 Re-collection is safe because it is stateless: `collect --into` reads the
 workspace afresh every time and writes whatever it finds. Re-storing an

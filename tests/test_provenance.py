@@ -62,7 +62,8 @@ def test_declared_provenance_builds_edges_and_uri() -> None:
 
     run = run_record(record)
     assert run.workflow_declaration_uri == "https://example.test/workflows/relax"
-    assert run.immutable_id == "ws:job"
+    assert run.source_id == "ws:job"
+    assert run.immutable_id is None
     assert [(edge.label, edge.entry_type, edge.entry_id) for edge in run.inputs] == [("initial", "structures", "s1")]
     assert [(edge.label, edge.entry_type, edge.entry_id) for edge in run.artifacts] == [("relaxed", "structures", "s2")]
     assert [(edge.label, edge.entry_type, edge.entry_id) for edge in run.outputs] == [("energy", "_httk_records", "e1")]

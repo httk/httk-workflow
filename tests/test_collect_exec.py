@@ -14,6 +14,7 @@ from typing import cast
 
 import pytest
 from httk.core import DataRecord, FileRecord
+from httk.core.storage import content_id
 
 from httk.workflow import Workspace
 from httk.workflow import collecting as collecting_module
@@ -424,13 +425,18 @@ def test_in_process_and_executable_collectors_have_identical_results(
         )
         assert asdict(expected_value) == asdict(actual_value)
     assert expected.run.workflow_declaration_uri == actual.run.workflow_declaration_uri == workflow_uri
+    assert expected.run.source_id == actual.run.source_id
     assert expected.run.immutable_id == actual.run.immutable_id
+    assert expected.run.immutable_id is None
     assert expected.run.id == actual.run.id
     assert asdict(expected.run) == asdict(actual.run)
     for side in ("inputs", "artifacts", "outputs"):
         expected_edges = tuple((edge.label, edge.entry_type, edge.entry_id) for edge in getattr(expected.run, side))
         actual_edges = tuple((edge.label, edge.entry_type, edge.entry_id) for edge in getattr(actual.run, side))
         assert expected_edges == actual_edges
+        for edge in getattr(expected.run, side):
+            if edge.label in expected.outputs:
+                assert edge.entry_id == content_id(expected.outputs[edge.label])
     assert expected.products == actual.products
     assert len(expected.products) == 2
     assert expected.products[0].label == "first"

@@ -15,7 +15,7 @@ to be declared.
 Every command below works without VASP installed: `examples/mock_vasp.py` writes
 the output files a finished run leaves behind, so the whole path — prepare, run,
 publish, collect — is exercised for real, with meaningless numbers. Install
-`httk-store` for `collect --into results.sqlite`; without it, that command reports
+`httk-store` for `collect --into results.sqlite --id-base httk.quickstart`; without it, that command reports
 a teaching error (the shell example skips storage and continues).
 
 The complete sequence of this page is also `examples/quickstart.sh`, which runs
@@ -50,7 +50,7 @@ $ httk workflow workspace init --name default .
 $ httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
 $ httk workflow workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 $ httk workflow run
-$ httk workflow collect --into results.sqlite
+$ httk workflow collect --into results.sqlite --id-base httk.quickstart
 $ httk workflow postprocess --script relaxation-plot
 ```
 
@@ -92,6 +92,8 @@ the workspace, which is how a campaign is run.
 
 **`collect --into`** printed one JSON summary per finished job and stored its
 entries, run, and products in the file-backed SQLite database `results.sqlite`.
+The required `--id-base httk.quickstart` selects the namespace for the store's
+minted entry ids.
 The stored results are readable with `httk-store`; the collection record is the
 boundary to that data layer — see {doc}`collecting`.
 

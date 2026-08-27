@@ -244,7 +244,21 @@ def test_campaign_collect_into_skips_degraded_jobs_and_exits_nonzero(tmp_path: P
 
     store = tmp_path / "campaign.sqlite"
     context = CLIContext("httk", root)
-    assert command(["campaign", "collect", "--allow-job-collector", "--into", str(store)], context) == 1
+    assert (
+        command(
+            [
+                "campaign",
+                "collect",
+                "--allow-job-collector",
+                "--into",
+                str(store),
+                "--id-base",
+                "httk.campaign",
+            ],
+            context,
+        )
+        == 1
+    )
 
     lines = capsys.readouterr().out.splitlines()
     reports = [json.loads(line) for line in lines[:-1]]

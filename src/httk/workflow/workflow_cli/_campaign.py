@@ -89,6 +89,8 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
 
     if arguments.into is not None and arguments.raw:
         raise ValueError("--into cannot be combined with --raw")
+    if arguments.into is not None and arguments.id_base is None:
+        raise ValueError("--id-base is required with --into")
     config = read_campaign(context.cwd)
     selected = sorted(arguments.partition or config.partitions)
     states = arguments.state or DEFAULT_COLLECT_STATES
@@ -132,7 +134,7 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
             )
         )
     reports = (
-        _store_collected(items, arguments.into)
+        _store_collected(items, arguments.into, id_base=arguments.id_base, id_series=arguments.id_series)
         if arguments.into is not None
         else [_collected_mapping(item) for item in items]
     )
@@ -309,6 +311,17 @@ def build_campaign_parser(
         "--into",
         metavar="PATH",
         help="save collected entries, runs, and products into a file-backed SQLite store",
+    )
+    collect_parser.add_argument(
+        "--id-base",
+        metavar="BASE",
+        help="entry-id namespace base (required with --into)",
+    )
+    collect_parser.add_argument(
+        "--id-series",
+        metavar="SERIES",
+        default="1",
+        help="entry-id campaign series (default: 1)",
     )
 
     managers = _leaf(

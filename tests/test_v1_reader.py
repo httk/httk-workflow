@@ -108,9 +108,10 @@ def test_collect_finished_tree_package_extract_and_degradation(tmp_path: Path) -
     assert len(collected) == 2
     good = next(item for item in collected if item.missing_collector is None)
     assert cast(Any, good.outputs["result"]).value == "2021-06-07_08.09.10"
-    assert isinstance(good.run.immutable_id, str)
-    assert good.run.immutable_id.startswith("httk-v1:")
-    assert good.run.immutable_id != good.record.job_id
+    assert isinstance(good.run.source_id, str)
+    assert good.run.source_id.startswith("httk-v1:")
+    assert good.run.source_id != good.record.job_id
+    assert good.run.immutable_id is None
     assert JobRecord.from_mapping(good.record.as_mapping()) == good.record
     assert good.run.last_modified == datetime(2021, 6, 7, 8, 9, 10, tzinfo=UTC)
     assert good.run.workflow_declaration_uri == "urn:finished"

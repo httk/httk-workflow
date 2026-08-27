@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 from httk.core import DataRecord, FileEntry, FileRecord
 from httk.core.cli import CLIContext
+from httk.core.storage import content_id
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace, collect
@@ -366,7 +367,8 @@ def test_cwl_language_collects_records_and_product_links(
     scaffold_module._WORKFLOW_PROVIDERS.pop(provider.workflow_id, None)
     assert set(item.outputs) == {"spoken"}
     assert isinstance(item.outputs["spoken"], FileRecord)
-    assert item.outputs["spoken"].type and item.outputs["spoken"].id
+    assert item.outputs["spoken"].type
+    assert item.run.outputs[0].entry_id == content_id(item.outputs["spoken"])
     assert item.unfulfilled == ()
     assert {edge.label for edge in item.run.artifacts} >= {"spoken"}
     assert {edge.label for edge in item.run.outputs} >= {"spoken"}
@@ -387,7 +389,7 @@ def test_cwl_file_output_collects_a_workspace_relative_descriptor(tmp_path: Path
     old_path = Path(str(outputs["spoken"]["path"])).resolve().relative_to(workspace.root).as_posix()
     assert isinstance(value, FileRecord)
     assert value.type == "files"
-    assert re.fullmatch(r"[0-9a-f]{64}", value.id)
+    assert re.fullmatch(r"[0-9a-f]{64}", content_id(value))
     assert value.url == old_path
     assert not PurePosixPath(value.url).is_absolute()
     assert value.name == "spoken.txt"
@@ -485,18 +487,34 @@ def test_cwl_collect_into_round_trips_a_file_record(tmp_path: Path, workspace: W
     package = _package(tmp_path / "collect-into", "echo.cwl", _ECHO_TOOL, "message", "spoken")
     new_job(workspace, package, inputs={"message": "hello"})
     _drive(workspace)
+    item = next(collect(workspace))
+    value = item.outputs["spoken"]
 
     context = CLIContext("httk", tmp_path)
     workspace_name = register_ws(context, workspace.root, "language-collect-into")
     store_path = tmp_path / "results.sqlite"
-    assert command(["collect", "--workspace", workspace_name, "--into", str(store_path)], context) == 0
+    assert (
+        command(
+            [
+                "collect",
+                "--workspace",
+                workspace_name,
+                "--into",
+                str(store_path),
+                "--id-base",
+                "httk.cwl",
+            ],
+            context,
+        )
+        == 0
+    )
     report = json.loads(capsys.readouterr().out.splitlines()[0])
     assert report["outputs"]["spoken"]["type"] == "files"
     assert report["stored"]["entries"]
     assert report["stored"]["run"]
     with Backend.sqlite(store_path) as database:
         store = SqlStore(database)
-        entry = store.fetch_entry(FileEntry, report["stored"]["entries"][0], eager=True)
+        entry = store.fetch_entry(FileEntry, content_id(value), eager=True)
     assert isinstance(entry, FileRecord)
     assert entry.id == report["stored"]["entries"][0]
 

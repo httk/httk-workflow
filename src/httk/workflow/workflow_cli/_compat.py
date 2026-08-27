@@ -14,13 +14,15 @@ def handle_v1_collect(arguments: argparse.Namespace, context: CLIContext) -> int
     """Collect finished directories from pre-existing httk v1 trees."""
 
     del context
+    if arguments.into is not None and arguments.id_base is None:
+        raise ValueError("--id-base is required with --into")
     failed = False
     for root in arguments.roots:
         try:
             stats: dict[str, object] = {}
             items = list(collect_finished_tree(root, workflow_dir=arguments.workflow_dir, stats=stats))
             reports = (
-                _store_collected(items, arguments.into)
+                _store_collected(items, arguments.into, id_base=arguments.id_base, id_series=arguments.id_series)
                 if arguments.into is not None
                 else [_collected_mapping(item) for item in items]
             )
@@ -59,6 +61,17 @@ def add_v1_collect_arguments(parser: argparse.ArgumentParser) -> None:
         help="the directory workflow package providing the collect hook",
     )
     parser.add_argument("--into", metavar="PATH", help="save collected entries, runs, and products to SQLite")
+    parser.add_argument(
+        "--id-base",
+        metavar="BASE",
+        help="entry-id namespace base (required with --into)",
+    )
+    parser.add_argument(
+        "--id-series",
+        metavar="SERIES",
+        default="1",
+        help="entry-id campaign series (default: 1)",
+    )
 
 
 def build_v1_parser(

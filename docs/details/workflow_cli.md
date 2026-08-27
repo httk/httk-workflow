@@ -197,7 +197,7 @@ Language documents use `job new --workflow DOCUMENT`; see
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--degraded`, `--raw`, `--allow-job-collector`, `--into PATH` |
+| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--degraded`, `--raw`, `--allow-job-collector`, `--into PATH`, `--id-base BASE`, `--id-series SERIES` |
 
 `--degraded` prints only the degraded per-job lines; the trailing summary still
 counts the whole sweep, so a filtered listing never hides how many jobs ran. It
@@ -329,7 +329,7 @@ executors this manager serves, or left committing with an unreadable definition.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `v1 collect ROOT` | harvest a pre-existing v1 result tree | `--workflow-dir PKG`, `--into PATH` |
+| `v1 collect ROOT` | harvest a pre-existing v1 result tree | `--workflow-dir PKG`, `--into PATH`, `--id-base BASE`, `--id-series SERIES` |
 
 `v1 collect` ends with one `httk-workflow-v1-collect-summary` line reporting
 `finished`, `unfinished_by_status` (tasks the name regex matched that were not
@@ -497,7 +497,7 @@ job again, or edit the one `runner.path` member.
 | `campaign init` | define the project's partition map and assignment policy | `--partition NAME=WORKSPACE`, `--assignment` |
 | `campaign show` | show the partition map | `--json` |
 | `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
-| `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--raw`, `--allow-job-collector`, `--into PATH` |
+| `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--raw`, `--allow-job-collector`, `--into PATH`, `--id-base BASE`, `--id-series SERIES` |
 | `campaign start-managers` | start a manager per selected partition | `--partition`, `--workers`, `--count`, `--adapter-timeout` |
 
 A campaign is a thin convention over the *registered workspaces* above: a
@@ -565,7 +565,7 @@ Harvest old v1 results without submitting them:
 
 ```console
 httk workflow v1 collect --workflow-dir PKG ROOT
-httk workflow v1 collect --workflow-dir PKG --into results.sqlite ROOT
+httk workflow v1 collect --workflow-dir PKG --into results.sqlite --id-base httk.v1 ROOT
 ```
 
 ## Inspecting and debugging jobs

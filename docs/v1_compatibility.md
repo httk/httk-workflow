@@ -154,7 +154,7 @@ the sweep continues.
 
 ```console
 httk workflow v1 collect --workflow-dir PKG ROOT
-httk workflow v1 collect --workflow-dir PKG --into results.sqlite ROOT
+httk workflow v1 collect --workflow-dir PKG --into results.sqlite --id-base httk.v1 ROOT
 ```
 
 Manifest-backed identity survives moving the tree. Without a manifest, the

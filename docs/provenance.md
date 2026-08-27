@@ -68,6 +68,12 @@ run = run_record(record)
 store.save(run)  # the httk-store side
 ```
 
+The resulting `Run.source_id` is the executing system's identity for the job,
+formatted by httk-workflow as `"<workspace_id>:<job_id>"`. It participates in
+content identity, so repeated collection of one job deduplicates while distinct
+jobs remain distinct. `Run.immutable_id` is left `None` for `httk-store` to
+mint as its own per-revision identifier.
+
 `run_record` does not fold children into the parent run. Each child collects to
 its own `Run`; a parent names child products explicitly in its observed
 declaration. Runner identity, the attempt timeline, and failure remain on the
