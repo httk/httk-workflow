@@ -254,6 +254,8 @@ def _attempt(
     children: list[dict[str, object]] | None = None,
     runner: Runner | None = None,
     name: str = "payload",
+    resources: dict[str, int] | None = None,
+    step_resources: dict[str, dict[str, int]] | None = None,
 ) -> Attempt:
     """Bind one attempt of a fabricated job, without a manager."""
 
@@ -271,6 +273,8 @@ def _attempt(
             data_mode="none" if data_generation is None else "transactional",
             parameters=parameters or {},
             environment=environment or {},
+            resources=resources or {},
+            step_resources=step_resources or {},
         ),
     )
     control = payload / f".httk-attempt.{uuid.uuid4()}"
@@ -307,6 +311,29 @@ def _attempt(
     if data_generation is not None:
         attempt_environment["HTTK_WORKFLOW_DATA_DIR"] = str(payload / "data")
     return Attempt.initialize(attempt_environment, runner=runner)
+
+
+def test_child_spec_inherits_job_resource_requirements(tmp_path: Path) -> None:
+    attempt = _attempt(
+        tmp_path,
+        step="start",
+        resources={"procs": 2},
+        step_resources={"start": {"mem": 1024}},
+    )
+    child = ChildSpec(step="start", runner=RunnerRef.workspace("runner", "a" * 64))
+    spec = child._job_spec(attempt.job, "child")
+    assert spec.resources == {"procs": 2}
+    assert spec.step_resources == {"start": {"mem": 1024}}
+
+
+def test_outcome_resource_requirements_are_action_scoped(tmp_path: Path) -> None:
+    advance = _attempt(tmp_path / "advance", step="start")
+    advance._require_draft().publish("advance", next_step="next", resources={"procs": 4})
+    assert _published(advance)["resources"] == {"procs": 4}
+    for action in ("succeed", "fail", "retry", "pause"):
+        fresh = _attempt(tmp_path / action, step="start")
+        with pytest.raises(ValueError, match="does not accept resources"):
+            fresh._require_draft().publish(action, resources={"procs": 1})
 
 
 def test_attempt_environment_resolves_declared_layers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -311,18 +311,26 @@ stay non-failing. The JSON summary carries `claim_problems`,
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `run` | run a manager until idle, or keep serving with `--idle` | `--workspace`, `--workers`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--adapter-timeout`, `--log-level` |
-| `manager run` | run a manager locally, or submit managers to a remote workspace's scheduler | `--workspace`, `--workers`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `run` | run a manager until idle, or keep serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--adapter-timeout`, `--log-level` |
+| `manager run` | run a manager locally, or submit managers to a remote workspace's scheduler | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
 `manager run` follows the binding: a local workspace runs the manager in this
-process as before, and a remote workspace submits managers through the remote's
-scheduler over its adapter — `--count N` managers, `--workers N` workers each.
+process by default, or starts `--count N` local manager processes, and a remote
+workspace submits managers through the remote's scheduler — `--count N`
+managers, `--workers N` workers each. `--worker-resource NAME COUNT` is
+repeatable and advertises per-manager capacity to the scheduler; local
+managers also use SLURM allocation variables when present. With a local
+`--count N`, explicit `--worker-resource` pairs are passed to every manager
+verbatim. Only auto-detected SLURM capacities are split across the N managers,
+using quotient-plus-remainder distribution so their aggregate equals the
+detected allocation.
 Both manager commands run until idle by default; `--idle` keeps serving. The
 top-level `run` takes `--capability` and `--placement-prefix` too, so the quickstart command can
 claim a capability-gated job and scope its scan; without them a gated job would
 stay unclaimable. Both print one startup banner and, on idle exit, one summary
-line that names any jobs left not claimable by the pools, capabilities, or
-executors this manager serves, or left committing with an unreadable definition. This is the command that subsumed the old
+line that names any jobs left not claimable by the pools, capabilities,
+resources, or executors this manager serves, or left committing with an
+unreadable definition. This is the command that subsumed the old
 `transfer start-manager`.
 
 ### `v1` — harvesting finished *httk* v1 trees
@@ -478,7 +486,7 @@ and `workspace status NAME` for reading a remote workspace's markers.
 | --- | --- |
 | `transfer send REMOTE JOB …` | `transfer --job JOB … LOCAL REMOTE` |
 | `transfer fetch --remote REMOTE --workspace LOCAL` | `transfer REMOTE LOCAL` |
-| `transfer start-manager REMOTE --count N` | `manager run --workspace REMOTE --count N` |
+| `transfer start-manager REMOTE --count N` | `manager run --workspace REMOTE --count N` (local bindings also start `N` manager processes) |
 | `transfer status REMOTE` | `workspace status REMOTE` |
 
 An earlier release also renamed two whole groups: `httk workflow computer …`
@@ -498,7 +506,7 @@ job again, or edit the one `runner.path` member.
 | `campaign show` | show the partition map | `--json` |
 | `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
 | `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--raw`, `--allow-job-collector`, `--into PATH`, `--id-base BASE`, `--id-series SERIES` |
-| `campaign start-managers` | start a manager per selected partition | `--partition`, `--workers`, `--count`, `--adapter-timeout` |
+| `campaign start-managers` | start a manager per selected partition | `--partition`, `--workers`, `--worker-resource`, `--count`, `--adapter-timeout` |
 
 A campaign is a thin convention over the *registered workspaces* above: a
 partition map, stored in the project, that spreads a very large body of work
@@ -991,8 +999,10 @@ The generated batch script is a `#!/bin/bash` file carrying one `#SBATCH`
 directive per configured setting, `--chdir` set to the workspace, `--output`
 and `--error` beside the script, and a single `exec` line that runs the manager
 command. The workspace's `manager.workers` count is appended only when the
-request did not already choose one, so an explicit `--workers` always wins. Both kinds report
-the submitted job identifiers.
+request did not already choose one, so an explicit `--workers` always wins.
+For `local`, `procs` and `mem` pairs are appended when the caller did not
+provide them; the SLURM kinds leave capacities to the batch environment and
+the manager's SLURM detection. Both kinds report the submitted job identifiers.
 
 A `start-manager` request names the client-probed workspace root in its
 required `workspace` field. `local` starts `count` detached processes and

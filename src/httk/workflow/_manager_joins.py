@@ -158,6 +158,7 @@ def evaluate(manager: Any, marker: Any, parent_job: Any, state: Any) -> bool:
             state.carried(),
             reason="join_satisfied",
             join_summary=observations,
+            resources=state.resources,
         )
         return True
     on_impossible = join.get("on_impossible")
@@ -170,6 +171,7 @@ def evaluate(manager: Any, marker: Any, parent_job: Any, state: Any) -> bool:
             state.carried(),
             reason="join_impossible",
             join_summary=observations,
+            resources=state.resources,
         )
         return True
     manager._transition(

@@ -153,9 +153,12 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
 def handle_campaign_start_managers(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Start a manager per selected partition of this campaign."""
 
+    from ._manager import _worker_resources
+
     report = campaign_managers(
         partitions=arguments.partition or None,
         workers=arguments.workers,
+        resources=_worker_resources(arguments.worker_resource),
         count=arguments.count,
         idle_timeout=arguments.idle_timeout,
         adapter_timeout=arguments.adapter_timeout,
@@ -339,6 +342,14 @@ def build_campaign_parser(
         help="start a manager only for this partition (repeatable, default: all of them)",
     )
     managers.add_argument("--workers", type=int, metavar="COUNT", help="workers per manager")
+    managers.add_argument(
+        "--worker-resource",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("NAME", "COUNT"),
+        help="advertise COUNT units of resource NAME to the scheduler (repeatable; procs and mem are shared fairly among --workers)",
+    )
     managers.add_argument(
         "--count",
         type=int,

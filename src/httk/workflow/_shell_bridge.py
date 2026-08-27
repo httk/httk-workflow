@@ -44,6 +44,8 @@ from pathlib import Path
 from typing import Literal, cast
 
 from ._util import read_json, write_json_atomic
+from .errors import FormatError
+from .models import validate_resources
 from .runtime import _read_environment
 from .runtime_builders import (
     JobSpec,
@@ -182,6 +184,7 @@ def _parser() -> argparse.ArgumentParser:
     spawn.add_argument("--capability", action="append", default=[], dest="capabilities")
     spawn.add_argument("--retry-on", action="append", default=[], dest="retry_on")
     spawn.add_argument("--resources")
+    spawn.add_argument("--step-resources")
     spawn.add_argument("--max-attempts-per-activation", type=int)
     spawn.add_argument("--max-total-attempts", type=int)
     spawn.add_argument("--max-activations", type=int)
@@ -200,12 +203,14 @@ def _parser() -> argparse.ArgumentParser:
     advance.add_argument("next_step")
     advance.add_argument("--state", action="append", default=[], dest="state")
     advance.add_argument("--priority", type=int)
+    advance.add_argument("--resource", action="append", default=[], dest="resources")
     gather = commands.add_parser("gather")
     gather.add_argument("next_step")
     gather.add_argument("--when", choices=_JOIN_CONDITIONS, default="all_succeeded")
     gather.add_argument("--count", type=int)
     gather.add_argument("--on-impossible")
     gather.add_argument("--priority", type=int)
+    gather.add_argument("--resource", action="append", default=[], dest="resources")
     commands.add_parser("succeed")
     fail = commands.add_parser("fail")
     fail.add_argument("code")
@@ -485,6 +490,27 @@ def _assignments(values: Sequence[str], name: str) -> dict[str, object]:
     return result
 
 
+def _resources(values: Sequence[str]) -> dict[str, int] | None:
+    """Parse repeatable ``NAME=INT`` resource arguments."""
+
+    if not values:
+        return None
+
+    result: dict[str, int] = {}
+    for item in values:
+        key, separator, text = item.partition("=")
+        if not separator or not key or not text:
+            raise _Refused(f"a resource must be spelled NAME=INT, not {item!r}")
+        try:
+            result[key] = int(text)
+        except ValueError as exc:
+            raise _Refused(f"a resource must be spelled NAME=INT, not {item!r}") from exc
+    try:
+        return validate_resources(result)
+    except FormatError as exc:
+        raise _Refused(str(exc)) from exc
+
+
 def _runner_reference(value: str) -> RunnerRef:
     """Parse the ``inherit``/``ws:PATH@SHA``/``installed:PATH@SHA`` spelling."""
 
@@ -509,6 +535,9 @@ def _child_spec(arguments: argparse.Namespace) -> ChildSpec:
     if not arguments.step:
         raise _Refused("a synthesized child needs --step, or --payload for a prepared payload directory")
     resources = None if not arguments.resources else read_json(Path(str(arguments.resources).removeprefix("@")))
+    step_resources = (
+        None if not arguments.step_resources else read_json(Path(str(arguments.step_resources).removeprefix("@")))
+    )
     return ChildSpec(
         step=arguments.step,
         parameters=_assignments(arguments.parameters, "a child parameter"),
@@ -523,6 +552,7 @@ def _child_spec(arguments: argparse.Namespace) -> ChildSpec:
         claim_pool=arguments.claim_pool,
         required_capabilities=tuple(arguments.capabilities),
         resources=resources,
+        step_resources=step_resources,
         maximum_attempts_per_activation=arguments.max_attempts_per_activation,
         maximum_total_attempts=arguments.max_total_attempts,
         maximum_activations=arguments.max_activations,
@@ -533,7 +563,13 @@ def _child_spec(arguments: argparse.Namespace) -> ChildSpec:
 def _spawn(arguments: argparse.Namespace) -> None:
     attempt = _publishing()
     if arguments.payload:
-        if arguments.step or arguments.parameters or arguments.runner != "inherit":
+        if (
+            arguments.step
+            or arguments.parameters
+            or arguments.runner != "inherit"
+            or arguments.resources
+            or arguments.step_resources
+        ):
             raise _Refused(
                 "a prepared payload directory carries its own job definition, "
                 "so --step, --parameter, and --runner apply only to a synthesized child"
@@ -828,6 +864,7 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
             arguments.next_step,
             state=_assignments(arguments.state, "a state assignment"),
             priority=arguments.priority,
+            resources=_resources(arguments.resources),
         )
     elif command == "gather":
         _publishing().gather(
@@ -836,6 +873,7 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
             count=arguments.count,
             on_impossible=arguments.on_impossible,
             priority=arguments.priority,
+            resources=_resources(arguments.resources),
         )
     elif command == "succeed":
         _publishing().succeed()

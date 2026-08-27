@@ -17,6 +17,7 @@ from .models import (
     normalize_placement,
     validate_failure,
     validate_label,
+    validate_resources,
     validate_step,
 )
 
@@ -190,6 +191,11 @@ def process_committing(manager: Any, marker: Marker) -> None:
         )
     )
     action = outcome["action"]
+    next_resources: dict[str, int] | None = None
+    if "resources" in outcome:
+        if action not in {"advance", "wait"}:
+            raise FormatError("outcome resources are only valid for advance or wait")
+        next_resources = validate_resources(outcome["resources"], "outcome.resources")
     progress = StateFrame.replace(state.carried(), data_generation=data_generation)
     declared_steps = manager._declared_runner_steps(marker, outcome)
     if declared_steps is not None:
@@ -200,7 +206,13 @@ def process_committing(manager: Any, marker: Marker) -> None:
     )
     if action == "advance":
         manager._advance(
-            marker, job, state, validate_step(outcome.get("next_step"), "next_step"), progress, priority=next_priority
+            marker,
+            job,
+            state,
+            validate_step(outcome.get("next_step"), "next_step"),
+            progress,
+            resources=next_resources,
+            priority=next_priority,
         )
     elif action == "retry":
         manager._retry(
@@ -217,6 +229,7 @@ def process_committing(manager: Any, marker: Marker) -> None:
             StateFrame.replace(
                 progress,
                 next_step=next_step,
+                resources=next_resources,
                 join=manager._labeled_join(join, outcome_path),
                 reason="waiting_for_children",
             ),
@@ -270,6 +283,7 @@ def advance(
     *,
     reason: str = "advance",
     join_summary: Sequence[object] | None = None,
+    resources: Mapping[str, int] | None = None,
     priority: int | None = None,
 ) -> None:
     activation_ordinal = (state.activation_ordinal if state.activation_ordinal is not None else 1) + 1
@@ -294,6 +308,7 @@ def advance(
             attempt_ordinal=0,
             reason=reason,
             join_summary=join_summary,
+            resources=resources,
             previous_attempt_id=state.attempt_id,
         ),
         priority=priority,

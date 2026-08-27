@@ -282,8 +282,8 @@ read back from the draft by whichever process asks next.
 
 | Call | Meaning |
 | --- | --- |
-| `httk_workflow_advance STEP [--state NAME=VALUE ...] [--priority N]` | run `STEP` next; the state is written before publication |
-| `httk_workflow_gather STEP [--when C] [--count N] [--on-impossible STEP] [--priority N]` | wait for the children spawned on this attempt, then run `STEP` at the optional priority |
+| `httk_workflow_advance STEP [--state NAME=VALUE ...] [--priority N] [--resource NAME=INT ...]` | run `STEP` next; the state is written before publication |
+| `httk_workflow_gather STEP [--when C] [--count N] [--on-impossible STEP] [--priority N] [--resource NAME=INT ...]` | wait for the children spawned on this attempt, then run `STEP` at the optional priority |
 | `httk_workflow_succeed` | the job is done |
 | `httk_workflow_retry REASON` | repeat this activation within the job's attempt budget |
 | `httk_workflow_pause REASON` | stop until an operator resumes the job |
@@ -327,6 +327,7 @@ job: its workflow, its claim pool, its priority, its resources, and its runner.
 | `--data-mode none\|transactional` | whether the child owns durable data |
 | `--retry-on CODE`, `--max-attempts-per-activation N`, `--max-total-attempts N`, `--max-activations N` | the child's retry policy |
 | `--resources @FILE.json` | the child's requested resources |
+| `--step-resources @FILE.json` | the child's per-step resource requirements |
 
 `inherit` copies this job's own `(source, path, sha256)`, which is what a campaign
 whose steps all live in one published runner wants. A payload runner cannot be
@@ -342,7 +343,9 @@ runs `STEP` when the condition holds. `--when` is `all_succeeded` (the default),
 `all_terminal`, `any_succeeded`, `any_terminal`, or `at_least` with `--count`.
 `--priority` changes the priority of the activation that resumes after the join.
 When the condition can no longer be met the job advances to `--on-impossible` if
-one is named, and fails with `dependency_failure` otherwise.
+one is named, and fails with `dependency_failure` otherwise. Add
+`--resource NAME=INT` one or more times to `httk_workflow_advance` or
+`httk_workflow_gather` to set the next activation's resource requirement.
 
 ### Data and workdir changes
 

@@ -97,6 +97,8 @@ before a provider is returned.
 | `description` | no | Human-readable summary and generated declaration description. |
 | `declaration_uri` | no | String `$id` for the generated or external workflow declaration. |
 | `declaration_file` | no | Relative regular-file member containing an externally authored OPTIMADE-format workflow declaration JSON. |
+| `resources` | no | Default resource requirements, a table mapping resource labels to non-negative integer values. |
+| `steps` | no | Per-step resource overrides; only valid with an executable runner and only for names in its declared `steps` list. |
 
 ```toml
 [workflow]
@@ -105,6 +107,13 @@ alias = "relax"
 description = "Relax one structure."
 declaration_uri = "https://example.org/workflows/relax"
 # declaration_file = "declaration.json"
+
+[workflow.resources]
+procs = 4
+mem = 4096
+
+[workflow.steps.relax.resources]
+procs = 8
 ```
 
 ### `[workflow.runner]`: executable form
@@ -120,6 +129,15 @@ or the sole step is selected. Otherwise `initial_step` is required.
 | `steps` | required | Nonempty runner step list. |
 | `data_mode` | `"none"` | `"none"` or `"transactional"`. |
 | `workdir_mode` | `"persistent"` | `"persistent"` or `"isolated"`. |
+
+### `[workflow.resources]` and `[workflow.steps.NAME]`
+
+`[workflow.resources]` maps resource labels to non-negative integers. Resource
+names are validated labels, values are not booleans, and units are opaque. An
+executable runner may add `[workflow.steps.NAME]` tables, each allowing only a
+`resources` table. `NAME` must occur in `[workflow.runner].steps`; an unknown
+name is an error. `[workflow.steps]` is rejected for language runners because
+their step set is supplied by the language.
 
 ### `[workflow.runner]`: language vocabulary
 

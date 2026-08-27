@@ -21,7 +21,12 @@ from httk.core.digests import tree_digest
 from . import languages
 from ._util import validate_inputs
 from .errors import FormatError
-from .models import RESERVED_WORKFLOW_ENVIRONMENT_PREFIX, environment_variable_name, validate_declarations
+from .models import (
+    RESERVED_WORKFLOW_ENVIRONMENT_PREFIX,
+    environment_variable_name,
+    validate_declarations,
+    validate_resources,
+)
 from .scaffold import WorkflowProvider, payload_relative, register_workflow
 
 MANIFEST_NAME = "httk_workflow.toml"
@@ -234,6 +239,34 @@ def _validate_parameters(raw: Mapping[str, object], directory: Path) -> dict[str
         if "default" in table:
             entry["default"] = table["default"]
         result[parameter] = entry
+    return result
+
+
+def _validate_steps(
+    raw: Mapping[str, object] | None,
+    executable_steps: tuple[str, ...],
+    directory: Path,
+    *,
+    language: str | None,
+) -> dict[str, dict[str, int]]:
+    """Validate per-step resource requirements from a workflow manifest."""
+
+    if raw is None:
+        return {}
+    if language is not None:
+        raise _error(directory, "[workflow.steps] requires [workflow.runner].steps")
+    result: dict[str, dict[str, int]] = {}
+    declared = ", ".join(executable_steps) or "none"
+    for name, value in raw.items():
+        path = f"[workflow.steps.{name}]"
+        if name not in executable_steps:
+            raise _error(directory, f"{path} is an unknown step; declared runner steps: {declared}")
+        table = _table(value, path, directory)
+        _unknown(table, {"resources"}, path, directory)
+        try:
+            result[name] = validate_resources(table.get("resources", {}), f"{path}.resources")
+        except FormatError as exc:
+            raise _error(directory, str(exc)) from exc
     return result
 
 
@@ -554,6 +587,8 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
             "parameters",
             "environment",
             "outputs",
+            "resources",
+            "steps",
         },
         "[workflow]",
         root,
@@ -647,6 +682,17 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         raise _error(root, "[workflow.runner].data_mode must be 'none' or 'transactional'")
     if workdir_mode not in {"persistent", "isolated"}:
         raise _error(root, "[workflow.runner].workdir_mode must be 'persistent' or 'isolated'")
+
+    try:
+        resources = validate_resources(workflow.get("resources", {}), "[workflow.resources]")
+    except FormatError as exc:
+        raise _error(root, str(exc)) from exc
+    step_resources = _validate_steps(
+        _table(workflow["steps"], "[workflow.steps]", root) if "steps" in workflow else None,
+        steps,
+        root,
+        language=language_name,
+    )
 
     raw_inputs = _table(workflow.get("inputs", {}), "[workflow.inputs]", root)
     input_metadata: dict[str, dict[str, object]] = {}
@@ -802,6 +848,8 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         parameters=parameters,
         environment=environment,
         outputs=outputs,
+        resources=resources,
+        step_resources=step_resources,
         declaration_uri=declaration_uri,
         declaration_file=None,
         _input_metadata=input_metadata,

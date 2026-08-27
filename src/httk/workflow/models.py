@@ -198,6 +198,39 @@ def validate_parameters(value: object, name: str = "parameters") -> dict[str, ob
     return dict(mapping)
 
 
+def validate_resources(value: object, name: str = "resources") -> dict[str, int]:
+    """Validate one quantitative resource-requirement mapping.
+
+    Resource names are protocol labels and values are opaque non-negative
+    integers.  The protocol does not assign units or meanings to names.
+
+    :param value: The resource mapping to validate.
+    :param name: The field name used in validation errors.
+    :return: The validated resource mapping.
+    :raises httk.workflow.errors.FormatError: If the mapping, names, or values are invalid.
+    """
+
+    mapping = require_mapping(value, name)
+    result: dict[str, int] = {}
+    for key, raw in mapping.items():
+        label = validate_label(key, f"{name} key")
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            raise FormatError(f"{name}.{label} must be an integer")
+        if raw < 0:
+            raise FormatError(f"{name}.{label} must be non-negative")
+        result[label] = raw
+    return result
+
+
+def _validate_step_resources(value: object, name: str = "step_resources") -> dict[str, dict[str, int]]:
+    mapping = require_mapping(value, name)
+    result: dict[str, dict[str, int]] = {}
+    for raw_step, raw_resources in mapping.items():
+        step = validate_step(raw_step, f"{name} step")
+        result[step] = validate_resources(raw_resources, f"{name}.{step}")
+    return result
+
+
 def _matches_environment_type(value: object, environment_type: str) -> bool:
     if environment_type == "string":
         return isinstance(value, str)
@@ -851,6 +884,9 @@ CARRIED_STATE_MEMBERS = (
     "attempt_ordinal",
     "total_attempts",
     "data_generation",
+    # The dynamic requirement selected for this activation. A new activation
+    # replaces it with the requirement published by its preceding outcome.
+    "resources",
     # The observed children of the join that started this activation are inputs
     # of the activation, exactly like its step: every attempt of it, including
     # one recovered from an abandoned claim or a retry, must see the same
@@ -926,6 +962,7 @@ class StateFrame:
         attempt_ordinal: int = _UNSET,
         total_attempts: int = _UNSET,
         data_generation: int | None = _UNSET,
+        resources: Mapping[str, int] | None = _UNSET,
         join_summary: Sequence[object] | None = _UNSET,
         runner_steps: Sequence[str] = _UNSET,
         manager_id: str = _UNSET,
@@ -974,6 +1011,7 @@ class StateFrame:
         :param attempt_ordinal: The attempt ordinal.
         :param total_attempts: The total attempt count.
         :param data_generation: The transactional data generation.
+        :param resources: The dynamic requirement of this activation.
         :param join_summary: The children observed by the activation.
         :param runner_steps: The runner's registered step names.
         :param manager_id: The owning manager identifier.
@@ -1017,6 +1055,7 @@ class StateFrame:
             ("attempt_ordinal", attempt_ordinal),
             ("total_attempts", total_attempts),
             ("data_generation", data_generation),
+            ("resources", resources),
             ("join_summary", join_summary),
             ("runner_steps", runner_steps),
             ("manager_id", manager_id),
@@ -1126,6 +1165,12 @@ class StateFrame:
     def data_generation(self) -> int | None:
         """Return the transactional data generation, when present."""
         return self._integer("data_generation")
+
+    @property
+    def resources(self) -> dict[str, int] | None:
+        """Return the validated dynamic resource requirement, when present."""
+        value = self.members.get("resources")
+        return None if value is None else validate_resources(value, "state.resources")
 
     @property
     def join_summary(self) -> object:
@@ -1260,7 +1305,8 @@ class JobDefinition:
     claim_pool: str
     required_capabilities: frozenset[str]
     retry_policy: RetryPolicy
-    resources: Mapping[str, object]
+    resources: Mapping[str, int]
+    step_resources: Mapping[str, Mapping[str, int]]
     parameters: Mapping[str, object]
     #: The declared and overridden workflow environment of this job.
     environment: Mapping[str, object]
@@ -1374,7 +1420,8 @@ class JobDefinition:
         if not isinstance(capabilities_raw, Sequence) or isinstance(capabilities_raw, (str, bytes)):
             raise FormatError("claim.required_capabilities must be an array")
         capabilities = frozenset(validate_label(item, "capability") for item in capabilities_raw)
-        resources = require_mapping(value.get("resources", {}), "resources")
+        resources = validate_resources(value.get("resources", {}))
+        step_resources = _validate_step_resources(value.get("step_resources", {}))
         parameters_raw = value.get("parameters")
         parameters = {} if parameters_raw is None else validate_parameters(parameters_raw)
         environment_raw = value.get("environment")
@@ -1404,6 +1451,7 @@ class JobDefinition:
             required_capabilities=capabilities,
             retry_policy=RetryPolicy.from_mapping(value.get("retry_policy", {})),
             resources=dict(resources),
+            step_resources={step: dict(requirement) for step, requirement in step_resources.items()},
             parameters=parameters,
             environment=environment,
             declarations=declarations,

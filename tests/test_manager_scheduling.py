@@ -148,6 +148,8 @@ def _payload(
     executor: str = "path",
     initial_step: str = "only",
     retry_on: tuple[str, ...] = (),
+    resources: dict[str, int] | None = None,
+    step_resources: dict[str, dict[str, int]] | None = None,
 ) -> tuple[Path, str]:
     job_id = str(uuid.uuid4())
     payload = root / tag
@@ -175,7 +177,8 @@ def _payload(
             "maximum_activations": 4,
             "retry_on": list(retry_on),
         },
-        "resources": {},
+        "resources": {} if resources is None else resources,
+        "step_resources": {} if step_resources is None else step_resources,
         "parent": None,
     }
     (payload / "job.json").write_text(json.dumps(job), encoding="utf-8")
@@ -1644,3 +1647,162 @@ def test_owner_request_waits_for_owner_manager(tmp_path: Path) -> None:
         assert manager._handle_requests() is False
         assert request_path.is_file()
         assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
+
+
+def _attempt_contexts(root: Path, job_id: str) -> list[dict[str, object]]:
+    """Read all attempt contexts for one job below a workspace root."""
+
+    return [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(root.rglob("context.json"))
+        if json.loads(path.read_text(encoding="utf-8")).get("job_id") == job_id
+    ]
+
+
+def test_resource_capacity_blocks_never_fitting_jobs_and_census_reports_them(tmp_path: Path) -> None:
+    for capacity in ({"procs": 1}, {}):
+        workspace = Workspace.initialize(tmp_path / ("workspace-" + ("small" if capacity else "none")))
+        payload, job_id = _payload(
+            tmp_path / ("source-" + ("small" if capacity else "none")),
+            _SUCCEED_RUNNER,
+            tag="too-large",
+            resources={"procs": 2},
+        )
+        workspace.submit(payload, "project/too-large")
+        with TaskManager(workspace, resources=capacity, heartbeat_interval=0.01) as manager:
+            manager.run_until_idle(timeout=5.0)
+            census = manager._work_census()
+        assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
+        assert census.ready_blocked["resources"] == {"procs": 1}
+
+
+def test_resource_packing_limits_concurrent_attempts(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    jobs: list[tuple[Path, str]] = []
+    sleeping = _SUCCEED_RUNNER.replace("context = json.loads", "import time\ntime.sleep(0.25)\n\ncontext = json.loads")
+    for index in range(3):
+        payload, job_id = _payload(
+            tmp_path / "source",
+            sleeping,
+            tag=f"packed-{index}",
+            resources={"procs": 2, "mem": 4},
+        )
+        workspace.submit(payload, f"project/packed/{index}")
+        jobs.append((payload, job_id))
+    with TaskManager(
+        workspace,
+        resources={"procs": 4, "mem": 8},
+        maximum_workers=4,
+        heartbeat_interval=0.01,
+    ) as manager:
+        maximum_running = 0
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
+            manager.tick()
+            maximum_running = max(maximum_running, len(manager._running))
+            if all(workspace.find_marker_by_id(job_id).kind == "succeeded" for _, job_id in jobs):  # type: ignore[union-attr]
+                break
+            time.sleep(0.01)
+        assert maximum_running <= 2
+    assert all(workspace.find_marker_by_id(job_id).kind == "succeeded" for _, job_id in jobs)  # type: ignore[union-attr]
+
+
+def test_undeclared_resources_use_fair_share(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    jobs: list[tuple[Path, str]] = []
+    sleeping = _SUCCEED_RUNNER.replace("context = json.loads", "import time\ntime.sleep(0.2)\n\ncontext = json.loads")
+    for index in range(3):
+        payload, job_id = _payload(tmp_path / "source", sleeping, tag=f"fair-{index}")
+        workspace.submit(payload, f"project/fair/{index}")
+        jobs.append((payload, job_id))
+    with TaskManager(workspace, resources={"procs": 4}, maximum_workers=2, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30.0)
+    contexts = [context for _, job_id in jobs for context in _attempt_contexts(workspace.root, job_id)]
+    assert len(contexts) == 3
+    assert all(context["resources"] == {"procs": 2} for context in contexts)
+
+
+def test_dynamic_resources_apply_to_advance_and_clear_on_next_advance(tmp_path: Path) -> None:
+    runner = """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+
+context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
+temporary = control / "outcome.tmp.test"
+temporary.mkdir()
+base = {"format": "httk-workflow-outcome", "format_version": 2,
+        "job_id": context["job_id"], "activation_id": context["activation_id"],
+        "attempt_id": context["attempt_id"]}
+if context["step"] == "first":
+    outcome = {**base, "action": "advance", "next_step": "second", "resources": {"procs": 3}}
+elif context["step"] == "second":
+    outcome = {**base, "action": "advance", "next_step": "third"}
+else:
+    outcome = {**base, "action": "succeed"}
+(temporary / "outcome.json").write_text(json.dumps(outcome))
+os.rename(temporary, control / "outcome.ready")
+"""
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", runner, tag="dynamic", initial_step="first")
+    workspace.submit(payload, "project/dynamic")
+    with TaskManager(
+        workspace, resources={"procs": 4, "mem": 8}, maximum_workers=2, heartbeat_interval=0.01
+    ) as manager:
+        manager.run_until_idle(timeout=30.0)
+    contexts = {context["step"]: context["resources"] for context in _attempt_contexts(workspace.root, job_id)}
+    assert contexts == {
+        "first": {"procs": 2, "mem": 4},
+        "second": {"procs": 3, "mem": 4},
+        "third": {"procs": 2, "mem": 4},
+    }
+
+
+def test_wait_resources_apply_to_post_join_activation(tmp_path: Path) -> None:
+    runner = _SPAWNING_RUNNER.format(child=_SUCCEED_RUNNER).replace(
+        '"next_step": "gather",', '"next_step": "gather",\n        "resources": {"procs": 3},'
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", runner, tag="wait-resources")
+    workspace.submit(payload, "project/wait-resources")
+    with TaskManager(
+        workspace, resources={"procs": 4, "mem": 8}, maximum_workers=2, heartbeat_interval=0.01
+    ) as manager:
+        manager.run_until_idle(timeout=30.0)
+    contexts = _attempt_contexts(workspace.root, job_id)
+    assert {context["step"]: context["resources"] for context in contexts} == {
+        "only": {"procs": 2, "mem": 4},
+        "gather": {"procs": 3, "mem": 4},
+    }
+
+
+def test_retry_keeps_dynamic_resource_requirement(tmp_path: Path) -> None:
+    runner = """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+
+context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
+temporary = control / "outcome.tmp.test"
+temporary.mkdir()
+base = {"format": "httk-workflow-outcome", "format_version": 2,
+        "job_id": context["job_id"], "activation_id": context["activation_id"],
+        "attempt_id": context["attempt_id"]}
+if context["step"] == "first":
+    outcome = {**base, "action": "advance", "next_step": "retry", "resources": {"procs": 3}}
+elif context["attempt_ordinal"] == 1:
+    outcome = {**base, "action": "fail", "failure": {"code": "temporary", "message": "try again", "retryable": True}}
+else:
+    outcome = {**base, "action": "succeed"}
+(temporary / "outcome.json").write_text(json.dumps(outcome))
+os.rename(temporary, control / "outcome.ready")
+"""
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", runner, tag="retry-resources", initial_step="first")
+    workspace.submit(payload, "project/retry-resources")
+    with TaskManager(workspace, resources={"procs": 4}, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30.0)
+    contexts = [context for context in _attempt_contexts(workspace.root, job_id) if context["step"] == "retry"]
+    assert [context["resources"] for context in contexts] == [{"procs": 3}, {"procs": 3}]

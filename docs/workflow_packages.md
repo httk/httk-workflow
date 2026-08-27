@@ -20,6 +20,13 @@ entry = "run"
 steps = ["prepare", "relax", "publish"]
 initial_step = "prepare"
 
+[workflow.resources]
+procs = 4
+mem = 4096
+
+[workflow.steps.relax.resources]
+procs = 8
+
 [workflow.inputs.structure]
 destination = "POSCAR"
 entry_type = "structures"

@@ -127,6 +127,8 @@ def _workflow_description(target: str, format: str | None = None) -> dict[str, o
         "initial_step": workflow.initial_step,
         "data_mode": workflow.data_mode,
         "workdir_mode": workflow.workdir_mode,
+        "resources": dict(workflow.resources),
+        "step_resources": {step: dict(resources) for step, resources in workflow.step_resources.items()},
         "build": (
             {
                 "present": True,
@@ -200,9 +202,12 @@ def _render_text(description: Mapping[str, object]) -> str:
             f"data_mode: {description['data_mode']}",
             f"workdir_mode: {description['workdir_mode']}",
             build_line,
+            f"resources: {_value(description['resources'])}" if description["resources"] else "",
+            f"step_resources: {_value(description['step_resources'])}" if description["step_resources"] else "",
             "steps:",
         ]
     )
+    lines = [line for line in lines if line]
     steps = description["steps"]
     assert isinstance(steps, list)
     for step in steps:

@@ -225,6 +225,8 @@ def _payload(
     capabilities: list[str] | None = None,
     attempts_per_activation: int = 3,
     tag: str = "example",
+    resources: dict[str, int] | None = None,
+    step_resources: dict[str, dict[str, int]] | None = None,
 ) -> tuple[Path, str]:
     """Write one complete payload directory and return it with its job id."""
 
@@ -254,7 +256,8 @@ def _payload(
             "maximum_activations": 5,
             "retry_on": [],
         },
-        "resources": {},
+        "resources": {} if resources is None else resources,
+        "step_resources": {} if step_resources is None else step_resources,
         "parent": None,
     }
     (payload / "job.json").write_text(json.dumps(job), encoding="utf-8")
@@ -724,6 +727,63 @@ def test_debug_drives_a_three_step_runner_in_the_foreground(tmp_path: Path) -> N
     assert text.count("committing") == 3
     marker = resolve_job(workspace, job_id)
     assert marker.kind == "succeeded"
+
+
+def test_debug_admits_declared_resources_for_every_job_step(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    payload, job_id = _payload(
+        tmp_path / "source",
+        _THREE_STEP_RUNNER,
+        initial_step="run",
+        resources={"procs": 2},
+        step_resources={"run": {"gpus": 1}},
+    )
+
+    outcome = debug_job(workspace, str(payload), emit=lambda line: None)
+
+    assert outcome.job_id == job_id
+    assert outcome.exit_code == DEBUG_EXIT_SUCCEEDED
+    assert outcome.state == "succeeded"
+
+
+def test_debug_refreshes_capacity_for_dynamic_resources(tmp_path: Path) -> None:
+    runner = """#!/usr/bin/env python3
+import json
+import os
+from pathlib import Path
+
+context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
+temporary = control / "outcome.tmp.test"
+temporary.mkdir()
+base = {
+    "format": "httk-workflow-outcome",
+    "format_version": 2,
+    "job_id": context["job_id"],
+    "activation_id": context["activation_id"],
+    "attempt_id": context["attempt_id"],
+}
+if context["step"] == "run":
+    outcome = {**base, "action": "advance", "next_step": "second", "resources": {"procs": 3}}
+else:
+    outcome = {**base, "action": "succeed"}
+(temporary / "outcome.json").write_text(json.dumps(outcome))
+os.rename(temporary, control / "outcome.ready")
+"""
+    workspace = _workspace(tmp_path)
+    payload, job_id = _payload(
+        tmp_path / "source",
+        runner,
+        initial_step="run",
+        resources={"procs": 1},
+        step_resources={"run": {"gpus": 1}},
+    )
+
+    outcome = debug_job(workspace, str(payload), timeout=10.0, emit=lambda line: None)
+
+    assert outcome.job_id == job_id
+    assert outcome.exit_code == DEBUG_EXIT_SUCCEEDED
+    assert outcome.state == "succeeded"
 
 
 def test_debug_submits_a_fresh_payload_at_the_step_override(tmp_path: Path) -> None:

@@ -3,6 +3,7 @@
 import logging
 import uuid
 from collections import Counter
+from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
 
 from .errors import (
@@ -19,21 +20,60 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger("httk.workflow.manager")
 
 
-def eligible_ready(manager: Any) -> list[Marker]:
-    """Filter and order the ready window for one manager's capabilities."""
+def effective_requirement(
+    job: JobDefinition,
+    state: StateFrame,
+    capacity: Mapping[str, int],
+    maximum_workers: int,
+) -> dict[str, int]:
+    """Return the resource requirement selected for one ready activation."""
 
-    eligible: list[Marker] = []
+    if state.resources is not None:
+        requirement = dict(state.resources)
+    elif state.step is not None and state.step in job.step_resources:
+        requirement = dict(job.step_resources[state.step])
+    else:
+        requirement = dict(job.resources)
+    for name in ("procs", "mem"):
+        if name in capacity and name not in requirement:
+            share = capacity[name] // maximum_workers
+            if share == 0 and capacity[name] > 0:
+                share = capacity[name]
+            requirement[name] = share
+    return requirement
+
+
+def unfit_resource(requirement: Mapping[str, int], capacity: Mapping[str, int]) -> str | None:
+    """Return the first sorted resource key that cannot fit the capacity."""
+
+    for name in sorted(requirement):
+        value = requirement[name]
+        if name not in capacity or capacity[name] <= 0 or value > capacity[name]:
+            return name
+    return None
+
+
+def available_resources(capacity: Mapping[str, int], running: Iterable[Any]) -> dict[str, int]:
+    """Return capacity remaining after reservations of locally running attempts."""
+
+    available = dict(capacity)
+    for attempt in running:
+        for name, value in attempt.resources.items():
+            if name in available:
+                available[name] = max(0, available[name] - value)
+    return available
+
+
+def eligible_ready(manager: Any) -> list[tuple[Marker, dict[str, int]]]:
+    """Filter and order ready work, pairing each marker with its requirement."""
+
+    eligible: list[tuple[Marker, dict[str, int]]] = []
     for marker in manager._window("eligible_ready", "ready"):
         manager._pace()
-        try:
-            job: JobDefinition = manager.workspace.load_job(marker)
-        except (WorkflowError, OSError) as exc:
-            manager._report_anomaly(
-                f"ready:{marker.job_key}",
-                f"skipping ready job {marker.job_key}: {exc}",
-                manager._event("job_unusable", marker, pass_name="ready"),
-            )
+        loaded = manager._load_job_and_state(marker, "ready")
+        if loaded is None:
             continue
+        job, state = loaded
         manager._reported.pop(f"ready:{marker.job_key}", None)
         if manager._executor_for(job) is None:
             _LOGGER.debug(
@@ -56,8 +96,25 @@ def eligible_ready(manager: Any) -> list[Marker]:
                 ",".join(sorted(job.required_capabilities - manager.capabilities)),
             )
             continue
-        eligible.append(marker)
-    eligible.sort(key=lambda item: (item.priority, item.path.as_posix()))
+        try:
+            requirement = effective_requirement(job, state, manager.resources, manager.maximum_workers)
+        except (WorkflowError, OSError) as exc:
+            manager._report_anomaly(
+                f"ready:{marker.job_key}",
+                f"skipping ready job {marker.job_key}: {exc}",
+                manager._event("job_unusable", marker, pass_name="ready"),
+            )
+            continue
+        missing_resource = unfit_resource(requirement, manager.resources)
+        if missing_resource is not None:
+            _LOGGER.debug(
+                "skipping ready job %s: resource %s does not fit manager capacity",
+                marker.job_key,
+                missing_resource,
+            )
+            continue
+        eligible.append((marker, requirement))
+    eligible.sort(key=lambda item: (item[0].priority, item[0].path.as_posix()))
     return eligible
 
 
@@ -185,9 +242,16 @@ def claim_pass(manager: Any, changed: bool, logger: Any) -> bool:
         return changed
     if manager._maintenance_paused():
         return changed
-    for marker in manager._eligible_ready():
+    for marker, requirement in manager._eligible_ready_with_requirements():
         if len(manager._running) >= manager.maximum_workers:
             break
+        available = manager._available_resources()
+        if ("procs" in manager.resources and available["procs"] == 0) or (
+            "mem" in manager.resources and available["mem"] == 0
+        ):
+            break
+        if any(value > available.get(name, 0) for name, value in requirement.items()):
+            continue
         try:
             changed |= manager._claim_and_launch(marker)
         except TransitionLostError as exc:
@@ -207,8 +271,8 @@ def _classify_pending(manager: Any, marker: Marker, blocked: dict[str, Counter[s
     """Classify one submitted or ready marker, returning whether it is actionable.
 
     A submitted job only needs its executor served to register; a ready job must
-    also match the pool and capabilities. A job this manager cannot progress is
-    attributed to exactly one missing requirement, in the same order
+    also match the pool, capabilities, and static resource capacity. A job this
+    manager cannot progress is attributed to exactly one missing requirement, in the same order
     :func:`eligible_ready` checks them.
     """
 
@@ -230,6 +294,18 @@ def _classify_pending(manager: Any, marker: Marker, blocked: dict[str, Counter[s
     if missing:
         blocked["capability"][min(missing)] += 1
         return False
+    try:
+        state = manager._read_frame(marker)
+    except (WorkflowError, OSError):
+        return False
+    try:
+        requirement = effective_requirement(job, state, manager.resources, manager.maximum_workers)
+    except (WorkflowError, OSError):
+        return False
+    missing_resource = unfit_resource(requirement, manager.resources)
+    if missing_resource is not None:
+        blocked["resources"][missing_resource] += 1
+        return False
     return True
 
 
@@ -238,7 +314,7 @@ def work_census(manager: Any) -> "WorkCensus":
 
     Actionability applies exactly the claim predicates of :func:`eligible_ready`:
     a ready job counts as actionable only if this manager could claim it. A
-    wrong-pool, missing-capability, or unserved-executor job is not actionable
+    wrong-pool, missing-capability, resource-unfit, or unserved-executor job is not actionable
     — the manager can do nothing about it — so it is reported for the operator
     instead of silently keeping the manager awake or silently letting it exit.
     """
@@ -258,7 +334,12 @@ def work_census(manager: Any) -> "WorkCensus":
             waiting += 1
         else:
             paused += 1
-    blocked: dict[str, Counter[str]] = {"executor": Counter(), "pool": Counter(), "capability": Counter()}
+    blocked: dict[str, Counter[str]] = {
+        "executor": Counter(),
+        "pool": Counter(),
+        "capability": Counter(),
+        "resources": Counter(),
+    }
     ready_claimable = 0
     actionable = 0
     for marker in manager._walk(("submitted", "ready")):

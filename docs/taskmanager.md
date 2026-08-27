@@ -16,6 +16,11 @@ they do; `job list`, `job show`, `job log`, and `job why` (why is this job
 manager ever starts, and `job debug` drives one job in the foreground while
 you author a runner.
 
+Use repeatable `--worker-resource NAME COUNT` options to advertise capacities;
+inside an active SLURM allocation, local managers derive `procs`, `mem`,
+`gpus`, and `nodes` from the allocation variables. `--count N` starts N local
+manager processes, each with its own manager directory and log.
+
 ## Environment preludes
 
 Shell setup an HPC job needs — `module load`, `source activate`, `export` — is

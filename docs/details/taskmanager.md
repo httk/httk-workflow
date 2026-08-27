@@ -289,6 +289,14 @@ against the ordered `--runner-search-path` roots of the manager.
 httk workflow manager run --workspace WORKSPACE --workers 8
 ```
 
+To advertise a host allocation explicitly, repeat `--worker-resource` once per
+resource. For example, four workers sharing 32 CPUs and 128000 MB:
+
+```console
+httk workflow manager run --workspace WORKSPACE --workers 4 \
+  --worker-resource procs 32 --worker-resource mem 128000
+```
+
 Safety property: a task manager claims and runs only jobs whose marker, payload
 directory, and `job.json` are regular, non-symlink entries owned by the account
 running that manager. Child jobs belong to the manager's account; imported jobs
@@ -304,6 +312,45 @@ httk workflow manager run --workspace WORKSPACE \
   --workers 4
 ```
 
+### Resources
+
+Managers may advertise integer resource capacities, such as
+`resources={"procs": 8, "mem": 32768}`. A ready job is skipped permanently by
+that manager when one of its declared resources is missing, zero-capacity, or
+larger than the manager's capacity; these jobs are reported in the idle census
+under `ready_blocked["resources"]`. Jobs that fit are packed against the
+reservations of attempts already running. When a job omits `procs` or `mem`,
+the manager assigns its fair share (`capacity // workers`, using the whole
+capacity when that quotient is zero), so undeclared jobs still occupy one
+worker's share. A dynamic requirement published by an `advance` or `wait`
+outcome applies to the next activation and is retained across retries.
+
+Resource labels are otherwise opaque to the manager. `manager.workers` is
+unchanged: it remains the concurrency limit and there is no
+`manager.resources` workspace setting. The command-line capacities are
+repeatable, must be non-negative integers, and override any same-named SLURM
+capacity detected by a local manager.
+
+When a manager runs inside a SLURM batch allocation, it derives capacities only
+when `SLURM_JOB_ID` is present:
+
+| SLURM variable | Manager resource |
+| --- | --- |
+| `SLURM_NTASKS` | `procs` |
+| `SLURM_GPUS` | `gpus` |
+| `SLURM_JOB_NUM_NODES` | `nodes` |
+| `SLURM_MEM_PER_CPU`, `SLURM_CPUS_PER_TASK`, `SLURM_NTASKS` | `mem = MEM_PER_CPU × CPUS_PER_TASK (default 1) × NTASKS` |
+| `SLURM_MEM_PER_NODE`, `SLURM_JOB_NUM_NODES` | fallback `mem = MEM_PER_NODE × JOB_NUM_NODES` when `SLURM_MEM_PER_CPU` is absent |
+
+Memory values are recorded in MB; a trailing `M`, `G`, or `K` is accepted,
+with `G` multiplied by 1024 and `K` divided by 1024. Missing or invalid input
+omits only the affected capacity and invalid input is warned about. Local
+adapters supply host `procs` and total host physical memory in MB when the
+caller did not provide those capacities. For multiple local managers, explicit
+resource pairs are per-manager values and remain unchanged; only injected host
+capacities are split across managers with quotient-plus-remainder distribution.
+SLURM adapters let the allocation variables describe the real allocation.
+
 A manager claims work under the workspace's `lease_seconds` unless
 `--lease-seconds` overrides it for that manager alone.
 
@@ -312,19 +359,21 @@ pass `--idle` to keep serving.
 
 **One banner, then one summary.** Whatever the console log level, `run` and
 `manager run` print one line on startup — the manager id, the workspace, the log
-file path, and the pools, capabilities, and executors this manager serves — so a
+file path, the pools, capabilities, executors, and advertised resources this
+manager serves — so a
 normal run is never silent about which manager is doing what and where its log
 is. When it exits idle it prints one closing summary line that classifies every
 remaining job: how many succeeded and failed, how many are *not claimable here*
 — ready or unregisterable-submitted jobs broken down by the pool, capability,
-or executor this manager does not serve — how many are waiting on children, how
-many are paused, and how many committing or cancelling jobs have an unreadable
-definition. A job this manager cannot progress — including one whose `job.json`
-is corrupt — no longer keeps it awake to the idle timeout; it is reported
-instead. If the manager does hit `--idle-timeout`, the advice names the actual
-pool, capability, and executor mismatches, the flags that would clear the pool
-and capability ones, and points an unreadable definition at `workspace fsck`,
-rather than a bare suggestion to raise the timeout.
+or executor this manager does not serve, or by resource label beyond its
+capacity — how many are waiting on children, how many are paused, and how many
+committing or cancelling jobs have an unreadable definition. A job this manager
+cannot progress — including one whose `job.json` is corrupt — no longer keeps
+it awake to the idle timeout; it is reported instead. If the manager does hit
+`--idle-timeout`, the advice names the actual pool, capability, executor, and
+resource mismatches, the flags that would clear them, and points an unreadable
+definition at `workspace fsck`, rather than a bare suggestion to raise the
+timeout.
 
 **Taking over another manager's attempt.** An expired lease says that a manager
 stopped heartbeating, which is not the same as its attempt having stopped, so

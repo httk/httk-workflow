@@ -21,7 +21,7 @@ from httk.core.register import register_format_serializer, register_reader, regi
 
 import httk.workflow.vasp
 from httk.workflow import FormatError, TaskManager, Workspace, scaffold
-from httk.workflow.models import JobDefinition, validate_label
+from httk.workflow.models import JobDefinition, StateFrame, validate_label, validate_resources
 from httk.workflow.runners import RUNNERS, runner_path
 from httk.workflow.runtime_builders import JobSpec
 from httk.workflow.scaffold import (
@@ -65,6 +65,43 @@ def test_job_definition_uses_runner_executor_wire_key() -> None:
     job["runner"]["executor"] = ""
     with pytest.raises(FormatError, match=r"runner\.executor"):
         JobDefinition.from_mapping(job)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [({}, {}), ({"procs": 4, "mem": 0}, {"procs": 4, "mem": 0})],
+)
+def test_resource_requirements_accept_nonnegative_integers(value: object, expected: dict[str, int]) -> None:
+    assert validate_resources(value) == expected
+
+
+@pytest.mark.parametrize("value", (None, [], {"bad/name": 1}, {"procs": True}, {"procs": 1.5}, {"procs": -1}))
+def test_resource_requirements_reject_invalid_values(value: object) -> None:
+    with pytest.raises(FormatError):
+        validate_resources(value)
+
+
+def test_job_definition_round_trips_step_resource_requirements() -> None:
+    mapping = JobSpec(
+        name="test",
+        workflow="tests.example",
+        runner_path="files/runner",
+        initial_step="start",
+        resources={"procs": 2},
+        step_resources={"start": {"mem": 1024}},
+    ).as_mapping()
+    definition = JobDefinition.from_mapping(mapping)
+    assert definition.resources == {"procs": 2}
+    assert definition.step_resources == {"start": {"mem": 1024}}
+
+
+def test_state_frame_resources_accessor_validates_and_round_trips() -> None:
+    frame = StateFrame.replace(resources={"procs": 3})
+    assert frame.resources == {"procs": 3}
+    with pytest.raises(FormatError, match="non-negative"):
+        invalid = StateFrame({"resources": {"procs": -1}})
+        value = invalid.resources
+        assert value is None
 
 
 def test_a_bare_pwd_document_is_synthesized_with_a_declaration(tmp_path: Path) -> None:

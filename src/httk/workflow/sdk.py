@@ -339,6 +339,7 @@ class ChildSpec:
     :param claim_pool: The child's claim pool, or the parent's when omitted.
     :param required_capabilities: Capabilities required by the child.
     :param resources: Resources requested by the child, or the parent's when omitted.
+    :param step_resources: Per-step resources requested by the child, or the parent's when omitted.
     :param maximum_attempts_per_activation: The child's per-activation attempt budget.
     :param maximum_total_attempts: The child's total attempt budget.
     :param maximum_activations: The child's activation budget.
@@ -361,7 +362,8 @@ class ChildSpec:
     priority: int | None = None
     claim_pool: str | None = None
     required_capabilities: tuple[str, ...] = ()
-    resources: Mapping[str, object] | None = None
+    resources: Mapping[str, int] | None = None
+    step_resources: Mapping[str, Mapping[str, int]] | None = None
     maximum_attempts_per_activation: int | None = None
     maximum_total_attempts: int | None = None
     maximum_activations: int | None = None
@@ -392,6 +394,11 @@ class ChildSpec:
             maximum_activations=self.maximum_activations,
             retry_on=self.retry_on,
             resources=dict(parent.resources) if self.resources is None else dict(self.resources),
+            step_resources=(
+                {step: dict(resources) for step, resources in parent.step_resources.items()}
+                if self.step_resources is None
+                else {step: dict(resources) for step, resources in self.step_resources.items()}
+            ),
             parameters=dict(self.parameters),
             declarations=validate_declarations(self.declarations, "child declarations"),
         )
@@ -978,6 +985,7 @@ class Attempt:
         *,
         state: Mapping[str, object] | None = None,
         priority: int | None = None,
+        resources: Mapping[str, int] | None = None,
     ) -> Path:
         """Publish a new activation of this job at *step*.
 
@@ -987,6 +995,7 @@ class Attempt:
         :param step: The next registered step.
         :param state: State members to merge before publication.
         :param priority: The priority of the new activation, when changed.
+        :param resources: The requirement of the new activation, when changed.
         :return: The path of the published outcome.
         :raises RuntimeError: If this attempt already published an outcome.
         """
@@ -995,7 +1004,7 @@ class Attempt:
         self._check_step(step, "advance target")
         if state:
             self.state.merge(state)
-        return self._publish("advance", next_step=step, priority=priority)
+        return self._publish("advance", next_step=step, priority=priority, resources=resources)
 
     def gather(
         self,
@@ -1006,6 +1015,7 @@ class Attempt:
         on_impossible: str | None = None,
         rejoin: Iterable[str] = (),
         priority: int | None = None,
+        resources: Mapping[str, int] | None = None,
     ) -> Path:
         """Wait for this attempt's and optionally earlier children, then run *step*.
 
@@ -1022,6 +1032,7 @@ class Attempt:
         :param on_impossible: The step to run when the condition cannot be met.
         :param rejoin: Labels of children observed by an earlier join activation.
         :param priority: The priority of the join activation, when changed.
+        :param resources: The requirement of the join activation, when changed.
         :return: The path of the published wait outcome.
         :raises ValueError: If no children were spawned or rejoined, a rejoined label is unknown, or a named step is invalid.
         """
@@ -1073,7 +1084,7 @@ class Attempt:
                 "gather requires children spawned on this attempt or rejoin entries, and neither was provided"
             )
         join = join_mapping(children, when, count, on_impossible, rejoin_children)
-        return self._publish("wait", next_step=step, priority=priority, join=join)
+        return self._publish("wait", next_step=step, priority=priority, join=join, resources=resources)
 
     def succeed(self) -> Path:
         """Publish the successful completion of this job.
@@ -1176,6 +1187,7 @@ class Attempt:
         retry: Mapping[str, object] | None = None,
         join: Mapping[str, object] | None = None,
         pause: Mapping[str, object] | None = None,
+        resources: Mapping[str, int] | None = None,
     ) -> Path:
         draft = self._require_draft()
         declared = self._undeclared_steps()
@@ -1188,6 +1200,7 @@ class Attempt:
                 retry=retry,
                 join=join,
                 pause=pause,
+                resources=resources,
                 runner_steps=declared,
             )
         except Exception:

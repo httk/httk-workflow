@@ -76,6 +76,8 @@ from .models import (
     ensure_step_known,
     normalize_placement,
     validate_parameters,
+    validate_resources,
+    validate_step,
 )
 from .runtime_builders import JobSpec, prepare_job_payload
 from .workspace import Workspace
@@ -149,6 +151,8 @@ class WorkflowProvider:
     :param initial_step: Select the default starting step.
     :param alias: Provide an alternate registered name.
     :param steps: Declare the steps the runner provides.
+    :param resources: Declare the default resource requirement.
+    :param step_resources: Declare per-step resource requirements.
     :param data_mode: Declare the workflow's default data mode.
     :param workdir_mode: Declare the workflow's default workdir mode.
     :param summary: Describe the workflow for callers.
@@ -180,6 +184,8 @@ class WorkflowProvider:
     initial_step: str = "start"
     alias: str | None = None
     steps: tuple[str, ...] = ()
+    resources: Mapping[str, int] = field(default_factory=dict)
+    step_resources: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
     data_mode: DataMode = "none"
     workdir_mode: WorkdirMode = "persistent"
     summary: str = ""
@@ -239,6 +245,19 @@ class WorkflowProvider:
         object.__setattr__(self, "inputs", MappingProxyType(inputs))
         object.__setattr__(self, "runner_options", MappingProxyType(dict(self.runner_options)))
         object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
+        object.__setattr__(
+            self, "resources", MappingProxyType(validate_resources(self.resources, "workflow.resources"))
+        )
+        object.__setattr__(
+            self,
+            "step_resources",
+            MappingProxyType(
+                {
+                    validate_step(step, "workflow step"): validate_resources(requirement, f"workflow.steps.{step}")
+                    for step, requirement in self.step_resources.items()
+                }
+            ),
+        )
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
         object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
@@ -416,6 +435,8 @@ class ResolvedWorkflow:
     :param initial_step: Select the step a job starts at.
     :param alias: Preserve the registered workflow alias.
     :param steps: Preserve the steps the runner provides.
+    :param resources: Preserve the default resource requirement.
+    :param step_resources: Preserve per-step resource requirements.
     :param data_mode: Preserve the workflow data mode.
     :param workdir_mode: Preserve the workflow workdir mode.
     :param packaged: Preserve the packaged runner file name when applicable.
@@ -450,6 +471,8 @@ class ResolvedWorkflow:
     document_path: Path | None = None
     alias: str | None = None
     steps: tuple[str, ...] = ()
+    resources: Mapping[str, int] = field(default_factory=dict)
+    step_resources: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
     data_mode: DataMode = "none"
     workdir_mode: WorkdirMode = "persistent"
     packaged: str | None = None
@@ -498,6 +521,19 @@ class ResolvedWorkflow:
         object.__setattr__(self, "runner_options", MappingProxyType(dict(self.runner_options)))
         object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
         object.__setattr__(self, "environment", MappingProxyType(dict(self.environment)))
+        object.__setattr__(
+            self, "resources", MappingProxyType(validate_resources(self.resources, "workflow.resources"))
+        )
+        object.__setattr__(
+            self,
+            "step_resources",
+            MappingProxyType(
+                {
+                    validate_step(step, "workflow step"): validate_resources(requirement, f"workflow.steps.{step}")
+                    for step, requirement in self.step_resources.items()
+                }
+            ),
+        )
 
     @property
     def store_name(self) -> str:
@@ -793,6 +829,8 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
         alias=provider.alias,
         initial_step=provider.initial_step,
         steps=provider.steps,
+        resources=provider.resources,
+        step_resources=provider.step_resources,
         data_mode=provider.data_mode,
         workdir_mode=provider.workdir_mode,
         packaged=None if provider.directory is not None else provider.runner_file,
@@ -878,6 +916,8 @@ def resolve_workflow(
                 workdir_mode=provider.workdir_mode,
                 summary=provider.summary,
                 inputs=provider.inputs,
+                resources=provider.resources,
+                step_resources=provider.step_resources,
                 instantiate=provider.instantiate,
                 declarations=provider.declarations,
                 collector=provider.collector,
@@ -1604,6 +1644,8 @@ def _submit(
             data_mode=prepared.data_mode,
             priority=500 if priority is None else priority,
             required_capabilities=tuple(sorted(set(prepared.required_capabilities))),
+            resources=workflow.resources,
+            step_resources=workflow.step_resources,
             parameters=validate_parameters(job_parameters),
             environment=(
                 {

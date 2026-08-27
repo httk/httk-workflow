@@ -200,6 +200,19 @@ def _print_line(line: str) -> None:
     print(line, flush=True)
 
 
+def _debug_capacity(job: Any, dynamic: Mapping[str, int] | None = None) -> dict[str, int]:
+    """Return capacity sufficient for every declared requirement of *job*."""
+
+    capacity: dict[str, int] = {}
+    requirements = (job.resources, *job.step_resources.values())
+    if dynamic is not None:
+        requirements += (dynamic,)
+    for requirement in requirements:
+        for name, value in requirement.items():
+            capacity[name] = max(capacity.get(name, 0), max(1, value))
+    return capacity
+
+
 def _drive(
     workspace: Workspace,
     marker: Marker,
@@ -231,12 +244,16 @@ def _drive(
     with TaskManager(
         scoped,
         capabilities=sorted(job.required_capabilities),
+        resources=_debug_capacity(job),
         accept_any_pool=True,
         maximum_workers=1,
         heartbeat_interval=0.01,
         join_grace_seconds=timeout + 60.0,
     ) as manager:
         while True:
+            frame = manager._read_frame(current)
+            # This single-job foreground manager intentionally exposes a mutable plain dict.
+            manager.resources = _debug_capacity(job, frame.resources)
             manager.tick()
             found = workspace.find_marker_by_id(marker.job_id)
             if found is None:

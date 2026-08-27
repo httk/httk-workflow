@@ -246,8 +246,23 @@ def test_campaign_start_managers_forwards_idle_timeout(tmp_path: Path, monkeypat
         return []
 
     monkeypatch.setattr(_campaign, "campaign_managers", fake_campaign_managers)
-    assert command(["campaign", "start-managers", "--idle-timeout", "10"], _context(tmp_path)) == 0
+    assert (
+        command(
+            [
+                "campaign",
+                "start-managers",
+                "--idle-timeout",
+                "10",
+                "--worker-resource",
+                "procs",
+                "4",
+            ],
+            _context(tmp_path),
+        )
+        == 0
+    )
     assert seen["idle_timeout"] == 10.0
+    assert seen["resources"] == {"procs": 4}
 
 
 def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:

@@ -276,6 +276,45 @@ def test_an_unknown_step_names_the_registered_steps(tmp_path: Path) -> None:
     assert outcome["runner_steps"] == ["collect", "relax"]
 
 
+def test_advance_resource_options_are_published(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, step="start")
+    completed = fixture.run(
+        _runner(
+            "start",
+            "next",
+            body="step_start() { httk_workflow_advance next --resource procs=4 --resource mem=100; }\nstep_next() { :; }",
+        )
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert fixture.outcome()["resources"] == {"mem": 100, "procs": 4}
+
+
+def test_advance_without_resource_options_omits_resources(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, step="start")
+    completed = fixture.run(
+        _runner(
+            "start",
+            "next",
+            body="step_start() { httk_workflow_advance next; }\nstep_next() { :; }",
+        )
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "resources" not in fixture.outcome()
+
+
+def test_malformed_advance_resource_option_is_refused(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, step="start")
+    completed = fixture.run(
+        _runner(
+            "start",
+            "next",
+            body="step_start() { httk_workflow_advance next --resource procs=nope; }\nstep_next() { :; }",
+        )
+    )
+    assert completed.returncode == 2
+    assert "NAME=INT" in completed.stderr
+
+
 def test_a_step_that_publishes_nothing_is_reported_as_no_outcome(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, step="silent")
     completed = fixture.run(_runner("silent", body="step_silent() { httk_workflow_log info nothing; }"))

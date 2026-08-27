@@ -29,6 +29,7 @@ from ._util import (
     utc_now,
     write_json_atomic,
 )
+from .errors import FormatError
 from .models import (
     JOB_STATE_DIRECTORY,
     JobDefinition,
@@ -39,6 +40,7 @@ from .models import (
     validate_failure,
     validate_label,
     validate_parameters,
+    validate_resources,
     validate_sha256,
     validate_step,
 )
@@ -164,6 +166,7 @@ class JobSpec:
     :param maximum_activations: Bound job activations.
     :param retry_on: Name manager-detected failure codes eligible for retry.
     :param resources: Supply resource requirements.
+    :param step_resources: Supply per-step resource requirements.
     :param parameters: Supply opaque job parameters.
     :param environment: Supply declared environment metadata and overrides.
     :param declarations: Supply workflow declarations.
@@ -191,7 +194,8 @@ class JobSpec:
     maximum_total_attempts: int | None = None
     maximum_activations: int | None = None
     retry_on: tuple[str, ...] = ()
-    resources: Mapping[str, object] = field(default_factory=dict)
+    resources: Mapping[str, int] = field(default_factory=dict)
+    step_resources: Mapping[str, Mapping[str, int]] = field(default_factory=dict)
     parameters: Mapping[str, object] = field(default_factory=dict)
     environment: Mapping[str, object] = field(default_factory=dict)
     #: Workflow declarations carried verbatim into ``job.json``, keyed by name.
@@ -228,6 +232,11 @@ class JobSpec:
             if self.runner_sha256 is None:
                 raise ValueError(f"a {self.runner_source} runner must pin runner_sha256")
             runner["sha256"] = validate_sha256(self.runner_sha256, "runner_sha256")
+        resources = validate_resources(self.resources)
+        step_resources: dict[str, dict[str, int]] = {}
+        for raw_step, raw_resources in self.step_resources.items():
+            step = validate_step(raw_step, "step_resources step")
+            step_resources[step] = validate_resources(raw_resources, f"step_resources.{step}")
         result: dict[str, object] = {
             "format": "httk-workflow-job",
             "format_version": 2,
@@ -245,7 +254,8 @@ class JobSpec:
                 "required_capabilities": list(self.required_capabilities),
             },
             "retry_policy": retry_policy,
-            "resources": dict(self.resources),
+            "resources": resources,
+            "step_resources": step_resources,
             "parent": None if parent is None else dict(parent),
         }
         if self.parameters:
@@ -701,6 +711,7 @@ class OutcomeDraft:
         message: str | None = None,
         expected_data_generation: int | None = None,
         runner_steps: Sequence[str] | None = None,
+        resources: Mapping[str, int] | None = None,
     ) -> Path:
         """Publish this outcome atomically.
 
@@ -714,6 +725,7 @@ class OutcomeDraft:
         :param message: Attach an optional human-readable message.
         :param expected_data_generation: Confirm the transaction generation.
         :param runner_steps: Record the runner steps available to the manager.
+        :param resources: Set the requirement of the next activation for ``advance`` or ``wait``.
         :return: The authoritative published outcome path.
         :raises FileExistsError: If an outcome is already published.
         :raises ValueError: If the action's required details are invalid.
@@ -729,6 +741,13 @@ class OutcomeDraft:
             validate_step(next_step)
         elif next_step is not None:
             raise ValueError(f"{action} does not accept next_step")
+        if resources is not None and action not in {"advance", "wait"}:
+            raise ValueError(f"{action} does not accept resources")
+        if resources is not None:
+            try:
+                resources = validate_resources(resources)
+            except FormatError as exc:
+                raise ValueError(str(exc)) from exc
         if action == "wait" and join is None:
             join = join_mapping(self.children)
         if action == "fail":
@@ -776,6 +795,7 @@ class OutcomeDraft:
             # The step set of the runner that published this outcome, recorded by
             # the manager as evidence of what this job can still be advanced to.
             "runner_steps": None if runner_steps is None else [validate_step(item) for item in runner_steps],
+            "resources": resources,
         }
         body.update({key: value for key, value in optional.items() if value is not None})
         # Draft-internal: durability of the whole draft is the one batched tree

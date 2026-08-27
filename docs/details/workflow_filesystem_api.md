@@ -749,7 +749,7 @@ checksum is present and wrong, is reported at once rather than waited out. The
 same deadline bounds the retries of a verified state-marker rename and of any
 other metadata-visibility probe.
 
-Every state frame includes:
+State frames have the following shape; the `resources` member is optional and is absent until an outcome sets it:
 
 ```json
 {
@@ -769,6 +769,7 @@ Every state frame includes:
   "attempt_ordinal": 1,
   "total_attempts": 4,
   "data_generation": 2,
+  "resources": {},
   "priority": 500,
   "reason": "advance"
 }
@@ -780,6 +781,11 @@ Every state frame includes:
 An in-flight operator pause adds the optional `pause_requested` member to the
 state frame; it is carried to the next attempt boundary, then consumed when the
 job enters `paused`, while a terminal outcome supersedes it.
+
+The optional state-frame `resources` member is the validated dynamic resource
+requirement of the current activation. It is carried across attempts of that
+activation; a new activation replaces it with the requirement selected for the
+new activation.
 
 State frames form a backwards-linked history across writer segments. Failure,
 join, operator, and outcome details are embedded in the applicable state frame
@@ -848,6 +854,7 @@ A minimal `job.json` is:
     "retry_on": ["lease_lost", "timeout", "process_failure"]
   },
   "resources": {},
+  "step_resources": {},
   "parent": null
 }
 ```
@@ -863,6 +870,17 @@ the immutable job digest like every other member. An implementation MUST reject 
 the payload or in transactional `data/`. A parent that synthesizes a child job
 varies normally only the child's `initial_step` and its `parameters`.
 The limit is exposed as `MAXIMUM_PARAMETERS_BYTES` by the protocol model.
+
+`resources` is a mapping from a resource label to a non-negative integer.
+Labels use `validate_label`; booleans, negative values, and all non-integers are
+invalid. `step_resources` is an optional mapping from validated step names to
+the same kind of resource mapping. Units are opaque integers; for example,
+SLURM-derived `mem` values are megabytes. A ready job's effective requirement
+for step `s` is selected, by the manager, from the state frame's dynamic
+`resources`, then `job.step_resources[s]`, then `job.resources`, then `{}`.
+For manager resources named `procs` or `mem` that a requirement omits, the
+manager assumes the worker's fair share (`capacity // workers`). A manager that
+does not provide a resource a job requires never runs that job.
 
 The optional top-level `declarations` member carries workflow declarations: a
 JSON object mapping a declaration name to one declaration document. A
@@ -949,8 +967,9 @@ are available in every core-v2 workspace.
 `claim.pool` is the scheduling pool or queue from which the job may be claimed.
 Pool and capability labels use the same conservative component syntax as tags.
 A manager advertises its pools and capabilities and MUST claim a job only when
-both match. This is claim eligibility, not a workflow name and not a substitute
-for quantitative `resources`.
+both match. This is claim eligibility, not a workflow name; quantitative
+`resources` are separate declarations used by a capable manager when packing
+attempts.
 
 The literal pool name `default` is reserved for jobs requiring no explicit
 routing. A manager started without pool configuration MUST advertise
@@ -1492,6 +1511,11 @@ Thus a shell or Python step does not infer restart from leftover filenames. It
 reads `HTTK_WORKFLOW_CONTEXT` (or the scalar variables), then uses the existing
 files according to application policy.
 
+The attempt context's `resources` member is the effective requirement selected
+for the activation that was launched. It is a validated resource mapping, so a
+runner can use it as the manager's placement decision without re-resolving the
+job declaration.
+
 Attempt-control directories are transient metadata. Persistent workdirs are
 application data and MUST NOT be garbage-collected merely because an attempt
 ended. Isolated workdirs may be collected under their retention policy. No
@@ -1547,6 +1571,10 @@ writes and carries it forward, and ignores a malformed one with a log entry: the
 member is evidence for an operator or a tool drawing the reachable steps of a job,
 never an input of a manager decision. A runner that declares it SHOULD do so in the
 first outcome the job publishes.
+
+An `advance` or `wait` outcome MAY contain `resources`, a resource mapping using
+the same validation rules as `job.json`. It is the requirement of the next
+activation. Other actions MUST NOT contain it.
 
 Actions are:
 
@@ -2311,7 +2339,8 @@ A manager:
 7. evaluates waiting joins, including cross-workspace references when enabled;
 8. handles submitted jobs and operator requests;
 9. claims eligible ready work in pool, capability, priority, and resource
-   order;
+   order, skipping requirements that cannot fit its advertised capacities and
+   packing fitting attempts against the reservations of its running attempts;
 10. continues watching for workspaces being attached, renamed, or detached.
 
 It does not need to reconcile a separate state index. Listing `state/` is

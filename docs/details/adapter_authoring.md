@@ -381,7 +381,16 @@ it always did:
 
 An adapter should append the workspace's configured `manager.workers` to `argv` only when the
 request did not already choose one, so that an explicit `--workers` from the
-command line always wins over the workspace's default.
+command line always wins over the workspace's default. It is also expected to
+make the manager's `procs` and `mem` capacities (and `gpus` and `nodes` when
+known) match the real allocation: append `--worker-resource NAME COUNT`
+pairs when the caller did not provide them, or run the manager where
+`SLURM_*` variables describe the allocation. Keep the `manager.workers` rule;
+there is no `manager.resources` setting. Explicit resource pairs are
+per-manager values and must be passed through verbatim. When a local request
+starts multiple managers, split only injected host capacities across `count`
+with quotient-plus-remainder distribution so the aggregate matches the host
+capacity and a remainder is assigned to the first managers.
 
 ## Settings and credentials
 

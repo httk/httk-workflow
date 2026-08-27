@@ -7,9 +7,11 @@ from httk.core.plugins.install import install_plugin
 
 from httk.workflow import Workspace, scaffold
 from httk.workflow._runner_builds import register_build
-from httk.workflow.packages import _reset_plugin_workflow_cache
+from httk.workflow.models import JobDefinition
+from httk.workflow.packages import _reset_plugin_workflow_cache, parse_workflow_manifest
 from httk.workflow.scaffold import (
     WorkflowProvider,
+    new_job,
     register_workflow,
     registered_workflow_labels,
     registered_workflows,
@@ -70,6 +72,64 @@ def test_installed_plugin_workflow_resolves_by_id_and_alias(tmp_path: Path) -> N
     assert provider is not None and provider.workflow_id == "test.plugin.flow"
     assert workflow_provider("plugin-flow") == provider
     assert resolve_workflow("plugin-flow").workflow_id == "test.plugin.flow"
+
+
+def test_manifest_resource_requirements_reach_provider_and_job(tmp_path: Path) -> None:
+    package = tmp_path / "workflow"
+    package.mkdir()
+    (package / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (package / "run").chmod(0o755)
+    (package / "httk_workflow.toml").write_text(
+        '[workflow]\nid = "test.resources"\n'
+        '[workflow.runner]\nsteps = ["start", "finish"]\n'
+        '[workflow.resources]\nprocs = 2\n'
+        '[workflow.steps.finish.resources]\nmem = 512\n',
+        encoding="utf-8",
+    )
+    provider = parse_workflow_manifest(package)
+    assert provider.resources == {"procs": 2}
+    assert provider.step_resources == {"finish": {"mem": 512}}
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package, tag="resource-job")
+    definition = JobDefinition.from_path(job.payload / "job.json")
+    assert definition.resources == {"procs": 2}
+    assert definition.step_resources == {"finish": {"mem": 512}}
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        ("[workflow.steps.start]\nwat = 1\n", "unknown key"),
+        ("[workflow.steps.other.resources]\nprocs = 1\n", "unknown step"),
+        ("[workflow.resources]\nprocs = true\n", "must be an integer"),
+        ("[workflow.resources]\nprocs = -1\n", "non-negative"),
+    ],
+)
+def test_manifest_resource_requirements_reject_bad_declarations(tmp_path: Path, extra: str, message: str) -> None:
+    package = tmp_path / "workflow"
+    package.mkdir()
+    (package / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (package / "run").chmod(0o755)
+    (package / "httk_workflow.toml").write_text(
+        '[workflow]\nid = "test.resources"\n[workflow.runner]\nsteps = ["start"]\n' + extra,
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=message):
+        parse_workflow_manifest(package)
+
+
+def test_manifest_step_resources_require_an_executable_runner_steps_list(tmp_path: Path) -> None:
+    package = tmp_path / "workflow"
+    package.mkdir()
+    (package / "document.json").write_text("{}", encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(
+        '[workflow]\nid = "test.resources"\n'
+        '[workflow.runner]\nlanguage = "httk-v1"\n'
+        '[workflow.steps.start.resources]\nprocs = 1\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=r"\[workflow\.steps\] requires \[workflow\.runner\]\.steps"):
+        parse_workflow_manifest(package)
 
 
 def test_in_process_registration_wins_over_plugin(tmp_path: Path) -> None:

@@ -33,6 +33,8 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 from .collecting import DEFAULT_COLLECT_STATES, JobRecord, job_records
+from .errors import FormatError
+from .models import validate_resources
 from .projects import read_project_section, write_project_section
 from .registry import LOCAL_REMOTE, WorkspaceBinding, resolve_workspace
 from .scaffold import JobItem, ScaffoldedJob, new_job, new_jobs
@@ -312,6 +314,7 @@ def campaign_managers(
     *,
     partitions: Sequence[str] | None = None,
     workers: int | None = None,
+    resources: Mapping[str, int] | None = None,
     count: int = 1,
     poll_interval: float = 1.0,
     idle_timeout: float = 3600.0,
@@ -327,6 +330,7 @@ def campaign_managers(
 
     :param partitions: Select partitions, or use all partitions.
     :param workers: Limit concurrent workers for local managers.
+    :param resources: Resource capacities advertised by each manager.
     :param count: Number of remote managers to submit per remote partition.
     :param poll_interval: Set the local manager polling interval.
     :param idle_timeout: Set the local manager idle timeout.
@@ -339,6 +343,10 @@ def campaign_managers(
     from .adapters import probe_remote_workspace, resolve_remote, submit_remote_managers
     from .manager import TaskManager
 
+    try:
+        manager_resources = validate_resources({} if resources is None else resources, "manager.resources")
+    except FormatError as exc:
+        raise ValueError(str(exc)) from exc
     config = read_campaign(project)
     report: list[dict[str, object]] = []
     for partition in _selected(config, partitions):
@@ -346,7 +354,11 @@ def campaign_managers(
         binding: WorkspaceBinding = resolve_workspace(name, project=project)
         if binding.remote == LOCAL_REMOTE:
             assert binding.path is not None
-            with TaskManager(Workspace(binding.path), maximum_workers=workers or 1) as manager:
+            with TaskManager(
+                Workspace(binding.path),
+                resources=manager_resources,
+                maximum_workers=workers or 1,
+            ) as manager:
                 manager.run_until_idle(timeout=idle_timeout, poll_interval=poll_interval)
             report.append({"partition": partition, "workspace": name, "mode": "local", "ran": True})
         else:
@@ -356,6 +368,8 @@ def campaign_managers(
             manager_argv: list[str] = []
             if workers is not None:
                 manager_argv += ["--workers", str(workers)]
+            for resource, capacity in manager_resources.items():
+                manager_argv += ["--worker-resource", resource, str(capacity)]
             result = submit_remote_managers(
                 target,
                 remote_name,

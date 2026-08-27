@@ -30,6 +30,7 @@ string from request or settings values.
 """
 
 import json
+import os
 import re
 import shlex
 import shutil
@@ -411,6 +412,19 @@ def _with_workers(argv: Sequence[str], workers: str | None) -> list[str]:
     return [*arguments, "--workers", workers]
 
 
+def _with_resources(argv: Sequence[str], resources: Mapping[str, int]) -> list[str]:
+    """Append resource capacities whose names are absent from *argv*."""
+
+    arguments = list(argv)
+    supplied = {
+        arguments[index + 1] for index, argument in enumerate(arguments[:-1]) if argument == "--worker-resource"
+    }
+    for name, count in resources.items():
+        if name not in supplied:
+            arguments += ["--worker-resource", name, str(count)]
+    return arguments
+
+
 def _workspace(request: Mapping[str, object], settings: Mapping[str, object]) -> str:
     """Return the explicitly requested or configured workspace path."""
 
@@ -647,23 +661,35 @@ def _start_manager(kind: str, request: Mapping[str, object]) -> None:
     argv = _with_workers(_argv(request, "start-manager"), _text(workspace_settings, "manager.workers"))
     if kind == "local":
         count = _count(request)
-        manager_argv = _local_httk(argv, settings)
+        resources = {"procs": os.cpu_count() or 1}
+        try:
+            resources["mem"] = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // 2**20
+        except (ValueError, OSError, AttributeError):
+            pass
+        supplied = {argv[index + 1] for index, argument in enumerate(argv[:-1]) if argument == "--worker-resource"}
         prelude = _text(workspace_settings, "environment.prelude")
-        if prelude:
-            launch_argv = ["bash", "-lc", "set -e\n" + prelude + '\nexec "$@"', "bash", *manager_argv]
-        else:
-            launch_argv = manager_argv
-        pids = [
-            subprocess.Popen(
-                launch_argv,
-                cwd=_cwd(request),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            ).pid
-            for _ in range(count)
-        ]
+        pids: list[int] = []
+        for index in range(count):
+            injected = {
+                name: value // count + (1 if index < value % count else 0)
+                for name, value in resources.items()
+                if name not in supplied
+            }
+            manager_argv = _local_httk(_with_resources(argv, injected), settings)
+            if prelude:
+                launch_argv = ["bash", "-lc", "set -e\n" + prelude + '\nexec "$@"', "bash", *manager_argv]
+            else:
+                launch_argv = manager_argv
+            pids.append(
+                subprocess.Popen(
+                    launch_argv,
+                    cwd=_cwd(request),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                ).pid
+            )
         # ``pid`` names the first one, so a caller that only ever started a
         # single manager reads the same field it always did.
         _result("start-manager", pid=pids[0], pids=pids, count=count)

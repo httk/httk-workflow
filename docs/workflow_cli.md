@@ -22,3 +22,7 @@ operator concepts behind it.
 The full reference, {doc}`details/workflow_cli`, documents every command and
 option — projects and signed manifests, configuration, remotes and transfers,
 and the protocol spellings.
+
+Manager capacities can be advertised with repeatable `--worker-resource NAME
+COUNT` options. `--count N` starts multiple local managers for a local binding
+and submits multiple managers through a remote scheduler for a remote binding.

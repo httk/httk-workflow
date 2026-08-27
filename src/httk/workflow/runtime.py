@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Self
 
 from ._util import read_json
+from .errors import FormatError
+from .models import validate_resources
 
 __all__ = [
     "AttemptContext",
@@ -85,7 +87,7 @@ class AttemptContext:
     #: the member reads as empty, which is what a context written before layered
     #: settings existed meant.
     settings: Mapping[str, object]
-    resources: Mapping[str, object]
+    resources: Mapping[str, int]
     join: object
     raw: Mapping[str, Any]
 
@@ -107,9 +109,10 @@ class AttemptContext:
         generation = value.get("data_generation")
         if generation is not None and (not isinstance(generation, int) or isinstance(generation, bool)):
             raise ValueError("attempt data_generation must be an integer or null")
-        resources_raw = value.get("resources", {})
-        if not isinstance(resources_raw, Mapping):
-            raise ValueError("attempt resources must be an object")
+        try:
+            resources = validate_resources(value.get("resources", {}), "attempt resources")
+        except FormatError as exc:
+            raise ValueError(str(exc)) from exc
         settings_raw = value.get("settings", {})
         if not isinstance(settings_raw, Mapping):
             raise ValueError("attempt settings must be an object")
@@ -152,7 +155,7 @@ class AttemptContext:
             data_generation=generation,
             durable=bool(value.get("durable", False)),
             settings=dict(settings_raw),
-            resources=dict(resources_raw),
+            resources=resources,
             join=value.get("join"),
             raw=value,
         )

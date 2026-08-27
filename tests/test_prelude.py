@@ -145,6 +145,12 @@ def _start_manager_local_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *
         captured.append(list(launch_argv))
         return _FakePopen(launch_argv, **kwargs)
 
+    monkeypatch.setattr(adapter_runtime.os, "cpu_count", lambda: 8)
+    monkeypatch.setattr(
+        adapter_runtime.os,
+        "sysconf",
+        lambda name: {"SC_PHYS_PAGES": 4_194_304, "SC_PAGE_SIZE": 4096}[name],
+    )
     monkeypatch.setattr(adapter_runtime.subprocess, "Popen", fake_popen)
     adapter_runtime._start_manager("local", {"argv": argv, "workspace": str(workspace.root)})
     assert len(captured) == 1
@@ -152,12 +158,44 @@ def _start_manager_local_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *
 
 
 def test_start_manager_local_wraps_argv_when_prelude_is_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    manager_argv = adapter_runtime._local_httk(["httk", "workflow", "manager", "run", "--workspace", "station"], {})
+    manager_argv = adapter_runtime._local_httk(
+        [
+            "httk",
+            "workflow",
+            "manager",
+            "run",
+            "--workspace",
+            "station",
+            "--worker-resource",
+            "procs",
+            "8",
+            "--worker-resource",
+            "mem",
+            "16384",
+        ],
+        {},
+    )
     launched = _start_manager_local_argv(tmp_path, monkeypatch, prelude="module load VASP/6.2.1")
     assert launched == ["bash", "-lc", 'set -e\nmodule load VASP/6.2.1\nexec "$@"', "bash", *manager_argv]
 
 
 def test_start_manager_local_leaves_argv_bare_without_prelude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    manager_argv = adapter_runtime._local_httk(["httk", "workflow", "manager", "run", "--workspace", "station"], {})
+    manager_argv = adapter_runtime._local_httk(
+        [
+            "httk",
+            "workflow",
+            "manager",
+            "run",
+            "--workspace",
+            "station",
+            "--worker-resource",
+            "procs",
+            "8",
+            "--worker-resource",
+            "mem",
+            "16384",
+        ],
+        {},
+    )
     launched = _start_manager_local_argv(tmp_path, monkeypatch, prelude=None)
     assert launched == manager_argv

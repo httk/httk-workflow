@@ -52,6 +52,7 @@ from .models import (
     canonical_uuid,
     normalize_placement,
     validate_attempt_control,
+    validate_resources,
 )
 from .workspace import DISCOVERY_HEARTBEAT_STRIDE, MarkerStream, Workspace
 
@@ -120,7 +121,7 @@ class WorkCensus:
 
     ``ready_blocked`` groups the ready and unregisterable-submitted jobs this
     manager cannot progress by the requirement it lacks — ``executor``, ``pool``,
-    or ``capability`` — mapping each requirement to the count of jobs it would
+    ``capability``, or ``resources`` — mapping each requirement to the count of jobs it would
     turn away. Every such job is attributed to exactly one requirement, so the
     grouped counts sum to :attr:`ready_blocked_total`.
 
@@ -163,9 +164,10 @@ class WorkCensus:
 
     def _blocked_groups(self) -> list[str]:
         groups: list[str] = []
-        for kind in ("executor", "pool", "capability"):
+        for kind in ("executor", "pool", "capability", "resources"):
             for name, count in sorted(self.ready_blocked.get(kind, {}).items()):
-                groups.append(f"{kind}={name}: {count}")
+                label = f"resource={name}" if kind == "resources" else f"{kind}={name}"
+                groups.append(f"{label}: {count}")
         return groups
 
     def summary_line(self) -> str:
@@ -196,8 +198,17 @@ class WorkCensus:
         pools = sorted(self.ready_blocked.get("pool", {}))
         capabilities = sorted(self.ready_blocked.get("capability", {}))
         executors = sorted(self.ready_blocked.get("executor", {}))
-        if not (pools or capabilities or executors):
+        resources = sorted(self.ready_blocked.get("resources", {}))
+        if not (pools or capabilities or executors or resources):
             return None
+        if resources and not (pools or capabilities or executors):
+            count = sum(self.ready_blocked["resources"].values())
+            names = ", ".join(f"`{name}`" for name in resources)
+            resource_flags = " ".join(f"--worker-resource {name} COUNT" for name in resources)
+            return (
+                f"{count} ready job(s) need resource {names} beyond this manager's capacity; "
+                f"start a manager with {resource_flags}, or pass --idle to keep serving"
+            )
         lacks: list[str] = []
         remedies: list[str] = []
         flags: list[str] = []
@@ -207,6 +218,9 @@ class WorkCensus:
         if capabilities:
             lacks.append("capability(ies) " + ",".join(capabilities))
             flags += [f"--capability {name}" for name in capabilities]
+        if resources:
+            lacks.append("resource(s) " + ",".join(resources))
+            flags += [f"--worker-resource {name} COUNT" for name in resources]
         if flags:
             remedies.append("start a manager with " + " ".join(flags))
         # An executor is installed, not passed as a flag, so it gets its own
@@ -271,6 +285,7 @@ class RunningAttempt:
     :param stdout: Hold the captured standard-output stream.
     :param stderr: Hold the captured standard-error stream.
     :param attempt_id: Identify the running attempt.
+    :param resources: Reserve these resources while the attempt is running.
     :param fenced: Mark an attempt whose marker ownership is already resolved.
     :param cancelling: Mark an attempt currently being cancelled.
     :param owner_uid: Record the operating-system owner when known.
@@ -281,6 +296,7 @@ class RunningAttempt:
     stdout: BinaryIO
     stderr: BinaryIO
     attempt_id: str
+    resources: Mapping[str, int]
     # Set once this attempt's outcome has been committed or its marker has been
     # fenced: the process may still be exiting, and reaping it is then routine
     # rather than the discovery of an orphan.
@@ -307,6 +323,7 @@ class TaskManager:
     :param workspace: Attach the manager to this workspace.
     :param pools: Accept jobs assigned to these pools.
     :param capabilities: Advertise these execution capabilities.
+    :param resources: Advertise these integer resource capacities.
     :param maximum_workers: Limit the number of local attempts.
     :param lease_seconds: Override the workspace claim lease.
     :param heartbeat_interval: Set the requested manager heartbeat interval.
@@ -334,6 +351,7 @@ class TaskManager:
         *,
         pools: Sequence[str] = ("default",),
         capabilities: Sequence[str] = (),
+        resources: Mapping[str, int] | None = None,
         maximum_workers: int = 1,
         lease_seconds: float | None = None,
         heartbeat_interval: float = 30.0,
@@ -354,6 +372,10 @@ class TaskManager:
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
+        try:
+            validated_resources = validate_resources({} if resources is None else resources, "manager.resources")
+        except FormatError as exc:
+            raise ValueError(str(exc)) from exc
         if discovery_budget < 1:
             raise ValueError("discovery_budget must be positive")
         if gc_interval is not None and gc_interval <= 0.0:
@@ -381,6 +403,7 @@ class TaskManager:
         self.runner_modules: tuple[str, ...] = tuple(runner_modules)
         self.pools = frozenset(pools)
         self.capabilities = frozenset(capabilities)
+        self.resources = validated_resources
         self.maximum_workers = maximum_workers
         # A lease is workspace policy unless this manager overrides it, so two
         # managers of one workspace expire each other's claims consistently.
@@ -1152,7 +1175,19 @@ class TaskManager:
         return _manager_scheduling.register_submissions(self)
 
     def _eligible_ready(self) -> list[Marker]:
+        """Return eligible markers for compatibility with private callers."""
+
+        return [marker for marker, _ in self._eligible_ready_with_requirements()]
+
+    def _eligible_ready_with_requirements(self) -> list[tuple[Marker, dict[str, int]]]:
+        """Return eligible markers paired with their effective requirements."""
+
         return _manager_scheduling.eligible_ready(self)
+
+    def _available_resources(self) -> dict[str, int]:
+        """Return manager capacity after reservations of local attempts."""
+
+        return _manager_scheduling.available_resources(self.resources, self._running.values())
 
     def _claim_and_launch(self, marker: Marker) -> bool:
         """Claim one ready job and launch its attempt, reporting local faults."""
@@ -1291,7 +1326,12 @@ class TaskManager:
             self, job, control, tree_digest=tree_digest, sha256_file=sha256_file, log=_LOGGER
         )
 
-    def _launch_claimed(self, marker: Marker, job: JobDefinition, previous_state: StateFrame) -> None:
+    def _launch_claimed(
+        self,
+        marker: Marker,
+        job: JobDefinition,
+        previous_state: StateFrame,
+    ) -> None:
         claimed_state = self._read_frame(marker)
         try:
             launch_job = self.workspace.load_job(marker)
@@ -1327,6 +1367,11 @@ class TaskManager:
         workdir.mkdir(parents=True, exist_ok=True)
         settings = self.workspace.read_settings()
         workflow_prelude = self.workspace.read_workflow_preludes().get(job.workflow, "")
+        # The ready-to-claimed rename preserves the activation frame. The
+        # claimed frame is authoritative for the reservation.
+        requirement = _manager_scheduling.effective_requirement(
+            job, claimed_state, self.resources, self.maximum_workers
+        )
         context = {
             "format": "httk-workflow-attempt-context",
             "format_version": 2,
@@ -1358,7 +1403,7 @@ class TaskManager:
             # re-exporting it for every job. This is the workspace layer of the
             # parameters → environment → workspace → default resolution.
             "settings": settings,
-            "resources": dict(job.resources),
+            "resources": dict(requirement),
             "join": claimed_state.join_summary,
             # The enriched, labeled observations of this activation's join, or an
             # empty array when the activation follows no join. ``join`` keeps the
@@ -1505,7 +1550,15 @@ class TaskManager:
         os.close(gate_write)
         assert process is not None
         assert running is not None
-        self._running[attempt_id] = RunningAttempt(running, process, stdout, stderr, attempt_id, owner_uid=self.uid)
+        self._running[attempt_id] = RunningAttempt(
+            running,
+            process,
+            stdout,
+            stderr,
+            attempt_id,
+            dict(requirement),
+            owner_uid=self.uid,
+        )
         launch_fields: dict[str, object] = {"attempt_id": attempt_id, "pid": process.pid, "step": context["step"]}
         if job.runner_source == "payload":
             # A payload-source runner lives in the mutable payload, so record the
@@ -1901,10 +1954,20 @@ class TaskManager:
         *,
         reason: str = "advance",
         join_summary: Sequence[object] | None = None,
+        resources: Mapping[str, int] | None = None,
         priority: int | None = None,
     ) -> None:
         _manager_commit.advance(
-            self, marker, job, state, next_step, progress, reason=reason, join_summary=join_summary, priority=priority
+            self,
+            marker,
+            job,
+            state,
+            next_step,
+            progress,
+            reason=reason,
+            join_summary=join_summary,
+            resources=resources,
+            priority=priority,
         )
 
     def _retry(
