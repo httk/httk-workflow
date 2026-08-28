@@ -69,9 +69,9 @@ def test_job_state_and_attempt_control_do_not_change_the_payload_digest(tmp_path
     state["energy"] = -12.5
     state.merge({"converged": True, "history": [1, 2, 3]})
     assert (payload / ".httk-job" / "state.json").is_file()
-    (payload / "attempts/0f0f0f0f").mkdir(parents=True)
-    (payload / "attempts/0f0f0f0f" / "stdout.log").write_text("noise\n", encoding="utf-8")
+    (payload / "attempts/0f0f0f0f").mkdir(parents=True, exist_ok=True)
     (payload / "logs").mkdir()
+    (payload / "logs" / "stdio.out").write_text("noise\n", encoding="utf-8")
     (payload / "logs" / "future.log").write_text("reserved\n", encoding="utf-8")
     # Neither the state a runner keeps nor the control directory of an attempt is
     # part of the immutable job, so neither can move the payload digest.

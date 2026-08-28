@@ -290,6 +290,7 @@ def _attempt(
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"fabricated--{uuid.uuid4()}",
                 "placement": "project/fabricated",
+                "payload": str(payload),
                 "step": step,
                 "activation_id": str(uuid.uuid4()),
                 "attempt_id": str(uuid.uuid4()),
@@ -400,7 +401,7 @@ def test_runner_gates_all_declared_environment_and_records_sources(
             "variable": {"value": "env", "source": "environment-variable"},
         },
     }
-    log = (attempt.workdir / ".httk-runner" / "runlog.jsonl").read_text(encoding="utf-8")
+    log = (attempt.payload / "logs" / "runlog.jsonl").read_text(encoding="utf-8")
     assert log.count("parameters are in job.json; environment resolved as") == 1
 
 
@@ -475,7 +476,7 @@ def test_environment_resolution_snapshot_and_unchanged_activation_are_stable(
     second.declare("environment", document)
     assert _main(run, second) == 0
     assert second.declaration("environment") == first.declaration("environment")
-    assert not (second.workdir / ".httk-runner" / "runlog.jsonl").exists()
+    assert not (second.payload / "logs" / "runlog.jsonl").exists()
 
 
 def test_environment_resolution_distinguishes_json_number_and_boolean(
@@ -513,7 +514,7 @@ def test_environment_resolution_distinguishes_json_number_and_boolean(
     value = values["value"]
     assert isinstance(value, Mapping)
     assert value["value"] is True
-    assert (second.workdir / ".httk-runner" / "runlog.jsonl").is_file()
+    assert (second.payload / "logs" / "runlog.jsonl").is_file()
 
 
 def test_manager_waits_for_deferred_environment_log_before_commit(tmp_path: Path) -> None:
@@ -559,7 +560,7 @@ raise SystemExit(run.main())
     marker = workspace.find_marker_by_id(job.id)
     assert marker is not None and marker.kind == "succeeded"
     workdir = workspace.payload_path(marker.placement, marker.job_key) / "run"
-    runlog = (workdir / ".httk-runner" / "runlog.jsonl").read_text(encoding="utf-8")
+    runlog = (workdir.parent / "logs" / "runlog.jsonl").read_text(encoding="utf-8")
     assert "parameters are in job.json; environment resolved as" in runlog
 
 
@@ -633,7 +634,7 @@ raise SystemExit(run.main())
 
     workdir = workspace.payload_path(final.placement, final.job_key) / "run"
     assert "parameters are in job.json; environment resolved as" in (
-        workdir / ".httk-runner" / "runlog.jsonl"
+        workdir.parent / "logs" / "runlog.jsonl"
     ).read_text(encoding="utf-8")
 
 
@@ -679,7 +680,7 @@ raise SystemExit(run.main())
     assert marker is not None and marker.kind == "succeeded"
     workdir = workspace.payload_path(marker.placement, marker.job_key) / "run"
     assert "parameters are in job.json; environment resolved as" in (
-        workdir / ".httk-runner" / "runlog.jsonl"
+        workdir.parent / "logs" / "runlog.jsonl"
     ).read_text(encoding="utf-8")
 
 

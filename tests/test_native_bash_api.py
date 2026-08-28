@@ -43,6 +43,7 @@ def _draft(tmp_path: Path, *, data_generation: int | None = None) -> OutcomeDraf
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"job--{uuid.uuid4()}",
                 "placement": "project/a",
+                "payload": str(tmp_path / "payload"),
                 "step": "prepare",
                 "activation_id": str(uuid.uuid4()),
                 "attempt_id": str(uuid.uuid4()),

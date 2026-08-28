@@ -33,6 +33,7 @@ def _context(path: Path) -> None:
                 "job_id": "job",
                 "job_key": "job-key",
                 "placement": "jobs",
+                "payload": str(path.parent.parent / "job"),
                 "step": "relax",
                 "activation_id": "activation",
                 "attempt_id": "attempt",

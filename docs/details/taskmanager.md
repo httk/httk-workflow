@@ -737,7 +737,7 @@ httk workflow job debug --workspace WORKSPACE --follow-children JOB
 ```
 
 `job debug` drives exactly one job to a terminal state in the foreground and
-streams the attempt's `stdout.log` and `stderr.log` to the console as they grow.
+streams the job's `logs/stdio.out` chronicle to the console as it grows.
 Every transition is performed by a private task manager whose scans are
 restricted to that one job, so the debugged job runs through exactly the code
 paths a production manager uses and no unrelated work is claimed. Lines are

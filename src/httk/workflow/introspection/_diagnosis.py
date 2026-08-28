@@ -881,6 +881,25 @@ def _commit_wedge(control: Path | None) -> str | None:
     return error if isinstance(error, str) and error else None
 
 
+def _retained_log_path(workspace: Workspace, marker: Marker, state: Mapping[str, object]) -> Path:
+    """Return the retained stdio path named by a failure frame, if valid."""
+
+    payload = workspace.payload_path(marker.placement, marker.job_key)
+    failure = state.get("failure")
+    if isinstance(failure, Mapping):
+        details = failure.get("details")
+        if isinstance(details, Mapping):
+            paths = details.get("log_paths")
+            if isinstance(paths, Sequence) and not isinstance(paths, (str, bytes)):
+                for value in paths:
+                    if not isinstance(value, str):
+                        continue
+                    relative = Path(value)
+                    if not relative.is_absolute() and ".." not in relative.parts:
+                        return payload / relative
+    return payload / "logs" / "stdio.out"
+
+
 def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
     """Explain why one job is, or is not, making progress."""
 
@@ -987,7 +1006,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
             report.check(
                 "attempt logs",
                 None,
-                f"the live attempt writes {control / 'stdout.log'}",
+                f"the job writes {_retained_log_path(workspace, marker, state)}",
             )
         _attempt_history_check(workspace, marker, state, report)
         _flapping_check(job, state, report)
@@ -1088,7 +1107,11 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                     report.check("dependency child", False, _describe_child(item, with_failure=True))
         _breadcrumb_check(control, report)
         if control is not None:
-            report.check("attempt logs", None, f"the failed attempt wrote {control / 'stderr.log'}")
+            report.check(
+                "attempt logs",
+                None,
+                f"the job writes {_retained_log_path(workspace, marker, state)}",
+            )
         _continue_checks(job, state, report)
         _attempt_history_check(workspace, marker, state, report)
         _flapping_check(job, state, report)
@@ -1134,7 +1157,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
             report.check(
                 "attempt logs",
                 None,
-                f"the fenced attempt wrote {control / 'stdout.log'}",
+                f"the job writes {_retained_log_path(workspace, marker, state)}",
             )
         if job is not None:
             _manager_checks(

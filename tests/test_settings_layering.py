@@ -127,6 +127,7 @@ def _attempt_environment(
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"fabricated--{uuid.uuid4()}",
                 "placement": "project/fabricated",
+                "payload": str(payload),
                 "step": "only",
                 "activation_id": str(uuid.uuid4()),
                 "attempt_id": str(uuid.uuid4()),

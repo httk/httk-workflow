@@ -181,7 +181,7 @@ int httk_workflow_state_merge(const char *const *assignments);
 
 /* Record the workflow declaration this job observed, from a JSON document file. */
 int httk_workflow_declare(const char *name, const char *document_file);
-/* Append one ordinary evidence event to this workdir's run log. */
+/* Append one ordinary evidence event to this job's logs/runlog.jsonl. */
 int httk_workflow_runlog_note(const char *message);
 /* Append one event meant to be read first when the job is inspected. */
 int httk_workflow_runlog_headline(const char *message);

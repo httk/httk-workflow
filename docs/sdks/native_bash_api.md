@@ -442,8 +442,9 @@ belong on stderr.
 
 `httk_workflow_runlog_note`, `httk_workflow_runlog_headline`, and
 `httk_workflow_runlog_append MESSAGE FILE...` retain structured evidence in the
-workdir's run log; `httk_workflow_log LEVEL MESSAGE...` writes a timestamped line
-to stderr, which the manager retains too. `httk_calc`, `httk_template_render`,
+job's `logs/runlog.jsonl`; `httk_workflow_log LEVEL MESSAGE...` writes a
+timestamped line to stderr, which the manager retains too. `httk_calc`,
+`httk_template_render`,
 `httk_compress`, and `httk_decompress` are safe replacements for commonly used
 *httk* v1 conveniences: templates use `string.Template` and an explicit JSON
 values object, never `eval`.

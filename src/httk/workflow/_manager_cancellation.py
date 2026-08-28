@@ -91,7 +91,10 @@ def finish(manager: Any, marker: Any, state: Any, members: tuple[str, ...], *, u
         return False
     local = manager._running.pop(attempt_id, None)
     if local is not None:
-        local.close_logs()
+        return_code = local.process.poll()
+        if return_code is None:
+            return_code = -signal.SIGKILL
+        manager._write_attempt_end(local, return_code)
     manager._cancel_kill_at.pop(attempt_id, None)
     manager._cancel_unverified.discard(attempt_id)
     manager._transition(

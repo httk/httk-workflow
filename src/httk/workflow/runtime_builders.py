@@ -1017,13 +1017,13 @@ def _check_state_item(name: str, value: object) -> None:
 
 
 class RunLog:
-    """Append structured application evidence in a workdir.
+    """Append structured application evidence in a job payload.
 
-    :param workdir: Locate the workdir receiving the run log.
+    :param payload: Locate the payload receiving the run log.
     """
 
-    def __init__(self, workdir: str | os.PathLike[str]) -> None:
-        self.path = Path(workdir).resolve() / ".httk-runner" / "runlog.jsonl"
+    def __init__(self, payload: str | os.PathLike[str]) -> None:
+        self.path = Path(payload).resolve() / "logs" / "runlog.jsonl"
 
     def append(self, kind: str, message: str, *, files: Sequence[str | os.PathLike[str]] = ()) -> None:
         """Append one structured run-log event.
@@ -1055,8 +1055,19 @@ class RunLog:
             "message": message,
             "files": attachments,
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        self.append_record(self.path, record)
+
+    @staticmethod
+    def append_record(path: str | os.PathLike[str], record: Mapping[str, object]) -> None:
+        """Append one already-formed run-log record with one operating-system write.
+
+        :param path: Locate the append-only run log.
+        :param record: Provide the complete JSON record to append.
+        """
+
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
             os.write(descriptor, json_bytes(record) + b"\n")
         finally:

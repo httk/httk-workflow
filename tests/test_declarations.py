@@ -193,6 +193,7 @@ def _fabricate(tmp_path: Path, *, step: str, declarations: dict[str, Any] | None
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"fabricated--{uuid.uuid4()}",
                 "placement": "project/fabricated",
+                "payload": str(payload),
                 "step": step,
                 "activation_id": str(uuid.uuid4()),
                 "attempt_id": str(uuid.uuid4()),

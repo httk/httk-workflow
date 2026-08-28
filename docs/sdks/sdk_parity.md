@@ -99,7 +99,7 @@ language, and compares everything both left behind.
 | `Runner.has_instantiate` | — | Whether a creation-time instantiate hook is registered. | none |
 | `Runner.step` | **step_&lt;name&gt;** function | Register one handler for one step; the name is the function's unless overridden. | none |
 | `Runner.instantiate` | — | Register the in-process Python creation-time hook receiving `scaffold.InstantiateContext`; directory packages may use the language-neutral executable hook contract instead. | none for the Python form; JSON stdin/stdout for the executable form |
-| `Runner.steps` | — | Every registered step name, against which every step name an outcome publishes is checked. | `.httk-job/runner-steps.json`, rewritten when the set changes |
+| `Runner.steps` | — | Every registered step name, carried in every outcome so the manager can validate and retain it. | outcome `runner_steps` |
 | `Runner.description` | `httk_workflow_main --describe` | Print this runner's own description and touch nothing else. | one `httk-workflow-runner-description` version 2 object on stdout |
 | `Runner.main` | `httk_workflow_main` | Dispatch the step the manager asked for, and turn every ending of it into exactly one outcome. | the published `outcome.ready/` of one attempt |
 | `Runner.main` | `httk_workflow_main` | A handler that returns without publishing an outcome is reported as such rather than left ambiguous. | `fail` outcome with `failure.code` `no_outcome` |
@@ -109,7 +109,7 @@ language, and compares everything both left behind.
 | `Attempt.context` | `httk_workflow_context` | The manager-written identity and restart evidence of this attempt; one field, or the whole object. | `attempt/context.json` (`httk-workflow-attempt-context` version 2) |
 | `Attempt.step` | `httk_workflow_context step` | The step this attempt runs. Bash also exports it for the handler. | `context.json` → `step`; **$HTTK_WORKFLOW_STEP** |
 | `Attempt.control` | — | The attempt control directory, where the outcome is published. | **$HTTK_WORKFLOW_CONTROL_DIR** |
-| `Attempt.payload` | — | The immutable job payload directory. | **$HTTK_WORKFLOW_JOB_DIR** |
+| `Attempt.payload` | — | The immutable job payload directory. | `context.json` → absolute `payload`; **$HTTK_WORKFLOW_JOB_DIR** |
 | `Attempt.workdir` | — | The directory the step does its work in. | **$HTTK_WORKFLOW_WORKDIR** |
 | `Attempt.workspace` | — | The workspace root this job belongs to. | **$HTTK_WORKFLOW_WORKSPACE_DIR** |
 | `Attempt.data` | — | The job's published transactional data, or `None` when the job has `data.mode` `none`. | **$HTTK_WORKFLOW_DATA_DIR** |
@@ -119,13 +119,13 @@ language, and compares everything both left behind.
 | `Attempt.parameter` | `httk_workflow_parameter` | One parameter, with an optional default; without one, a missing parameter raises `KeyError` in Python and exits 1 in Bash. | `job.json` → `parameters` |
 | `Attempt.setting` | `httk_workflow_setting` | One application setting, resolved most-specific first: the job's `parameters[name]`, then the environment variable `HTTK_` + the dotted name upper-cased with dots as underscores (`vasp.command` → `HTTK_VASP_COMMAND`), then the workspace settings, then the default; without one, an absent setting returns `None` in Python and exits 1 in Bash. | `job.json` → `parameters`, manager-built attempt environment, `context.json` → `settings` |
 | `Attempt.environment` | `httk_workflow_environment` | One declared workflow environment value. The start gate resolves every entry before a handler runs and snapshots the result for the attempt; direct reads retain the override → environment variable → workspace setting → manifest default → call-default order. An undeclared or unresolved value raises `KeyError` in Python and exits 1 in Bash. | `job.json` → `environment`, manager-built attempt environment, `context.json` → `settings` |
-| `Runner.main` | `httk_workflow_main` | Before dispatch, a declared environment is resolved eagerly. Missing or ill-typed values publish non-retryable `environment_unresolved`; successful changes are recorded with their source and logged once after the handler completes. Describe mode and jobs without declarations are unchanged. | `fail` outcome, `.httk-job/declarations/environment.json`, `.httk-runner/runlog.jsonl` |
+| `Runner.main` | `httk_workflow_main` | Before dispatch, a declared environment is resolved eagerly. Missing or ill-typed values publish non-retryable `environment_unresolved`; successful changes are recorded with their source and logged once after the handler completes. Describe mode and jobs without declarations are unchanged. | `fail` outcome, `.httk-job/declarations/environment.json`, `logs/runlog.jsonl` |
 | `Attempt.state` | — | The job's private JSON state mapping, surviving every advance, every retry, and every isolated workdir. | `.httk-job/state.json` |
 | `JobState.read` | `httk_workflow_state_get` | Read the whole state document, or in Bash one key; an unset key exits 1. | `.httk-job/state.json` |
 | `JobState.set` | `httk_workflow_state_set` | Store one JSON value in one atomic replace. | `.httk-job/state.json` |
 | `JobState.delete` | `httk_workflow_state_delete` | Remove one key, reporting whether it was present. | `.httk-job/state.json` |
 | `JobState.merge` | `httk_workflow_state_merge` | Write several keys in one atomic replace. | `.httk-job/state.json` |
-| `Attempt.log` | — | The append-only structured run log of this workdir. | `.httk-runner/runlog.jsonl` |
+| `Attempt.log` | — | The append-only structured run log of this job payload. | `logs/runlog.jsonl` |
 | `protocol.RunLog.append` | `httk_workflow_runlog_note` | Append one ordinary evidence event. | one `httk-workflow-runlog-event` line, kind `note` |
 | `protocol.RunLog.append` | `httk_workflow_runlog_headline` | Append one event meant to be read first when the job is inspected. | one `httk-workflow-runlog-event` line, kind `headline` |
 | `protocol.RunLog.append` | `httk_workflow_runlog_append` | Append one event with whole files attached by content and digest. | one `httk-workflow-runlog-event` line, kind `files` |

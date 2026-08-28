@@ -25,7 +25,9 @@ _LOGGER = logging.getLogger("httk.workflow.manager")
 
 
 def failure(code: str, message: str, *, exit_status: int | None = None) -> dict[str, object]:
-    details = None if exit_status is None else {"exit_status": exit_status}
+    details: dict[str, object] = {"log_paths": ["logs/stdio.out"]}
+    if exit_status is not None:
+        details["exit_status"] = exit_status
     return Failure(code, message, details=details).as_mapping()
 
 
@@ -243,7 +245,11 @@ def process_committing(manager: Any, marker: Marker) -> None:
         try:
             failure_value = validate_failure(outcome.get("failure"))
         except FormatError as exc:
-            failure_value = Failure("protocol_error", f"runner published a malformed failure object: {exc}")
+            failure_value = Failure(
+                "protocol_error",
+                f"runner published a malformed failure object: {exc}",
+                details={"log_paths": ["logs/stdio.out"]},
+            )
             reason = "protocol_error"
         else:
             reason = "declared_failure"

@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import FrameType
-from typing import Any, BinaryIO, Self
+from typing import Any, Self
 
 from httk.core.digests import sha256_file, tree_digest
 
@@ -45,6 +45,7 @@ from .models import (
     ATTEMPTS_DIRECTORY,
     CARRIED_STATE_MEMBERS,
     CORE_PROFILE,
+    LOGS_DIRECTORY,
     TERMINAL_KINDS,
     JobDefinition,
     Marker,
@@ -54,6 +55,7 @@ from .models import (
     validate_attempt_control,
     validate_resources,
 )
+from .runtime_builders import RunLog
 from .workspace import DISCOVERY_HEARTBEAT_STRIDE, MarkerStream, Workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -127,6 +129,61 @@ def _attempt_container(payload: Path) -> Path:
     """Return a payload's real attempt container, allowing its first creation."""
 
     return _real_directory(payload / ATTEMPTS_DIRECTORY, missing_ok=True)
+
+
+def _logs_container(payload: Path) -> Path:
+    """Return a payload's real log container, allowing its first creation."""
+
+    return _real_directory(payload / LOGS_DIRECTORY, missing_ok=True)
+
+
+def _write_marker(descriptor: int, line: str, job_key: str) -> None:
+    """Write one evidence marker, retaining launch progress on ordinary errors."""
+
+    try:
+        os.write(descriptor, ("\n" + line).encode("utf-8", errors="backslashreplace"))
+    except Exception as exc:
+        _LOGGER.warning("cannot append an evidence marker for %s: %s", job_key, exc)
+
+
+def _append_log_line(payload: Path, line: str, *, job_key: str | None = None) -> None:
+    """Append one complete evidence line to the job's stdio chronicle."""
+
+    name = job_key or payload.name
+    descriptor = -1
+    try:
+        logs = _logs_container(payload)
+        logs.mkdir(parents=True, exist_ok=True)
+        descriptor = os.open(logs / "stdio.out", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        _write_marker(descriptor, line, name)
+    except Exception as exc:
+        _LOGGER.warning("cannot append the stdio chronicle for %s: %s", name, exc)
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except Exception as exc:
+                _LOGGER.warning("cannot close the stdio chronicle for %s: %s", name, exc)
+
+
+def _attempt_outcome_action(control: Path) -> str:
+    """Return an attempt's published action, or ``none`` while it is absent."""
+
+    try:
+        outcome = read_json(control / "outcome.ready" / "outcome.json")
+    except (FormatError, OSError):
+        return "none"
+    action = outcome.get("action")
+    return action if isinstance(action, str) else "none"
+
+
+def _append_attempt_event(path: Path, record: Mapping[str, object], job_key: str) -> None:
+    """Append the manager's attempt evidence without affecting launch progress."""
+
+    try:
+        RunLog.append_record(path, record)
+    except Exception as exc:
+        _LOGGER.warning("cannot append the attempt runlog event for %s: %s", job_key, exc)
 
 
 def _setting_variable_name(key: str) -> str:
@@ -302,8 +359,6 @@ class RunningAttempt:
 
     :param marker: Identify the claimed job marker.
     :param process: Track the launched process group.
-    :param stdout: Hold the captured standard-output stream.
-    :param stderr: Hold the captured standard-error stream.
     :param attempt_id: Identify the running attempt.
     :param resources: Reserve these resources while the attempt is running.
     :param fenced: Mark an attempt whose marker ownership is already resolved.
@@ -313,8 +368,7 @@ class RunningAttempt:
 
     marker: Marker
     process: subprocess.Popen[bytes]
-    stdout: BinaryIO
-    stderr: BinaryIO
+    control: Path
     attempt_id: str
     resources: Mapping[str, int]
     # Set once this attempt's outcome has been committed or its marker has been
@@ -329,12 +383,6 @@ class RunningAttempt:
 
     def __repr__(self) -> str:
         return f"RunningAttempt(attempt_id={self.attempt_id!r}, pid={self.process.pid})"
-
-    def close_logs(self) -> None:
-        """Close the captured output streams for this attempt."""
-
-        self.stdout.close()
-        self.stderr.close()
 
 
 class TaskManager:
@@ -578,12 +626,24 @@ class TaskManager:
         self.close()
 
     def close(self) -> None:
-        """Close local attempt logs and the manager's journal writer."""
+        """Close local attempt tracking and the manager's journal writer."""
 
-        for attempt in self._running.values():
-            attempt.close_logs()
         self._running.clear()
         self.writer.close()
+
+    def _write_attempt_end(self, attempt: RunningAttempt, return_code: int) -> None:
+        """Append the end marker for a locally reaped attempt."""
+
+        try:
+            payload = self.workspace.payload_path(attempt.marker.placement, attempt.marker.job_key)
+            _append_log_line(
+                payload,
+                f"=== httk attempt {attempt.attempt_id} ended {utc_now()} exit {return_code} "
+                f"outcome {_attempt_outcome_action(attempt.control)}\n",
+                job_key=attempt.marker.job_key,
+            )
+        except Exception as exc:
+            _LOGGER.warning("cannot append the end marker for %s: %s", attempt.marker.job_key, exc)
 
     @property
     def manager_directory(self) -> Path:
@@ -1401,6 +1461,7 @@ class TaskManager:
             "job_id": job.id,
             "job_key": job.job_key,
             "placement": marker.placement.as_posix(),
+            "payload": str(payload.resolve()),
             "step": claimed_state.step,
             "activation_id": claimed_state.activation_id,
             "activation_ordinal": claimed_state.activation_ordinal,
@@ -1482,29 +1543,61 @@ class TaskManager:
                 )
                 continue
             environment.setdefault(variable, str(value))
-        stdout = (control / "stdout.log").open("ab")
-        stderr = (control / "stderr.log").open("ab")
-        runner_command = list(
-            executor.command(
-                AttemptLaunch(
-                    job=job,
-                    marker=marker,
-                    payload=payload,
-                    workdir=workdir,
-                    control=control,
-                    context_path=context_path,
-                    context=context,
-                    runner=runner,
-                    workflow_prelude=workflow_prelude,
-                )
-            )
-        )
-        if not runner_command:
-            raise FormatError(f"runner executor {job.runner_executor!r} returned an empty command")
-        gate_read, gate_write = os.pipe()
+        stdio_fd = -1
+        gate_read = -1
+        gate_write = -1
         process: subprocess.Popen[bytes] | None = None
         running: Marker | None = None
         try:
+            logs = _logs_container(payload)
+            logs.mkdir(parents=True, exist_ok=True)
+            stdio_fd = os.open(logs / "stdio.out", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            start_marker = (
+                f"=== httk attempt {attempt_id} step {context['step']} ordinal {context['attempt_ordinal']} "
+                f"started {utc_now()}\n"
+            )
+            _write_marker(stdio_fd, start_marker, marker.job_key)
+            runner_command = list(
+                executor.command(
+                    AttemptLaunch(
+                        job=job,
+                        marker=marker,
+                        payload=payload,
+                        workdir=workdir,
+                        control=control,
+                        context_path=context_path,
+                        context=context,
+                        runner=runner,
+                        workflow_prelude=workflow_prelude,
+                    )
+                )
+            )
+            if not runner_command:
+                raise FormatError(f"runner executor {job.runner_executor!r} returned an empty command")
+            gate_read, gate_write = os.pipe()
+            try:
+                runner_sha256 = job.runner_sha256 or sha256_file(runner)
+            except Exception as exc:
+                runner_sha256 = None
+                _LOGGER.warning("cannot hash the runner for %s: %s", marker.job_key, exc)
+            _append_attempt_event(
+                logs / "runlog.jsonl",
+                {
+                    "format": "httk-workflow-runlog-event",
+                    "format_version": 2,
+                    "timestamp": utc_now(),
+                    "kind": "attempt",
+                    "message": f"attempt {attempt_id} step {context['step']} launched",
+                    "attempt_id": attempt_id,
+                    "activation_id": claimed_state.activation_id,
+                    "step": context["step"],
+                    "runner_source": job.runner_source,
+                    "runner_path": str(runner if job.runner_source == "payload" else control / "runner"),
+                    "runner_sha256": runner_sha256,
+                    "files": [],
+                },
+                marker.job_key,
+            )
             process = subprocess.Popen(
                 [
                     sys.executable,
@@ -1515,11 +1608,13 @@ class TaskManager:
                 ],
                 cwd=workdir,
                 env=environment,
-                stdout=stdout,
-                stderr=stderr,
+                stdout=stdio_fd,
+                stderr=stdio_fd,
                 start_new_session=True,
                 pass_fds=(gate_read,),
             )
+            os.close(stdio_fd)
+            stdio_fd = -1
             os.close(gate_read)
             gate_read = -1
             write_json_atomic(
@@ -1552,13 +1647,20 @@ class TaskManager:
         except Exception as exc:
             if gate_read >= 0:
                 os.close(gate_read)
-            os.close(gate_write)
-            stdout.close()
-            stderr.close()
+                gate_read = -1
+            if gate_write >= 0:
+                os.close(gate_write)
+                gate_write = -1
             if process is not None:
                 # The gate is closed, so the launcher observes end-of-file and
                 # exits, but an unreaped launcher must never be left behind.
                 self._reap_launcher(process)
+            reason = str(exc).replace("\n", "\\n")
+            _append_log_line(
+                payload,
+                f"=== httk attempt {attempt_id} ended {utc_now()} launch-failed {reason}\n",
+                job_key=marker.job_key,
+            )
             if isinstance(exc, TransitionLostError):
                 raise
             _LOGGER.error(
@@ -1567,16 +1669,22 @@ class TaskManager:
                 exc,
                 extra=self._event("launch_error", marker, attempt_id=attempt_id),
             )
-            self._handle_attempt_failure(running or marker, job, "process_failure", f"cannot launch runner: {exc}")
+            failure_code = "protocol_error" if isinstance(exc, FormatError) else "process_failure"
+            self._handle_attempt_failure(running or marker, job, failure_code, f"cannot launch runner: {exc}")
             return
-        os.close(gate_write)
+        finally:
+            if stdio_fd >= 0:
+                os.close(stdio_fd)
+            if gate_read >= 0:
+                os.close(gate_read)
+            if gate_write >= 0:
+                os.close(gate_write)
         assert process is not None
         assert running is not None
         self._running[attempt_id] = RunningAttempt(
             running,
             process,
-            stdout,
-            stderr,
+            control,
             attempt_id,
             dict(requirement),
             owner_uid=self.uid,
@@ -1669,7 +1777,7 @@ class TaskManager:
             return_code = local.process.poll()
             if return_code is None:
                 return False
-            local.close_logs()
+            self._write_attempt_end(local, return_code)
             del self._running[attempt_id]
             _LOGGER.info(
                 "attempt %s of %s exited with status %d",
@@ -1823,7 +1931,10 @@ class TaskManager:
                 )
                 if not exited:
                     self._terminate_process(local.process.pid)
-            local.close_logs()
+            return_code = local.process.poll()
+            if return_code is None:
+                return_code = -signal.SIGKILL if local.cancelling else -1
+            self._write_attempt_end(local, return_code)
             del self._running[attempt_id]
 
     def _commit_published_outcome(

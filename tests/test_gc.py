@@ -110,7 +110,9 @@ def _attempt_directory(payload: Path, *, days: float) -> Path:
 
     control = payload / f"attempts/{uuid.uuid4()}"
     (control / "outcome.ready").mkdir(parents=True)
-    (control / "stdout.log").write_text("older attempt\n", encoding="utf-8")
+    logs = payload / "logs"
+    logs.mkdir(exist_ok=True)
+    (logs / "stdio.out").write_text("older attempt\n", encoding="utf-8")
     _age(control, days)
     return control
 

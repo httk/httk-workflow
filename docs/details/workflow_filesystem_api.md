@@ -732,16 +732,18 @@ that name it — before the rename that makes it authoritative:
 | Outcome bundle (`outcome.json`, `runner_steps`, failure detail, its sealed transaction manifest and staged payload, its child `job.json` bundles) | the `outcome.tmp.<nonce>` → `outcome.ready` rename; the whole draft tree is flushed in one batch, then the attempt-control directory after the rename |
 | Committed transaction data (`data/`) | the manager appends the destination state frame and renames the marker out of `committing`; every replayed destination and each parent directory it touched, including the trash a removal moved into, is flushed first |
 | Registered child payloads and their submitted markers | the parent's marker leaves `committing` |
-| Job state (`.httk-job/state.json`), observed declarations, `runner-steps.json` | each atomic replace returns |
+| Job state (`.httk-job/state.json`), observed declarations | each atomic replace returns |
 | Sealed replayable workdir batch (`.httk-runner/workdir-ready/`) and its replay into the workdir | the batch is published, then retired as applied |
 
 Two runner-side artifacts keep only process-interruption safety even in the
 durable profile, because per-line synchronization would dominate their cost and
 neither is authoritative workflow state: the append-only run log
-(`.httk-runner/runlog.jsonl`) and the runner's captured `stdout.log` and
-`stderr.log`. They are evidence for an operator, not markers or committed data;
+(`logs/runlog.jsonl`) and the runner's captured `logs/stdio.out`. They are
+evidence for an operator, not markers or committed data;
 losing their tail to a power cut costs a diagnostic line, never a lost outcome
 or a half-applied transaction.
+A late fenced process may append to `logs/stdio.out` after a later attempt's
+start marker; the chronicle is evidence, not an ordering authority.
 
 In the non-durable profile every one of these keeps process-interruption safety
 only: a torn write or an interrupted rename is still never observed, but a node
@@ -1310,22 +1312,43 @@ unsafe policy MUST be recorded there too.
 
 Attempt control is separate from application workdir:
 
+The version-2 `context.json` includes `payload`, an absolute path to the job
+payload, so SDKs can locate the job-level logs independently of the selected
+workdir.
+
 ```text
 <workspace>/<placement>/<job-key>/
 ├── attempts/<attempt-id>/
 │   ├── context.json
 │   ├── process.json
 │   ├── runner                   # the verified staged copy of a shared runner
-│   ├── stdout.log
-│   ├── stderr.log
 │   ├── outcome.tmp.<nonce>/
 │   └── outcome.ready/
-├── logs/                       # reserved for a future run-log layout; unused in core-v2
+├── logs/
+│   ├── stdio.out               # append-only stdout/stderr chronicle
+│   └── runlog.jsonl             # append-only structured run log
 ├── .httk-job/                   # optional runner-private job state
 │   └── declarations/            # optional observed workflow declarations
 │       └── <declaration-name>.json
 └── run/                         # persistent mode
 ```
+
+`logs/stdio.out` is one append-only chronicle for all attempts. The manager's
+marker lines have these formats, verbatim:
+
+```text
+=== httk attempt <attempt-id> step <step> ordinal <attempt_ordinal> started <utc-iso>
+=== httk attempt <attempt-id> ended <utc-iso> exit <returncode> outcome <action|none>
+=== httk attempt <attempt-id> ended <utc-iso> launch-failed <reason>
+```
+
+Each marker is written as one `os.write` whose bytes begin with `\n` and end
+with `\n`; a preceding empty line is normal. When cutting an attempt's block,
+recognize a marker as a line that starts with `=== httk attempt`. A late fenced
+process may append output after a newer attempt's start marker, so this file is
+evidence rather than an ordering authority. If a manager is lost mid-attempt,
+that attempt may have a start marker without an end marker; a takeover writes
+its own start/end pair.
 
 In isolated mode the application directory is
 `run.<attempt-id>/` instead of `run/`. The runner's current working directory is
@@ -1501,6 +1524,7 @@ An unclean persistent retry context is:
   "workspace_id": "b588833b-87ea-4da2-b860-1c9e768cfbc1",
   "job_id": "01234567-89ab-cdef-0123-456789abcdef",
   "placement": "project-17/0/03a",
+  "payload": "/srv/httk/project-17/0/03a/job-1",
   "step": "relax",
   "activation_id": "e7f86a0e-34d6-45a7-b92d-3f4b2dc98c54",
   "attempt_id": "a6c2c973-29e1-44e2-9649-ae419e340ac4",
@@ -2175,6 +2199,8 @@ The failure frame contains job, step, activation, and attempt IDs; the failure
 object with its code, message, and details such as exit status or signal; retry
 history; manager ID; relevant retained log paths; and data generation. For a job
 with `data.mode` equal to `none`, data generation is `null`.
+Manager-generated failure details retain the payload-relative path
+`log_paths: ["logs/stdio.out"]`; `job why` uses that frame member when present.
 
 Current broken jobs are exactly the markers below `state/failed/`. This
 directory tree is authoritative and requires no reconciliation.

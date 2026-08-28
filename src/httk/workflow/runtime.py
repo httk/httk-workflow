@@ -32,6 +32,7 @@ class AttemptContext:
     :param job_id: Identify the job.
     :param job_key: Identify the job payload.
     :param placement: Locate the job placement.
+    :param payload: Record the absolute job payload path.
     :param step: Identify the runner step.
     :param activation_id: Identify the activation.
     :param attempt_id: Identify the attempt.
@@ -58,6 +59,7 @@ class AttemptContext:
     job_id: str
     job_key: str
     placement: str
+    payload: str
     step: str
     activation_id: str
     attempt_id: str
@@ -103,7 +105,16 @@ class AttemptContext:
         value = read_json(Path(path))
         if value.get("format") != "httk-workflow-attempt-context" or value.get("format_version") != 2:
             raise ValueError("attempt context must use httk-workflow-attempt-context version 2")
-        required = ("workspace_id", "job_id", "job_key", "placement", "step", "activation_id", "attempt_id")
+        required = (
+            "workspace_id",
+            "job_id",
+            "job_key",
+            "placement",
+            "payload",
+            "step",
+            "activation_id",
+            "attempt_id",
+        )
         if any(not isinstance(value.get(name), str) or not value[name] for name in required):
             raise ValueError("attempt context is missing a required string identity")
         generation = value.get("data_generation")
@@ -116,6 +127,9 @@ class AttemptContext:
         settings_raw = value.get("settings", {})
         if not isinstance(settings_raw, Mapping):
             raise ValueError("attempt settings must be an object")
+        payload = value.get("payload")
+        if not isinstance(payload, str) or not Path(payload).is_absolute():
+            raise ValueError("attempt payload must be an absolute path")
 
         def optional_integer(name: str) -> int | None:
             raw = value.get(name)
@@ -138,6 +152,7 @@ class AttemptContext:
             job_id=value["job_id"],
             job_key=value["job_key"],
             placement=value["placement"],
+            payload=payload,
             step=value["step"],
             activation_id=value["activation_id"],
             attempt_id=value["attempt_id"],

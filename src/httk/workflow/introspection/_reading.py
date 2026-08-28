@@ -10,6 +10,7 @@ from ..errors import FormatError, WorkflowError, WorkspaceCorruptionError
 from ..journal import read_record
 from ..models import (
     ATTEMPTS_DIRECTORY,
+    LOGS_DIRECTORY,
     STATE_KINDS,
     JobDefinition,
     Marker,
@@ -26,20 +27,20 @@ _HISTORY_READ_DEADLINE_SECONDS = 0.1
 _RUNLOG_TAIL_BYTES = 65536
 
 
-def read_last_headline(workdir: str | Path | None) -> str | None:
+def read_last_headline(payload: str | Path | None) -> str | None:
     """Return the message of the last ``headline`` run-log event, if any.
 
-    The runlog is JSON lines a runner appends in its workdir; a ``headline``
+    The runlog is JSON lines a runner appends in its payload; a ``headline``
     event is the runner's own one-line summary of where it is. Only the tail of
     the file is read, so a long-running runner's headline is cheap to surface.
 
-    :param workdir: The attempt workdir whose ``.httk-runner/runlog.jsonl`` to read.
+    :param payload: The job payload whose ``logs/runlog.jsonl`` to read.
     :return: The last headline message, or ``None`` when there is none to read.
     """
 
-    if workdir is None:
+    if payload is None:
         return None
-    path = Path(workdir) / ".httk-runner" / "runlog.jsonl"
+    path = Path(payload) / LOGS_DIRECTORY / "runlog.jsonl"
     try:
         with path.open("rb") as handle:
             handle.seek(0, 2)

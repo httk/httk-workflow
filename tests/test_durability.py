@@ -106,6 +106,7 @@ def _write_context(
         "job_id": str(uuid.uuid4()),
         "job_key": "durable--" + str(uuid.uuid4()),
         "placement": "project/jobs",
+        "payload": str(directory.parent / "payload"),
         "step": "start",
         "activation_id": str(uuid.uuid4()),
         "attempt_id": str(uuid.uuid4()),

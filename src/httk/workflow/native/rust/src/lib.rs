@@ -509,7 +509,7 @@ impl Attempt {
         self.command(&["declare", name, document_file])
     }
 
-    /// Append one ordinary evidence event to this workdir's run log.
+    /// Append one ordinary evidence event to this job's logs/runlog.jsonl.
     pub fn runlog_note(&self, message: &str) -> Result<i32, BridgeError> {
         self.command(&["runlog", "note", message])
     }

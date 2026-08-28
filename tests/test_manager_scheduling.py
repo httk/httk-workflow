@@ -4,6 +4,7 @@ import errno
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -53,6 +54,30 @@ _SLEEPING_RUNNER = """#!/usr/bin/env python3
 import time
 
 time.sleep(600)
+"""
+
+_PARTIAL_RETRY_RUNNER = """#!/usr/bin/env python3
+import json
+import os
+import sys
+from pathlib import Path
+
+context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+print("partial", end="", flush=True)
+if context["attempt_ordinal"] == 1:
+    sys.exit(7)
+control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
+temporary = control / "outcome.tmp.test"
+temporary.mkdir()
+(temporary / "outcome.json").write_text(json.dumps({
+    "format": "httk-workflow-outcome",
+    "format_version": 2,
+    "job_id": context["job_id"],
+    "activation_id": context["activation_id"],
+    "attempt_id": context["attempt_id"],
+    "action": "succeed",
+}))
+os.rename(temporary, control / "outcome.ready")
 """
 
 _SPAWNING_RUNNER = """#!/usr/bin/env python3
@@ -1348,6 +1373,162 @@ def test_a_normal_run_never_reports_an_orphaned_attempt(
     messages = [record.getMessage() for record in caplog.records]
     assert not any("no longer owns a running marker" in message for message in messages), messages
     assert not [record for record in caplog.records if record.levelno >= logging.WARNING], messages
+
+
+def _reject_stdio_end_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make manager end-marker writes fail while leaving all other writes usable."""
+
+    real_write = manager_module.os.write
+
+    def write(fd: int, data: bytes) -> int:
+        try:
+            target = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            target = ""
+        if target.endswith("/stdio.out") and b" ended " in data:
+            raise OSError("test end-marker write failure")
+        return real_write(fd, data)
+
+    monkeypatch.setattr(manager_module.os, "write", write)
+
+
+def test_end_marker_failure_does_not_block_reap_or_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="end-write-reap")
+    workspace.submit(payload, "project/end-write-reap")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        _reject_stdio_end_writes(monkeypatch)
+        manager.run_until_idle(timeout=60.0)
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+
+
+def test_end_marker_failure_does_not_block_cancellation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="end-write-cancel")
+    workspace.submit(payload, "project/end-write-cancel")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        _reject_stdio_end_writes(monkeypatch)
+        running = _drive_until(workspace, manager, job_id, {"running"})
+        _publish_cancel(workspace, running)
+        cancelled = _drive_until(workspace, manager, job_id, {"cancelled"})
+
+    assert cancelled.kind == "cancelled"
+
+
+def test_pipe_failure_closes_stdio_fd_and_fails_the_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="pipe-failure")
+    workspace.submit(payload, "project/pipe-failure")
+    captured: list[int] = []
+    real_open = manager_module.os.open
+
+    def capture_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+        fd = real_open(path, flags, mode, dir_fd=dir_fd)
+        if Path(path).name == "stdio.out":
+            captured.append(fd)
+        return fd
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        monkeypatch.setattr(manager_module.os, "open", capture_open)
+
+        def fail_pipe() -> tuple[int, int]:
+            raise OSError("test pipe failure")
+
+        monkeypatch.setattr(manager_module.os, "pipe", fail_pipe)
+        manager.run_until_idle(timeout=60.0)
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "failed"
+    assert captured
+    for fd in captured:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_launch_failure_marker_records_an_unexecutable_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="launch-failure")
+    workspace.submit(payload, "project/launch-failure")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+
+        def fail_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+            raise OSError("runner command unavailable")
+
+        monkeypatch.setattr(manager_module.subprocess, "Popen", fail_popen)
+        manager.run_until_idle(timeout=60.0)
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "failed"
+    root = workspace.payload_path(marker.placement, marker.job_key)
+    lines = (root / "logs" / "stdio.out").read_text(encoding="utf-8").splitlines()
+    attempt_id = next(path.name for path in (root / "attempts").iterdir() if path.is_dir())
+    failure_lines = [line for line in lines if line.startswith("=== httk attempt") and "launch-failed" in line]
+    assert len(failure_lines) == 1
+    assert re.fullmatch(
+        rf"=== httk attempt {attempt_id} ended \d{{4}}-\d{{2}}-\d{{2}}T[^ ]+ launch-failed runner command unavailable",
+        failure_lines[0],
+    )
+
+
+def test_one_stdio_chronicle_has_fenced_markers_and_manager_attempt_events(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(
+        tmp_path / "source",
+        _PARTIAL_RETRY_RUNNER,
+        tag="chronicle",
+        retry_on=("process_failure",),
+    )
+    workspace.submit(payload, "project/chronicle")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=60.0)
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    root = workspace.payload_path(marker.placement, marker.job_key)
+    lines = (root / "logs" / "stdio.out").read_text(encoding="utf-8").splitlines()
+    marker_lines = [line for line in lines if line.startswith("=== httk attempt")]
+    assert len(marker_lines) == 4
+    assert re.fullmatch(r"=== httk attempt [0-9a-f-]+ step only ordinal 1 started .+", marker_lines[0])
+    assert re.fullmatch(r"=== httk attempt [0-9a-f-]+ ended .+ exit 7 outcome none", marker_lines[1])
+    assert re.fullmatch(r"=== httk attempt [0-9a-f-]+ step only ordinal 2 started .+", marker_lines[2])
+    assert re.fullmatch(r"=== httk attempt [0-9a-f-]+ ended .+ exit 0 outcome succeed", marker_lines[3])
+    assert "partial" in lines
+    assert not list(root.glob(f"attempts/*/{'stdout'}.log"))
+    assert not list(root.glob(f"attempts/*/{'stderr'}.log"))
+
+    events = [json.loads(line) for line in (root / "logs" / "runlog.jsonl").read_text().splitlines()]
+    attempts = [event for event in events if event.get("kind") == "attempt"]
+    assert len(attempts) == 2
+    for event in attempts:
+        assert event["attempt_id"]
+        assert event["step"] == "only"
+        assert event["runner_path"] == str(root / "files" / "runner")
+        assert event["runner_sha256"]
+
+
+def test_a_runlog_directory_is_evidence_failure_and_does_not_block_launch(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="runlog-directory")
+    (payload / "logs" / "runlog.jsonl").mkdir(parents=True)
+    workspace.submit(payload, "project/runlog-directory")
+
+    with (
+        caplog.at_level(logging.WARNING, logger="httk.workflow"),
+        TaskManager(workspace, heartbeat_interval=0.01) as manager,
+    ):
+        manager.run_until_idle(timeout=60.0)
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    assert any("attempt runlog event" in record.getMessage() for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------

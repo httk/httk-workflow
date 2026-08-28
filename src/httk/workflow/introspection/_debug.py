@@ -13,13 +13,11 @@ from .._util import read_json
 from ..errors import WorkspaceCorruptionError
 from ..manager import TaskManager
 from ..manifests import read_maintenance_lock
-from ..models import CORE_STATE_KINDS, TERMINAL_KINDS, Marker, validate_step
+from ..models import CORE_STATE_KINDS, LOGS_DIRECTORY, TERMINAL_KINDS, Marker, validate_step
 from ..workspace import MarkerFault, Workspace
 from ._diagnosis import observe_join
 from ._reading import (
-    _attempt_control,
     _job_of,
-    _optional_string,
     _state_of,
     resolve_job,
 )
@@ -236,7 +234,7 @@ def _drive(
         f"(runner {job.runner_source}:{job.runner_path.as_posix()} on executor {job.runner_executor})"
     )
     scoped = ScopedWorkspace(workspace.root, {marker.job_key}, durable=workspace.durable)
-    tails: dict[str, list[_Tail]] = {}
+    tails: dict[str, _Tail] = {}
     deadline = time.monotonic() + timeout
     seen_generation = -1
     driven_children = False
@@ -265,9 +263,8 @@ def _drive(
                 seen_generation = current.generation
                 write(f"[{meta}] g{current.generation} {current.kind} {_frame_summary(state)}")
             if current.kind in TERMINAL_KINDS or current.kind == "paused":
-                for group in tails.values():
-                    for tail in group:
-                        tail.pump(final=True)
+                for tail in tails.values():
+                    tail.pump(final=True)
                 write(f"[{meta}] {current.job_key} finished as {current.kind}")
                 return current
             if current.kind == "waiting":
@@ -310,23 +307,16 @@ def _pump(
     workspace: Workspace,
     marker: Marker,
     state: Mapping[str, Any],
-    tails: dict[str, list[_Tail]],
+    tails: dict[str, _Tail],
     context: str,
     write: Callable[[str], None],
 ) -> None:
     """Stream whatever the attempts of this job have written since the last pass."""
 
-    attempt_id = _optional_string(state.get("attempt_id"))
-    control = _attempt_control(workspace, marker, state)
-    if attempt_id is not None and attempt_id not in tails and control is not None and control.is_dir():
-        step = state.get("step") or "-"
-        tails[attempt_id] = [
-            _Tail(control / "stdout.log", f"[{context}{step}] ", write),
-            _Tail(control / "stderr.log", f"[{context}{step}] (stderr) ", write),
-        ]
-    for group in tails.values():
-        for tail in group:
-            tail.pump()
+    if "stdio" not in tails:
+        payload = workspace.payload_path(marker.placement, marker.job_key)
+        tails["stdio"] = _Tail(payload / LOGS_DIRECTORY / "stdio.out", "", write)
+    tails["stdio"].pump()
 
 
 def _drive_children(

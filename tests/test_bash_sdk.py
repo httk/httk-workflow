@@ -118,6 +118,7 @@ def _fixture(
                 "job_id": str(uuid.uuid4()),
                 "job_key": f"fabricated--{uuid.uuid4()}",
                 "placement": "project/fabricated",
+                "payload": str(payload),
                 "step": step,
                 "activation_id": str(uuid.uuid4()),
                 "attempt_id": str(uuid.uuid4()),
@@ -181,7 +182,7 @@ def test_declared_environment_is_gated_and_recorded_before_a_bash_step(tmp_path:
         "setting": {"value": 7, "source": "workspace-setting"},
         "variable": {"value": "env", "source": "environment-variable"},
     }
-    log = (fixture.workdir / ".httk-runner" / "runlog.jsonl").read_text(encoding="utf-8")
+    log = (fixture.payload / "logs" / "runlog.jsonl").read_text(encoding="utf-8")
     assert "parameters are in job.json; environment resolved as" in log
 
 
@@ -834,5 +835,5 @@ def test_a_payload_bash_runner_advances_commits_data_and_succeeds(tmp_path: Path
     state = workspace.read_state(marker)
     assert state["runner_steps"] == ["collect", "start"]
     assert marker.priority == 700
-    runlog = (root / "run" / ".httk-runner" / "runlog.jsonl").read_text(encoding="utf-8")
+    runlog = (root / "logs" / "runlog.jsonl").read_text(encoding="utf-8")
     assert "the data of the previous step is committed" in runlog

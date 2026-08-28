@@ -73,7 +73,7 @@ def describe_job(workspace: Workspace, marker: Marker) -> dict[str, Any]:
             "workdir": None if workdir_path is None else str(workdir_path),
             "data": str(payload / "data") if job is not None and job.data_mode == "transactional" else None,
         },
-        "last_headline": read_last_headline(workdir_path),
+        "last_headline": read_last_headline(payload),
         "state_error": state_error,
         "job_error": job_error,
     }

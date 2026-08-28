@@ -560,15 +560,37 @@ def test_why_reports_a_failed_job_with_its_breadcrumb_and_continue(tmp_path: Pat
 
     report = describe_job(workspace, marker)
     assert report["error_breadcrumb"]["exception"] == "RuntimeError"
-    assert report["failure"]["details"] == {"exit_status": 7}
+    assert report["failure"]["details"] == {"exit_status": 7, "log_paths": ["logs/stdio.out"]}
+
+
+def test_why_prefers_a_retained_log_path_from_the_failure_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = _workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", _BREADCRUMB_RUNNER, attempts_per_activation=1)
+    workspace.submit(payload, "project/custom-log")
+    _run(workspace)
+    marker = resolve_job(workspace, job_id)
+    state = dict(workspace.read_state(marker))
+    failure = dict(state["failure"])
+    details = dict(failure["details"])
+    details["log_paths"] = ["diagnostics/retained-stdio.out"]
+    failure["details"] = details
+    state["failure"] = failure
+    monkeypatch.setattr(workspace, "read_state", lambda _marker: state)
+
+    diagnosis = explain_job(workspace, marker)
+    logs = next(check for check in diagnosis.checks if check.name == "attempt logs")
+    assert "diagnostics/retained-stdio.out" in logs.detail
 
 
 _HEADLINE_CRASH_RUNNER = """#!/usr/bin/env python3
 import json
+import os
 import sys
 from pathlib import Path
 
-runlog = Path(".httk-runner") / "runlog.jsonl"
+runlog = Path(os.environ["HTTK_WORKFLOW_JOB_DIR"]) / "logs" / "runlog.jsonl"
 runlog.parent.mkdir(parents=True, exist_ok=True)
 with runlog.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps({
@@ -606,7 +628,7 @@ def test_render_job_surfaces_a_process_failure_breadcrumb_headline_and_control(t
 
     diagnosis = explain_job(workspace, marker)
     logs = next(check for check in diagnosis.checks if check.name == "attempt logs")
-    assert "stderr.log" in logs.detail
+    assert "logs/stdio.out" in logs.detail
 
 
 def test_why_reports_an_exhausted_continue_budget(tmp_path: Path) -> None:
@@ -734,13 +756,38 @@ def test_debug_drives_a_three_step_runner_in_the_foreground(tmp_path: Path) -> N
     assert outcome.state == "succeeded"
     text = "\n".join(lines)
     for step in ("prepare", "relax", "collect"):
-        assert f"[{step}] runner is working on {step}" in text
-        assert f"[{step}] (stderr) diagnostic from {step}" in text
+        assert f"runner is working on {step}" in text
+        assert f"diagnostic from {step}" in text
         assert f"step={step}" in text
     assert "[debug] example--" in text and "finished as succeeded" in text
     assert text.count("committing") == 3
     marker = resolve_job(workspace, job_id)
     assert marker.kind == "succeeded"
+    payload_root = workspace.payload_path(marker.placement, marker.job_key)
+    published = [
+        json.loads((attempt / "outcome.ready" / "outcome.json").read_text(encoding="utf-8"))
+        for attempt in sorted((payload_root / "attempts").iterdir())
+        if (attempt / "outcome.ready" / "outcome.json").is_file()
+    ]
+    assert len(published) == 3
+    assert all(outcome["runner_steps"] == ["prepare", "relax", "collect"] for outcome in published)
+    assert not (payload_root / ".httk-job" / ("runner" + "-steps.json")).exists()
+    chronicle = (payload_root / "logs" / "stdio.out").read_text(encoding="utf-8").splitlines()
+    for step in ("prepare", "relax", "collect"):
+        start = next(
+            index
+            for index, line in enumerate(chronicle)
+            if line.startswith("=== httk attempt") and f" step {step} " in line and " started " in line
+        )
+        end = next(
+            index
+            for index in range(start + 1, len(chronicle))
+            if chronicle[index].startswith("=== httk attempt") and " ended " in chronicle[index]
+        )
+        block = chronicle[start : end + 1]
+        assert f"runner is working on {step}" in block
+        assert f"diagnostic from {step}" in block
+        assert f"step={step}" in text
 
 
 def test_debug_admits_declared_resources_for_every_job_step(tmp_path: Path) -> None:
@@ -809,7 +856,7 @@ def test_debug_submits_a_fresh_payload_at_the_step_override(tmp_path: Path) -> N
     assert outcome.exit_code == DEBUG_EXIT_SUCCEEDED
     text = "\n".join(lines)
     assert "initial step overridden to collect" in text
-    assert "[collect] runner is working on collect" in text
+    assert "runner is working on collect" in text
     assert "runner is working on prepare" not in text
     marker = resolve_job(workspace, job_id)
     assert marker.placement.as_posix() == "scratch/debug"
@@ -877,8 +924,8 @@ def test_debug_follows_children_only_when_asked(tmp_path: Path) -> None:
     assert finished.exit_code == DEBUG_EXIT_SUCCEEDED
     text = "\n".join(lines)
     assert "[debug child:only] child--" in text
-    assert "[child:only run] the child is working on run" in text
-    assert "[gather] the parent gathered 1 child(ren)" in text
+    assert "the child is working on run" in text
+    assert "the parent gathered 1 child(ren)" in text
     assert resolve_job(workspace, job_id).kind == "succeeded"
 
 
@@ -890,5 +937,5 @@ def test_debug_runs_from_the_command_line(tmp_path: Path, capsys) -> None:
 
     assert command(["job", "debug", "--workspace", ws, "--placement", "cli/debug", str(payload)], context) == 0
     text = capsys.readouterr().out
-    assert "[prepare] runner is working on prepare" in text
+    assert "runner is working on prepare" in text
     assert resolve_job(workspace, job_id).kind == "succeeded"

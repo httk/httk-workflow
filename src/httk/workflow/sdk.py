@@ -43,7 +43,6 @@ from types import MappingProxyType
 from typing import Any, Literal, Self, cast, overload
 
 from ._util import json_bytes, read_json, require_string, validate_inputs, write_json_atomic
-from .errors import FormatError
 from .models import (
     JOB_STATE_DIRECTORY,
     RESERVED_WORKFLOW_ENVIRONMENT_PREFIX,
@@ -90,7 +89,6 @@ RUNNER_DESCRIPTION_FORMAT = "httk-workflow-runner-description"
 RUNNER_ERROR_FORMAT = "httk-workflow-runner-error"
 _DESCRIBE_VARIABLE = "HTTK_WORKFLOW_DESCRIBE"
 _DESCRIBE_FLAG = "--describe"
-_RUNNER_STEPS_FILE = "runner-steps.json"
 _ENVIRONMENT_MARKER = ".httk-environment-resolution.json"
 _ENVIRONMENT_LOG_GRACE_SECONDS = 1.0
 
@@ -561,7 +559,7 @@ class Attempt:
         # synchronizes an outcome, a transaction, or a spawned child before it
         # is renamed authoritative without the step asking.
         self.state = JobState(payload, durable=context.durable)
-        self.log = RunLog(workdir)
+        self.log = RunLog(payload)
         self._runner = runner
         self._draft: OutcomeDraft | None = None
         self._transaction: TransactionBuilder | None = None
@@ -1209,8 +1207,6 @@ class Attempt:
         self._published = published
         self._action = action
         self._activate_environment_log_deadline()
-        if declared is not None:
-            self._record_steps(declared)
         return published
 
     def _activate_environment_log_deadline(self) -> None:
@@ -1226,27 +1222,10 @@ class Attempt:
         recorded["log_deadline"] = time.time() + _ENVIRONMENT_LOG_GRACE_SECONDS
         write_json_atomic(marker, recorded, durable=self.context.durable)
 
-    def _undeclared_steps(self) -> list[str] | None:
-        """Return the runner's step set when this job has not recorded it yet."""
+    def _undeclared_steps(self) -> list[str]:
+        """Return the complete step set to carry in every published outcome."""
 
-        if self._runner is None:
-            return None
-        steps = sorted(self._runner.steps)
-        path = self.payload / JOB_STATE_DIRECTORY / _RUNNER_STEPS_FILE
-        if path.is_file():
-            try:
-                if read_json(path).get("steps") == steps:
-                    return None
-            except FormatError:
-                pass
-        return steps
-
-    def _record_steps(self, steps: Sequence[str]) -> None:
-        path = self.payload / JOB_STATE_DIRECTORY / _RUNNER_STEPS_FILE
-        try:
-            write_json_atomic(path, {"steps": list(steps)}, durable=self.context.durable)
-        except OSError as exc:  # pragma: no cover - only an optimization
-            _LOGGER.debug("cannot record the declared steps of %s: %s", self.context.job_key, exc)
+        return [] if self._runner is None else sorted(self._runner.steps)
 
     def _discard_draft(self) -> None:
         """Remove an unpublished draft so no half-outcome survives this attempt."""
