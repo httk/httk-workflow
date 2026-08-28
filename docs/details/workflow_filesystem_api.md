@@ -726,9 +726,10 @@ that name it — before the rename that makes it authoritative:
 
 | Artifact | Synchronized before |
 | --- | --- |
-| Journal frame | the state-marker rename that references it |
+| Journal frame, including the `process` identity in a `running` frame | the state-marker rename that references it |
 | State marker / request / submitted payload | it becomes visible in `state/` (its parent directory is flushed) |
-| Attempt `context.json`, `process.json` | the runner is launched against it |
+| Running marker directories (source and destination) | the launch gate byte is written, after the verified `running` marker rename and both marker-directory entries are flushed |
+| Attempt `context.json` | the runner is launched against it |
 | Outcome bundle (`outcome.json`, `runner_steps`, failure detail, its sealed transaction manifest and staged payload, its child `job.json` bundles) | the `outcome.tmp.<nonce>` → `outcome.ready` rename; the whole draft tree is flushed in one batch, then the attempt-control directory after the rename |
 | Committed transaction data (`data/`) | the manager appends the destination state frame and renames the marker out of `committing`; every replayed destination and each parent directory it touched, including the trash a removal moved into, is flushed first |
 | Registered child payloads and their submitted markers | the parent's marker leaves `committing` |
@@ -794,6 +795,20 @@ State frames have the following shape; the `resources` member is optional and is
 
 `data_generation` is omitted or `null` when `job.json` declares
 `data.mode: "none"`.
+
+A `running` frame also carries the launched process identity in its `process`
+object. The object contains exactly the following protocol members:
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `pid` | integer | Process ID of the gated launcher. |
+| `process_group` | integer | Process-group ID used for signalling. |
+| `hostname` | string | Host on which the launcher runs. |
+| `launched_at` | string | UTC timestamp at which the launcher was created. |
+
+The `process` object is retained through `cancelling` and may remain on the
+terminal `cancelled` frame. It is deliberately not carried into a recovered
+or relaunched attempt.
 
 An in-flight operator pause adds the optional `pause_requested` member to the
 state frame; it is carried to the next attempt boundary, then consumed when the
@@ -1075,7 +1090,7 @@ The state kinds are:
 | `ready` | Eligible to be claimed when resources permit. |
 | `claimed` | A manager won the claim but has not launched the attempt. |
 | `running` | The current attempt may have a live process. |
-| `committing` | The attempt is fenced; its outcome is being replayed. |
+| `committing` | The attempt is fenced; its outcome is being replayed, and the frame may still name the fenced live process. |
 | `cancelling` | The attempt is fenced by a cancellation; its process is being stopped and its exit verified. |
 | `relocating` | No attempt may run; the placement is changing. |
 | `transferring` | A quiescent payload is moving or detaching. |
@@ -1156,7 +1171,8 @@ Every transition of the core profile, exhaustively:
 | `waiting` | `failed` | `dependency_failure`: the join became impossible with no `on_impossible`, or a named child stayed unresolvable past the join grace. |
 | `waiting` | `failed` | `protocol_error`: the recorded join itself cannot be read. |
 | `failed`, `paused` | `ready` | Operator `continue` (retry the activation) or `override_step` (new activation). |
-| `cancelling` | `cancelled` | The exit of the fenced attempt was verified. |
+| `cancelling` | `cancelled` | For a running attempt with a valid same-host identity, the exit was verified. |
+| `committing` | `cancelled` | A valid same-host identity was signalled best-effort when available; exit was not verified, and the terminal frame records `no_live_attempt`. |
 | any nonterminal | `cancelled` | Operator `cancel` where no live attempt has to be stopped first. |
 | `submitted`, `ready`, `waiting` | `paused` | Operator `pause`. |
 | `claimed`, `running`, `committing` | the same kind | Operator `pause`, recorded as a sticky deferred request until the next attempt boundary. |
@@ -1194,27 +1210,38 @@ order is the guarantee:
    group, and `SIGKILL` after a configured grace period. The `cancelling` frame
    names the attempt, its attempt-control directory, and its previous owner, so
    a recovering manager has everything it needs.
-3. **Only then finish, against evidence.** The marker moves to `cancelled` only
-   once the exit has actually been verified, and the verification is recorded
-   in the `cancellation` member of the terminal frame.
+3. **Only then finish, against evidence.** For a `running` or `cancelling`
+   attempt with a valid same-host identity, the marker moves to `cancelled`
+   only once the exit has actually been verified, and the verification is
+   recorded in the `cancellation` member of the terminal frame.
 
-A manager MUST NOT publish `cancelled` for an attempt it has merely signalled.
+Cancelling a `committing` job keeps the historical best-effort behavior: the
+manager signals the recorded process group when a valid same-host identity is
+available, then moves directly to `cancelled` with `no_live_attempt`. It does
+not verify process exit, because the outcome is already published and replay
+may be partially applied.
+Known limitation: the recorded process may still be running after this
+terminal transition.
+
+A manager MUST NOT publish `cancelled` for a `running` attempt it has merely
+signalled. The committing behavior above is the documented exception.
 Acceptable evidence is:
 
 | `cancellation.verified` | Meaning |
 | --- | --- |
 | `process_exited` | The manager launched the process and reaped it; the exit status is recorded. |
 | `process_group_absent` | The process was recorded on this host and its process group no longer exists. |
-| `no_launched_process` | No process identity was ever durably recorded, so the launch gate guarantees the runner never executed. |
-| `no_live_attempt` | The job was cancelled from a state that has no live attempt at all. |
+| `no_live_attempt` | The job was cancelled from a state where no exit verification is performed, including `committing` after outcome publication. |
 
 A cancellation whose process cannot be proven stopped — typically one recorded
 on a different host — MUST leave the marker in `cancelling`, journal why, and
-retry. Staying in `cancelling` is the safe outcome: the attempt remains fenced,
-so it can produce no state, and an operator sees a stalled cancellation rather
-than a terminal state that falsely asserts that nothing is still writing the
-workdir. A site whose batch system can confirm that an allocation has ended MAY
-treat that confirmation as evidence and record it in the same member.
+retry. A missing or malformed `process` member is damage, not evidence that the
+launch gate was never released, and MUST follow the same unverifiable path.
+Staying in `cancelling` is the safe outcome: the attempt remains fenced, so it
+can produce no state, and an operator sees a stalled cancellation rather than a
+terminal state that falsely asserts that nothing is still writing the workdir.
+A site whose batch system can confirm that an allocation has ended MAY treat
+that confirmation as evidence and record it in the same member.
 
 Because the fence is a marker rename, cancellation composes with everything
 else by construction: an attempt that publishes an outcome after being fenced
@@ -1253,11 +1280,12 @@ The manager creates `attempts/<attempt-id>/`, prepares the selected
 persistent or isolated workdir, appends a running frame, and renames the
 claimed marker to running immediately before launching the application. A
 local executor MAY first create a process blocked on a launch gate, durably
-record that process identity, commit the running marker, and only then release
-the gate to execute the application. If its manager disappears before release,
-the gate MUST cause that process to exit without executing the application.
-This closes the otherwise ambiguous crash window between a running transition
-and recording the new process identity.
+record that process identity in the running frame, and only then release the
+gate to execute the application. If its manager disappears before release, the
+gate MUST cause that process to exit without executing the application. The
+identity is part of the durable running frame, so a missing or malformed
+identity after repair is damage and cannot be used as `no_live_attempt` or as
+proof that the application never ran.
 
 Managers update `managers/<manager-id>/heartbeat.json` by atomic replacement.
 A recoverer uses the state frame, heartbeat, batch scheduler when available,
@@ -1325,7 +1353,6 @@ workdir.
 <workspace>/<placement>/<job-key>/
 ├── attempts/<attempt-id>/
 │   ├── context.json
-│   ├── process.json
 │   ├── outcome.tmp.<nonce>/
 │   └── outcome.ready/
 ├── logs/

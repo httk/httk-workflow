@@ -24,7 +24,7 @@ import httk.workflow.manager as manager_module
 from conftest import TestProfile as _TestProfile
 from httk.workflow import TaskManager, Workspace, _manager_requests
 from httk.workflow._logging import reset_logging
-from httk.workflow.journal import JournalWriter
+from httk.workflow.journal import JournalWriter, read_record
 from httk.workflow.manager import RunningAttempt
 from httk.workflow.models import CARRIED_STATE_MEMBERS, Marker, StateFrame
 
@@ -53,6 +53,28 @@ os.rename(temporary, control / "outcome.ready")
 _SLEEPING_RUNNER = """#!/usr/bin/env python3
 import time
 
+time.sleep(600)
+"""
+
+_PUBLISH_THEN_HANG_RUNNER = """#!/usr/bin/env python3
+import json
+import os
+import time
+from pathlib import Path
+
+context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
+temporary = control / "outcome.tmp.test"
+temporary.mkdir()
+(temporary / "outcome.json").write_text(json.dumps({
+    "format": "httk-workflow-outcome",
+    "format_version": 2,
+    "job_id": context["job_id"],
+    "activation_id": context["activation_id"],
+    "attempt_id": context["attempt_id"],
+    "action": "succeed",
+}))
+os.rename(temporary, control / "outcome.ready")
 time.sleep(600)
 """
 
@@ -274,26 +296,15 @@ def _fake_running_attempt(
     manager_id: str,
     pid: int,
     lease_seconds: float,
+    hostname: str | None = None,
 ) -> tuple[Marker, str]:
-    """Publish a running marker owned by another manager, with a process record."""
+    """Publish a running marker owned by another manager, with a process member."""
 
     marker = workspace.submit(payload, placement)
     job = workspace.load_job(marker)
     attempt_id = str(uuid.uuid4())
     control = workspace.payload_path(marker.placement, marker.job_key) / f"attempts/{attempt_id}"
     control.mkdir(parents=True)
-    (control / "process.json").write_text(
-        json.dumps(
-            {
-                "pid": pid,
-                "process_group": pid,
-                "hostname": socket.gethostname(),
-                "launched_at": "2026-07-26T00:00:00.000000Z",
-                "launch_gated": True,
-            }
-        ),
-        encoding="utf-8",
-    )
     with JournalWriter(workspace.control) as writer:
         running = workspace.transition(
             writer,
@@ -313,6 +324,12 @@ def _fake_running_attempt(
                 "lease_seconds": lease_seconds,
                 "started_at": "2026-07-26T00:00:00.000000Z",
                 "workdir": "run",
+                "process": {
+                    "pid": pid,
+                    "process_group": pid,
+                    "hostname": socket.gethostname() if hostname is None else hostname,
+                    "launched_at": "2026-07-26T00:00:00.000000Z",
+                },
                 "reason": "launched",
             },
         )
@@ -388,6 +405,12 @@ _GOLDEN_RUNNING_FRAME: dict[str, Any] = {
     "lease_seconds": 900.0,
     "started_at": "2026-07-26T11:59:00.000000Z",
     "workdir": "run",
+    "process": {
+        "pid": 12345,
+        "process_group": 12345,
+        "hostname": "compute-17",
+        "launched_at": "2026-07-26T11:59:00.000000Z",
+    },
     "reason": "launched",
     "a-member-from-a-later-profile": {"kept": True},
 }
@@ -465,6 +488,7 @@ def test_a_path_traversing_attempt_control_fails_only_its_own_job(tmp_path: Path
             "manager_id": previous.members["manager_id"],
             "lease_seconds": previous.members["lease_seconds"],
             "attempt_control": "../../../../etc",
+            "process": previous.members["process"],
             "reason": "hostile",
         }
         marker = workspace.transition(writer, marker, "running", updates)
@@ -475,6 +499,123 @@ def test_a_path_traversing_attempt_control_fails_only_its_own_job(tmp_path: Path
     failed = workspace.find_marker_by_id(job_id)
     assert failed is not None and failed.kind == "failed"
     assert workspace.read_state(failed)["failure"]["code"] == "protocol_error"
+
+
+def test_running_frame_records_launcher_identity_without_attempt_metadata_file(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="running-process")
+    workspace.submit(payload, "project/running-process")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        running = _drive_until(workspace, manager, job_id, {"running"})
+        state = workspace.read_state(running)
+        process = state["process"]
+        assert isinstance(process, dict)
+        local = manager._running[state["attempt_id"]]
+        assert process["pid"] == local.process.pid
+        attempt = workspace.payload_path(running.placement, running.job_key) / str(state["attempt_control"])
+        assert {entry.name for entry in attempt.iterdir()} == {"context.json"}
+        manager._signal_running_attempts(signal.SIGKILL)
+
+
+@pytest.mark.parametrize("process_group", [0, "123"])
+def test_malformed_process_group_is_never_signalled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_group: object
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, _ = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag=f"bad-process-group-{process_group}")
+    marker, _ = _fake_running_attempt(
+        workspace,
+        payload,
+        "project/bad-process-group",
+        manager_id=_fake_manager(workspace, heartbeat_age=None),
+        pid=os.getpid(),
+        lease_seconds=10.0,
+    )
+    called: list[tuple[int, int]] = []
+
+    def fail_killpg(group: int, signal_number: int) -> None:
+        called.append((group, signal_number))
+        raise AssertionError("malformed process group reached os.killpg")
+
+    monkeypatch.setattr(manager_module.os, "killpg", fail_killpg)
+    state = StateFrame.from_mapping(workspace.read_state(marker))
+    process = dict(state.members["process"])
+    process["process_group"] = process_group
+    bad_state = StateFrame.replace(state, process=process)
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager._terminate_attempt(marker, bad_state)
+    assert called == []
+
+
+def test_running_to_failed_retains_process_identity_on_malformed_outcome(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="failed-process")
+    marker, _ = _fake_running_attempt(
+        workspace,
+        payload,
+        "project/failed-process",
+        manager_id=_fake_manager(workspace, heartbeat_age=None),
+        pid=os.getpid(),
+        lease_seconds=10.0,
+    )
+    original = workspace.read_state(marker)["process"]
+    state = workspace.read_state(marker)
+    outcome = workspace.payload_path(marker.placement, marker.job_key) / str(state["attempt_control"]) / "outcome.ready"
+    outcome.mkdir()
+    (outcome / "outcome.json").write_text("{}", encoding="utf-8")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.tick()
+
+    failed = workspace.find_marker_by_id(job_id)
+    assert failed is not None and failed.kind == "failed"
+    failed_state = workspace.read_state(failed)
+    assert failed_state["failure"]["code"] == "protocol_error"
+    assert failed_state["process"] == original
+
+
+def test_commit_failure_rebuild_retains_process_identity(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="commit-failure-process")
+    marker, _ = _fake_running_attempt(
+        workspace,
+        payload,
+        "project/commit-failure-process",
+        manager_id=_fake_manager(workspace, heartbeat_age=None),
+        pid=os.getpid(),
+        lease_seconds=10.0,
+    )
+    state = StateFrame.from_mapping(workspace.read_state(marker))
+    original = state.members["process"]
+    outcome = (
+        workspace.payload_path(marker.placement, marker.job_key)
+        / str(state.members["attempt_control"])
+        / "outcome.ready"
+    )
+    outcome.mkdir()
+    (outcome / "outcome.json").write_text("{}", encoding="utf-8")
+    committing = StateFrame.replace(
+        state.carried(),
+        process=original,
+        manager_id=str(uuid.uuid4()),
+        writer_id=str(uuid.uuid4()),
+        attempt_id=state.members["attempt_id"],
+        attempt_control=state.members["attempt_control"],
+        outcome_action="succeed",
+        child_digests={},
+        child_labels={},
+        reason="outcome_published",
+    )
+    with JournalWriter(workspace.control) as writer:
+        marker = workspace.transition(writer, marker, "committing", committing.as_mapping())
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        assert manager._resume_committing() is True
+
+    failed = workspace.find_marker_by_id(job_id)
+    assert failed is not None and failed.kind == "failed"
+    assert workspace.read_state(failed)["process"] == original
 
 
 def test_a_symlinked_attempts_directory_fails_launch_without_gc_escape(tmp_path: Path) -> None:
@@ -715,6 +856,35 @@ def test_a_dead_writer_is_taken_over_at_once_without_waiting_out_the_grace(tmp_p
     assert workspace.read_state(marker)["takeover_evidence"]["evidence"] == "writer_process_dead"
 
 
+def test_a_takeover_relaunch_records_a_fresh_process_identity(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    finished = subprocess.Popen([sys.executable, "-c", "pass"])
+    finished.wait(timeout=30)
+    payload, job_id = _payload(
+        tmp_path / "source",
+        _SLEEPING_RUNNER,
+        tag="fresh-takeover-process",
+        workdir_mode="isolated",
+        retry_on=("lease_lost",),
+    )
+    _fake_running_attempt(
+        workspace,
+        payload,
+        "project/fresh-takeover-process",
+        manager_id=_fake_manager(workspace, heartbeat_age=11.0),
+        pid=finished.pid,
+        lease_seconds=10.0,
+    )
+
+    with TaskManager(workspace, heartbeat_interval=0.01, takeover_grace_factor=100.0) as manager:
+        running = _drive_until(workspace, manager, job_id, {"running"})
+        state = workspace.read_state(running)
+        process = state["process"]
+        assert isinstance(process, dict)
+        assert process["pid"] != finished.pid
+        manager._signal_running_attempts(signal.SIGKILL)
+
+
 def test_dead_environment_writer_is_reconciled_after_its_grace(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     finished = subprocess.Popen([sys.executable, "-c", "pass"])
@@ -905,10 +1075,70 @@ def test_cancelling_a_running_job_fences_it_then_proves_its_process_is_gone(
     state = workspace.read_state(marker)
     assert state["cancellation"]["verified"] == "process_exited"
     assert state["cancellation"]["pid"] == pid
+    assert state["process"]["pid"] == pid
     assert state["operator"] == "tester" and state["operator_reason"] == "scheduling test"
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
     assert any("cancelling" in record.getMessage() for record in caplog.records)
+
+
+def test_foreign_host_cancellation_keeps_process_identity_on_unverifiable_rewrite(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="foreign-cancel")
+    marker, _ = _fake_running_attempt(
+        workspace,
+        payload,
+        "project/foreign-cancel",
+        manager_id=_fake_manager(workspace, heartbeat_age=None),
+        pid=os.getpid(),
+        lease_seconds=10.0,
+        hostname="faraway-host",
+    )
+
+    _publish_cancel(workspace, marker)
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.tick()
+
+    cancelling = workspace.find_marker_by_id(job_id)
+    assert cancelling is not None and cancelling.kind == "cancelling"
+    state = workspace.read_state(cancelling)
+    assert state["process"]["hostname"] == "faraway-host"
+    assert state["cancellation"]["verified"] is None
+    assert state["cancellation"]["problem"] == "unverifiable_here"
+
+
+def test_cancelling_committing_attempt_signals_and_retains_process_identity(
+    tmp_path: Path,
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _PUBLISH_THEN_HANG_RUNNER, tag="cancel-committing")
+    workspace.submit(payload, "project/cancel-committing")
+
+    first = TaskManager(workspace, heartbeat_interval=0.01)
+    _drive_until(workspace, first, job_id, {"running"})
+    committing = _drive_until(workspace, first, job_id, {"committing"})
+    attempt = next(iter(first._running.values()))
+    process = attempt.process
+    process_pid = process.pid
+    committing_state = workspace.read_state(committing)
+    assert committing_state["process"]["pid"] == process_pid
+    first.close()
+
+    _publish_cancel(workspace, committing)
+    try:
+        with TaskManager(workspace, heartbeat_interval=0.01) as second:
+            second.tick()
+            cancelled = workspace.find_marker_by_id(job_id)
+            assert cancelled is not None and cancelled.kind == "cancelled"
+            process.wait(timeout=30)
+            cancelled_state = workspace.read_state(cancelled)
+            previous = read_record(workspace.control, str(cancelled_state["previous_record_ref"]))
+            assert previous["kind"] == "committing"
+            assert previous["process"] == cancelled_state["process"]
+    finally:
+        if process.poll() is None:
+            os.killpg(process_pid, signal.SIGKILL)
+            process.wait(timeout=30)
 
 
 def test_a_manager_that_dies_mid_cancellation_leaves_it_to_the_next_one(tmp_path: Path) -> None:
@@ -925,7 +1155,7 @@ def test_a_manager_that_dies_mid_cancellation_leaves_it_to_the_next_one(tmp_path
     assert fenced is not None and fenced.kind == "cancelling"
     # The manager disappears holding the fence; the marker stays cancelling.
     first.close()
-    assert attempt.process.poll() is None or True
+    assert attempt.process.poll() in (None, -signal.SIGTERM)
 
     with TaskManager(workspace, heartbeat_interval=0.01, cancel_grace_seconds=0.5) as second:
         second.tick()
@@ -988,9 +1218,16 @@ def test_deferred_pause_is_recorded_and_consumed_at_attempt_boundary(tmp_path: P
 
         state = manager._read_frame(current_running)
         committing = manager._transition(
-            current_running, "committing", StateFrame.replace(state.carried(), reason="outcome_published")
+            current_running,
+            "committing",
+            StateFrame.replace(state.carried(), process=state.members["process"], reason="outcome_published"),
         )
-        paused = manager._transition(committing, "ready", manager._read_frame(committing).carried())
+        committing_state = manager._read_frame(committing)
+        paused = manager._transition(
+            committing,
+            "ready",
+            StateFrame.replace(committing_state.carried(), process=committing_state.members["process"]),
+        )
 
     assert paused.kind == "paused"
     final = workspace.read_state(paused)
@@ -999,6 +1236,7 @@ def test_deferred_pause_is_recorded_and_consumed_at_attempt_boundary(tmp_path: P
     assert final["operator"] == "tester"
     assert final["operator_reason"] == "wait for the current step"
     assert final["request_id"] == requested["request_id"]
+    assert final["process"] == committing_state.members["process"]
 
 
 def test_deferred_pause_continue_resumes_the_next_activation(tmp_path: Path) -> None:
@@ -1020,7 +1258,9 @@ def test_deferred_pause_continue_resumes_the_next_activation(tmp_path: Path) -> 
         assert current_running is not None and current_running.kind == "running"
         state = manager._read_frame(current_running)
         committing = manager._transition(
-            current_running, "committing", StateFrame.replace(state.carried(), reason="outcome_published")
+            current_running,
+            "committing",
+            StateFrame.replace(state.carried(), process=state.members["process"], reason="outcome_published"),
         )
         state = manager._read_frame(committing)
         manager._advance(committing, workspace.load_job(committing), state, "next", state.carried())
@@ -1079,7 +1319,12 @@ def test_deferred_pause_is_consumed_by_runner_pause_and_continue_resumes(
         committing = manager._transition(
             current_running,
             "committing",
-            StateFrame.replace(state.carried(), outcome_action="pause", reason="outcome_published"),
+            StateFrame.replace(
+                state.carried(),
+                process=state.members["process"],
+                outcome_action="pause",
+                reason="outcome_published",
+            ),
         )
         manager._process_committing(committing)
 

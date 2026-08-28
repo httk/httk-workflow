@@ -1509,6 +1509,17 @@ class Workspace:
                 )
             if destination.is_file():
                 moved = Marker.from_path(state_root, destination)
+                if self.durable:
+                    directories = (
+                        (destination.parent,)
+                        if destination.parent == source.parent
+                        else (
+                            destination.parent,
+                            source.parent,
+                        )
+                    )
+                    for directory in directories:
+                        fsync_directory(directory)
                 self._index_note(moved)
                 return moved
             if source.is_file():

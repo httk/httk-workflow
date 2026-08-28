@@ -128,7 +128,7 @@ def test_workspace_runner_is_published_resolved_and_verified_in_place(tmp_path: 
         assert (job_root / "run" / "ran.txt").read_text(encoding="utf-8") == "only"
         attempt = next(job_root.joinpath("attempts").iterdir())
         assert not (attempt / "runner").exists()
-        assert {entry.name for entry in attempt.iterdir()} <= {"context.json", "process.json", "outcome.ready"}
+        assert {entry.name for entry in attempt.iterdir()} <= {"context.json", "outcome.ready"}
         events = [
             json.loads(line) for line in (job_root / "logs" / "runlog.jsonl").read_text(encoding="utf-8").splitlines()
         ]

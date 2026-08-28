@@ -772,9 +772,9 @@ the context named by `HTTK_WORKFLOW_CONTEXT` and publishes
 for the two authoring SDKs that implement it.
 
 The local executor starts runners behind a one-byte launch gate. It records
-the process identity and commits the `running` marker before releasing that
-gate. If the manager disappears during this narrow launch interval, the gated
-process observes end-of-file and exits without executing the runner.
+the process identity in the `running` frame before releasing that gate. If the
+manager disappears during this narrow launch interval, the gated process
+observes end-of-file and exits without executing the runner.
 
 `httk workflow manager run` executes the normal `path` runner executor. Converted
 `httk-v1` packages use that same path through their packaged v1 runner; select

@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import FrameType
-from typing import Any, Self
+from typing import Any, Self, cast
 
 from httk.core.digests import sha256_file, tree_digest
 
@@ -53,6 +53,7 @@ from .models import (
     canonical_uuid,
     normalize_placement,
     validate_attempt_control,
+    validate_process,
     validate_resources,
 )
 from .runtime_builders import RunLog
@@ -99,6 +100,7 @@ _CANCELLING_MEMBERS = (
     "lease_seconds",
     "workdir",
     "started_at",
+    "process",
     "operator",
     "operator_key",
     "operator_reason",
@@ -999,17 +1001,20 @@ class TaskManager:
     ) -> Marker:
         pause_member_present = updates.has("pause_requested")
         pause_requested = updates.pause_requested
+        current: StateFrame | None = None
         if kind in {"ready", "waiting", "paused"} and not pause_member_present:
             try:
                 current = self._read_frame(marker)
             except (WorkflowError, OSError):
                 current = None
-            if current is not None:
+            if current is not None and not pause_member_present:
                 pause_member_present = current.has("pause_requested")
                 pause_requested = current.pause_requested
         if kind in {"ready", "waiting"} and pause_member_present:
             retained = {name: value for name, value in updates.members.items() if name != "pause_requested"}
             if pause_requested is not None:
+                if marker.kind == "committing" and "process" not in retained:
+                    raise FormatError("a deferred pause from committing must retain its process identity")
                 updates = StateFrame.replace(
                     StateFrame(retained),
                     operator=pause_requested.get("operator"),
@@ -1618,17 +1623,6 @@ class TaskManager:
             stdio_fd = -1
             os.close(gate_read)
             gate_read = -1
-            write_json_atomic(
-                control / "process.json",
-                {
-                    "pid": process.pid,
-                    "process_group": process.pid,
-                    "hostname": self.hostname,
-                    "launched_at": utc_now(),
-                    "launch_gated": True,
-                },
-                durable=self.workspace.durable,
-            )
             running = self._transition(
                 marker,
                 "running",
@@ -1641,6 +1635,12 @@ class TaskManager:
                     started_at=utc_now(),
                     workdir=str(workdir.relative_to(payload)),
                     attempt_control=control_name,
+                    process={
+                        "pid": process.pid,
+                        "process_group": process.pid,
+                        "hostname": self.hostname,
+                        "launched_at": utc_now(),
+                    },
                     reason="launched",
                 ),
             )
@@ -1851,12 +1851,12 @@ class TaskManager:
 
         age = self._heartbeat_age(state.manager_id)
         grace = lease_seconds * self.takeover_grace_factor
-        if self._attempt_writer_dead(marker, state):
+        if self._attempt_writer_dead(state):
             return {"evidence": "writer_process_dead", "heartbeat_age_seconds": age}
         if job.workdir_mode == "persistent":
             if self.unsafe_persistent_takeover:
                 return {"evidence": "unsafe_persistent_takeover", "heartbeat_age_seconds": age, "unsafe": True}
-            writer_host = self._recorded_writer_host(marker, state)
+            writer_host = self._recorded_writer_host(state)
             where = f" on host {writer_host}" if writer_host and writer_host != self.hostname else ""
             self._report_anomaly(
                 f"persistent_takeover:{marker.job_key}",
@@ -1988,7 +1988,7 @@ class TaskManager:
         deadline_expired = (
             isinstance(deadline, (int, float)) and not isinstance(deadline, bool) and time.time() >= deadline
         )
-        if not self._attempt_writer_dead(marker, state) and not deadline_expired:
+        if not self._attempt_writer_dead(state) and not deadline_expired:
             return False
         return self._reconcile_environment_log_absence(marker_path)
 
@@ -2040,20 +2040,23 @@ class TaskManager:
         attempt_control = state.attempt_control
         if attempt_id is None or attempt_control is None:
             raise FormatError("a running frame must name its attempt and attempt control directory")
+        committing = StateFrame.replace(
+            state.carried(),
+            manager_id=self.manager_id,
+            writer_id=self.writer.writer_id,
+            attempt_id=attempt_id,
+            attempt_control=attempt_control,
+            outcome_action=str(outcome["action"]),
+            child_digests=child_digests,
+            child_labels=child_labels,
+            reason="outcome_published",
+        )
+        if "process" in state.members:
+            committing = StateFrame.replace(committing, process=state.members["process"])
         self._transition(
             marker,
             "committing",
-            StateFrame.replace(
-                state.carried(),
-                manager_id=self.manager_id,
-                writer_id=self.writer.writer_id,
-                attempt_id=attempt_id,
-                attempt_control=attempt_control,
-                outcome_action=str(outcome["action"]),
-                child_digests=child_digests,
-                child_labels=child_labels,
-                reason="outcome_published",
-            ),
+            committing,
         )
         # The attempt has published everything it will ever publish and its
         # marker has moved, so the local process is finishing rather than
@@ -2194,17 +2197,16 @@ class TaskManager:
         age = self._heartbeat_age(manager_id)
         return age is not None and age <= lease_seconds
 
-    def _recorded_writer_host(self, marker: Marker, state: StateFrame) -> str | None:
+    def _recorded_writer_host(self, state: StateFrame) -> str | None:
         """Return the host that launched the recorded attempt, when it named one."""
 
-        try:
-            process = read_json(self._attempt_control_path(marker, state) / "process.json")
-        except (FormatError, WorkflowError, OSError):
+        process = validate_process(state.members.get("process"))
+        if process is None:
             return None
-        host = process.get("hostname")
-        return host if isinstance(host, str) and host else None
+        host = process["hostname"]
+        return host if isinstance(host, str) else None
 
-    def _attempt_writer_dead(self, marker: Marker, state: StateFrame) -> bool:
+    def _attempt_writer_dead(self, state: StateFrame) -> bool:
         """Report whether the process of the recorded attempt is provably gone.
 
         Only a process this host can ask about proves anything, so an attempt
@@ -2213,23 +2215,16 @@ class TaskManager:
         justifies.
         """
 
-        try:
-            process_path = self._attempt_control_path(marker, state) / "process.json"
-        except FormatError as exc:
-            _LOGGER.warning("cannot locate the attempt control directory of %s: %s", marker.job_key, exc)
-            return False
-        try:
-            process = read_json(process_path)
-        except WorkflowError:
+        process = validate_process(state.members.get("process"))
+        if process is None:
             return False
         if process.get("hostname") != self.hostname:
             return False
         try:
-            pid = int(process["pid"])
-            os.kill(pid, 0)
+            os.kill(cast(int, process["pid"]), 0)
         except ProcessLookupError:
             return True
-        except (KeyError, TypeError, ValueError, PermissionError):
+        except PermissionError:
             return False
         return False
 
@@ -2508,8 +2503,8 @@ class TaskManager:
     def _finish_cancellation(self, marker: Marker, state: StateFrame) -> bool:
         return _manager_cancellation.finish(self, marker, state, _CANCELLING_MEMBERS, utc_now=utc_now, logger=_LOGGER)
 
-    def _cancellation_evidence(self, marker: Marker, state: StateFrame) -> dict[str, object] | None:
-        return _manager_cancellation.evidence(self, marker, state, read_json=read_json, utc_now=utc_now)
+    def _cancellation_evidence(self, state: StateFrame) -> dict[str, object] | None:
+        return _manager_cancellation.evidence(self, state, utc_now=utc_now)
 
     def _report_unverifiable_cancellation(self, marker: Marker, state: StateFrame) -> None:
         _manager_cancellation.report_unverifiable(
@@ -2537,12 +2532,10 @@ class TaskManager:
             if local.process.poll() is None:
                 self._terminate_process(local.process.pid, signal_number)
             return
-        try:
-            process = read_json(self._attempt_control_path(marker, state) / "process.json")
-            if process.get("hostname") == self.hostname:
-                self._terminate_process(int(process["process_group"]), signal_number)
-        except (FormatError, WorkflowError, KeyError, TypeError, ValueError):
+        process = validate_process(state.members.get("process"))
+        if process is None or process["hostname"] != self.hostname:
             return
+        self._terminate_process(cast(int, process["process_group"]), signal_number)
 
     @staticmethod
     def _process_group_alive(process_group: int) -> bool:

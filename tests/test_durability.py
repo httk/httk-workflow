@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+import httk.workflow.manager as manager_module
+import httk.workflow.workspace as workspace_module
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.runtime import AttemptContext
@@ -236,6 +238,63 @@ def test_a_nondurable_outcome_publish_performs_no_draft_syncs(tmp_path: Path, mo
     assert not any(event[0] == "fsync" and "outcome.tmp" in event[1] for event in events)
     control_real = os.path.realpath(control)
     assert not any(event[0] == "fsync" and event[1] == control_real for event in events)
+
+
+def test_a_durable_running_marker_is_synced_before_the_launch_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=True)
+    payload, _ = _prepare(tmp_path / "source", _DURABLE_RUNNER)
+    workspace.submit(payload, "project/jobs")
+
+    events = _install_spies(monkeypatch)
+    real_fsync_directory = workspace_module.fsync_directory
+
+    def spy_fsync_directory(path: Path) -> None:
+        events.append(("fsync_directory", os.path.realpath(path)))
+        real_fsync_directory(path)
+
+    monkeypatch.setattr(workspace_module, "fsync_directory", spy_fsync_directory)
+    real_write = manager_module.os.write
+
+    def spy_write(fd: int, data: bytes) -> int:
+        if data == b"R":
+            events.append(("gate", str(fd)))
+        return real_write(fd, data)
+
+    monkeypatch.setattr(manager_module.os, "write", spy_write)
+    _run(workspace)
+
+    running_renames = [
+        index
+        for index, event in enumerate(events)
+        if event[0] == "rename" and f"{os.sep}state{os.sep}running{os.sep}" in event[2]
+    ]
+    assert len(running_renames) == 1
+    running_rename = running_renames[0]
+    marker_directory = os.path.realpath(Path(events[running_rename][2]).parent)
+    source_directory = os.path.realpath(Path(events[running_rename][1]).parent)
+    marker_syncs = [
+        index
+        for index, event in enumerate(events)
+        if running_rename < index and event[0] == "fsync_directory" and event[1] == marker_directory
+    ]
+    gate_writes = [index for index, event in enumerate(events) if event[0] == "gate"]
+    assert len(gate_writes) == 1
+    source_syncs = [
+        index
+        for index, event in enumerate(events)
+        if running_rename < index and event[0] == "fsync_directory" and event[1] == source_directory
+    ]
+    assert marker_syncs and source_syncs
+    journal_syncs = [
+        index
+        for index, event in enumerate(events[:running_rename])
+        if event[0] == "fsync" and f"{os.sep}journal{os.sep}" in event[1]
+    ]
+    assert journal_syncs
+    assert max(journal_syncs) < running_rename < min(marker_syncs) < gate_writes[0]
+    assert max(journal_syncs) < running_rename < min(source_syncs) < gate_writes[0]
 
 
 # ---------------------------------------------------------------------------

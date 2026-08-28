@@ -5,19 +5,20 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from .errors import FormatError, WorkflowError
-from .models import StateFrame
+from .models import StateFrame, validate_process
 
 
 def evidence(
     manager: Any,
-    marker: Any,
     state: Any,
     *,
-    read_json: Any,
     utc_now: Any,
 ) -> dict[str, object] | None:
     """Assess whether the fenced attempt is proven to have stopped."""
+
+    process = validate_process(state.members.get("process"))
+    if process is None:
+        return None
 
     attempt_id = state.attempt_id or ""
     local = manager._running.get(attempt_id)
@@ -32,16 +33,9 @@ def evidence(
             "exit_status": exit_status,
             "verified_at": utc_now(),
         }
-    try:
-        process = read_json(manager._attempt_control_path(marker, state) / "process.json")
-    except (FormatError, WorkflowError):
-        return {"verified": "no_launched_process", "verified_at": utc_now()}
     if process.get("hostname") != manager.hostname:
         return None
-    try:
-        group = int(process["process_group"])
-    except (KeyError, TypeError, ValueError):
-        return {"verified": "no_launched_process", "verified_at": utc_now()}
+    group = process["process_group"]
     if manager._process_group_alive(group):
         return None
     return {
@@ -85,7 +79,7 @@ def finish(manager: Any, marker: Any, state: Any, members: tuple[str, ...], *, u
             extra=manager._event("cancel_kill", marker, attempt_id=attempt_id),
         )
         manager._terminate_attempt(marker, state, signal.SIGKILL)
-    proof = manager._cancellation_evidence(marker, state)
+    proof = manager._cancellation_evidence(state)
     if proof is None:
         manager._report_unverifiable_cancellation(marker, state)
         return False
@@ -165,7 +159,13 @@ def report_unverifiable(
         logger.debug("cancellation of %s is still unverifiable here", marker.job_key)
         return
     manager._cancel_unverified.add(attempt_id)
-    detail = "its process is recorded on another host, so this manager cannot prove that it stopped"
+    process = state.members.get("process")
+    if isinstance(process, Mapping):
+        detail = "its process identity is missing or malformed, so this manager cannot prove that it stopped"
+        if process.get("hostname") != manager.hostname:
+            detail = "its process is recorded on another host, so this manager cannot prove that it stopped"
+    else:
+        detail = "its running frame has no process identity, so this manager cannot prove that it stopped"
     logger.warning(
         "cancellation of %s is not finished: %s",
         marker.job_key,

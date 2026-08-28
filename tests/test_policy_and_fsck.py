@@ -501,6 +501,58 @@ def test_fsck_never_touches_a_marker_whose_manager_is_still_alive(tmp_path: Path
     assert workspace.read_state(repaired)["manager_id"] == manager_id
 
 
+def test_fsck_repaired_running_frame_without_process_cannot_be_cancelled_as_stopped(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path)
+    manager_id = str(uuid.uuid4())
+    marker = _chain(
+        workspace,
+        workspace.submit(payload, "jobs"),
+        [
+            ("ready", {"reason": "submitted"}),
+            ("claimed", {"reason": "claimed", "manager_id": manager_id, "lease_seconds": 1.0}),
+            ("running", {"reason": "launched", "manager_id": manager_id}),
+        ],
+    )
+    _corrupt_frame(workspace, marker)
+    heartbeat = workspace.control / "managers" / manager_id / "heartbeat.json"
+    heartbeat.parent.mkdir(parents=True)
+    heartbeat.write_text(
+        json.dumps({"manager_id": manager_id, "updated_at": "2020-01-01T00:00:00.000000Z"}),
+        encoding="utf-8",
+    )
+
+    report = workspace.check(repair=True)
+    assert report.findings[0].action == "repaired"
+    repaired = workspace.find_marker_by_id(job_id)
+    assert repaired is not None and repaired.kind == "running"
+    workspace.publish_request(
+        {
+            "format": "httk-workflow-request",
+            "format_version": 2,
+            "request_id": str(uuid.uuid4()),
+            "job_id": repaired.job_id,
+            "job_key": repaired.job_key,
+            "placement": repaired.placement.as_posix(),
+            "expected_generation": repaired.generation,
+            "expected_record_ref": repaired.record_ref,
+            "action": "cancel",
+            "operator": "tester",
+            "reason": "damaged process identity",
+            "created_at": util_module.utc_now(),
+        }
+    )
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.tick()
+
+    cancelling = workspace.find_marker_by_id(job_id)
+    assert cancelling is not None and cancelling.kind == "cancelling"
+    state = workspace.read_state(cancelling)
+    assert state["cancellation"]["verified"] is None
+    assert state["cancellation"]["problem"] == "unverifiable_here"
+
+
 def test_fsck_reports_an_uninterpretable_state_entry(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, _ = _payload(tmp_path)

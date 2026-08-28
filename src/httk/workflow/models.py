@@ -104,6 +104,33 @@ _MODULE_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*
 _UNSAFE_PATH_COMPONENTS = frozenset({"", ".", "..", WORKSPACE_DIRECTORY})
 
 
+def validate_process(value: object) -> Mapping[str, object] | None:
+    """Return a valid recorded process identity, or ``None`` if malformed.
+
+    :param value: The process identity to validate.
+    :return: The identity when all required members have their exact protocol types.
+    """
+
+    if not isinstance(value, Mapping):
+        return None
+    pid = value.get("pid")
+    process_group = value.get("process_group")
+    hostname = value.get("hostname")
+    launched_at = value.get("launched_at")
+    if (
+        type(pid) is not int
+        or pid <= 0
+        or type(process_group) is not int
+        or process_group <= 0
+        or not isinstance(hostname, str)
+        or not hostname
+        or not isinstance(launched_at, str)
+        or not launched_at
+    ):
+        return None
+    return value
+
+
 def canonical_uuid(value: object, name: str = "id") -> str:
     """Validate and return a canonical lowercase UUID.
 
@@ -977,6 +1004,7 @@ class StateFrame:
         lease_seconds: float = _UNSET,
         matched_pool: str = _UNSET,
         matched_capabilities: Sequence[str] = _UNSET,
+        process: Mapping[str, object] = _UNSET,
         started_at: str = _UNSET,
         workdir: str = _UNSET,
         outcome_action: str = _UNSET,
@@ -1026,6 +1054,7 @@ class StateFrame:
         :param lease_seconds: The claim lease duration.
         :param matched_pool: The pool selected for the claim.
         :param matched_capabilities: The capabilities matched by the claim.
+        :param process: The launched process identity.
         :param started_at: The attempt start timestamp.
         :param workdir: The attempt workdir.
         :param outcome_action: The published outcome action.
@@ -1070,6 +1099,7 @@ class StateFrame:
             ("lease_seconds", lease_seconds),
             ("matched_pool", matched_pool),
             ("matched_capabilities", matched_capabilities),
+            ("process", process),
             ("started_at", started_at),
             ("workdir", workdir),
             ("outcome_action", outcome_action),

@@ -153,6 +153,16 @@ def context_children(join_summary: object) -> list[dict[str, object]]:
     return [dict(item) for item in join_summary if isinstance(item, Mapping)]
 
 
+def _retain_deferred_pause_process(state: StateFrame, progress: StateFrame) -> StateFrame:
+    """Retain the committing attempt identity when a pause is deferred."""
+
+    if state.pause_requested is None:
+        return progress
+    if "process" not in state.members:
+        raise FormatError("a deferred pause requires the committing process identity")
+    return StateFrame.replace(progress, process=state.members["process"])
+
+
 def process_committing(manager: Any, marker: Marker) -> None:
     """Apply a validated committing outcome through the manager's effects."""
 
@@ -202,6 +212,7 @@ def process_committing(manager: Any, marker: Marker) -> None:
     declared_steps = manager._declared_runner_steps(marker, outcome)
     if declared_steps is not None:
         progress = StateFrame.replace(progress, runner_steps=declared_steps)
+    progress = _retain_deferred_pause_process(state, progress)
     priority_raw = outcome.get("priority")
     next_priority = (
         marker.priority if priority_raw is None else require_int(priority_raw, "outcome.priority", maximum=999)
@@ -269,10 +280,13 @@ def process_committing(manager: Any, marker: Marker) -> None:
             priority=next_priority,
         )
     elif action == "pause":
+        paused = progress
+        if "process" in state.members:
+            paused = StateFrame.replace(paused, process=state.members["process"])
         manager._transition(
             marker,
             "paused",
-            StateFrame.replace(progress, pause=outcome.get("pause"), reason="step_paused"),
+            StateFrame.replace(paused, pause=outcome.get("pause"), reason="step_paused"),
             priority=next_priority,
         )
     else:
@@ -292,6 +306,7 @@ def advance(
     resources: Mapping[str, int] | None = None,
     priority: int | None = None,
 ) -> None:
+    progress = _retain_deferred_pause_process(state, progress)
     activation_ordinal = (state.activation_ordinal if state.activation_ordinal is not None else 1) + 1
     maximum = job.retry_policy.maximum_activations
     if maximum is not None and activation_ordinal > maximum:
@@ -333,6 +348,7 @@ def retry(
     takeover_evidence: Mapping[str, object] | None = None,
     priority: int | None = None,
 ) -> None:
+    progress = _retain_deferred_pause_process(state, progress)
     current_attempts = state.attempt_ordinal if state.attempt_ordinal is not None else 1
     maximum = job.retry_policy.maximum_attempts_per_activation
     if maximum is not None and current_attempts >= maximum:
@@ -429,6 +445,8 @@ def handle_attempt_failure(
             manager._retry(marker, job, state, progress, code, unclean=unclean, takeover_evidence=takeover_evidence)
             return
         failed = StateFrame.replace(progress, failure=failure(code, message, exit_status=exit_status), reason=code)
+        if "process" in state.members:
+            failed = StateFrame.replace(failed, process=state.members["process"])
         if takeover_evidence is not None:
             failed = StateFrame.replace(failed, takeover_evidence=dict(takeover_evidence))
         manager._transition(marker, "failed", failed)
@@ -483,7 +501,9 @@ def resume(manager: Any, logger: Any) -> bool:
                     marker,
                     "failed",
                     StateFrame.replace(
-                        state.carried(),
+                        StateFrame.replace(state.carried(), process=state.members["process"])
+                        if "process" in state.members
+                        else state.carried(),
                         failure=manager._failure(code, str(exc)),
                         reason="commit_failed",
                     ),

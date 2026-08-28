@@ -18,6 +18,7 @@ from httk.core.cli import CLIContext
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.introspection import explain_job, resolve_job
+from httk.workflow.journal import JournalWriter
 from httk.workflow.models import StateFrame
 from httk.workflow.workflow_cli import command
 
@@ -254,10 +255,35 @@ def test_why_reports_a_foreign_host_persistent_writer_as_blocked(tmp_path: Path)
         marker = resolve_job(workspace, job_id)
         assert marker.kind == "running"
         state = StateFrame.from_mapping(workspace.read_state(marker))
-        control = workspace.payload_path(marker.placement, marker.job_key) / str(state.attempt_control)
-        process = json.loads((control / "process.json").read_text())
+        process = dict(state.members["process"])
         process["hostname"] = "faraway-host"
-        (control / "process.json").write_text(json.dumps(process))
+        with JournalWriter(workspace.control) as writer:
+            marker = workspace.transition(
+                writer,
+                marker,
+                "running",
+                {
+                    **state.select(
+                        (
+                            "step",
+                            "activation_id",
+                            "activation_ordinal",
+                            "attempt_id",
+                            "attempt_ordinal",
+                            "total_attempts",
+                            "data_generation",
+                            "manager_id",
+                            "writer_id",
+                            "attempt_control",
+                            "lease_seconds",
+                            "started_at",
+                            "workdir",
+                        )
+                    ).as_mapping(),
+                    "process": process,
+                    "reason": "foreign_writer",
+                },
+            )
         diagnosis = explain_job(workspace, marker)
         manager._signal_running_attempts(signal.SIGKILL)
     assert diagnosis.blocked

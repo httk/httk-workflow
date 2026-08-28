@@ -22,6 +22,7 @@ from ..models import (
     Marker,
     normalize_placement,
     parse_package_runner,
+    validate_process,
 )
 from ..workspace import Workspace
 from ._reading import (
@@ -846,7 +847,7 @@ def _breadcrumb_check(control: Path | None, report: _Diagnosing) -> None:
         report.hint(f"read the complete traceback in {control / 'error.json'}")
 
 
-def _persistent_writer_host(control: Path | None) -> str | None:
+def _persistent_writer_host(state: Mapping[str, object]) -> str | None:
     """Return the foreign host that launched a persistent attempt, if any.
 
     A persistent-workdir attempt whose writer ran on another host cannot be
@@ -856,14 +857,11 @@ def _persistent_writer_host(control: Path | None) -> str | None:
     one.
     """
 
-    if control is None:
+    process = validate_process(state.get("process"))
+    if process is None:
         return None
-    try:
-        process = read_json(control / "process.json")
-    except WorkflowError:
-        return None
-    host = _optional_string(process.get("hostname"))
-    if host is None or host == socket.gethostname():
+    host = process["hostname"]
+    if not isinstance(host, str) or host == socket.gethostname():
         return None
     return host
 
@@ -983,7 +981,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
         )
         blocked = not alive
         foreign_host = (
-            _persistent_writer_host(control)
+            _persistent_writer_host(state)
             if kind == "running" and not alive and job is not None and job.workdir_mode == "persistent"
             else None
         )
@@ -1151,7 +1149,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
                 "termination evidence",
                 None,
                 "no exit has been verified yet; acceptable evidence is process_exited, "
-                "process_group_absent, no_launched_process, or no_live_attempt",
+                "process_group_absent, or no_live_attempt",
             )
         if control is not None:
             report.check(
