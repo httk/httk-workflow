@@ -914,10 +914,12 @@ to the journal summarizing the same counts, so the collection is itself part of
 the workspace's durable history.
 
 A retention limit that is not configured means *keep*, so on a workspace whose
-policy is empty the command only prunes what cannot carry information: empty
-placement mirrors below the state kinds, staging entries abandoned for a day,
-and month-old request leftovers — those claimed by a manager that is gone and
-those a manager explicitly retired. Configure the limits to collect the rest:
+policy is empty the command only prunes what cannot carry information, plus
+terminal markers whose payloads the operator removed: empty placement mirrors
+below the state kinds, staging entries abandoned for a day, month-old request
+leftovers — those claimed by a manager that is gone and those a manager
+explicitly retired — and eligible `removed_jobs`. Configure the limits to
+collect the rest:
 
 ```console
 httk workflow workspace policy set --key retention.attempt_control_days --value 14 WORKSPACE
@@ -931,18 +933,30 @@ httk workflow workspace policy set --key retention.journal_days --value 90 WORKS
 | `transaction_trash` | `trash_days` | trees a replayed transaction moved aside, once the job left `committing` |
 | `retired_bundles` | `trash_days` | acknowledged transfer bundles below `transfers/retired/` |
 | `transfer_records` | `trash_days` | per-transfer receipts below `transfers/acks/` and `transfers/imported/` |
+| `removed_jobs` | always safe | state markers for terminal jobs whose payload directories are absent, unless a non-terminal parent still references them as join children |
 | `journal_segments` | `journal_days` | segments no current marker references, written by a writer no live manager owns |
 | `manager_directories` | `journal_days` | directories of dead managers whose segments are gone |
 | `placement_directories` | always safe | empty placement mirrors below `state/<kind>/` |
 | `tmp_entries` | always safe | staging entries older than 24 hours |
 | `retired_requests` | always safe | requests claimed over 30 days ago by a manager now gone, and requests retired over 30 days ago with their `.retirement` records |
 
+To remove a finished (`succeeded`, `failed`, or `cancelled`) job, remove its
+payload directory with `rm -r` (use the path from `job show`), then run
+`httk workflow workspace gc WORKSPACE`, or wait for a manager started with
+`--gc-interval`; GC clears the orphaned state entry. A non-terminal job must be
+cancelled first with `job request cancel`. Remove children only when their
+parent is terminal: GC's join guard is best-effort, not a lock, and a parent
+that publishes a join during the unbounded TOCTOU window before unlinking may
+observe a missing child and fail or stall. This is a scheduling-correctness
+consequence, not payload data loss. For a non-terminal marker whose payload is
+absent, `fsck` reports `payload_missing`.
+
 The collector never touches the quarantine, a sealed transfer bundle, a
-persistent workdir, a payload beyond its aged attempt-control directories, any
-marker, a segment a current marker references, a manager that is still
-heartbeating, or the runner store. Removal is bottom-up and rewrites no state,
-so a collection killed halfway leaves the workspace exactly as consistent as it
-was, and running it again simply finishes the job.
+persistent workdir, a payload beyond its aged attempt-control directories, a
+non-terminal marker, a segment a current marker references, a manager that is
+still heartbeating, or the runner store. Removal is bottom-up and rewrites no
+state, so a collection killed halfway leaves the workspace exactly as
+consistent as it was, and running it again simply finishes the job.
 
 Collecting journal segments has one honest cost. Only the segment a marker
 points into is protected, so the deep history of an old job goes with the

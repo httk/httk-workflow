@@ -9,15 +9,17 @@ transaction replaced, an intact bundle for every transfer already acknowledged
 — and on a quota'd HPC filesystem that is what fails first.
 
 This module is the separate, explicit collector the specification asks for. It
-is driven entirely by ``policy.retention``: a limit that is not configured
-means *keep*, so a workspace whose operator has said nothing is only ever
+is driven by ``policy.retention`` for aged categories: a limit that is not
+configured means *keep*. A workspace whose operator has said nothing is still
 tidied of things that cannot carry information at all — empty placement
-mirrors, abandoned staging entries, and long-dead request receipts.
+mirrors, abandoned staging entries, and long-dead request receipts — plus the
+one conditional case: a terminal marker whose payload the operator removed.
 
 Everything here is conservative by construction. It never touches the
 quarantine, a sealed transfer bundle, a persistent workdir, a payload beyond
-its aged attempt-control directories, the marker of any job, a journal segment
-a current marker references, the directory of a manager that is still
+its aged attempt-control directories, a marker of any job except a terminal
+job whose payload directory is absent, a journal segment
+that a current marker references, the directory of a manager that is still
 heartbeating, ``runner-builds`` (machine-local rebuildable derived state), or
 the runner store. Removal is bottom-up and mutates no
 workspace state, so a collector that is killed halfway leaves a workspace that
@@ -33,7 +35,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ._util import read_json, timestamp_seconds, utc_now
+from ._manager_joins import children as join_children
+from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
 from .errors import FormatError, WorkflowError
 from .journal import parse_record_ref
 from .models import (
@@ -65,6 +68,7 @@ RETIRED_REQUEST_MAXIMUM_AGE_SECONDS = 30 * 24 * 60 * 60
 #: Every category a report carries, in the order a collection performs them.
 GC_CATEGORIES = (
     "attempt_control",
+    "removed_jobs",
     "transaction_trash",
     "retired_bundles",
     "transfer_records",
@@ -122,6 +126,7 @@ class GcReport:
     :param collected_at: Timestamp at which the report was produced.
     :param retention: Retention settings used for the collection.
     :param categories: Results for each collection category.
+    :param removed_jobs: Job keys whose terminal markers were removed.
     :param record_ref: Journal reference for the collection record, if written.
     :param skipped: Categories or reasons skipped during collection.
     :param skipped_foreign: Foreign entries skipped by category.
@@ -132,6 +137,7 @@ class GcReport:
     collected_at: str
     retention: Mapping[str, object]
     categories: tuple[GcCategory, ...] = ()
+    removed_jobs: tuple[str, ...] = ()
     record_ref: str | None = None
     skipped: tuple[str, ...] = ()
     skipped_foreign: Mapping[str, int] = field(default_factory=dict)
@@ -194,6 +200,7 @@ class GcReport:
             "skipped": list(self.skipped),
             "skipped_foreign": dict(self.skipped_foreign),
             "categories": [category.as_mapping() for category in self.categories],
+            "removed_jobs": list(self.removed_jobs),
             **({} if self.record_ref is None else {"record_ref": self.record_ref}),
         }
 
@@ -366,6 +373,8 @@ class _Collection:
         self._skipped: list[str] = []
         self._skipped_foreign: dict[str, int] = {}
         self._markers: list[Marker] | None = None
+        self._removed_jobs: list[str] = []
+        self._projected_removed: set[str] = set()
         self._live_managers: dict[str, str | None] | None = None
         self._opaque_live_manager = False
         # writer id -> how many of its segments survive this collection, which
@@ -468,13 +477,10 @@ class _Collection:
         modified = _mtime(path)
         return modified is not None and modified <= cutoff
 
-    def _collect(self, category: str, path: Path, *, size: int | None = None) -> None:
+    def _collect(self, category: str, path: Path, *, size: int | None = None) -> bool:
         """Account for one collectable entry and, unless dry, remove it."""
 
-        accumulator = self._accumulators[category]
-        accumulator.candidates += 1
-        accumulator.entries.append(str(path))
-        accumulator.bytes_reclaimed += _tree_bytes(path) if size is None else size
+        self._account_candidate(category, path, size=size)
         foreign = 0
 
         def count_foreign() -> None:
@@ -486,8 +492,18 @@ class _Collection:
             self._skipped_foreign[category] = self._skipped_foreign.get(category, 0) + foreign
             _LOGGER.debug("skipping %s foreign entries below %s", foreign, path)
         if not self.dry_run and removed:
+            accumulator = self._accumulators[category]
             accumulator.removed += 1
             _LOGGER.debug("collected %s entry %s", category, path)
+        return removed
+
+    def _account_candidate(self, category: str, path: Path, *, size: int | None = None) -> None:
+        """Account for a candidate without attempting to remove it."""
+
+        accumulator = self._accumulators[category]
+        accumulator.candidates += 1
+        accumulator.entries.append(str(path))
+        accumulator.bytes_reclaimed += _tree_bytes(path) if size is None else size
 
     def _skip(self, category: str, reason: str) -> None:
         self._skipped.append(f"{category}: {reason}")
@@ -525,6 +541,109 @@ class _Collection:
             for _modified, _name, entry in controls[:-1]:
                 if self._aged(entry, cutoff):
                     self._collect("attempt_control", entry)
+
+    def _join_child_parents(self) -> dict[str, set[str]] | None:
+        """Return non-terminal parents that reference each child job id.
+
+        :return: Child job ids mapped to their non-terminal parent job keys, or
+            ``None`` when a non-terminal marker's current state is unreadable.
+        """
+
+        parents: dict[str, set[str]] = {}
+        for marker in self.markers():
+            if marker.kind in TERMINAL_KINDS:
+                continue
+            try:
+                state = self.workspace.read_state(marker)
+                join = state.get("join")
+                if join is None:
+                    continue
+                if not isinstance(join, Mapping):
+                    raise WorkflowError("state.join is not an object")
+                references = join_children(join)
+                for reference in references:
+                    child_id = reference.get("job_id") if isinstance(reference, Mapping) else None
+                    if not isinstance(child_id, str):
+                        raise WorkflowError("state.join.children contains an invalid child reference")
+                    parents.setdefault(child_id, set()).add(marker.job_key)
+            except (WorkflowError, OSError, TypeError, ValueError) as exc:
+                self._skip("removed_jobs", f"cannot load non-terminal marker state {marker.job_key}: {exc}")
+                return None
+        return parents
+
+    def collect_removed_jobs(self) -> None:
+        """Collect terminal markers whose complete payload was removed.
+
+        A non-terminal parent keeps a referenced child marker alive until the
+        parent is terminal, because the parent may still need to observe that
+        child's state. An unreadable non-terminal state makes the whole
+        category stand down conservatively. After waiting for payload metadata,
+        the parent map and current ``committing`` markers are checked again
+        immediately before unlinking. This is a TOCTOU window of unbounded
+        length in principle: GC may be descheduled between its rescan and the
+        unlink. If a parent publishes a join referencing the removed child in
+        that window, the join observes a missing child and may fail or stall;
+        this is a scheduling-correctness consequence, not payload data loss.
+        The operator rule is to remove children only when their parent is
+        terminal; this guard is best-effort, not a lock.
+        """
+
+        parents = self._join_child_parents()
+        if parents is None:
+            return
+        candidates: list[tuple[Marker, Path]] = []
+        for marker in self.markers():
+            if marker.kind not in TERMINAL_KINDS:
+                continue
+            payload = self.workspace.payload_path(marker.placement, marker.job_key)
+            if not payload.exists():
+                candidates.append((marker, payload))
+        if not candidates:
+            return
+        absent = set(
+            wait_for_paths(
+                (payload for _marker, payload in candidates), deadline_seconds=self.workspace.visibility_deadline
+            )
+        )
+        candidates = [(marker, payload) for marker, payload in candidates if payload in absent]
+        if not candidates:
+            return
+
+        self._markers = list(self.workspace.scan_markers(STATE_KINDS))
+        rescanned = {marker.path: marker for marker in self._markers if marker.kind in TERMINAL_KINDS}
+        candidates = [
+            (
+                rescanned[marker.path],
+                self.workspace.payload_path(rescanned[marker.path].placement, rescanned[marker.path].job_key),
+            )
+            for marker, _payload in candidates
+            if marker.path in rescanned
+        ]
+        if not candidates:
+            return
+        parents = self._join_child_parents()
+        if parents is None:
+            return
+        if any(marker.kind == "committing" for marker in self.markers()):
+            self._skip("removed_jobs", "a marker is currently committing")
+            return
+        for marker, _payload in candidates:
+            parent_keys = parents.get(marker.job_id)
+            if parent_keys:
+                self._account_candidate("removed_jobs", marker.path, size=_entry_bytes(marker.path))
+                parent_text = ", ".join(sorted(parent_keys))
+                self._skip(
+                    "removed_jobs",
+                    f"kept child {marker.job_key}: referenced by non-terminal parent(s) {parent_text}",
+                )
+                continue
+            removed = self._collect("removed_jobs", marker.path, size=_entry_bytes(marker.path))
+            if removed:
+                self._markers = [item for item in self.markers() if item.path != marker.path]
+                if self.dry_run:
+                    self._projected_removed.add(str(marker.path))
+                else:
+                    self._removed_jobs.append(marker.job_key)
 
     def collect_transaction_trash(self) -> None:
         """Collect the trees a replayed transaction moved aside.
@@ -721,7 +840,8 @@ class _Collection:
                 continue
             emptied: set[str] = set()
             for directory, directories, files in os.walk(kind_dir, topdown=False, onerror=lambda _: None):
-                if directory == str(kind_dir) or files:
+                actual_files = [name for name in files if os.path.join(directory, name) not in self._projected_removed]
+                if directory == str(kind_dir) or actual_files:
                     continue
                 if any(os.path.join(directory, name) not in emptied for name in directories):
                     continue
@@ -767,6 +887,7 @@ class _Collection:
         """Perform every category in order and publish the resulting report."""
 
         self.collect_attempt_control()
+        self.collect_removed_jobs()
         self.collect_transaction_trash()
         self.collect_retired_bundles()
         self.collect_transfer_records()
@@ -781,6 +902,7 @@ class _Collection:
             collected_at=utc_now(),
             retention=self.retention.as_mapping(),
             categories=tuple(self._accumulators[name].frozen() for name in GC_CATEGORIES),
+            removed_jobs=tuple(self._removed_jobs),
             skipped=tuple(self._skipped),
             skipped_foreign=dict(self._skipped_foreign),
         )
@@ -804,6 +926,7 @@ class _Collection:
             "retention": dict(report.retention),
             "removed": report.removed,
             "bytes_reclaimed": report.bytes_reclaimed,
+            "removed_jobs": list(report.removed_jobs),
             "skipped_foreign": dict(report.skipped_foreign),
             "categories": {
                 category.name: {
@@ -834,6 +957,7 @@ class _Collection:
             collected_at=report.collected_at,
             retention=report.retention,
             categories=report.categories,
+            removed_jobs=report.removed_jobs,
             record_ref=record_ref,
             skipped=report.skipped,
             skipped_foreign=report.skipped_foreign,
@@ -873,7 +997,8 @@ def collect_garbage(
     retention means keep. The exceptions are the categories that cannot carry
     information — empty placement mirrors, staging entries abandoned for a day,
     and month-old request leftovers, whether claimed by a manager that is gone
-    or explicitly retired — which are collected whatever the policy says.
+    or explicitly retired — plus ``removed_jobs``, which is collected whatever
+    the policy says.
 
     With *dry_run* the workspace is not touched at all and the report describes
     what a real run would have removed. *now* overrides the moment every age is

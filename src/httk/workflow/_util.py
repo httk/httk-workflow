@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -222,7 +222,20 @@ def visibility_attempts(deadline_seconds: float | None = None) -> Iterator[int]:
 def wait_for_path(path: Path, *, deadline_seconds: float | None = None) -> bool:
     """Reopen and retry a path lookup until the visibility deadline expires."""
 
+    return not wait_for_paths((path,), deadline_seconds=deadline_seconds)
+
+
+def wait_for_paths(paths: Iterable[Path], *, deadline_seconds: float | None = None) -> tuple[Path, ...]:
+    """Return paths still absent after one shared metadata visibility window.
+
+    :param paths: Paths to probe together.
+    :param deadline_seconds: Maximum time to spend retrying metadata probes.
+    :return: The paths that remained absent after the final probe.
+    """
+
+    remaining = list(paths)
     for _ in visibility_attempts(deadline_seconds):
-        if path.exists():
-            return True
-    return path.exists()
+        remaining = [path for path in remaining if not path.exists()]
+        if not remaining:
+            break
+    return tuple(path for path in remaining if not path.exists())

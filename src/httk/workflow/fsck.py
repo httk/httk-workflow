@@ -20,10 +20,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ._util import read_json, timestamp_seconds, utc_now
+from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
 from .errors import WorkflowError
 from .journal import JournalFrame, JournalWriter, iter_journal_frames, verify_record
-from .models import STATE_KINDS, Marker
+from .models import STATE_KINDS, TERMINAL_KINDS, Marker
 from .workspace import MarkerFault
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
@@ -47,7 +47,7 @@ ACTIONS = ("reported", "repaired", "quarantined", "skipped_live")
 
 @dataclass(frozen=True)
 class FsckFinding:
-    """Describe one marker that does not resolve to a readable frame.
+    """Describe one marker finding produced by the check.
 
     :param entry: Marker entry that failed inspection.
     :param problem: Stable problem code.
@@ -365,6 +365,9 @@ def check_workspace(
                 detail,
                 extra={"event": "fsck_finding", "entry": str(entry.path), "problem": code},
             )
+            if code == "payload_missing":
+                findings.append(finding)
+                continue
             if not repair:
                 findings.append(finding)
                 continue
@@ -413,22 +416,26 @@ def _inspect(workspace: "Workspace", marker: Marker) -> tuple[str, str] | None:
 
     if marker.record_ref == "init":
         # The only marker without a frame is the one submission creates.
-        if marker.kind == "submitted" and marker.generation == 0:
-            return None
-        return (
-            "identity_mismatch",
-            f"a marker at generation {marker.generation} in {marker.kind} may not reference the initial state",
+        if marker.kind != "submitted" or marker.generation != 0:
+            return (
+                "identity_mismatch",
+                f"a marker at generation {marker.generation} in {marker.kind} may not reference the initial state",
+            )
+    else:
+        verification = verify_record(
+            workspace.control,
+            marker.record_ref,
+            deadline_seconds=workspace.visibility_deadline,
         )
-    verification = verify_record(
-        workspace.control,
-        marker.record_ref,
-        deadline_seconds=workspace.visibility_deadline,
-    )
-    if verification.frame is None:
-        return str(verification.problem), verification.detail
-    mismatch = _identity_problem(workspace, marker, verification.frame)
-    if mismatch is not None:
-        return "identity_mismatch", mismatch
+        if verification.frame is None:
+            return str(verification.problem), verification.detail
+        mismatch = _identity_problem(workspace, marker, verification.frame)
+        if mismatch is not None:
+            return "identity_mismatch", mismatch
+    if marker.kind not in TERMINAL_KINDS | {"relocating", "transferring"}:
+        payload = workspace.payload_path(marker.placement, marker.job_key)
+        if wait_for_paths((payload,), deadline_seconds=workspace.visibility_deadline):
+            return "payload_missing", f"marker payload directory is absent: {payload}"
     return None
 
 

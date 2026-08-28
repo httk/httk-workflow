@@ -177,10 +177,11 @@ httk workflow workspace gc WORKSPACE
 
 It is safe to run against a live workspace: a manager that is still
 heartbeating keeps its own directory and every journal segment it wrote, no
-marker or payload is touched beyond the aged attempt-control directories of
-terminal jobs, and pruning an empty placement mirror that a transition is
-recreating underneath is an ordinary outcome rather than an error. A limit left
-unset means keep. See
+non-terminal marker or payload is touched beyond the aged attempt-control
+directories of terminal jobs; GC may remove a terminal marker whose payload
+the operator removed. Pruning an empty placement mirror that a transition is
+recreating underneath is an ordinary outcome rather than an error. A limit
+left unset means keep. See
 [the command guide](workflow_cli.md#freeing-disk) for the full category table
 and for what collecting journal history costs.
 
@@ -197,6 +198,15 @@ never between observing a marker and acting on it, obeying exactly the same
 logged rather than allowed to disturb scheduling. Keep the interval long: a
 collection walks the state tree and the journal directory, which is work the
 scheduling passes do not need done often.
+
+To remove a finished (`succeeded`, `failed`, or `cancelled`) job, remove the
+payload directory named by `job show` with `rm -r`, then run
+`httk workflow workspace gc WORKSPACE`, or let a manager started with
+`--gc-interval` perform it. Cancel a non-terminal job first with `job request
+cancel`, and remove children only when their parent is terminal: GC's join
+guard is best-effort, not a lock, and a parent that publishes a join during the
+unbounded TOCTOU window before unlinking may observe a missing child and fail
+or stall. This is a scheduling-correctness consequence, not payload data loss.
 
 ## Filesystem visibility
 
@@ -617,7 +627,9 @@ filesystem is never mistaken for damage — to a readable frame whose checksum
 verifies and whose job, kind, and generation agree with the marker name. Each
 problem is reported with a stable code: `missing_segment`, `short_read`,
 `checksum_mismatch`, `reference_mismatch`, `identity_mismatch`,
-`unparseable_name`, and their siblings. Without `--repair` nothing is written.
+`unparseable_name`, `payload_missing`, and their siblings. `payload_missing`
+means a non-terminal marker has no payload; it is always reported and is never
+repaired or quarantined. Without `--repair` nothing is written.
 The command exits `0` when the workspace is clean or everything found was
 repaired, and `1` when something is left for an operator.
 

@@ -11,6 +11,7 @@ that is still heartbeating — are crafted in place, and everything is aged with
 
 import json
 import os
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -24,7 +25,8 @@ from httk.workflow import TaskManager, Workspace
 from httk.workflow import gc as gc_module
 from httk.workflow._util import read_json, utc_now, write_json_atomic
 from httk.workflow.gc import GcReport
-from httk.workflow.journal import parse_record_ref
+from httk.workflow.journal import parse_record_ref, read_record, segment_path
+from httk.workflow.models import Marker
 from httk.workflow.workflow_cli import command
 
 _DAY = 86400.0
@@ -186,6 +188,164 @@ def _sealed_ledger(workspace: Workspace, record_ref: str) -> Path:
         },
     )
     return ledger
+
+
+def _finished_job(workspace: Workspace, root: Path, name: str) -> tuple[str, Marker, Path]:
+    """Submit and finish one job, returning its id, marker, and payload."""
+
+    payload, job_id = _payload(root, name)
+    workspace.submit(payload, "jobs")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    workspace.set_policy({"visibility_deadline_seconds": 0.01})
+    return job_id, marker, workspace.payload_path(marker.placement, marker.job_key)
+
+
+def test_removed_terminal_jobs_are_collected_and_audited(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    job_id, marker, payload = _finished_job(workspace, tmp_path / "source", "removed")
+    shutil.rmtree(payload)
+
+    dry_run = workspace.collect_garbage(dry_run=True)
+    removed = dry_run.category("removed_jobs")
+    assert removed.candidates == 1 and removed.removed == 0
+    assert marker.path.as_posix() in removed.entries
+    assert marker.path.is_file()
+
+    report = workspace.collect_garbage()
+    assert report.category("removed_jobs").removed == 1
+    assert dry_run.category("placement_directories").candidates == report.category("placement_directories").candidates
+    assert report.removed_jobs == (marker.job_key,)
+    assert job_id not in {item.job_id for item in workspace.scan_markers()}
+    assert not marker.path.exists()
+    assert report.record_ref is not None
+    frame = read_record(workspace.control, report.record_ref)
+    assert frame["removed_jobs"] == [marker.job_key]
+
+    second = workspace.collect_garbage()
+    assert second.category("removed_jobs").candidates == 0
+    assert second.removed_jobs == ()
+    assert second.record_ref is None
+
+
+def test_existing_terminal_payload_is_not_a_removed_job_candidate(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    job_id, _marker, payload = _finished_job(workspace, tmp_path / "source", "kept")
+    report = workspace.collect_garbage()
+    assert report.category("removed_jobs").candidates == 0
+    assert workspace.find_marker_by_id(job_id) is not None
+    assert payload.is_dir()
+
+
+def test_non_terminal_marker_without_payload_is_not_collected(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    payload, job_id = _payload(tmp_path / "source", "pending")
+    workspace.submit(payload, "jobs")
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None
+    shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
+
+    report = workspace.collect_garbage()
+    assert report.category("removed_jobs").candidates == 0
+    assert workspace.find_marker_by_id(job_id) is not None
+
+
+def test_removed_join_child_is_kept_until_its_non_terminal_parent_is_terminal(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    child_id, child_marker, child_payload = _finished_job(workspace, tmp_path / "source", "child")
+    parent_payload, parent_id = _payload(tmp_path / "source", "parent")
+    parent_marker = workspace.submit(parent_payload, "jobs")
+    with workspace.open_journal_writer() as writer:
+        workspace.transition(
+            writer,
+            parent_marker,
+            "waiting",
+            {
+                "join": {
+                    "children": [
+                        {
+                            "workspace_id": workspace.workspace_id,
+                            "job_id": child_id,
+                            "job_key": child_marker.job_key,
+                            "placement_hint": child_marker.placement.as_posix(),
+                        }
+                    ],
+                    "condition": "all_terminal",
+                }
+            },
+        )
+    shutil.rmtree(child_payload)
+
+    report = workspace.collect_garbage()
+    category = report.category("removed_jobs")
+    assert category.candidates == 1 and category.removed == 0
+    assert workspace.find_marker_by_id(child_id) is not None
+    assert workspace.find_marker_by_id(parent_id) is not None
+    assert any(child_marker.job_key in reason and "non-terminal parent" in reason for reason in report.skipped)
+
+
+def test_removed_jobs_stands_down_when_a_non_terminal_state_is_unreadable(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    _job_id, terminal_marker, terminal_payload = _finished_job(workspace, tmp_path / "source", "candidate")
+    shutil.rmtree(terminal_payload)
+    parent_payload, _parent_id = _payload(tmp_path / "source", "unreadable-parent")
+    parent_marker = workspace.submit(parent_payload, "jobs")
+    with workspace.open_journal_writer() as writer:
+        parent_marker = workspace.transition(writer, parent_marker, "ready", {})
+    writer_id, segment, _offset, _length, _checksum = parse_record_ref(parent_marker.record_ref)
+    segment_path(workspace.control, writer_id, segment).unlink()
+
+    report = workspace.collect_garbage()
+    assert report.category("removed_jobs").removed == 0
+    assert workspace.find_marker_by_id(terminal_marker.job_id) is not None
+    assert any(reason.startswith("removed_jobs:") for reason in report.skipped)
+
+
+def test_removed_jobs_stands_down_while_a_marker_is_committing(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    _job_id, terminal_marker, terminal_payload = _finished_job(workspace, tmp_path / "source", "candidate")
+    shutil.rmtree(terminal_payload)
+    committing_payload, _committing_id = _payload(tmp_path / "source", "committing")
+    committing_marker = workspace.submit(committing_payload, "jobs")
+    with workspace.open_journal_writer() as writer:
+        committing_marker = workspace.transition(writer, committing_marker, "committing", {})
+
+    report = workspace.collect_garbage()
+    assert report.category("removed_jobs").removed == 0
+    assert workspace.find_marker_by_id(terminal_marker.job_id) is not None
+    assert workspace.find_marker_by_id(committing_marker.job_id) is not None
+    assert any(reason.startswith("removed_jobs:") for reason in report.skipped)
+
+
+def _journal_projection_workspace(root: Path) -> tuple[Workspace, Marker]:
+    """Build a workspace where an aged segment is referenced only by a removed job."""
+
+    workspace = Workspace.initialize(root / "workspace", durable=False)
+    workspace.set_policy({"visibility_deadline_seconds": 0.01, "retention": {"journal_days": 0.0}})
+    payload, _job_id = _payload(root / "source", "journal-projection")
+    marker = workspace.submit(payload, "jobs")
+    with workspace.open_journal_writer() as writer:
+        marker = workspace.transition(writer, marker, "succeeded", {})
+    writer_id, segment, _offset, _length, _checksum = parse_record_ref(marker.record_ref)
+    segment_file = segment_path(workspace.control, writer_id, segment)
+    _age(segment_file, 1)
+    shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
+    return workspace, marker
+
+
+def test_removed_jobs_dry_run_projects_journal_candidates_like_a_real_run(tmp_path: Path) -> None:
+    dry_workspace, dry_marker = _journal_projection_workspace(tmp_path / "dry")
+    real_workspace, real_marker = _journal_projection_workspace(tmp_path / "real")
+
+    dry_report = dry_workspace.collect_garbage(dry_run=True)
+    real_report = real_workspace.collect_garbage()
+    assert dry_report.category("journal_segments").candidates == real_report.category("journal_segments").candidates
+    assert dry_report.category("journal_segments").candidates == 1
+    assert dry_report.removed_jobs == ()
+    assert real_report.removed_jobs == (real_marker.job_key,)
+    assert dry_marker.path.is_file()
 
 
 class _Fixture:
@@ -538,7 +698,7 @@ def test_the_gc_command_prints_a_table_and_json(aged: _Fixture, capsys: pytest.C
     assert command(["workspace", "gc", "--dry-run", root], context) == 0
     printed = capsys.readouterr().out
     assert "category" in printed and "candidates" in printed
-    assert "attempt_control" in printed and "total" in printed
+    assert "attempt_control" in printed and "removed_jobs" in printed and "total" in printed
     assert "dry run: nothing was removed" in printed
     assert aged.old_attempts[0].is_dir()
 
@@ -547,6 +707,7 @@ def test_the_gc_command_prints_a_table_and_json(aged: _Fixture, capsys: pytest.C
     assert document["format"] == "httk-workflow-gc"
     assert document["dry_run"] is False
     assert document["removed"] > 0
+    assert "removed_jobs" in {category["name"] for category in document["categories"]}
     assert not aged.old_attempts[0].exists()
 
     assert command(["workspace", "gc"], context) == 2

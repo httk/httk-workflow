@@ -541,9 +541,12 @@ path. It MUST NOT create a second marker and later delete the first. Therefore:
 - no index-repair process is part of ordinary correctness.
 
 Outside the explicitly recoverable `relocating` and `transferring` states, a
-marker without its payload at the mirrored placement is corruption. A payload
-directory without a marker is unsubmitted temporary/orphan data, not a queued
-job, unless it is a sealed detached bundle containing
+marker without its payload at the mirrored placement is corruption, except for
+the terminal-for-scheduling kinds `succeeded`, `failed`, and `cancelled`. A
+terminal marker without its payload means that an operator removed the finished
+job; garbage collection removes that orphaned marker. A payload directory
+without a marker is unsubmitted temporary/orphan data, not a queued job, unless
+it is a sealed detached bundle containing
 `.httk-transfer/manifest.json` and its marker.
 
 ### State-marker rename
@@ -2473,8 +2476,9 @@ An absent member of `policy.retention` means **keep**. A collector MUST NOT
 prune a category whose limit is unconfigured; a workspace whose operator has
 said nothing therefore loses nothing.
 
-Three categories are exempt because the entries in them cannot carry
-information, and are collected whatever `policy.retention` says:
+These always-safe categories are exempt because the entries in them cannot carry
+information, plus the one conditional case of a terminal marker whose payload
+the operator removed; they are collected whatever `policy.retention` says:
 
 - an empty placement mirror below a state kind, pruned by `rmdir` alone;
 - an entry still sitting in `.httk-workflow/tmp/` or
@@ -2485,6 +2489,16 @@ information, and are collected whatever `policy.retention` says:
 - a request in `.httk-workflow/requests/retired/`, and its `.retirement`
   record, more than 30 days old. A retired request was already decided about
   and is never rescanned, so it is evidence for an operator and nothing else.
+- a terminal marker whose complete payload directory is absent. It is removed
+  as an operator-requested job removal, except when a non-terminal parent's
+  current `state.join.children[*].job_id` references that job; an unreadable
+  non-terminal state frame skips this category conservatively. The final
+  parent/`committing` check is a TOCTOU window of unbounded length in principle
+  because GC may be descheduled before unlinking. A parent that publishes a
+  join referencing the removed child in that window observes a missing child
+  and may fail or stall; this is a scheduling-correctness consequence, not
+  payload data loss. Operators must remove children only when their parent is
+  terminal; the GC guard is best-effort, not a lock.
 
 The remaining categories are gated as follows.
 
@@ -2538,6 +2552,7 @@ journal:
   "retention": {"journal_days": 30},
   "removed": 41,
   "bytes_reclaimed": 918273,
+  "removed_jobs": ["finished--…"],
   "categories": {"attempt_control": {"candidates": 12, "removed": 12, "bytes_reclaimed": 40960}}
 }
 ```

@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 import time
 import types
 import uuid
@@ -336,6 +337,34 @@ def test_fsck_reports_nothing_about_a_healthy_workspace(tmp_path: Path, capsys) 
     context = CLIContext("httk", tmp_path)
     assert command(["workspace", "fsck", "--json", register_ws(context, tmp_path / "workspace")], context) == 0
     assert json.loads(capsys.readouterr().out)[0]["findings"] == []
+
+
+def test_fsck_reports_missing_non_terminal_payload_without_repairing_it(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path)
+    workspace.submit(payload, "jobs")
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None
+    shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
+
+    report = workspace.check(repair=True, quarantine_unrepairable=True)
+    (finding,) = report.findings
+    assert finding.problem == "payload_missing"
+    assert finding.action == "reported"
+    assert marker.path.is_file()
+
+
+def test_fsck_ignores_missing_terminal_payload(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path)
+    workspace.submit(payload, "jobs")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
+
+    assert workspace.check(repair=True).findings == ()
 
 
 def test_fsck_detects_a_corrupted_frame_and_a_deleted_segment(tmp_path: Path) -> None:
