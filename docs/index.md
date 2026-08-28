@@ -46,11 +46,12 @@ directory to a finished relaxation, no runner written and no VASP required.
 **Orchestration and management** — driving and inspecting a workspace
 
 - {doc}`taskmanager` — workspaces, submission, managers, inspection, repair
-- {doc}`workflow_cli` — the whole `httk workflow` tree: projects, config, remotes
+- {doc}`workflow_cli` — the whole `httk workflow` tree: projects, config, remotes, and launchers
 - {doc}`campaigns` — partitioning a very large campaign across many workspaces
 - {doc}`benchmarks` — measured local scale snapshot and benchmark methodology
 - {doc}`collecting` — reading finished jobs back out as records and collected outputs
 - {doc}`adapter_authoring` — reaching a machine the packaged adapters do not cover
+- {doc}`launcher_authoring` — starting managers with a launcher the packaged template does not cover
 - {doc}`reference/index` — the generated API reference
 
 **Migration**
@@ -124,6 +125,7 @@ details/taskmanager
 details/workflow_packages
 details/workflow_cli
 details/adapter_authoring
+details/launcher_authoring
 details/workflow_filesystem_api
 details/httk_v1_migration_guide
 v1_compatibility

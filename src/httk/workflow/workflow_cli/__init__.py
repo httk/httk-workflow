@@ -74,6 +74,14 @@ from ._job import (
     handle_runner_describe,
     handle_runner_publish,
 )
+from ._launcher import (
+    build_launcher_parser,
+    handle_launcher_add,
+    handle_launcher_check,
+    handle_launcher_list,
+    handle_launcher_remove,
+    handle_launcher_show,
+)
 from ._manager import (
     _submit_remote_manager,
     add_manager_run_arguments,
@@ -183,6 +191,7 @@ def build_parser(
     build_config_parser(groups)
     build_project_parser(groups, context)
     build_remote_parser(groups)
+    build_launcher_parser(groups)
     build_transfer_parser(groups)
     build_campaign_parser(groups)
     return parser

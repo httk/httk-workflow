@@ -125,6 +125,8 @@ namespaces = true
   "native/java/*.java",
   "adapter_templates/*/remote.json",
   "adapter_templates/*/adapter",
+  "launch_templates/*/launcher.json",
+  "launch_templates/*/launcher",
 ]
 # The bundled legacy shell runtime is data of the v1 compatibility package it now
 # lives in, so a job whose httk-v1 backend points HTTK_DIR at it finds it wherever

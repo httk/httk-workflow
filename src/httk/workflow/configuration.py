@@ -45,6 +45,7 @@ __all__ = [
     "import_v1_configuration",
     "initialize_config",
     "keys_home",
+    "launchers_home",
     "machine_names",
     "read_config",
     "remotes_home",
@@ -118,6 +119,15 @@ def remotes_home() -> Path:
     """
 
     return config_home() / "remotes"
+
+
+def launchers_home() -> Path:
+    """Return where this user's manager launcher definitions live.
+
+    :return: Per-user manager launcher definition directory.
+    """
+
+    return config_home() / "launchers"
 
 
 def keys_home() -> Path:

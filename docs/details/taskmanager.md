@@ -5,6 +5,11 @@
 Every command below is under `httk workflow …`; see
 [the project and workflow command line](workflow_cli.md) for the complete tree.
 
+A launcher is to starting managers what a remote is to reaching a machine.
+Managers can use the built-in local `process` launcher or a named bundle such as
+the Slurm launcher; this phase exposes the bundles and their checks while the
+workspace `run` integration remains described by the manager command below.
+
 ## Initialize a workspace
 
 `WORKSPACE` is optional: omitting it uses the closest enclosing workspace,

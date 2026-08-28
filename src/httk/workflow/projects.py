@@ -101,6 +101,7 @@ DEFAULT_MANIFEST_EXCLUSIONS = (
     f"{PROJECT_DIRECTORY}/keys/*.seed",
     f"{PROJECT_DIRECTORY}/keys/*.priv",
     f"{PROJECT_DIRECTORY}/remotes/**/credentials*",
+    f"{PROJECT_DIRECTORY}/launchers/**/credentials*",
     f"{PROJECT_DIRECTORY}/computers/**/credentials*",
     f"{PROJECT_DIRECTORY}/manifest.jsonl.bz2",
     # A stale pre-release anchor may remain after a copy or partial migration;
@@ -109,6 +110,7 @@ DEFAULT_MANIFEST_EXCLUSIONS = (
     ".httk-project/keys/*.seed",
     ".httk-project/keys/*.priv",
     ".httk-project/remotes/**/credentials*",
+    ".httk-project/launchers/**/credentials*",
     ".httk-project/computers/**/credentials*",
     ".httk-project/manifest.jsonl.bz2",
     WORKSPACE_DIRECTORY,

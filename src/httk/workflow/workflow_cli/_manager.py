@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 
 from ..adapters import submit_remote_managers
 from ..errors import FormatError
+from ..launchers import split_capacity
 from ..manager import NotIdleError
 from ..models import WORKSPACE_DIRECTORY, validate_resources
 from ._common import *
@@ -482,12 +483,7 @@ def _run_local_manager_children(arguments: argparse.Namespace, root: Path, conte
         for index in range(arguments.count):
             if stopping:
                 break
-            resources = {
-                name: value
-                if name in cli_resources
-                else value // arguments.count + (1 if index < value % arguments.count else 0)
-                for name, value in capacity.items()
-            }
+            resources = split_capacity(capacity, arguments.count, cli_resources)[index]
             child_argv = [
                 sys.executable,
                 "-m",

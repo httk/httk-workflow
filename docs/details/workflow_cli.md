@@ -401,6 +401,20 @@ separately with `workspace init PATH`:
 | `project manifest create [--manifest PATH] PROJECT...` | write signed manifests | |
 | `project manifest verify [OPTIONS] [PROJECT...]` | verify manifests against their trees | `--manifest` (one project only), `--trusted-key` |
 
+### `launcher` — the bundles that start managers
+
+A *launcher* is to starting workflow managers what a remote is to reaching a
+machine. The built-in `process` launcher starts detached local processes; named
+launchers are versioned bundles, resolved project-first and then globally.
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `launcher list` | list manager launchers visible to this project | |
+| `launcher add [OPTIONS] NAME...` | create launchers from a packaged template | `--template`, `--global`, `--non-interactive` |
+| `launcher show [--json] NAME...` | describe launchers and their settings | |
+| `launcher check [OPTIONS] NAME...` | check a launcher's required binaries | `--launcher-timeout` |
+| `launcher remove [--force] NAME...` | remove launcher bundles | |
+
 ### `remote` — the adapters that reach other machines
 
 Named after `git remote`: a *remote* is one machine this project can reach, and
