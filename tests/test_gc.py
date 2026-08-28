@@ -99,7 +99,7 @@ def _age(path: Path, days: float) -> None:
     """Backdate one entry, and everything below it, by *days*."""
 
     when = time.time() - days * _DAY
-    if path.is_dir():
+    if path.is_dir() and not path.is_symlink():
         for child in sorted(path.rglob("*"), reverse=True):
             os.utime(child, (when, when), follow_symlinks=False)
     os.utime(path, (when, when), follow_symlinks=False)
@@ -108,7 +108,7 @@ def _age(path: Path, days: float) -> None:
 def _attempt_directory(payload: Path, *, days: float) -> Path:
     """Add one aged attempt-control directory to a payload."""
 
-    control = payload / f".httk-attempt.{uuid.uuid4()}"
+    control = payload / f"attempts/{uuid.uuid4()}"
     (control / "outcome.ready").mkdir(parents=True)
     (control / "stdout.log").write_text("older attempt\n", encoding="utf-8")
     _age(control, days)
@@ -383,7 +383,7 @@ class _Fixture:
         self.old_attempts = [_attempt_directory(payload, days=30) for payload in self.payloads]
         self.newest_attempts: list[Path] = []
         for payload in self.payloads:
-            existing = sorted(payload.glob(".httk-attempt.*"))
+            existing = sorted(payload.glob("attempts/*"))
             newest = max(existing, key=lambda path: path.stat().st_mtime)
             self.newest_attempts.append(newest)
         # A job that never ran keeps every attempt directory it has, whatever
@@ -709,9 +709,36 @@ def test_the_gc_command_prints_a_table_and_json(aged: _Fixture, capsys: pytest.C
     assert document["removed"] > 0
     assert "removed_jobs" in {category["name"] for category in document["categories"]}
     assert not aged.old_attempts[0].exists()
-
     assert command(["workspace", "gc"], context) == 2
     capsys.readouterr()
+
+
+def test_a_symlinked_control_is_skipped_by_gc(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    payload, job_id = _payload(tmp_path / "source", "job")
+    workspace.submit(payload, "project/symlinked-control")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    installed = workspace.payload_path(marker.placement, marker.job_key)
+    target = tmp_path / "outside-control"
+    target.mkdir()
+    sentinel = target / "must-survive"
+    sentinel.write_text("outside\n", encoding="utf-8")
+    linked = installed / "attempts" / "symlinked-control"
+    linked.symlink_to(target, target_is_directory=True)
+    _age(linked, 30)
+    genuine = next(path for path in (installed / "attempts").iterdir() if not path.is_symlink())
+    workspace.set_policy({"retention": {"attempt_control_days": 0.0}})
+
+    report = workspace.collect_garbage()
+
+    assert linked.is_symlink()
+    assert genuine.is_dir()
+    assert sentinel.read_text(encoding="utf-8") == "outside\n"
+    assert report.category("attempt_control").removed == 0
 
 
 def test_a_collection_report_round_trips_through_its_mapping(aged: _Fixture) -> None:

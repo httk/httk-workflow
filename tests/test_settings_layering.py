@@ -114,8 +114,8 @@ def _attempt_environment(
             parameters=parameters,
         ),
     )
-    control = payload / f".httk-attempt.{uuid.uuid4()}"
-    control.mkdir()
+    control = payload / f"attempts/{uuid.uuid4()}"
+    control.mkdir(parents=True)
     workdir = payload / "run"
     workdir.mkdir()
     (control / "context.json").write_text(

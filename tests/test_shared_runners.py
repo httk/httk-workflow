@@ -119,7 +119,7 @@ def test_workspace_runner_is_published_resolved_staged_and_verified(tmp_path: Pa
         job_root = workspace.payload_path(marker.placement, marker.job_key)
         assert (job_root / "run" / "ran.txt").read_text(encoding="utf-8") == "only"
         # The verified copy below the attempt control directory is what ran.
-        staged = sorted(job_root.glob(".httk-attempt.*/runner"))
+        staged = sorted(job_root.glob("attempts/*/runner"))
         assert len(staged) == 1
         assert staged[0].read_text(encoding="utf-8") == _SUCCEED_RUNNER
         assert stat.S_IMODE(staged[0].stat().st_mode) == 0o500
@@ -170,7 +170,7 @@ def test_an_installed_runner_tree_is_pinned_and_staged_whole(tmp_path: Path) -> 
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "succeeded"
     job_root = workspace.payload_path(marker.placement, marker.job_key)
-    staged = sorted(job_root.glob(".httk-attempt.*/runner"))
+    staged = sorted(job_root.glob("attempts/*/runner"))
     assert len(staged) == 1 and staged[0].is_dir()
     assert {item.name for item in staged[0].iterdir()} == {"run", "outcome.py"}
 
@@ -340,7 +340,7 @@ def test_workspace_runner_tree_is_staged_and_verified_by_manager(tmp_path: Path)
     marker = workspace.find_marker_by_id(job.id)
     assert marker is not None and marker.kind == "succeeded"
     job_root = workspace.payload_path(marker.placement, marker.job_key)
-    staged = sorted(job_root.glob(".httk-attempt.*/runner"))
+    staged = sorted(job_root.glob("attempts/*/runner"))
     assert len(staged) == 1 and staged[0].is_dir()
     assert (staged[0] / "run").is_file()
 

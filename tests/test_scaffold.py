@@ -704,7 +704,17 @@ def test_a_campaign_publishes_one_runner_and_yields_jobs_lazily(workspace: Works
 def test_a_staged_name_lands_where_the_runner_reads_it(workspace: Workspace, structure: Path, tmp_path: Path) -> None:
     assert payload_relative("POSCAR").as_posix() == "files/POSCAR"
     assert payload_relative("inputs/potcars/POTCAR").as_posix() == "inputs/potcars/POTCAR"
-    for refused in ("", "../escape", "/absolute/POSCAR", "job.json", ".httk-job/state.json"):
+    assert payload_relative("files/logs/x").as_posix() == "files/logs/x"
+    assert payload_relative("files/job.json").as_posix() == "files/job.json"
+    for refused in (
+        "",
+        "../escape",
+        "/absolute/POSCAR",
+        ".httk-job/state.json",
+        "attempts/attempt",
+        "logs/x",
+        "attempts/x",
+    ):
         with pytest.raises(ValueError):
             payload_relative(refused)
 
@@ -713,11 +723,12 @@ def test_a_staged_name_lands_where_the_runner_reads_it(workspace: Workspace, str
     job = new_job(
         workspace,
         "vasp-relax",
-        files={"POSCAR": structure, "INCAR": incar, "reference/notes.txt": incar},
+        files={"POSCAR": structure, "INCAR": incar, "reference/notes.txt": incar, "files/logs/x": incar},
         tag="staged",
     )
     assert (job.payload / "files" / "INCAR").read_text(encoding="utf-8") == "ENCUT = 300\n"
     assert (job.payload / "reference" / "notes.txt").is_file()
+    assert (job.payload / "files" / "logs" / "x").read_text(encoding="utf-8") == "ENCUT = 300\n"
 
     # A directory and a file that is not there are refused before anything is
     # submitted, so a refused scaffolding leaves no half job behind.

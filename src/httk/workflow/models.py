@@ -51,10 +51,12 @@ ACTIVE_STATE_KINDS = tuple(kind for kind in CORE_STATE_KINDS if kind not in TERM
 QUIESCENT_KINDS = frozenset({"submitted", "ready", "waiting", "paused", "failed", "succeeded", "cancelled"})
 
 # Payload entries that belong to a runner rather than to the immutable job: the
-# control directory of one attempt, and the state one runner keeps across the
-# attempts and steps of a job. Both live inside the payload because they must
-# travel with it, and neither is part of what the payload digest pins.
-ATTEMPT_CONTROL_PREFIX = ".httk-attempt."
+# control directory of one attempt, the future run-log directory, and the state
+# one runner keeps across the attempts and steps of a job. All live inside the
+# payload because they must travel with it, and none is part of what the payload
+# digest pins.
+ATTEMPTS_DIRECTORY = "attempts"
+LOGS_DIRECTORY = "logs"
 JOB_STATE_DIRECTORY = ".httk-job"
 WORKSPACE_DIRECTORY = ".httk-workspace"
 # Workspace policy: the tunables the specification calls "configured", stored
@@ -146,15 +148,15 @@ def is_payload_private(name: str) -> bool:
     :return: Whether the name is runner-private.
     """
 
-    return name == JOB_STATE_DIRECTORY or name.startswith(ATTEMPT_CONTROL_PREFIX)
+    return name in {ATTEMPTS_DIRECTORY, LOGS_DIRECTORY, JOB_STATE_DIRECTORY}
 
 
 def validate_attempt_control(value: object, name: str = "attempt_control") -> str:
     """Validate one attempt-control directory name read from a state frame.
 
     The name is joined below a job payload to reach the control directory of an
-    attempt, so it is exactly one relative component of the canonical
-    ``.httk-attempt.<attempt-id>`` shape. Validating it before it is joined is
+    attempt, so it is exactly the canonical ``attempts/<attempt-id>`` shape.
+    Validating it before it is joined is
     what keeps a hostile or damaged frame from naming a path outside the job.
 
     :param value: The attempt-control name to validate.
@@ -164,9 +166,11 @@ def validate_attempt_control(value: object, name: str = "attempt_control") -> st
     """
 
     text = require_string(value, name)
-    if not text.startswith(ATTEMPT_CONTROL_PREFIX):
-        raise FormatError(f"{name} must name an {ATTEMPT_CONTROL_PREFIX}<attempt-id> directory")
-    canonical_uuid(text[len(ATTEMPT_CONTROL_PREFIX) :], f"{name} attempt id")
+    prefix = f"{ATTEMPTS_DIRECTORY}/"
+    if not text.startswith(prefix):
+        raise FormatError(f"{name} must name an {prefix}<attempt-id> directory")
+    attempt_id = text[len(prefix) :]
+    canonical_uuid(attempt_id, f"{name} attempt id")
     return text
 
 

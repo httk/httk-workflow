@@ -255,8 +255,8 @@ def _fake_running_attempt(
     marker = workspace.submit(payload, placement)
     job = workspace.load_job(marker)
     attempt_id = str(uuid.uuid4())
-    control = workspace.payload_path(marker.placement, marker.job_key) / f".httk-attempt.{attempt_id}"
-    control.mkdir()
+    control = workspace.payload_path(marker.placement, marker.job_key) / f"attempts/{attempt_id}"
+    control.mkdir(parents=True)
     (control / "process.json").write_text(
         json.dumps(
             {
@@ -284,7 +284,7 @@ def _fake_running_attempt(
                 "data_generation": None,
                 "manager_id": manager_id,
                 "writer_id": writer.writer_id,
-                "attempt_control": control.name,
+                "attempt_control": f"attempts/{attempt_id}",
                 "lease_seconds": lease_seconds,
                 "started_at": "2026-07-26T00:00:00.000000Z",
                 "workdir": "run",
@@ -359,7 +359,7 @@ _GOLDEN_RUNNING_FRAME: dict[str, Any] = {
     "join_summary": None,
     "manager_id": "1b4e28ba-2fa1-11d2-883f-0016d3cca427",
     "writer_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-    "attempt_control": ".httk-attempt.9c5b94b1-35ad-49bb-b118-8e8fc24abf80",
+    "attempt_control": "attempts/9c5b94b1-35ad-49bb-b118-8e8fc24abf80",
     "lease_seconds": 900.0,
     "started_at": "2026-07-26T11:59:00.000000Z",
     "workdir": "run",
@@ -380,7 +380,7 @@ def test_a_state_frame_written_before_the_typed_frame_loads_identically() -> Non
     assert frame.step == "relax"
     assert frame.attempt_id == "9c5b94b1-35ad-49bb-b118-8e8fc24abf80"
     assert frame.attempt_ordinal == 2 and frame.total_attempts == 2
-    assert frame.attempt_control == ".httk-attempt.9c5b94b1-35ad-49bb-b118-8e8fc24abf80"
+    assert frame.attempt_control == "attempts/9c5b94b1-35ad-49bb-b118-8e8fc24abf80"
     assert frame.manager_id == "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
     assert frame.lease_seconds == 900.0
     assert frame.reason == "launched"
@@ -402,6 +402,15 @@ def test_a_state_frame_written_before_the_typed_frame_loads_identically() -> Non
 
 def test_a_state_frame_refuses_path_components_it_would_otherwise_join() -> None:
     from httk.workflow.errors import FormatError
+
+    for value in (
+        f".httk-{'attempt'}.{uuid.uuid4()}",
+        "attempts/../x",
+        f"attempts/{uuid.uuid4()}/y",
+    ):
+        traversal = StateFrame.from_mapping({**_GOLDEN_RUNNING_FRAME, "attempt_control": value})
+        with pytest.raises(FormatError):
+            _ = traversal.attempt_control
 
     traversal = StateFrame.from_mapping({**_GOLDEN_RUNNING_FRAME, "attempt_control": "../../../etc"})
     with pytest.raises(FormatError):
@@ -441,6 +450,60 @@ def test_a_path_traversing_attempt_control_fails_only_its_own_job(tmp_path: Path
     failed = workspace.find_marker_by_id(job_id)
     assert failed is not None and failed.kind == "failed"
     assert workspace.read_state(failed)["failure"]["code"] == "protocol_error"
+
+
+def test_a_symlinked_attempts_directory_fails_launch_without_gc_escape(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="symlinked-attempts")
+    submitted = workspace.submit(payload, "project/symlinked-attempts")
+    installed = workspace.payload_path(submitted.placement, submitted.job_key)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "must-survive"
+    sentinel.write_text("outside\n", encoding="utf-8")
+    (installed / "attempts").symlink_to(outside, target_is_directory=True)
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=15.0)
+
+    failed = workspace.find_marker_by_id(job_id)
+    assert failed is not None and failed.kind == "failed"
+    assert workspace.read_state(failed)["failure"]["code"] == "protocol_error"
+    workspace.set_policy({"retention": {"attempt_control_days": 0.0, "trash_days": 0.0}})
+    workspace.collect_garbage()
+    assert sentinel.read_text(encoding="utf-8") == "outside\n"
+    assert (installed / "attempts").is_symlink()
+
+
+def test_a_restarted_manager_rejects_symlinked_attempt_container(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SLEEPING_RUNNER, tag="recovery-symlink")
+    stale_manager = _fake_manager(workspace, heartbeat_age=3600.0)
+    running, _ = _fake_running_attempt(
+        workspace,
+        payload,
+        "project/recovery-symlink",
+        manager_id=stale_manager,
+        pid=os.getpid(),
+        lease_seconds=1.0,
+    )
+    installed = workspace.payload_path(running.placement, running.job_key)
+    attempts = installed / "attempts"
+    saved = tmp_path / "saved-attempts"
+    attempts.rename(saved)
+    outside = tmp_path / "outside-recovery"
+    outside.mkdir()
+    sentinel = outside / "must-survive"
+    sentinel.write_text("outside\n", encoding="utf-8")
+    attempts.symlink_to(outside, target_is_directory=True)
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.tick()
+
+    failed = workspace.find_marker_by_id(job_id)
+    assert failed is not None and failed.kind == "failed"
+    assert workspace.read_state(failed)["failure"]["code"] == "protocol_error"
+    assert sentinel.read_text(encoding="utf-8") == "outside\n"
 
 
 # ---------------------------------------------------------------------------
@@ -1102,7 +1165,7 @@ def test_claimed_deferred_pause_releases_without_launching(tmp_path: Path) -> No
                 writer_id=manager.writer.writer_id,
                 claim_id=str(uuid.uuid4()),
                 attempt_id=str(uuid.uuid4()),
-                attempt_control=".httk-attempt.claimed-pause",
+                attempt_control="attempts/00000000-0000-0000-0000-000000000001",
                 lease_seconds=manager.lease_seconds,
                 matched_pool="default",
                 matched_capabilities=[],
@@ -1355,7 +1418,7 @@ def test_marker_ownership_filters_scheduling_and_recovery(tmp_path: Path) -> Non
                 writer_id=manager.writer.writer_id,
                 claim_id=str(uuid.uuid4()),
                 attempt_id=str(uuid.uuid4()),
-                attempt_control=".httk-attempt.test",
+                attempt_control="attempts/00000000-0000-0000-0000-000000000002",
                 lease_seconds=manager.lease_seconds,
                 matched_pool="default",
                 matched_capabilities=[],

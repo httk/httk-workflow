@@ -38,9 +38,12 @@ from .journal import (
     verify_record,
 )
 from .models import (
+    ATTEMPTS_DIRECTORY,
     CARRIED_STATE_MEMBERS,
     CORE_PROFILE,
     CORE_STATE_KINDS,
+    JOB_STATE_DIRECTORY,
+    LOGS_DIRECTORY,
     QUIESCENT_KINDS,
     RUNNER_SOURCES,
     STATE_KINDS,
@@ -90,10 +93,13 @@ from .transactions import replay_transaction
 from .workspace import MarkerFault
 
 __all__ = [
+    "ATTEMPTS_DIRECTORY",
     "CARRIED_STATE_MEMBERS",
     # -- workspace format and profile ------------------------------------
     "CORE_PROFILE",
     "CORE_STATE_KINDS",
+    "JOB_STATE_DIRECTORY",
+    "LOGS_DIRECTORY",
     "QUIESCENT_KINDS",
     "RUNNER_SOURCES",
     "STATE_KINDS",

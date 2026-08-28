@@ -689,6 +689,11 @@ launches only when a workspace is co-located with the project, and refuses
 active work there. A detached project needs no workspace to create its
 manifest. Verification also recognizes the legacy
 `ht.project/manifest.bz2` format without changing it.
+When a directory contains a regular `job.json` that parses as an
+`httk-workflow-job` whose UUID matches the directory's valid job key, it is a
+job payload and its direct `attempts`, `logs`, and `.httk-job` children are
+skipped during both manifest creation and verification; same-named directories
+elsewhere are ordinary project content.
 
 ### What a verified manifest actually proves
 
@@ -930,7 +935,7 @@ httk workflow workspace policy set --key retention.journal_days --value 90 WORKS
 
 | Category | Retention limit | What goes |
 | --- | --- | --- |
-| `attempt_control` | `attempt_control_days` | `.httk-attempt.*` directories of terminal jobs, never the newest one of a job |
+| `attempt_control` | `attempt_control_days` | `attempts/*` directories of terminal jobs, never the newest one of a job |
 | `transaction_trash` | `trash_days` | trees a replayed transaction moved aside, once the job left `committing` |
 | `retired_bundles` | `trash_days` | acknowledged transfer bundles below `transfers/retired/` |
 | `transfer_records` | `trash_days` | per-transfer receipts below `transfers/acks/` and `transfers/imported/` |

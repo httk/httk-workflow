@@ -74,7 +74,10 @@ The core representation is deliberately small:
 4. Transition details and history are packed into shared append-only journal
    segments. There is no state-record file, event directory, failure file, or
    revision directory per job.
-5. An active attempt temporarily adds one small control directory. Application
+5. An active attempt temporarily adds one small control directory below the
+   reserved `attempts/` payload directory. The manager and collector refuse a
+   symlinked `attempts/` or control entry; a concurrent replacement by the
+   payload's own owner after that check is outside the threat model. Application
    execution may use either one persistent `run/` workdir or an isolated
    `run.<attempt-id>/`.
 6. `data/` and replayable transactions are optional. Jobs that opt in receive
@@ -92,7 +95,9 @@ data is:
 | Shared journal records | 0 files | Packed into writer segments |
 | Runner | 0 files | Shared and referenced by digest, unless it lives in the payload |
 | `.httk-job/` runner job state | 0 or 1 directory | Job lifetime, when a runner keeps state across attempts |
-| Attempt control directory | 0 or 1 directory | Attempt/retention lifetime |
+| `attempts/` reserved container | 0 or 1 directory | Created with the first attempt and retained for the job lifetime |
+| `attempts/<attempt-id>/` control directories | 0 or more directories | Attempt/retention lifetime |
+| `logs/` | 0 or 1 directory | Reserved for a future run-log layout; unused in core-v2 |
 | Persistent/isolated workdir | 0 or 1 directory | Application policy |
 | Per-state/per-event/per-failure files | 0 | Not used |
 
@@ -253,7 +258,8 @@ WORKSPACE/
                 ├── data/
                 ├── files/
                 ├── run/
-                └── .httk-attempt.<attempt-id>/
+                ├── attempts/<attempt-id>/
+                └── logs/                   # reserved for a future run-log layout; unused in core-v2
 ```
 
 Here the job placement is `project-17/0/03a`. Its authoritative marker has a
@@ -1236,7 +1242,7 @@ The claimed frame names:
 - resource allocation;
 - preceding record reference.
 
-The manager creates `.httk-attempt.<attempt-id>/`, prepares the selected
+The manager creates `attempts/<attempt-id>/`, prepares the selected
 persistent or isolated workdir, appends a running frame, and renames the
 claimed marker to running immediately before launching the application. A
 local executor MAY first create a process blocked on a launch gate, durably
@@ -1306,11 +1312,15 @@ Attempt control is separate from application workdir:
 
 ```text
 <workspace>/<placement>/<job-key>/
-├── .httk-attempt.<attempt-id>/
+├── attempts/<attempt-id>/
 │   ├── context.json
+│   ├── process.json
 │   ├── runner                   # the verified staged copy of a shared runner
+│   ├── stdout.log
+│   ├── stderr.log
 │   ├── outcome.tmp.<nonce>/
 │   └── outcome.ready/
+├── logs/                       # reserved for a future run-log layout; unused in core-v2
 ├── .httk-job/                   # optional runner-private job state
 │   └── declarations/            # optional observed workflow declarations
 │       └── <declaration-name>.json
@@ -1324,7 +1334,7 @@ the selected application workdir, not the attempt control directory.
 `.httk-job/` is runner-private state that belongs to the job rather than to one
 attempt: it survives retries, step advances, and isolated workdirs, and it travels
 with the payload when the job is transferred. A runner MAY store what it needs
-there, atomically. Both `.httk-job/` and every `.httk-attempt.<attempt-id>/` are
+there, atomically. `.httk-job/`, every `attempts/<attempt-id>/`, and `logs/` are
 excluded from every payload digest — submission, child registration, and detached
 transfer alike — so publishing an outcome and writing job state can never disturb
 an immutability check of the payload.
@@ -1650,7 +1660,7 @@ mandatory per-step revision directory.
 ### Transaction bundle
 
 ```text
-.httk-attempt.<attempt-id>/outcome.tmp.<nonce>/
+attempts/<attempt-id>/outcome.tmp.<nonce>/
 ├── outcome.json
 └── transaction/
     ├── manifest.json
@@ -1871,7 +1881,7 @@ together.
 A step places complete child bundles in its outcome:
 
 ```text
-.httk-attempt.<attempt-id>/outcome.tmp.<nonce>/
+attempts/<attempt-id>/outcome.tmp.<nonce>/
 ├── outcome.json
 └── children/
     ├── spawn.json

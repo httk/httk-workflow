@@ -10,7 +10,7 @@ import socket
 import stat
 import tempfile
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import partial
@@ -21,7 +21,16 @@ from httk.core.digests import sha256_file
 from httk.core.project import LegacyProjectError
 
 from ._util import json_bytes, retry_delay, timestamp_seconds, utc_now
-from .models import QUIESCENT_KINDS, STATE_KINDS, WORKSPACE_DIRECTORY
+from .errors import FormatError
+from .models import (
+    MAXIMUM_DECLARED_BYTES,
+    QUIESCENT_KINDS,
+    STATE_KINDS,
+    WORKSPACE_DIRECTORY,
+    canonical_uuid,
+    is_payload_private,
+    parse_job_key,
+)
 from .projects import (
     PROJECT_DIRECTORY,
     PROJECT_FILE,
@@ -77,17 +86,43 @@ def _excluded(path: str, patterns: Sequence[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
+def _is_job_payload(directory: Path, entries: Sequence[os.DirEntry[str]]) -> bool:
+    """Return whether a directory has a genuine, job-key-matching job document."""
+
+    job_entry = next((entry for entry in entries if entry.name == "job.json"), None)
+    if job_entry is None:
+        return False
+    try:
+        if not stat.S_ISREG(job_entry.stat(follow_symlinks=False).st_mode):
+            return False
+        with Path(job_entry.path).open("rb") as handle:
+            document = handle.read(MAXIMUM_DECLARED_BYTES + 1)
+        if len(document) > MAXIMUM_DECLARED_BYTES:
+            return False
+        value = json.loads(document)
+        if not isinstance(value, Mapping) or value.get("format") != "httk-workflow-job":
+            return False
+        _tag, job_id = parse_job_key(directory.name)
+        return canonical_uuid(value.get("id"), "job.json id") == job_id
+    except (FormatError, OSError, UnicodeError, json.JSONDecodeError):
+        return False
+
+
 def _records(root: Path, patterns: Sequence[str]) -> Iterator[dict[str, object]]:
     """Yield sorted records without following symlinks."""
 
     paths: list[Path] = []
 
     def visit(directory: Path) -> None:
-        with os.scandir(directory) as entries:
+        with os.scandir(directory) as scan:
+            entries = list(scan)
+            is_job_payload = _is_job_payload(directory, entries)
             for raw in entries:
                 entry = Path(raw.path)
                 relative = entry.relative_to(root).as_posix()
                 if _excluded(relative, patterns):
+                    continue
+                if is_job_payload and is_payload_private(raw.name):
                     continue
                 mode = raw.stat(follow_symlinks=False).st_mode
                 paths.append(entry)

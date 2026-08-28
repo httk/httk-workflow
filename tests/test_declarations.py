@@ -180,8 +180,8 @@ def _fabricate(tmp_path: Path, *, step: str, declarations: dict[str, Any] | None
     """Fabricate one attempt of one job and return its runner environment."""
 
     payload = _payload(tmp_path / "payload", declarations=declarations or {})
-    control = payload / f".httk-attempt.{uuid.uuid4()}"
-    control.mkdir()
+    control = payload / f"attempts/{uuid.uuid4()}"
+    control.mkdir(parents=True)
     workdir = payload / "run"
     workdir.mkdir()
     (control / "context.json").write_text(

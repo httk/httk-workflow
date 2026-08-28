@@ -10,6 +10,10 @@ the pieces that are workflow policy rather than anchor:
 * :data:`DEFAULT_MANIFEST_EXCLUSIONS` and :func:`project_exclusions` — what a
   signed manifest never records, which is a property of the manifest format and
   therefore stays here beside :mod:`httk.workflow.manifests`.
+  The manifest walker omits direct ``attempts``, ``logs``, and ``.httk-job``
+  children only below a directory whose regular ``job.json`` parses as an
+  ``httk-workflow-job`` and whose id matches the UUID in its valid job-key
+  basename.
 * :func:`initialize_project` and :func:`import_v1_project` — the anchor plus the
   project's registered default workflow workspace.
 """
@@ -75,9 +79,13 @@ __all__ = [
 #:
 #: The patterns are matched with :func:`fnmatch.fnmatchcase` against a relative
 #: POSIX path, and there ``*`` spans ``/`` as well. A ``**/`` prefix therefore
-#: only matches a path that *has* a slash, so every runner-private name is also
-#: listed in its bare root-level form; otherwise a ``.httk-attempt.*`` directory
-#: that happens to sit at the project root would be signed as project content.
+#: only matches a path that *has* a slash, so every pattern intended for a
+#: project-root entry is also listed in its bare root-level form.
+#:
+#: Job payload private children are scoped by the manifest walker: when a
+#: directory contains a valid ``httk-workflow-job`` document whose id matches
+#: its job-key UUID, its direct private children are skipped using
+#: :func:`~httk.workflow.models.is_payload_private`.
 #:
 #: This is manifest policy — a property of the signed-manifest format that lives
 #: with it in *httk-workflow*, not part of the anchor. The anchor only validates
@@ -105,14 +113,6 @@ DEFAULT_MANIFEST_EXCLUSIONS = (
     ".httk-project/manifest.jsonl.bz2",
     WORKSPACE_DIRECTORY,
     f"{WORKSPACE_DIRECTORY}/**",
-    ".httk-attempt.*",
-    ".httk-attempt.*/**",
-    ".httk-job",
-    ".httk-job/**",
-    "**/.httk-attempt.*",
-    "**/.httk-attempt.*/**",
-    "**/.httk-job",
-    "**/.httk-job/**",
 )
 
 

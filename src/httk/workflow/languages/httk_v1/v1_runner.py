@@ -251,7 +251,11 @@ def _task_directories(root: Path, spawned: set[str]) -> list[Path]:
         root_path, kept = Path(directory), []
         for name in directories:
             path = root_path / name
-            if name.startswith((".httk-attempt.", ".httk-v1-")) or path.is_symlink():
+            if (
+                (root_path == root and name in {"attempts", "logs", ".httk-job"})
+                or name.startswith(".httk-v1-")
+                or path.is_symlink()
+            ):
                 continue
             fields = TASK_PATTERN.fullmatch(name)
             relative = path.relative_to(root).as_posix()

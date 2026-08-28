@@ -207,6 +207,14 @@ HT_TASK_FINISHED
     assert _task_directories(parent_payload, set(cast(list[str], spawned))) == []
 
 
+def test_v1_walker_keeps_nested_logs_directory_tasks(tmp_path: Path) -> None:
+    root = tmp_path / "legacy-payload"
+    pending = root / "results" / "logs" / "ht.task.any.one.child.0.none.4.waitstart"
+    pending.mkdir(parents=True)
+
+    assert _task_directories(root, set()) == [pending]
+
+
 def test_v1_next_spawns_payload_children(tmp_path: Path) -> None:
     source = _legacy_source(
         tmp_path,

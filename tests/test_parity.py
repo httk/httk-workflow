@@ -217,9 +217,9 @@ def _outcomes(workspace: Workspace) -> dict[str, list[dict[str, Any]]]:
     """Every published outcome of every job, in publication order per job."""
 
     collected: dict[str, list[tuple[int, dict[str, Any]]]] = {}
-    for path in workspace.root.glob("**/.httk-attempt.*/outcome.ready/outcome.json"):
+    for path in workspace.root.glob("**/attempts/*/outcome.ready/outcome.json"):
         body = json.loads(path.read_text(encoding="utf-8"))
-        collected.setdefault(_tag(path.parents[2].name), []).append(
+        collected.setdefault(_tag(path.parents[3].name), []).append(
             (path.stat().st_mtime_ns, _normalized_outcome(body))
         )
     return {tag: [body for _, body in sorted(items)] for tag, items in collected.items()}
@@ -229,9 +229,9 @@ def _transactions(workspace: Workspace) -> dict[str, list[Any]]:
     """The operations of every published data transaction, keyed by job tag."""
 
     collected: dict[str, list[Any]] = {}
-    for path in workspace.root.glob("**/.httk-attempt.*/outcome.ready/transaction/manifest.json"):
+    for path in workspace.root.glob("**/attempts/*/outcome.ready/transaction/manifest.json"):
         manifest = json.loads(path.read_text(encoding="utf-8"))
-        collected[_tag(path.parents[3].name)] = list(manifest["operations"])
+        collected[_tag(path.parents[4].name)] = list(manifest["operations"])
     return collected
 
 

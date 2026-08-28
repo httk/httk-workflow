@@ -69,8 +69,10 @@ def test_job_state_and_attempt_control_do_not_change_the_payload_digest(tmp_path
     state["energy"] = -12.5
     state.merge({"converged": True, "history": [1, 2, 3]})
     assert (payload / ".httk-job" / "state.json").is_file()
-    (payload / ".httk-attempt.0f0f0f0f").mkdir()
-    (payload / ".httk-attempt.0f0f0f0f" / "stdout.log").write_text("noise\n", encoding="utf-8")
+    (payload / "attempts/0f0f0f0f").mkdir(parents=True)
+    (payload / "attempts/0f0f0f0f" / "stdout.log").write_text("noise\n", encoding="utf-8")
+    (payload / "logs").mkdir()
+    (payload / "logs" / "future.log").write_text("reserved\n", encoding="utf-8")
     # Neither the state a runner keeps nor the control directory of an attempt is
     # part of the immutable job, so neither can move the payload digest.
     assert workspace.payload_digest(marker) == digest
@@ -95,7 +97,7 @@ def test_a_job_that_wrote_state_still_transfers_and_verifies(tmp_path: Path) -> 
     }
     # The job ran, so its payload now holds both an attempt control directory and
     # job state; the bundle digest covers neither, and the import verifies it.
-    assert sorted(payload.glob(".httk-attempt.*"))
+    assert sorted(payload.glob("attempts/*"))
     digest = source.payload_digest(marker)
 
     bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)

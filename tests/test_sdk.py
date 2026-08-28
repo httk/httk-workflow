@@ -277,8 +277,8 @@ def _attempt(
             step_resources=step_resources or {},
         ),
     )
-    control = payload / f".httk-attempt.{uuid.uuid4()}"
-    control.mkdir()
+    control = payload / f"attempts/{uuid.uuid4()}"
+    control.mkdir(parents=True)
     workdir = payload / "run"
     workdir.mkdir()
     (control / "context.json").write_text(

@@ -28,6 +28,7 @@ is exactly as consistent as it was before.
 
 import logging
 import os
+import stat
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
@@ -40,7 +41,7 @@ from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
 from .errors import FormatError, WorkflowError
 from .journal import parse_record_ref
 from .models import (
-    ATTEMPT_CONTROL_PREFIX,
+    ATTEMPTS_DIRECTORY,
     QUIESCENT_KINDS,
     STATE_KINDS,
     TERMINAL_KINDS,
@@ -353,6 +354,15 @@ def _iterdir(path: Path) -> list[Path]:
         return []
 
 
+def _is_real_directory(path: Path) -> bool:
+    """Return whether *path* is an actual directory, without following links."""
+
+    try:
+        return stat.S_ISDIR(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
 def _marker_record_ref(name: str) -> str | None:
     """Return the record reference encoded in one marker basename."""
 
@@ -529,8 +539,11 @@ class _Collection:
                 continue
             payload = self.workspace.payload_path(marker.placement, marker.job_key)
             controls: list[tuple[float, str, Path]] = []
-            for entry in _iterdir(payload):
-                if not entry.name.startswith(ATTEMPT_CONTROL_PREFIX) or not entry.is_dir():
+            attempts = payload / ATTEMPTS_DIRECTORY
+            if not _is_real_directory(attempts):
+                continue
+            for entry in _iterdir(attempts):
+                if entry.is_symlink() or not _is_real_directory(entry):
                     continue
                 modified = _mtime(entry)
                 if modified is not None:
@@ -662,11 +675,20 @@ class _Collection:
             if marker.kind not in QUIESCENT_KINDS:
                 continue
             payload = self.workspace.payload_path(marker.placement, marker.job_key)
-            for control in _iterdir(payload):
-                if not control.name.startswith(ATTEMPT_CONTROL_PREFIX):
+            attempts = payload / ATTEMPTS_DIRECTORY
+            if not _is_real_directory(attempts):
+                continue
+            for control in _iterdir(attempts):
+                if control.is_symlink() or not _is_real_directory(control):
                     continue
-                trash = control / "outcome.ready" / "transaction" / "trash"
-                if not trash.is_dir():
+                outcome_ready = control / "outcome.ready"
+                transaction = outcome_ready / "transaction"
+                trash = transaction / "trash"
+                if (
+                    not _is_real_directory(outcome_ready)
+                    or not _is_real_directory(transaction)
+                    or not _is_real_directory(trash)
+                ):
                     continue
                 for entry in _iterdir(trash):
                     if self._aged(entry, cutoff):

@@ -71,8 +71,9 @@ if TYPE_CHECKING:
 from ._util import validate_inputs
 from .errors import FormatError
 from .models import (
-    ATTEMPT_CONTROL_PREFIX,
+    ATTEMPTS_DIRECTORY,
     JOB_STATE_DIRECTORY,
+    LOGS_DIRECTORY,
     ensure_step_known,
     normalize_placement,
     validate_parameters,
@@ -1972,7 +1973,9 @@ def payload_relative(name: str) -> PurePosixPath:
         raise ValueError(f"a staged payload file name must be relative: {name!r}")
     if len(relative.parts) == 1:
         relative = PurePosixPath(FILES_DIRECTORY) / relative
-    for part in relative.parts:
-        if part in {"", ".", "..", "job.json", JOB_STATE_DIRECTORY} or part.startswith(ATTEMPT_CONTROL_PREFIX):
+    for index, part in enumerate(relative.parts):
+        if part in {"", ".", ".."} or (
+            index == 0 and part in {"job.json", ATTEMPTS_DIRECTORY, LOGS_DIRECTORY, JOB_STATE_DIRECTORY}
+        ):
             raise FormatError(f"a staged payload file name may not contain {part!r}: {name!r}")
     return relative

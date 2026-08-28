@@ -300,6 +300,20 @@ def _hold_maintenance_lock(workspace: Workspace) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_malformed_attempt_control_is_not_joined_for_introspection(tmp_path: Path, monkeypatch) -> None:
+    workspace = _workspace(tmp_path)
+    payload, _job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER)
+    marker = workspace.submit(payload, "project/malformed-control")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.json").write_text("secret\n", encoding="utf-8")
+
+    for value in (str(outside), "attempts/../outside"):
+        monkeypatch.setattr(workspace, "read_state", lambda _marker, value=value: {"attempt_control": value})
+        report = describe_job(workspace, marker)
+        assert report["attempt"]["control"] is None
+
+
 def test_show_reports_the_authoritative_state_of_a_finished_job(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER)

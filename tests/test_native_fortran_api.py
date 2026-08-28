@@ -188,8 +188,8 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
             data_mode="none" if data_generation is None else "transactional",
         ),
     )
-    control = payload / f".httk-attempt.{uuid.uuid4()}"
-    control.mkdir()
+    control = payload / f"attempts/{uuid.uuid4()}"
+    control.mkdir(parents=True)
     workdir = payload / "run"
     workdir.mkdir()
     (control / "context.json").write_text(

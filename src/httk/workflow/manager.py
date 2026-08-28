@@ -42,7 +42,7 @@ from .errors import (
 from .executors import AttemptLaunch, PathRunnerExecutor, RunnerExecutor
 from .manifests import read_maintenance_lock
 from .models import (
-    ATTEMPT_CONTROL_PREFIX,
+    ATTEMPTS_DIRECTORY,
     CARRIED_STATE_MEMBERS,
     CORE_PROFILE,
     TERMINAL_KINDS,
@@ -107,6 +107,26 @@ _CANCELLING_MEMBERS = (
     "request_id",
 )
 _ENVIRONMENT_MARKER = ".httk-environment-resolution.json"
+
+
+def _real_directory(path: Path, *, missing_ok: bool = False) -> Path:
+    """Return *path* when it is a directory recorded without following links."""
+
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError as exc:
+        if missing_ok:
+            return path
+        raise FormatError(f"attempt directory is missing: {path}") from exc
+    if not stat.S_ISDIR(mode):
+        raise FormatError(f"attempt directory is not a real directory: {path}")
+    return path
+
+
+def _attempt_container(payload: Path) -> Path:
+    """Return a payload's real attempt container, allowing its first creation."""
+
+    return _real_directory(payload / ATTEMPTS_DIRECTORY, missing_ok=True)
 
 
 def _setting_variable_name(key: str) -> str:
@@ -1235,7 +1255,7 @@ class TaskManager:
                 writer_id=self.writer.writer_id,
                 claim_id=str(uuid.uuid4()),
                 attempt_id=attempt_id,
-                attempt_control=f"{ATTEMPT_CONTROL_PREFIX}{attempt_id}",
+                attempt_control=f"{ATTEMPTS_DIRECTORY}/{attempt_id}",
                 attempt_ordinal=attempt_ordinal,
                 total_attempts=total_attempts,
                 lease_seconds=self.lease_seconds,
@@ -1353,6 +1373,8 @@ class TaskManager:
             raise FormatError("a claimed frame must name its attempt and attempt control directory")
         payload = self.workspace.payload_path(marker.placement, marker.job_key)
         control = payload / control_name
+        attempts = _attempt_container(payload)
+        attempts.mkdir(parents=True, exist_ok=True)
         control.mkdir(exist_ok=False)
         runner = payload.joinpath(*job.runner_path.parts)
         if job.runner_source != "payload":
@@ -1522,7 +1544,7 @@ class TaskManager:
                     lease_seconds=self.lease_seconds,
                     started_at=utc_now(),
                     workdir=str(workdir.relative_to(payload)),
-                    attempt_control=control.name,
+                    attempt_control=control_name,
                     reason="launched",
                 ),
             )
@@ -1881,8 +1903,9 @@ class TaskManager:
             attempt_id = state.attempt_id
             if attempt_id is None:
                 raise FormatError("state frame names neither an attempt control directory nor an attempt")
-            control_name = validate_attempt_control(f"{ATTEMPT_CONTROL_PREFIX}{attempt_id}")
-        return payload / control_name
+            control_name = validate_attempt_control(f"{ATTEMPTS_DIRECTORY}/{attempt_id}")
+        _attempt_container(payload)
+        return _real_directory(payload / control_name)
 
     def _outcome_path(self, marker: Marker, state: StateFrame) -> Path:
         return self._attempt_control_path(marker, state) / "outcome.ready"

@@ -6,13 +6,15 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .._util import read_json
-from ..errors import WorkflowError, WorkspaceCorruptionError
+from ..errors import FormatError, WorkflowError, WorkspaceCorruptionError
 from ..journal import read_record
 from ..models import (
+    ATTEMPTS_DIRECTORY,
     STATE_KINDS,
     JobDefinition,
     Marker,
     normalize_placement,
+    validate_attempt_control,
 )
 from ..workspace import Workspace
 
@@ -148,8 +150,12 @@ def _attempt_control(workspace: Workspace, marker: Marker, state: Mapping[str, A
     name = _optional_string(state.get("attempt_control"))
     if name is None:
         attempt_id = _optional_string(state.get("attempt_id"))
-        name = None if attempt_id is None else f".httk-attempt.{attempt_id}"
+        name = None if attempt_id is None else f"{ATTEMPTS_DIRECTORY}/{attempt_id}"
     if name is None:
+        return None
+    try:
+        name = validate_attempt_control(name, "state.attempt_control")
+    except FormatError:
         return None
     return workspace.payload_path(marker.placement, marker.job_key) / name
 

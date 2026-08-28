@@ -219,7 +219,7 @@ def test_job_digest_is_rechecked_before_launch(tmp_path, monkeypatch) -> None:
         failed = workspace.find_marker_by_id(job_id)
         assert failed is not None and failed.kind == "failed"
         assert workspace.read_state(failed)["failure"]["code"] == "payload.tampered"
-        assert not list(payload.glob(".httk-attempt.*"))
+        assert not list(payload.glob("attempts/*"))
 
 
 def test_request_replaced_during_claim_is_not_applied(tmp_path, monkeypatch) -> None:

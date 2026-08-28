@@ -256,29 +256,45 @@ def test_an_adopted_third_party_key_becomes_a_trust_anchor(tmp_path: Path, monke
     assert _fields(trust_project_key(project, collaborator))["trusted_keys"] == [collaborator]
 
 
-def test_root_level_attempt_and_job_entries_stay_out_of_the_manifest(tmp_path: Path, monkeypatch) -> None:
-    """`fnmatch` `*` spans `/`, so `**/x` alone never matches a root-level entry."""
+def test_job_private_entries_are_scoped_to_job_payloads(tmp_path: Path, monkeypatch) -> None:
+    """Private names are excluded only below a genuine job payload root."""
 
     project = _project(tmp_path, monkeypatch)
-    attempt = project / ".httk-attempt.x"
-    attempt.mkdir()
-    (attempt / "stdout.log").write_text("private\n", encoding="utf-8")
-    (project / ".httk-job").mkdir()
-    (project / ".httk-job" / "state.json").write_text("{}", encoding="utf-8")
-    nested = project / "jobs" / "one"
-    nested.mkdir(parents=True)
-    (nested / ".httk-attempt.y").mkdir()
+    job_id = str(uuid.uuid4())
+    payload = project / f"job--{job_id}"
+    (payload / "attempts/a").mkdir(parents=True)
+    (payload / "attempts/a" / "f").write_text("private\n", encoding="utf-8")
+    (payload / "logs").mkdir()
+    (payload / "logs" / "l").write_text("private\n", encoding="utf-8")
+    (payload / ".httk-job").mkdir()
+    (payload / ".httk-job" / "s").write_text("private\n", encoding="utf-8")
+    (payload / "job.json").write_text(
+        json.dumps({"format": "httk-workflow-job", "id": job_id}),
+        encoding="utf-8",
+    )
+    plain_docs = project / "docs"
+    plain_docs.mkdir()
+    (plain_docs / "job.json").write_text("{}", encoding="utf-8")
+    plain_logs = project / "docs" / "logs"
+    plain_logs.mkdir()
+    (plain_logs / "notes.txt").write_text("user content\n", encoding="utf-8")
 
     manifest = create_manifest(project)
     records = bz2.decompress(manifest.read_bytes()).decode("utf-8").splitlines()[1:]
     body = "\n".join(records)
-    assert '"path":".httk-attempt.x"' not in body and '"path":".httk-job"' not in body
-    assert ".httk-attempt.y" not in body
+    assert f'"path":"{payload.name}/job.json"' in body
+    assert f'"path":"{payload.name}/attempts"' not in body
+    assert f'"path":"{payload.name}/logs"' not in body
+    assert f'"path":"{payload.name}/.httk-job"' not in body
+    assert '"path":"docs/logs/notes.txt"' in body
+    assert '"path":"docs/job.json"' in body
     assert '"path":"content.txt"' in body
     assert verify_manifest(project).verdict == VALID_TRUSTED
 
-    # A runner writing inside its own attempt directory never invalidates it.
-    (attempt / "stdout.log").write_text("more private output\n", encoding="utf-8")
+    # A runner writing inside its own private trees never invalidates the manifest.
+    (payload / "attempts/a" / "f").write_text("more private output\n", encoding="utf-8")
+    (payload / "logs" / "l").write_text("more private output\n", encoding="utf-8")
+    (payload / ".httk-job" / "s").write_text("more private output\n", encoding="utf-8")
     assert verify_manifest(project).verdict == VALID_TRUSTED
 
 
