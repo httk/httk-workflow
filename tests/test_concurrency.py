@@ -49,7 +49,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 log = Path("@LOG@")
 claims = log / "claims"
@@ -91,7 +91,7 @@ import os
 import time
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 if context["attempt_ordinal"] == 1:
     time.sleep(600)
@@ -114,7 +114,7 @@ import os
 import time
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 time.sleep(0.4)
 temporary = control / "outcome.tmp.test"
@@ -140,7 +140,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 job_dir = Path(os.environ["HTTK_WORKFLOW_JOB_DIR"])
 temporary = control / "outcome.tmp.test"

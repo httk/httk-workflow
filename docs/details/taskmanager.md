@@ -108,8 +108,11 @@ A runner reads one through `a.setting("vasp.command")`, resolved in layers — t
 job's inputs, a real `HTTK_VASP_COMMAND` deployment override, the workspace
 setting, then the runner's default. The manager exports scalar workspace settings
 into each attempt environment (`vasp.command` becomes `HTTK_VASP_COMMAND`) and
-snapshots them into `context.json`, so a runner sees the values the workspace
+snapshots them into the `HTTK_WORKFLOW_CONTEXT` JSON environment value, so a runner sees the values the workspace
 held when its job was claimed. See {doc}`/vasp_runners` and {doc}`/sdks/sdk_parity`.
+Workspace settings are non-secret configuration: they are snapshotted into the
+attempt context and exported into the runner environment, so credentials must
+not be stored there; remote credentials already live elsewhere.
 
 ## Readiness and transfer environment advisories
 
@@ -157,13 +160,17 @@ gets one immediate warning and is only a strict-mode failure.
 
 ## Freeing disk on a quota'd filesystem
 
-A manager frees nothing while it runs, by design: it is never required to
-execute cleanup code, so it can disappear between any two instructions. Over a
-long campaign the workspace therefore accumulates one control directory per
-attempt, one journal writer and manager directory per process start, a full
-copy of every tree a transaction replaced, and an intact bundle for every
-transfer already acknowledged. On a quota'd HPC filesystem that is what fails
-first.
+A manager removes an attempt's control directory after a durable commit and
+after it has reaped the local process when the actual destination is `ready`,
+`waiting`, `paused`, or `succeeded`; failed and cancelled attempts remain as
+evidence. Transaction trash is normally removed with that control tree. A
+manager inheriting a commit leaves the tree for GC. The manager is never
+required to execute cleanup code, so it can disappear between any two
+instructions. Over a long campaign the workspace therefore accumulates the
+control directories of failed and cancelled attempts, one journal writer and
+manager directory per process start, transaction trash left by an interrupted
+commit, and an intact bundle for every transfer already acknowledged. On a
+quota'd HPC filesystem that is what fails first.
 
 Collection is a separate, explicit operation. Configure the retention limits
 once, then run it from a maintenance job or by hand:
@@ -764,7 +771,7 @@ it would stop every launch anyway.
 ## Runner contract
 
 The runner executes in the selected persistent or isolated workdir. It reads
-the context named by `HTTK_WORKFLOW_CONTEXT` and publishes
+the context supplied by `HTTK_WORKFLOW_CONTEXT` and publishes
 `outcome.tmp.<nonce>/` as `outcome.ready/` beneath
 `HTTK_WORKFLOW_CONTROL_DIR`. See the
 {doc}`workflow_filesystem_api` for the complete protocol, and

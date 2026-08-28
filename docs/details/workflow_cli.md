@@ -842,8 +842,11 @@ resolved in layers, most specific first: the job's own parameters, a real
 `HTTK_VASP_COMMAND` deployment override, the workspace setting, then the runner's
 default. The manager exports scalar workspace settings into each attempt
 environment (`vasp.command` becomes `HTTK_VASP_COMMAND`) and snapshots them into
-`context.json`, so a runner sees the values the workspace held when its job was
+the `HTTK_WORKFLOW_CONTEXT` JSON value, so a runner sees the values the workspace held when its job was
 claimed. See {doc}`/vasp_runners` and {doc}`/sdks/sdk_parity`.
+Workspace settings are non-secret configuration: they are snapshotted into the
+attempt context and exported into the runner environment, so credentials must
+not be stored there; remote credentials already live elsewhere.
 
 ### Workflow preludes
 
@@ -902,9 +905,14 @@ for exactly what a repair will and will not touch.
 
 ## Freeing disk
 
-Nothing in the engine deletes anything on its own: neither a runner nor a
-manager is ever required to run cleanup code, so every artefact a crash could
-orphan is simply left in place. `workspace gc` is the separate, explicit
+A committing manager removes an attempt's control directory after its durable
+commit and after it has reaped the local process when the actual destination is
+`ready`, `waiting`, `paused`, or `succeeded`; failed and cancelled attempts stay
+as evidence. Transaction trash is normally removed with that control tree. An
+inherited commit is left for `workspace gc`. Apart from that bounded cleanup,
+nothing in the engine deletes anything on its own: neither a runner nor a
+manager is ever required to run cleanup code, so every other artefact a crash
+could orphan is simply left in place. `workspace gc` is the separate, explicit
 collector, driven entirely by the workspace's `policy.retention`:
 
 ```console
@@ -936,7 +944,7 @@ httk workflow workspace policy set --key retention.journal_days --value 90 WORKS
 
 | Category | Retention limit | What goes |
 | --- | --- | --- |
-| `attempt_control` | `attempt_control_days` | `attempts/*` directories of terminal jobs, never the newest one of a job |
+| `attempt_control` | `attempt_control_days` | aged `attempts/*` directories; failed and cancelled jobs retain their newest one, while other quiescent leftovers (including succeeded) also wait one workspace `lease_seconds` grace |
 | `transaction_trash` | `trash_days` | trees a replayed transaction moved aside, once the job left `committing` |
 | `retired_bundles` | `trash_days` | acknowledged transfer bundles below `transfers/retired/` |
 | `transfer_records` | `trash_days` | per-transfer receipts below `transfers/acks/` and `transfers/imported/` |

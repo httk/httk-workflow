@@ -33,36 +33,30 @@ def _draft(tmp_path: Path, *, data_generation: int | None = None) -> OutcomeDraf
 
     control = tmp_path / "control"
     control.mkdir()
-    context = control / "context.json"
-    context.write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-attempt-context",
-                "format_version": 2,
-                "workspace_id": str(uuid.uuid4()),
-                "job_id": str(uuid.uuid4()),
-                "job_key": f"job--{uuid.uuid4()}",
-                "placement": "project/a",
-                "payload": str(tmp_path / "payload"),
-                "step": "prepare",
-                "activation_id": str(uuid.uuid4()),
-                "attempt_id": str(uuid.uuid4()),
-                "activation_ordinal": 2,
-                "attempt_ordinal": 3,
-                "total_attempts": 4,
-                "is_restart": True,
-                "is_unclean_restart": False,
-                "attempt_reason": "requested_retry",
-                "workdir_mode": "persistent",
-                "workdir_reused": True,
-                "data_generation": data_generation,
-                "join": None,
-            }
-        ),
-        encoding="utf-8",
-    )
+    context = {
+        "format": "httk-workflow-attempt-context",
+        "format_version": 2,
+        "workspace_id": str(uuid.uuid4()),
+        "job_id": str(uuid.uuid4()),
+        "job_key": f"job--{uuid.uuid4()}",
+        "placement": "project/a",
+        "payload": str(tmp_path / "payload"),
+        "step": "prepare",
+        "activation_id": str(uuid.uuid4()),
+        "attempt_id": str(uuid.uuid4()),
+        "activation_ordinal": 2,
+        "attempt_ordinal": 3,
+        "total_attempts": 4,
+        "is_restart": True,
+        "is_unclean_restart": False,
+        "attempt_reason": "requested_retry",
+        "workdir_mode": "persistent",
+        "workdir_reused": True,
+        "data_generation": data_generation,
+        "join": None,
+    }
     (tmp_path / "run").mkdir()
-    return OutcomeDraft(AttemptContext.from_path(context), control)
+    return OutcomeDraft(AttemptContext.from_mapping(context), control)
 
 
 def test_composed_outcome_contains_transaction_and_children(tmp_path: Path) -> None:

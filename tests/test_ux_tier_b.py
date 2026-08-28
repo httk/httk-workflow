@@ -25,7 +25,7 @@ from httk.workflow.workflow_cli import command
 _SUCCEED_RUNNER = """#!/usr/bin/env python3
 import json, os
 from pathlib import Path
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 tmp = control / "outcome.tmp.test"
 tmp.mkdir()
@@ -40,7 +40,7 @@ os.rename(tmp, control / "outcome.ready")
 _FAIL_RUNNER = """#!/usr/bin/env python3
 import json, os
 from pathlib import Path
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 tmp = control / "outcome.tmp.test"
 tmp.mkdir()
@@ -66,7 +66,7 @@ sys.exit(1)
 _GHOST_JOIN_RUNNER = """#!/usr/bin/env python3
 import json, os, uuid
 from pathlib import Path
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 child_id = str(uuid.uuid5(uuid.UUID(context["job_id"]), "ghost"))
 tmp = control / "outcome.tmp.test"

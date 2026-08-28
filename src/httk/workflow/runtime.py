@@ -5,6 +5,7 @@ native runner uses; the environment-binding helper below is what the authoring
 SDK and the Bash bridge both recover an attempt through.
 """
 
+import json
 import os
 import signal
 import subprocess
@@ -13,7 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-from ._util import read_json
 from .errors import FormatError
 from .models import validate_resources
 
@@ -94,15 +94,16 @@ class AttemptContext:
     raw: Mapping[str, Any]
 
     @classmethod
-    def from_path(cls, path: str | os.PathLike[str]) -> Self:
-        """Read and validate a manager-written attempt context.
+    def from_mapping(cls, value: Mapping[str, Any]) -> Self:
+        """Validate a manager-written attempt context mapping.
 
-        :param path: Locate the attempt context file.
+        :param value: Decoded attempt context.
         :return: The validated attempt context.
         :raises ValueError: If the context format or required values are invalid.
         """
 
-        value = read_json(Path(path))
+        if not isinstance(value, Mapping):
+            raise ValueError("attempt context must be a JSON object")
         if value.get("format") != "httk-workflow-attempt-context" or value.get("format_version") != 2:
             raise ValueError("attempt context must use httk-workflow-attempt-context version 2")
         required = (
@@ -128,7 +129,7 @@ class AttemptContext:
         if not isinstance(settings_raw, Mapping):
             raise ValueError("attempt settings must be an object")
         payload = value.get("payload")
-        if not isinstance(payload, str) or not Path(payload).is_absolute():
+        if not isinstance(payload, str) or not os.path.isabs(payload):
             raise ValueError("attempt payload must be an absolute path")
 
         def optional_integer(name: str) -> int | None:
@@ -205,7 +206,11 @@ def _read_environment(environment: Mapping[str, str] | None = None) -> _AttemptE
             raise ValueError(f"missing workflow runtime variable: {name}")
         return value
 
-    context = AttemptContext.from_path(required("HTTK_WORKFLOW_CONTEXT"))
+    try:
+        context_value = json.loads(required("HTTK_WORKFLOW_CONTEXT"))
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError(f"workflow context is not valid JSON: {exc}") from exc
+    context = AttemptContext.from_mapping(context_value)
     step = values.get("HTTK_WORKFLOW_STEP") or context.step
     if step != context.step:
         raise ValueError(

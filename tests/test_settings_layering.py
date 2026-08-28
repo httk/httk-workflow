@@ -95,7 +95,7 @@ def _attempt_environment(
     """Fabricate one attempt whose job carries *parameters* and whose context carries
     *settings*, returning the environment both SDKs bind to.
 
-    The ``settings`` member of ``context.json`` is exactly the workspace layer a
+    The ``settings`` member of the attempt-context JSON is exactly the workspace layer a
     manager snapshots at claim time, so writing it here reproduces what a runner
     sees without a manager in the loop.
     """
@@ -118,28 +118,25 @@ def _attempt_environment(
     control.mkdir(parents=True)
     workdir = payload / "run"
     workdir.mkdir()
-    (control / "context.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-attempt-context",
-                "format_version": 2,
-                "workspace_id": str(uuid.uuid4()),
-                "job_id": str(uuid.uuid4()),
-                "job_key": f"fabricated--{uuid.uuid4()}",
-                "placement": "project/fabricated",
-                "payload": str(payload),
-                "step": "only",
-                "activation_id": str(uuid.uuid4()),
-                "attempt_id": str(uuid.uuid4()),
-                "data_generation": None,
-                "children": [],
-                "settings": settings,
-            }
-        ),
-        encoding="utf-8",
+    context_json = json.dumps(
+        {
+            "format": "httk-workflow-attempt-context",
+            "format_version": 2,
+            "workspace_id": str(uuid.uuid4()),
+            "job_id": str(uuid.uuid4()),
+            "job_key": f"fabricated--{uuid.uuid4()}",
+            "placement": "project/fabricated",
+            "payload": str(payload),
+            "step": "only",
+            "activation_id": str(uuid.uuid4()),
+            "attempt_id": str(uuid.uuid4()),
+            "data_generation": None,
+            "children": [],
+            "settings": settings,
+        }
     )
     return {
-        "HTTK_WORKFLOW_CONTEXT": str(control / "context.json"),
+        "HTTK_WORKFLOW_CONTEXT": context_json,
         "HTTK_WORKFLOW_CONTROL_DIR": str(control),
         "HTTK_WORKFLOW_JOB_DIR": str(payload),
         "HTTK_WORKFLOW_WORKDIR": str(workdir),

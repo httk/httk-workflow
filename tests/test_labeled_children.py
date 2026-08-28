@@ -11,7 +11,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 mode = "@MODE@"
 if mode == "succeed":
@@ -42,7 +42,7 @@ from pathlib import Path
 
 CHILD = {child!r}
 LABELS = {labels!r}
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 workdir = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 temporary = control / "outcome.tmp.test"
@@ -126,7 +126,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 count_path = run / "attempts"

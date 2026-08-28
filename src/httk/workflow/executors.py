@@ -33,7 +33,6 @@ class AttemptLaunch:
     :param payload: Immutable job payload directory.
     :param workdir: Directory in which the runner executes.
     :param control: Attempt-control directory.
-    :param context_path: Path of the serialized runner context.
     :param context: Runner context members.
     :param runner: Resolved executable, or no value to use the payload runner.
     :param workflow_prelude: Shell text run in a login shell before the runner, or empty for none.
@@ -44,7 +43,6 @@ class AttemptLaunch:
     payload: Path
     workdir: Path
     control: Path
-    context_path: Path
     context: Mapping[str, Any]
     runner: Path | None = None
     workflow_prelude: str = ""

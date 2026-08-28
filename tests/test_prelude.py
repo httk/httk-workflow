@@ -78,7 +78,6 @@ def _launch(tmp_path: Path, prelude: str) -> AttemptLaunch:
         payload=payload,
         workdir=tmp_path / "workdir",
         control=control,
-        context_path=control / "context.json",
         context={},
         workflow_prelude=prelude,
     )

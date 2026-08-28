@@ -184,27 +184,24 @@ def _fabricate(tmp_path: Path, *, step: str, declarations: dict[str, Any] | None
     control.mkdir(parents=True)
     workdir = payload / "run"
     workdir.mkdir()
-    (control / "context.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-attempt-context",
-                "format_version": 2,
-                "workspace_id": str(uuid.uuid4()),
-                "job_id": str(uuid.uuid4()),
-                "job_key": f"fabricated--{uuid.uuid4()}",
-                "placement": "project/fabricated",
-                "payload": str(payload),
-                "step": step,
-                "activation_id": str(uuid.uuid4()),
-                "attempt_id": str(uuid.uuid4()),
-                "data_generation": None,
-                "children": [],
-            }
-        ),
-        encoding="utf-8",
+    context_json = json.dumps(
+        {
+            "format": "httk-workflow-attempt-context",
+            "format_version": 2,
+            "workspace_id": str(uuid.uuid4()),
+            "job_id": str(uuid.uuid4()),
+            "job_key": f"fabricated--{uuid.uuid4()}",
+            "placement": "project/fabricated",
+            "payload": str(payload),
+            "step": step,
+            "activation_id": str(uuid.uuid4()),
+            "attempt_id": str(uuid.uuid4()),
+            "data_generation": None,
+            "children": [],
+        }
     )
     return {
-        "HTTK_WORKFLOW_CONTEXT": str(control / "context.json"),
+        "HTTK_WORKFLOW_CONTEXT": context_json,
         "HTTK_WORKFLOW_CONTROL_DIR": str(control),
         "HTTK_WORKFLOW_JOB_DIR": str(payload),
         "HTTK_WORKFLOW_WORKDIR": str(workdir),

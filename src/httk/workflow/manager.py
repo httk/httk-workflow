@@ -27,6 +27,7 @@ from . import (
     _manager_scheduling,
 )
 from ._util import (
+    json_bytes,
     read_json,
     timestamp_seconds,
     utc_now,
@@ -359,6 +360,11 @@ class RunningAttempt:
     :param process: Track the launched process group.
     :param attempt_id: Identify the running attempt.
     :param resources: Reserve these resources while the attempt is running.
+    :param outcome_action: Remember the published action if control cleanup wins
+        the race with process reaping.
+    :param cleanup_pending: Mark a non-terminal commit waiting for process reap.
+    :param cleanup_request: Retain the commit transition needed at process reap.
+    :param reaped: Record that this manager knows the process return code.
     :param fenced: Mark an attempt whose marker ownership is already resolved.
     :param cancelling: Mark an attempt currently being cancelled.
     :param owner_uid: Record the operating-system owner when known.
@@ -369,6 +375,10 @@ class RunningAttempt:
     control: Path
     attempt_id: str
     resources: Mapping[str, int]
+    outcome_action: str | None = None
+    cleanup_pending: bool = False
+    cleanup_request: tuple[Marker, StateFrame, Marker] | None = None
+    reaped: bool = False
     # Set once this attempt's outcome has been committed or its marker has been
     # fenced: the process may still be exiting, and reaping it is then routine
     # rather than the discovery of an orphan.
@@ -514,6 +524,10 @@ class TaskManager:
         self._manager_dir = workspace.control / "managers" / self.manager_id
         self._manager_dir.mkdir(parents=True, exist_ok=False)
         self._running: dict[str, RunningAttempt] = {}
+        # Attempts reaped just before their running marker became committing.
+        # This distinguishes a local process exit from an inherited commit;
+        # entries live only until the commit cleanup decision is made.
+        self._reaped_attempts: set[str] = set()
         # Running markers whose ownership could not be checked this pass are
         # preserved from orphan sweeping until the next pass can retry them.
         self._indeterminate_ownership: set[str] = set()
@@ -637,11 +651,18 @@ class TaskManager:
             _append_log_line(
                 payload,
                 f"=== httk attempt {attempt.attempt_id} ended {utc_now()} exit {return_code} "
-                f"outcome {_attempt_outcome_action(attempt.control)}\n",
+                f"outcome {attempt.outcome_action or _attempt_outcome_action(attempt.control)}\n",
                 job_key=attempt.marker.job_key,
             )
         except Exception as exc:
             _LOGGER.warning("cannot append the end marker for %s: %s", attempt.marker.job_key, exc)
+
+    def _finish_attempt_cleanup(self, attempt: RunningAttempt) -> None:
+        """Remove a committed attempt control after its process was reaped."""
+
+        request = attempt.cleanup_request
+        if attempt.cleanup_pending and request is not None:
+            _manager_commit._remove_committed_attempt_control(self, *request)
 
     @property
     def manager_directory(self) -> Path:
@@ -1307,6 +1328,7 @@ class TaskManager:
             )
             return True
         attempt_id = str(uuid.uuid4())
+        requirement = _manager_scheduling.effective_requirement(job, state, self.resources, self.maximum_workers)
         claimed = self._transition(
             marker,
             "claimed",
@@ -1319,6 +1341,7 @@ class TaskManager:
                 attempt_control=f"{ATTEMPTS_DIRECTORY}/{attempt_id}",
                 attempt_ordinal=attempt_ordinal,
                 total_attempts=total_attempts,
+                resources=dict(requirement),
                 lease_seconds=self.lease_seconds,
                 matched_pool=job.claim_pool,
                 matched_capabilities=sorted(job.required_capabilities),
@@ -1488,14 +1511,16 @@ class TaskManager:
             # summary exactly as earlier profiles published it.
             "children": self._context_children(claimed_state.join_summary),
         }
-        context_path = control / "context.json"
-        write_json_atomic(context_path, context, durable=self.workspace.durable)
+        context_value = json_bytes(context)
+        if len(context_value) >= 100_000:
+            raise FormatError("attempt context exceeds the 100000-byte environment limit")
+        context_json = context_value.decode("utf-8")
         environment = os.environ.copy()
         environment.pop("HTTK_WORKFLOW_RUNNER_ARTIFACTS", None)
         environment.pop("HTTK_WORKFLOW_RUNNER_ROOT", None)
         environment.update(
             {
-                "HTTK_WORKFLOW_CONTEXT": str(context_path),
+                "HTTK_WORKFLOW_CONTEXT": context_json,
                 "HTTK_WORKFLOW_CONTROL_DIR": str(control),
                 "HTTK_WORKFLOW_WORKSPACE_DIR": str(self.workspace.root),
                 "HTTK_WORKFLOW_JOB_DIR": str(payload),
@@ -1568,7 +1593,6 @@ class TaskManager:
                         payload=payload,
                         workdir=workdir,
                         control=control,
-                        context_path=context_path,
                         context=context,
                         runner=runner,
                         workflow_prelude=workflow_prelude,
@@ -1786,7 +1810,7 @@ class TaskManager:
             if return_code is None:
                 return False
             self._write_attempt_end(local, return_code)
-            del self._running[attempt_id]
+            local.reaped = True
             _LOGGER.info(
                 "attempt %s of %s exited with status %d",
                 attempt_id,
@@ -1795,6 +1819,7 @@ class TaskManager:
                 extra=self._event("attempt_exit", marker, attempt_id=attempt_id, exit_status=return_code),
             )
             if outcome_path.is_dir():
+                self._reaped_attempts.add(attempt_id)
                 self._commit_published_outcome(marker, job, state, outcome_path)
             else:
                 code = "protocol_error" if return_code == 0 else "process_failure"
@@ -1805,6 +1830,8 @@ class TaskManager:
                     f"runner exited with status {return_code} without an outcome",
                     exit_status=return_code,
                 )
+            self._finish_attempt_cleanup(local)
+            del self._running[attempt_id]
             return True
         lease_seconds = self.lease_seconds if state.lease_seconds is None else state.lease_seconds
         if self._manager_alive(state.manager_id, lease_seconds=lease_seconds):
@@ -1941,8 +1968,13 @@ class TaskManager:
                     self._terminate_process(local.process.pid)
             return_code = local.process.poll()
             if return_code is None:
-                return_code = -signal.SIGKILL if local.cancelling else -1
+                # A signal sent successfully is not proof that the process has
+                # exited. Keep tracking it until poll() supplies its returncode;
+                # in particular, never clean a control tree before that point.
+                continue
             self._write_attempt_end(local, return_code)
+            local.reaped = True
+            self._finish_attempt_cleanup(local)
             del self._running[attempt_id]
 
     def _commit_published_outcome(
@@ -1957,6 +1989,11 @@ class TaskManager:
         try:
             if not self._environment_log_ready(marker, state):
                 return False
+            local = self._running.get(state.attempt_id or "")
+            if local is not None:
+                action = read_json(outcome_path / "outcome.json").get("action")
+                if isinstance(action, str):
+                    local.outcome_action = action
             self._begin_commit(marker, state, outcome_path)
         except TransitionLostError:
             return True
@@ -2101,8 +2138,8 @@ class TaskManager:
         join_summary: Sequence[object] | None = None,
         resources: Mapping[str, int] | None = None,
         priority: int | None = None,
-    ) -> None:
-        _manager_commit.advance(
+    ) -> Marker:
+        return _manager_commit.advance(
             self,
             marker,
             job,
@@ -2126,8 +2163,8 @@ class TaskManager:
         unclean: bool,
         takeover_evidence: Mapping[str, object] | None = None,
         priority: int | None = None,
-    ) -> None:
-        _manager_commit.retry(
+    ) -> Marker:
+        return _manager_commit.retry(
             self,
             marker,
             job,

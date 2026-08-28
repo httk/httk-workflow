@@ -53,7 +53,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 job_dir = Path(os.environ["HTTK_WORKFLOW_JOB_DIR"])
 run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
@@ -151,7 +151,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()
@@ -180,7 +180,7 @@ import os
 import time
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 with (run / "steps.log").open("a") as stream:

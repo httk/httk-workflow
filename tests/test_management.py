@@ -7,7 +7,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
-from httk.workflow import Workspace
+from httk.workflow import TaskManager, Workspace
 from httk.workflow.adapters import add_remote, import_v1_remote, run_adapter
 from httk.workflow.configuration import identity_key_paths
 from httk.workflow.journal import JournalWriter
@@ -125,6 +125,25 @@ def test_maintenance_guard_refuses_cancelling_workspace(tmp_path: Path) -> None:
         workspace.transition(writer, running, "cancelling", {"reason": "test"})
     with pytest.raises(ValueError, match="quiescent workspace"), workspace_maintenance_guard(workspace):
         pass
+
+
+def test_oversized_attempt_context_fails_as_protocol_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A context too large for one environment value leaves failure evidence."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source")
+    workspace.submit(payload, "jobs/oversized-context")
+    monkeypatch.setattr(workspace, "read_settings", lambda: {"huge": "x" * 100_000})
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=60.0)
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "failed"
+    state = workspace.read_state(marker)
+    assert state["failure"]["code"] == "protocol_error"
+    root = workspace.payload_path(marker.placement, marker.job_key)
+    assert len(list((root / "attempts").iterdir())) == 1
 
 
 def test_adapter_json_contract_and_no_shell_interpolation(tmp_path: Path) -> None:

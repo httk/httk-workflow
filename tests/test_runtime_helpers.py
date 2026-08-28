@@ -23,36 +23,30 @@ from httk.workflow.vasp import (
 )
 
 
-def _context(path: Path) -> None:
-    path.write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-attempt-context",
-                "format_version": 2,
-                "workspace_id": "workspace",
-                "job_id": "job",
-                "job_key": "job-key",
-                "placement": "jobs",
-                "payload": str(path.parent.parent / "job"),
-                "step": "relax",
-                "activation_id": "activation",
-                "attempt_id": "attempt",
-                "is_restart": True,
-                "is_unclean_restart": False,
-                "data_generation": None,
-            }
-        ),
-        encoding="utf-8",
-    )
+def _context(path: Path) -> dict[str, object]:
+    return {
+        "format": "httk-workflow-attempt-context",
+        "format_version": 2,
+        "workspace_id": "workspace",
+        "job_id": "job",
+        "job_key": "job-key",
+        "placement": "jobs",
+        "payload": str(path.parent.parent / "job"),
+        "step": "relax",
+        "activation_id": "activation",
+        "attempt_id": "attempt",
+        "is_restart": True,
+        "is_unclean_restart": False,
+        "data_generation": None,
+    }
 
 
 def test_an_attempt_reads_its_context_and_publishes_one_outcome(tmp_path: Path) -> None:
     control = tmp_path / "control"
     control.mkdir()
-    context = control / "context.json"
-    _context(context)
+    context = _context(control)
     environment = {
-        "HTTK_WORKFLOW_CONTEXT": str(context),
+        "HTTK_WORKFLOW_CONTEXT": json.dumps(context),
         "HTTK_WORKFLOW_CONTROL_DIR": str(control),
         "HTTK_WORKFLOW_JOB_DIR": str(tmp_path / "job"),
         "HTTK_WORKFLOW_WORKDIR": str(tmp_path / "run"),

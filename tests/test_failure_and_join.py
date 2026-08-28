@@ -64,7 +64,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()
@@ -232,7 +232,7 @@ import os
 import uuid
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 child_id = str(uuid.uuid5(uuid.UUID(context["job_id"]), "ghost"))
 temporary = control / "outcome.tmp.test"
@@ -356,10 +356,10 @@ def test_gather_refuses_a_join_over_no_children(tmp_path: Path) -> None:
         "attempt_id": str(uuid.uuid4()),
         "data_generation": None,
     }
-    (control / "context.json").write_text(json.dumps(context), encoding="utf-8")
+    context_json = json.dumps(context)
     (tmp_path / "run").mkdir()
     environment = {
-        "HTTK_WORKFLOW_CONTEXT": str(control / "context.json"),
+        "HTTK_WORKFLOW_CONTEXT": context_json,
         "HTTK_WORKFLOW_CONTROL_DIR": str(control),
         "HTTK_WORKFLOW_JOB_DIR": str(tmp_path / "job"),
         "HTTK_WORKFLOW_WORKDIR": str(tmp_path / "run"),
@@ -445,11 +445,11 @@ def _in_process_attempt(tmp_path: Path, *, label: str | None = None) -> Attempt:
             }
         ],
     }
-    (control / "context.json").write_text(json.dumps(context), encoding="utf-8")
+    context_json = json.dumps(context)
     (tmp_path / "run").mkdir()
     return Attempt.initialize(
         {
-            "HTTK_WORKFLOW_CONTEXT": str(control / "context.json"),
+            "HTTK_WORKFLOW_CONTEXT": context_json,
             "HTTK_WORKFLOW_CONTROL_DIR": str(control),
             "HTTK_WORKFLOW_JOB_DIR": str(tmp_path / "job"),
             "HTTK_WORKFLOW_WORKDIR": str(tmp_path / "run"),

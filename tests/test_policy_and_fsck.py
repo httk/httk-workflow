@@ -30,7 +30,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 outcome = {
     "format": "httk-workflow-outcome",

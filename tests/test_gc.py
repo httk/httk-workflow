@@ -36,7 +36,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 workdir = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 (workdir / "kept.txt").write_text("persistent application data\\n")
@@ -157,6 +157,65 @@ def _manager_directory(workspace: Workspace, writer_id: str, *, live: bool, days
     )
     _age(manager_dir, days)
     return manager_dir
+
+
+def test_succeeded_attempt_control_waits_for_lease_grace_while_runner_lingers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GC must not remove a published attempt while its runner may live."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    workspace.set_policy({"lease_seconds": 1.0, "retention": {"attempt_control_days": 0.0}})
+    payload, job_id = _payload(tmp_path / "source", "lingering")
+    runner = payload / "files" / "runner"
+    runner.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+trap '' TERM
+source "$HTTK_WORKFLOW_BASH_API"
+httk_workflow_runner tests.gc run
+step_run() {
+    httk_workflow_succeed
+    sleep 1.5
+}
+httk_workflow_main
+""",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    workspace.submit(payload, "project/lingering")
+    # The real committing manager is allowed to retain the process, but this
+    # test deliberately leaves the control tree for GC to exercise its grace.
+    monkeypatch.setattr("httk.workflow._manager_commit._remove_committed_attempt_control", lambda *args: None)
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            manager.tick()
+            marker = workspace.find_marker_by_id(job_id)
+            if marker is not None and marker.kind == "succeeded":
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("job did not succeed")
+        root = workspace.payload_path(marker.placement, marker.job_key)
+        controls = list((root / "attempts").iterdir())
+        assert len(controls) == 1
+        assert manager._running and next(iter(manager._running.values())).process.poll() is None
+
+        assert workspace.collect_garbage().category("attempt_control").removed == 0
+        assert controls[0].is_dir()
+
+        process = next(iter(manager._running.values())).process
+        process_deadline = time.monotonic() + 10.0
+        while process.poll() is None and time.monotonic() < process_deadline:
+            time.sleep(0.01)
+        assert process.poll() is not None
+        time.sleep(0.1)
+        report = workspace.collect_garbage()
+
+    assert report.category("attempt_control").removed == 1
+    assert not controls[0].exists()
 
 
 def _two_segment_writer(workspace: Workspace, *, days: float) -> tuple[str, list[Path], str]:
@@ -381,15 +440,14 @@ class _Fixture:
         ]
         self.workdirs = [payload / "run" for payload in self.payloads]
 
-        # Per terminal job: the attempt the manager ran, plus one older one.
+        # Per terminal job: a stale post-commit leftover plus a fresh one that
+        # supplies transaction-trash evidence for the category test.
         self.old_attempts = [_attempt_directory(payload, days=30) for payload in self.payloads]
         self.newest_attempts: list[Path] = []
         for payload in self.payloads:
-            existing = sorted(payload.glob("attempts/*"))
-            newest = max(existing, key=lambda path: path.stat().st_mtime)
-            self.newest_attempts.append(newest)
-        # A job that never ran keeps every attempt directory it has, whatever
-        # its age, because it is not terminal.
+            self.newest_attempts.append(_attempt_directory(payload, days=0))
+        # A quiescent job that never ran may collect aged attempt directories
+        # too; the lease grace still protects a recent one.
         pending_payload, pending_id = _payload(tmp_path / "source", "job-pending")
         self.workspace.submit(pending_payload, "project/deep/pending")
         self.pending_id = pending_id
@@ -504,12 +562,12 @@ def test_each_category_collects_only_the_aged_entries(aged: _Fixture) -> None:
     report = aged.workspace.collect_garbage()
     assert report.candidates == report.removed
 
-    # 1. Aged attempt-control directories of terminal jobs, never the newest.
+    # 1. Aged attempt-control directories of quiescent jobs, never the newest
+    # failed/cancelled evidence.
     assert [directory.exists() for directory in aged.old_attempts] == [False, False]
     assert all(directory.is_dir() for directory in aged.newest_attempts)
-    assert report.category("attempt_control").removed == 2
-    # A job that is not terminal keeps every attempt directory it has.
-    assert all(directory.is_dir() for directory in aged.pending_attempts)
+    assert report.category("attempt_control").removed == 4
+    assert all(not directory.exists() for directory in aged.pending_attempts)
 
     # 2. Transaction trash of a job that has left committing.
     assert not aged.trash.exists()
@@ -591,7 +649,7 @@ def test_a_collection_journals_one_frame_summarizing_what_it_removed(aged: _Fixt
     assert frame["retention"] == {"attempt_control_days": 7.0, "journal_days": 30.0, "trash_days": 14.0}
     categories = frame["categories"]
     assert isinstance(categories, dict)
-    assert categories["attempt_control"]["removed"] == 2
+    assert categories["attempt_control"]["removed"] == 4
     # The frame is not a state frame, so it never disturbs a workspace check.
     assert aged.workspace.check().ok
 
@@ -729,18 +787,21 @@ def test_a_symlinked_control_is_skipped_by_gc(tmp_path: Path) -> None:
     target.mkdir()
     sentinel = target / "must-survive"
     sentinel.write_text("outside\n", encoding="utf-8")
+    (installed / "attempts").mkdir()
+    (installed / "attempts" / "genuine").mkdir()
     linked = installed / "attempts" / "symlinked-control"
     linked.symlink_to(target, target_is_directory=True)
     _age(linked, 30)
     genuine = next(path for path in (installed / "attempts").iterdir() if not path.is_symlink())
-    workspace.set_policy({"retention": {"attempt_control_days": 0.0}})
+    _age(genuine, 30)
+    workspace.set_policy({"lease_seconds": 1.0, "retention": {"attempt_control_days": 0.0}})
 
     report = workspace.collect_garbage()
 
     assert linked.is_symlink()
-    assert genuine.is_dir()
+    assert not genuine.exists()
     assert sentinel.read_text(encoding="utf-8") == "outside\n"
-    assert report.category("attempt_control").removed == 0
+    assert report.category("attempt_control").removed == 1
 
 
 def test_a_collection_report_round_trips_through_its_mapping(aged: _Fixture) -> None:

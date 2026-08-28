@@ -1,11 +1,13 @@
 """Private outcome and commit decisions used by the task manager."""
 
+import errno
 import logging
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from . import gc as _gc
 from ._util import read_json, require_int, require_string
 from .errors import FormatError, TransactionError, UnsupportedExtensionError
 from .models import (
@@ -22,6 +24,52 @@ from .models import (
 )
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
+
+
+def _remove_attempt_control_tree(control: Path, job_key: str) -> None:
+    """Best-effort remove one validated attempt-control tree and its container."""
+
+    attempts = control.parent
+    removed = _gc._remove_tree(control)
+    if not removed and control.exists():
+        raise OSError(f"attempt control tree remains: {control}")
+    try:
+        attempts.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        if exc.errno != errno.ENOTEMPTY:
+            _LOGGER.warning("cannot remove empty attempt container for %s: %s", job_key, exc)
+
+
+def _remove_committed_attempt_control(manager: Any, marker: Marker, state: StateFrame, destination: Marker) -> None:
+    """Remove local committed control only after this manager has reaped it.
+
+    A live local attempt is marked for cleanup and removed when its process is
+    reaped. A committing marker recovered by a manager that never owned the
+    process is deliberately left for ``attempt_control`` garbage collection.
+    """
+
+    if destination.kind in {"failed", "cancelled"}:
+        return
+    attempt_id = state.attempt_id or ""
+    local = manager._running.get(attempt_id)
+    if local is not None:
+        local.cleanup_pending = True
+        local.cleanup_request = (marker, state, destination)
+        if not local.reaped:
+            return
+    elif attempt_id not in manager._reaped_attempts:
+        # This is an inherited commit: no process exit was proven by this
+        # manager, so the evidence remains for the collector.
+        return
+    try:
+        control = manager._attempt_control_path(marker, state)
+        _remove_attempt_control_tree(control, marker.job_key)
+    except Exception as exc:
+        _LOGGER.warning("cannot remove committed attempt control for %s: %s", marker.job_key, exc)
+    finally:
+        manager._reaped_attempts.discard(attempt_id)
 
 
 def failure(code: str, message: str, *, exit_status: int | None = None) -> dict[str, object]:
@@ -218,7 +266,7 @@ def process_committing(manager: Any, marker: Marker) -> None:
         marker.priority if priority_raw is None else require_int(priority_raw, "outcome.priority", maximum=999)
     )
     if action == "advance":
-        manager._advance(
+        destination = manager._advance(
             marker,
             job,
             state,
@@ -227,16 +275,18 @@ def process_committing(manager: Any, marker: Marker) -> None:
             resources=next_resources,
             priority=next_priority,
         )
+        _remove_committed_attempt_control(manager, marker, state, destination)
     elif action == "retry":
-        manager._retry(
+        destination = manager._retry(
             marker, job, state, progress, nested_reason(outcome, "retry"), unclean=False, priority=next_priority
         )
+        _remove_committed_attempt_control(manager, marker, state, destination)
     elif action == "wait":
         next_step = validate_step(outcome.get("next_step"), "next_step")
         join = outcome.get("join")
         if not isinstance(join, Mapping):
             raise FormatError("wait outcome requires a join object")
-        manager._transition(
+        destination = manager._transition(
             marker,
             "waiting",
             StateFrame.replace(
@@ -248,10 +298,12 @@ def process_committing(manager: Any, marker: Marker) -> None:
             ),
             priority=next_priority,
         )
+        _remove_committed_attempt_control(manager, marker, state, destination)
     elif action == "succeed":
-        manager._transition(
+        destination = manager._transition(
             marker, "succeeded", StateFrame.replace(progress, reason="succeeded"), priority=next_priority
         )
+        _remove_committed_attempt_control(manager, marker, state, destination)
     elif action == "fail":
         try:
             failure_value = validate_failure(outcome.get("failure"))
@@ -271,24 +323,29 @@ def process_committing(manager: Any, marker: Marker) -> None:
                     failure_value.code,
                     extra=manager._event("declared_retry", marker, failure_code=failure_value.code),
                 )
-                manager._retry(marker, job, state, progress, failure_value.code, unclean=False, priority=next_priority)
+                destination = manager._retry(
+                    marker, job, state, progress, failure_value.code, unclean=False, priority=next_priority
+                )
+                _remove_committed_attempt_control(manager, marker, state, destination)
                 return
-        manager._transition(
+        destination = manager._transition(
             marker,
             "failed",
             StateFrame.replace(progress, failure=failure_value.as_mapping(), reason=reason),
             priority=next_priority,
         )
+        _remove_committed_attempt_control(manager, marker, state, destination)
     elif action == "pause":
         paused = progress
         if "process" in state.members:
             paused = StateFrame.replace(paused, process=state.members["process"])
-        manager._transition(
+        destination = manager._transition(
             marker,
             "paused",
             StateFrame.replace(paused, pause=outcome.get("pause"), reason="step_paused"),
             priority=next_priority,
         )
+        _remove_committed_attempt_control(manager, marker, state, destination)
     else:
         raise FormatError(f"unsupported outcome action: {action!r}")
 
@@ -305,20 +362,19 @@ def advance(
     join_summary: Sequence[object] | None = None,
     resources: Mapping[str, int] | None = None,
     priority: int | None = None,
-) -> None:
+) -> Marker:
     progress = _retain_deferred_pause_process(state, progress)
     activation_ordinal = (state.activation_ordinal if state.activation_ordinal is not None else 1) + 1
     maximum = job.retry_policy.maximum_activations
     if maximum is not None and activation_ordinal > maximum:
-        manager._transition(
+        return manager._transition(
             marker,
             "failed",
             StateFrame.replace(
                 progress, failure=failure("budget_exhausted", "maximum_activations exceeded"), reason="budget_exhausted"
             ),
         )
-        return
-    manager._transition(
+    return manager._transition(
         marker,
         "ready",
         StateFrame.replace(
@@ -347,17 +403,16 @@ def retry(
     unclean: bool,
     takeover_evidence: Mapping[str, object] | None = None,
     priority: int | None = None,
-) -> None:
+) -> Marker:
     progress = _retain_deferred_pause_process(state, progress)
     current_attempts = state.attempt_ordinal if state.attempt_ordinal is not None else 1
     maximum = job.retry_policy.maximum_attempts_per_activation
     if maximum is not None and current_attempts >= maximum:
-        manager._transition(
+        return manager._transition(
             marker,
             "failed",
             StateFrame.replace(progress, failure=failure("retry_exhausted", reason), reason="retry_exhausted"),
         )
-        return
     evidence_value = {} if takeover_evidence is None else dict(takeover_evidence)
     retried = StateFrame.replace(
         progress,
@@ -368,7 +423,7 @@ def retry(
     )
     if takeover_evidence is not None:
         retried = StateFrame.replace(retried, takeover_evidence=evidence_value)
-    manager._transition(marker, "ready", retried, priority=priority)
+    return manager._transition(marker, "ready", retried, priority=priority)
 
 
 def register_children(

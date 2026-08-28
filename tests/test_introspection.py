@@ -37,7 +37,7 @@ import os
 import sys
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 step = context["step"]
@@ -87,7 +87,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()
@@ -108,7 +108,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 print("the child is working on " + context["step"])
 temporary = control / "outcome.tmp.child"
@@ -132,7 +132,7 @@ from pathlib import Path
 
 CHILD_SOURCE = """@CHILD@"""
 CHILD_EXECUTOR = "@EXECUTOR@"
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()
@@ -764,13 +764,14 @@ def test_debug_drives_a_three_step_runner_in_the_foreground(tmp_path: Path) -> N
     marker = resolve_job(workspace, job_id)
     assert marker.kind == "succeeded"
     payload_root = workspace.payload_path(marker.placement, marker.job_key)
-    published = [
-        json.loads((attempt / "outcome.ready" / "outcome.json").read_text(encoding="utf-8"))
-        for attempt in sorted((payload_root / "attempts").iterdir())
-        if (attempt / "outcome.ready" / "outcome.json").is_file()
-    ]
-    assert len(published) == 3
-    assert all(outcome["runner_steps"] == ["prepare", "relax", "collect"] for outcome in published)
+    assert not (payload_root / "attempts").exists()
+    frames = job_frames(workspace, marker)
+    committed = [frame for frame in frames if frame.get("kind") == "committing"]
+    assert len(committed) == 3
+    assert all(frame["outcome_action"] == "advance" for frame in committed[:2])
+    assert committed[-1]["outcome_action"] == "succeed"
+    destinations = [frame for frame in frames if frame.get("runner_steps")]
+    assert all(frame["runner_steps"] == ["prepare", "relax", "collect"] for frame in destinations)
     assert not (payload_root / ".httk-job" / ("runner" + "-steps.json")).exists()
     chronicle = (payload_root / "logs" / "stdio.out").read_text(encoding="utf-8").splitlines()
     for step in ("prepare", "relax", "collect"):
@@ -813,7 +814,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()

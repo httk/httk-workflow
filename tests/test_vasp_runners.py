@@ -241,9 +241,7 @@ def test_the_installed_package_form_resolves_the_packaged_runner(
 
     kind, payload = _payload_of(workspace, job_id)
     assert kind == "succeeded"
-    attempts = sorted(payload.glob("attempts/*"))
-    assert attempts
-    assert not (attempts[-1] / "runner").exists()
+    assert not (payload / "attempts").exists()
     assert json.loads((payload / "logs" / "runlog.jsonl").read_text(encoding="utf-8").splitlines()[0])[
         "runner_path"
     ] == str(runner_path("vasp_relax.py"))

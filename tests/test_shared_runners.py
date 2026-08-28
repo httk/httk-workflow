@@ -21,7 +21,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 (Path(os.environ["HTTK_WORKFLOW_WORKDIR"]) / "ran.txt").write_text(context["step"])
 temporary = control / "outcome.tmp.test"
@@ -126,9 +126,7 @@ def test_workspace_runner_is_published_resolved_and_verified_in_place(tmp_path: 
         assert marker is not None and marker.kind == "succeeded"
         job_root = workspace.payload_path(marker.placement, marker.job_key)
         assert (job_root / "run" / "ran.txt").read_text(encoding="utf-8") == "only"
-        attempt = next(job_root.joinpath("attempts").iterdir())
-        assert not (attempt / "runner").exists()
-        assert {entry.name for entry in attempt.iterdir()} <= {"context.json", "outcome.ready"}
+        assert not (job_root / "attempts").exists()
         events = [
             json.loads(line) for line in (job_root / "logs" / "runlog.jsonl").read_text(encoding="utf-8").splitlines()
         ]
@@ -199,8 +197,7 @@ def test_an_installed_runner_tree_is_pinned_and_executed_in_place(tmp_path: Path
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "succeeded"
     job_root = workspace.payload_path(marker.placement, marker.job_key)
-    attempt = next(job_root.joinpath("attempts").iterdir())
-    assert not (attempt / "runner").exists()
+    assert not (job_root / "attempts").exists()
     assert (bundle / "run").is_file()
 
 
@@ -482,8 +479,7 @@ def test_workspace_runner_tree_is_verified_and_executed_in_place(tmp_path: Path)
     marker = workspace.find_marker_by_id(job.id)
     assert marker is not None and marker.kind == "succeeded"
     job_root = workspace.payload_path(marker.placement, marker.job_key)
-    attempt = next(job_root.joinpath("attempts").iterdir())
-    assert not (attempt / "runner").exists()
+    assert not (job_root / "attempts").exists()
     assert (workspace.runners / "toolbox" / "run").is_file()
 
 

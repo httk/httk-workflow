@@ -109,30 +109,27 @@ def _fixture(
     control.mkdir(parents=True)
     workdir = payload / "run"
     workdir.mkdir()
-    (control / "context.json").write_text(
-        json.dumps(
-            {
-                "format": "httk-workflow-attempt-context",
-                "format_version": 2,
-                "workspace_id": str(uuid.uuid4()),
-                "job_id": str(uuid.uuid4()),
-                "job_key": f"fabricated--{uuid.uuid4()}",
-                "placement": "project/fabricated",
-                "payload": str(payload),
-                "step": step,
-                "activation_id": str(uuid.uuid4()),
-                "attempt_id": str(uuid.uuid4()),
-                "data_generation": data_generation,
-                "children": children or [],
-                "settings": settings or {},
-            }
-        ),
-        encoding="utf-8",
+    context_json = json.dumps(
+        {
+            "format": "httk-workflow-attempt-context",
+            "format_version": 2,
+            "workspace_id": str(uuid.uuid4()),
+            "job_id": str(uuid.uuid4()),
+            "job_key": f"fabricated--{uuid.uuid4()}",
+            "placement": "project/fabricated",
+            "payload": str(payload),
+            "step": step,
+            "activation_id": str(uuid.uuid4()),
+            "attempt_id": str(uuid.uuid4()),
+            "data_generation": data_generation,
+            "children": children or [],
+            "settings": settings or {},
+        }
     )
     process_environment = os.environ.copy()
     process_environment.update(
         {
-            "HTTK_WORKFLOW_CONTEXT": str(control / "context.json"),
+            "HTTK_WORKFLOW_CONTEXT": context_json,
             "HTTK_WORKFLOW_CONTROL_DIR": str(control),
             "HTTK_WORKFLOW_JOB_DIR": str(payload),
             "HTTK_WORKFLOW_WORKDIR": str(workdir),
@@ -457,7 +454,7 @@ record refused_assignment httk_workflow_state_merge nonsense""",
 
 def test_a_corrupt_attempt_context_is_refused_with_two(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, step="only")
-    Path(fixture.environment["HTTK_WORKFLOW_CONTEXT"]).write_text("{}\n", encoding="utf-8")
+    fixture.environment["HTTK_WORKFLOW_CONTEXT"] = "{}"
     completed = fixture.run(_runner("only", body="step_only() { httk_workflow_succeed; }"))
     assert completed.returncode == 2
     assert "httk-workflow-attempt-context" in completed.stderr

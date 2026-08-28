@@ -55,7 +55,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 (run / "steps.txt").open("a").write(context["step"] + "\\n")
@@ -195,7 +195,7 @@ import os
 import sys
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 run = Path(os.environ["HTTK_WORKFLOW_WORKDIR"])
 count_path = run / "count"
 count = int(count_path.read_text()) + 1 if count_path.exists() else 1
@@ -235,7 +235,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 payload = temporary / "transaction" / "payload"
@@ -285,7 +285,7 @@ import os
 import uuid
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()
@@ -308,7 +308,7 @@ else:
 import json
 import os
 from pathlib import Path
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.child"
 temporary.mkdir()

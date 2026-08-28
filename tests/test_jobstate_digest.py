@@ -95,9 +95,9 @@ def test_a_job_that_wrote_state_still_transfers_and_verifies(tmp_path: Path) -> 
         "energy": -12.5,
         "converged": True,
     }
-    # The job ran, so its payload now holds both an attempt control directory and
-    # job state; the bundle digest covers neither, and the import verifies it.
-    assert sorted(payload.glob("attempts/*"))
+    # The committing manager removes succeeded attempt control; the bundle
+    # digest still covers neither that transient directory nor job state.
+    assert not (payload / "attempts").exists()
     digest = source.payload_digest(marker)
 
     bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)

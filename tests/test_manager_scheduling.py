@@ -35,7 +35,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()
@@ -62,7 +62,7 @@ import os
 import time
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()
@@ -84,7 +84,7 @@ import os
 import sys
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 print("partial", end="", flush=True)
 if context["attempt_ordinal"] == 1:
     sys.exit(7)
@@ -109,7 +109,7 @@ import uuid
 from pathlib import Path
 
 CHILD = {child!r}
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()
@@ -514,7 +514,7 @@ def test_running_frame_records_launcher_identity_without_attempt_metadata_file(t
         local = manager._running[state["attempt_id"]]
         assert process["pid"] == local.process.pid
         attempt = workspace.payload_path(running.placement, running.job_key) / str(state["attempt_control"])
-        assert {entry.name for entry in attempt.iterdir()} == {"context.json"}
+        assert not list(attempt.iterdir())
         manager._signal_running_attempts(signal.SIGKILL)
 
 
@@ -1757,6 +1757,113 @@ def test_one_stdio_chronicle_has_fenced_markers_and_manager_attempt_events(tmp_p
         assert event["runner_sha256"]
 
 
+def test_bash_post_publication_delay_is_reaped_before_cleanup(tmp_path: Path) -> None:
+    runner = """#!/usr/bin/env bash
+set -euo pipefail
+source "$HTTK_WORKFLOW_BASH_API"
+httk_workflow_runner tests.scheduling only
+step_only() {
+    httk_workflow_succeed
+    sleep 2
+}
+httk_workflow_main
+"""
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", runner, tag="bash-late-exit")
+    workspace.submit(payload, "project/bash-late-exit")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30.0)
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    root = workspace.payload_path(marker.placement, marker.job_key)
+    assert not (root / "attempts").exists() or not list((root / "attempts").iterdir())
+    assert "no_outcome" not in (root / "logs" / "stdio.out").read_text(encoding="utf-8")
+
+
+def test_python_exception_after_succeed_cannot_resurrect_attempt_control(tmp_path: Path) -> None:
+    source_root = Path(__file__).parents[1] / "src"
+    runner = f"""#!/usr/bin/env python3
+import signal
+import sys
+import time
+sys.path.insert(0, {str(source_root)!r})
+from httk.workflow import Runner
+
+run = Runner("tests.scheduling")
+
+@run.step
+def only(a):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    a.succeed()
+    time.sleep(1.5)
+    raise RuntimeError("late handler failure")
+
+if __name__ == "__main__":
+    raise SystemExit(run.main())
+"""
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", runner, tag="python-late-exit")
+    workspace.submit(payload, "project/python-late-exit")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30.0)
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    root = workspace.payload_path(marker.placement, marker.job_key)
+    assert not (root / "attempts").exists() or not list((root / "attempts").iterdir())
+
+
+def test_inherited_committing_success_retains_attempt_control_for_gc(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, job_id = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag="inherited-commit")
+    running, _attempt_id = _fake_running_attempt(
+        workspace,
+        payload,
+        "project/inherited-commit",
+        manager_id=_fake_manager(workspace, heartbeat_age=3600.0),
+        pid=os.getpid(),
+        lease_seconds=10.0,
+    )
+    state = StateFrame.from_mapping(workspace.read_state(running))
+    control = workspace.payload_path(running.placement, running.job_key) / str(state.attempt_control)
+    outcome = control / "outcome.ready"
+    outcome.mkdir()
+    (outcome / "outcome.json").write_text(
+        json.dumps(
+            {
+                "format": "httk-workflow-outcome",
+                "format_version": 2,
+                "job_id": running.job_id,
+                "activation_id": state.activation_id,
+                "attempt_id": state.attempt_id,
+                "action": "succeed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    committing = StateFrame.replace(
+        state.carried(),
+        manager_id=str(uuid.uuid4()),
+        writer_id=str(uuid.uuid4()),
+        outcome_action="succeed",
+        child_digests={},
+        child_labels={},
+        reason="outcome_published",
+    )
+    with JournalWriter(workspace.control) as writer:
+        workspace.transition(writer, running, "committing", committing.as_mapping())
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=30.0)
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    assert control.is_dir()
+
+
 def test_a_runlog_directory_is_evidence_failure_and_does_not_block_launch(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -2138,13 +2245,17 @@ def test_owner_request_waits_for_owner_manager(tmp_path: Path) -> None:
         assert workspace.find_marker_by_id(job_id).kind == "ready"  # type: ignore[union-attr]
 
 
-def _attempt_contexts(root: Path, job_id: str) -> list[dict[str, object]]:
-    """Read all attempt contexts for one job below a workspace root."""
+def _attempt_contexts(workspace: Workspace, job_id: str) -> list[dict[str, object]]:
+    """Read the claimed-attempt snapshots retained in the job journal."""
 
+    from httk.workflow.introspection._reading import job_frames
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None
     return [
-        json.loads(path.read_text(encoding="utf-8"))
-        for path in sorted(root.rglob("context.json"))
-        if json.loads(path.read_text(encoding="utf-8")).get("job_id") == job_id
+        {"step": frame.get("step"), "resources": frame.get("resources", {})}
+        for frame in job_frames(workspace, marker)
+        if frame.get("kind") == "claimed"
     ]
 
 
@@ -2227,7 +2338,7 @@ def test_undeclared_resources_use_fair_share(tmp_path: Path) -> None:
         jobs.append((payload, job_id))
     with TaskManager(workspace, resources={"procs": 4}, maximum_workers=2, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=30.0)
-    contexts = [context for _, job_id in jobs for context in _attempt_contexts(workspace.root, job_id)]
+    contexts = [context for _, job_id in jobs for context in _attempt_contexts(workspace, job_id)]
     assert len(contexts) == 3
     assert all(context["resources"] == {"procs": 2} for context in contexts)
 
@@ -2238,7 +2349,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()
@@ -2261,7 +2372,7 @@ os.rename(temporary, control / "outcome.ready")
         workspace, resources={"procs": 4, "mem": 8}, maximum_workers=2, heartbeat_interval=0.01
     ) as manager:
         manager.run_until_idle(timeout=30.0)
-    contexts = {context["step"]: context["resources"] for context in _attempt_contexts(workspace.root, job_id)}
+        contexts = {context["step"]: context["resources"] for context in _attempt_contexts(workspace, job_id)}
     assert contexts == {
         "first": {"procs": 2, "mem": 4},
         "second": {"procs": 3, "mem": 4},
@@ -2280,7 +2391,7 @@ def test_wait_resources_apply_to_post_join_activation(tmp_path: Path) -> None:
         workspace, resources={"procs": 4, "mem": 8}, maximum_workers=2, heartbeat_interval=0.01
     ) as manager:
         manager.run_until_idle(timeout=30.0)
-    contexts = _attempt_contexts(workspace.root, job_id)
+    contexts = _attempt_contexts(workspace, job_id)
     assert {context["step"]: context["resources"] for context in contexts} == {
         "only": {"procs": 2, "mem": 4},
         "gather": {"procs": 3, "mem": 4},
@@ -2293,7 +2404,7 @@ import json
 import os
 from pathlib import Path
 
-context = json.loads(Path(os.environ["HTTK_WORKFLOW_CONTEXT"]).read_text())
+context = json.loads(os.environ["HTTK_WORKFLOW_CONTEXT"])
 control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])
 temporary = control / "outcome.tmp.test"
 temporary.mkdir()
@@ -2314,5 +2425,5 @@ os.rename(temporary, control / "outcome.ready")
     workspace.submit(payload, "project/retry-resources")
     with TaskManager(workspace, resources={"procs": 4}, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=30.0)
-    contexts = [context for context in _attempt_contexts(workspace.root, job_id) if context["step"] == "retry"]
+        contexts = [context for context in _attempt_contexts(workspace, job_id) if context["step"] == "retry"]
     assert [context["resources"] for context in contexts] == [{"procs": 3}, {"procs": 3}]

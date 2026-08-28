@@ -29,9 +29,10 @@ write files and atomically rename a file or directory.
 The design descends from the `ht.task.*` directories, `ht_steps`,
 `ht.nextstep`, subtasks, and `ht.atomic.*` replay mechanism in *httk* v1. It keeps
 the central property of that design: neither a workflow step nor a task manager
-is ever required to run cleanup code. Either may disappear between any two
-instructions. A later task manager must be able to identify the last commit
-point and continue from it.
+is ever required to run cleanup code, apart from the owning manager's best-effort
+post-commit removal of a locally reaped successful attempt control tree. Either
+may disappear between any two instructions. A later task manager must be able
+to identify the last commit point and continue from it.
 
 The design target is workspaces larger than the measured local snapshot in
 {doc}`/benchmarks`; that target is not a capacity measurement. Metadata inode
@@ -95,8 +96,8 @@ data is:
 | Shared journal records | 0 files | Packed into writer segments |
 | Runner | 0 files | Shared and referenced by digest, unless it lives in the payload |
 | `.httk-job/` runner job state | 0 or 1 directory | Job lifetime, when a runner keeps state across attempts |
-| `attempts/` reserved container | 0 or 1 directory | Created with the first attempt and retained for the job lifetime |
-| `attempts/<attempt-id>/` control directories | 0 or more directories | Attempt/retention lifetime |
+| `attempts/` reserved container | 0 or 1 directory | Exists only while an attempt is live, failed/cancelled evidence is retained, or a succeeded leftover awaits collection |
+| `attempts/<attempt-id>/` control directories | 0 or more directories | Live-attempt lifetime, failed/cancelled evidence retention, or a succeeded leftover awaiting collection |
 | `logs/` | 0 or 1 directory | Reserved for a future run-log layout; unused in core-v2 |
 | Persistent/isolated workdir | 0 or 1 directory | Application policy |
 | Per-state/per-event/per-failure files | 0 | Not used |
@@ -729,8 +730,8 @@ that name it — before the rename that makes it authoritative:
 | Journal frame, including the `process` identity in a `running` frame | the state-marker rename that references it |
 | State marker / request / submitted payload | it becomes visible in `state/` (its parent directory is flushed) |
 | Running marker directories (source and destination) | the launch gate byte is written, after the verified `running` marker rename and both marker-directory entries are flushed |
-| Attempt `context.json` | the runner is launched against it |
-| Outcome bundle (`outcome.json`, `runner_steps`, failure detail, its sealed transaction manifest and staged payload, its child `job.json` bundles) | the `outcome.tmp.<nonce>` → `outcome.ready` rename; the whole draft tree is flushed in one batch, then the attempt-control directory after the rename |
+| Attempt context environment value | the runner is launched with it; the compact UTF-8 JSON must be under 100,000 bytes |
+| Outcome bundle (`outcome.json`, `runner_steps`, failure detail, its sealed transaction manifest and staged payload, its child `job.json` bundles) | the `outcome.tmp.<nonce>` → `outcome.ready` rename; the whole draft tree is flushed in one batch, then the attempt-control directory after the rename; cleanup follows the durable destination transition and local process reap |
 | Committed transaction data (`data/`) | the manager appends the destination state frame and renames the marker out of `committing`; every replayed destination and each parent directory it touched, including the trash a removal moved into, is flushed first |
 | Registered child payloads and their submitted markers | the parent's marker leaves `committing` |
 | Job state (`.httk-job/state.json`), observed declarations | each atomic replace returns |
@@ -1345,14 +1346,23 @@ unsafe policy MUST be recorded there too.
 
 Attempt control is separate from application workdir:
 
-The version-2 `context.json` includes `payload`, an absolute path to the job
+The version-2 attempt-context JSON document includes `payload`, an absolute path to the job
 payload, so SDKs can locate the job-level logs independently of the selected
 workdir.
+
+The manager supplies this document as the value of `HTTK_WORKFLOW_CONTEXT`; it
+does not create a context file. The canonical compact UTF-8 encoding must be
+shorter than 100,000 bytes. A larger context is a `protocol_error` at launch,
+so application settings belong in the bounded settings snapshot rather than
+in bulk files or values.
+
+Workspace settings are non-secret configuration: they are snapshotted into the
+attempt context and exported into the runner environment, so credentials MUST
+NOT be stored there; remote credentials already live elsewhere.
 
 ```text
 <workspace>/<placement>/<job-key>/
 ├── attempts/<attempt-id>/
-│   ├── context.json
 │   ├── outcome.tmp.<nonce>/
 │   └── outcome.ready/
 ├── logs/
@@ -1453,7 +1463,7 @@ with the choice recorded in history.
 The manager MUST set:
 
 ```text
-HTTK_WORKFLOW_CONTEXT=<absolute path to attempt context.json>
+HTTK_WORKFLOW_CONTEXT=<compact JSON attempt-context document>
 HTTK_WORKFLOW_CONTROL_DIR=<absolute attempt-control path>
 HTTK_WORKFLOW_WORKSPACE_DIR=<absolute workspace path>
 HTTK_WORKFLOW_JOB_DIR=<absolute current payload path>
@@ -1470,7 +1480,7 @@ HTTK_WORKFLOW_RUNNER_ROOT=<absolute shared runner file or tree root>
 
 `HTTK_WORKFLOW_DATA_DIR` is additionally set only for transactional-data jobs.
 For a shared runner, `HTTK_WORKFLOW_RUNNER_ROOT` names its file or tree root.
-The JSON file is the source of truth; scalar environment variables are
+The JSON document is the source of truth; scalar environment variables are
 language-neutral conveniences.
 
 `HTTK_WORKFLOW_DURABLE`, and the `durable` member of the attempt context, carry
@@ -2381,6 +2391,14 @@ For a valid current outcome, a manager:
 8. renames the exact committing marker to the destination;
 9. performs optional cleanup later.
 
+After the destination transition returns successfully, the manager that owned
+the attempt removes its control directory only after it has reaped that
+attempt's process and learned its return code. This applies when the actual
+destination is `ready`, `waiting`, `paused`, or `succeeded`; `failed` and
+`cancelled` retain their evidence. A manager inheriting a `committing` marker
+did not own and reap that process, so it leaves the directory for
+`attempt_control` garbage collection.
+
 Steps 4 and 5 synchronize before steps 7 and 8, so a durable workspace has the
 committed data and the registered children on storage before the marker rename
 that claims them: a power cut can never leave a marker out of `committing` that
@@ -2397,7 +2415,7 @@ Interruption recovery follows directly:
 | While a transaction is replayed | State remains committing; infer completed operations from source, destination, trash, and digests. |
 | While children are registered | Verify existing children and register the missing set. |
 | After destination frame, before marker rename | Frame is prepared but not current; replay and rename. |
-| After marker rename | New state is already authoritative; cleanup is optional. |
+| After marker rename | New state is already authoritative; the owning manager cleans up after it reaps the process when the destination is `ready`, `waiting`, `paused`, or `succeeded`. |
 | Old fenced process publishes late | Never apply it. |
 
 Before recovering a stale claimed or running job, a manager MUST inspect its
@@ -2508,7 +2526,9 @@ workspace publishes in `policy.retention`:
 - incomplete outcome directories;
 - obsolete attempt-control directories;
 - abandoned and completed isolated workdirs;
-- transaction trash after the destination marker transition;
+- transaction trash after the destination marker transition, normally removed
+  with the attempt-control tree for `ready`, `waiting`, `paused`, and
+  `succeeded` destinations;
 - retained diagnostic application files.
 
 That list is permissive: it bounds what a conforming collector *may* touch, not
@@ -2583,16 +2603,21 @@ The remaining categories are gated as follows.
 
 | Category | Gate | Additional condition |
 | --- | --- | --- |
-| Attempt-control directory | `attempt_control_days` | The job is in `succeeded`, `failed`, or `cancelled`, and this is not its newest attempt-control directory. |
+| Attempt-control directory | `attempt_control_days` | Failed and cancelled jobs retain their newest; other quiescent jobs' leftovers (including succeeded) must be older than both this limit and one workspace `lease_seconds` grace. |
 | Transaction trash | `trash_days` | The job's marker has reached a quiescent kind, so the destination transition has happened and no replay consults the trash again. |
 | Retired transfer bundle | `trash_days` | Below `transfers/retired/`; the ledger describing it is kept. |
 | Import acknowledgement and import record | `trash_days` | Below `transfers/acks/` and `transfers/imported/`. |
 | Journal segment | `journal_days` | No current marker — nor the sealed marker of a bundle awaiting handover — references it, and its writer belongs to no manager heartbeating within its lease. |
 | Manager directory | `journal_days` | The manager's heartbeat is expired and none of its writer's segments were retained. |
 
-The newest attempt-control directory of a terminal job is retained regardless
-of age: it holds the outcome and failure breadcrumb of the attempt that
-decided the job, plus the metadata needed to identify it.
+Failed and cancelled jobs retain their newest attempt-control directory
+regardless of age: it holds the outcome and failure breadcrumb of the attempt
+that decided the job, plus the metadata needed to identify it. A succeeded
+attempt-control directory is normally removed by the committing manager after
+the destination transition is durable and its local process has been reaped.
+If that manager dies first — or another manager inherits the committing marker
+— the leftover is eligible for `attempt_control_days`, including when it is the
+only directory left for the job.
 
 A collector MUST NOT prune the runner store. A runner is referenced by digest
 from `job.json` and from transfer manifests, an attached workspace can gain a

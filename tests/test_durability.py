@@ -98,7 +98,7 @@ def _write_context(
     durable: bool | None,
     data_generation: int | None = None,
 ) -> AttemptContext:
-    """Write and read one attempt context, optionally omitting ``durable``."""
+    """Build and read one attempt context, optionally omitting ``durable``."""
 
     directory.mkdir(parents=True, exist_ok=True)
     document: dict[str, object] = {
@@ -117,9 +117,7 @@ def _write_context(
     }
     if durable is not None:
         document["durable"] = durable
-    path = directory / "context.json"
-    path.write_text(json.dumps(document), encoding="utf-8")
-    return AttemptContext.from_path(path)
+    return AttemptContext.from_mapping(document)
 
 
 def test_attempt_context_round_trips_durable_and_tolerates_absence(tmp_path: Path) -> None:

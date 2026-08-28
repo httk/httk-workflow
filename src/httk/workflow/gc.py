@@ -1,8 +1,10 @@
 """Collect bounded, explicitly configured workspace garbage.
 
-Nothing in the engine frees disk on its own, and that is deliberate: neither a
-runner nor a manager is ever required to run cleanup code, so every artefact a
-crash could orphan is simply left in place. Over a long campaign that costs
+Except for a succeeded attempt's control directory, which its owning committing
+manager removes after the commit is durable and its process is reaped, nothing in the engine frees disk
+on its own. That is deliberate: neither a runner nor a manager is ever required
+to run cleanup code, so every other artefact a crash could orphan is simply left
+in place. Over a long campaign that costs
 real space — one control directory per attempt, one journal writer directory
 and one manager directory per process start, a full copy of every tree a
 transaction replaced, an intact bundle for every transfer already acknowledged
@@ -522,20 +524,25 @@ class _Collection:
     # -- categories ----------------------------------------------------------
 
     def collect_attempt_control(self) -> None:
-        """Collect the aged attempt-control directories of terminal jobs.
+        """Collect aged attempt-control directories of quiescent jobs.
 
-        The newest directory of a job is never collected however old it is: it
-        holds the outcome, the failure breadcrumb, and the runner's own logs
-        for the attempt that decided the job, which is precisely what an
-        operator looks at when a terminal job is questioned much later.
+        Failed and cancelled jobs retain their newest directory however old it
+        is: it holds the outcome, the failure breadcrumb, and the runner's own
+        logs for the attempt that decided the job. A succeeded job normally has
+        no retained attempt evidence; a directory left after an owning manager
+        dies before cleanup, or after an inherited commit, is collectable when
+        it ages past this gate and the workspace lease grace. The grace also
+        applies to every other non-failed/cancelled quiescent destination, so a
+        runner lingering after publication is not collected immediately.
         """
 
         cutoff = self._cutoff(self.retention.attempt_control_days)
         if cutoff is None:
             self._skip("attempt_control", "retention.attempt_control_days is not configured")
             return
+        lease_cutoff = self.now - self.workspace.policy.lease_seconds
         for marker in self.markers():
-            if marker.kind not in TERMINAL_KINDS:
+            if marker.kind not in QUIESCENT_KINDS:
                 continue
             payload = self.workspace.payload_path(marker.placement, marker.job_key)
             controls: list[tuple[float, str, Path]] = []
@@ -548,11 +555,14 @@ class _Collection:
                 modified = _mtime(entry)
                 if modified is not None:
                     controls.append((modified, entry.name, entry))
-            if len(controls) < 2:
+            if marker.kind in {"failed", "cancelled"} and len(controls) < 2:
                 continue
             controls.sort()
-            for _modified, _name, entry in controls[:-1]:
-                if self._aged(entry, cutoff):
+            retained = controls[-1:] if marker.kind in {"failed", "cancelled"} else ()
+            for modified, _name, entry in controls:
+                if entry in retained:
+                    continue
+                if self._aged(entry, cutoff) and (marker.kind in {"failed", "cancelled"} or modified <= lease_cutoff):
                     self._collect("attempt_control", entry)
 
     def _join_child_parents(self) -> dict[str, set[str]] | None:

@@ -233,7 +233,7 @@ def _compiled_package(root: Path) -> Path:
         "#!/usr/bin/env python3\n"
         "import json, os\n"
         "from pathlib import Path\n"
-        "context = json.loads(Path(os.environ['HTTK_WORKFLOW_CONTEXT']).read_text())\n"
+        "context = json.loads(os.environ['HTTK_WORKFLOW_CONTEXT'])\n"
         "workdir = Path(os.environ['HTTK_WORKFLOW_WORKDIR'])\n"
         "(workdir / 'used-artifact').write_text('yes')\n"
         "control = Path(os.environ['HTTK_WORKFLOW_CONTROL_DIR'])\n"

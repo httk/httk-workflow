@@ -17,6 +17,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from conftest import TestProfile as _TestProfile
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.protocol import JobSpec, prepare_job_payload
@@ -279,8 +281,12 @@ def _artifacts(workspace: Workspace) -> dict[str, str]:
 
 
 def test_a_bash_campaign_and_a_python_campaign_publish_the_same_artifacts(
-    tmp_path: Path, test_profile: _TestProfile
+    tmp_path: Path, test_profile: _TestProfile, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Keep the full outcome and transaction bundles available for this parity
+    # comparison. This reaches the private implementation seam deliberately;
+    # the production cleanup behavior has no diagnostic/runtime switch.
+    monkeypatch.setattr("httk.workflow._manager_commit._remove_committed_attempt_control", lambda *args: None)
     sites = test_profile.scale(normal=2, extended=3)
     python = _campaign(tmp_path / "python", _PYTHON_RUNNER, "run.py", sites=sites)
     shell = _campaign(tmp_path / "bash", _BASH_RUNNER, "run.sh", sites=sites)
