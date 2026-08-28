@@ -110,6 +110,7 @@ workflow_cli
 campaigns
 benchmarks
 adapter_authoring
+launcher_authoring
 reference/index
 notebooks/examples
 workflow_filesystem_api
