@@ -54,8 +54,8 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`campaigns` — partitioning a very large campaign across many workspaces
 - {doc}`benchmarks` — measured local scale snapshot and benchmark methodology
 - {doc}`collecting` — reading finished jobs back out as records and collected outputs
-- {doc}`adapter_authoring` — reaching a machine the packaged adapters do not cover
-- {doc}`launcher_authoring` — starting managers with a launcher the packaged template does not cover
+- {doc}`remotes` — reaching a machine with a packaged or custom remote adapter
+- {doc}`launchers` — starting managers with a packaged or custom launcher
 - {doc}`reference/index` — the generated API reference
 
 **Migration**
@@ -113,8 +113,8 @@ taskmanager
 workflow_cli
 campaigns
 benchmarks
-adapter_authoring
-launcher_authoring
+remotes
+launchers
 reference/index
 notebooks/examples
 workflow_filesystem_api

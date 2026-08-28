@@ -320,6 +320,7 @@ def campaign_managers(
     workers: int | None = None,
     resources: Mapping[str, int] | None = None,
     count: int | None = None,
+    launcher: str | None = None,
     poll_interval: float = 1.0,
     idle_timeout: float = 3600.0,
     adapter_timeout: float | None = None,
@@ -336,6 +337,7 @@ def campaign_managers(
     :param resources: Resource capacities advertised by each manager.
     :param count: Explicit number of managers to start at each launch site; when
         omitted, each workspace's ``manager.count`` setting applies.
+    :param launcher: Use this launcher for every selected partition.
     :param poll_interval: Set the local manager polling interval.
     :param idle_timeout: Set the local manager idle timeout.
     :param adapter_timeout: Set the remote adapter timeout.
@@ -366,6 +368,7 @@ def campaign_managers(
                 workers=workers,
                 worker_resource=[[resource, str(capacity)] for resource, capacity in manager_resources.items()],
                 count=count,
+                launcher=launcher,
                 lease_seconds=None,
                 heartbeat_interval=30.0,
                 poll_interval=poll_interval,
@@ -400,6 +403,7 @@ def campaign_managers(
                 workers=workers,
                 worker_resource=[[resource, str(capacity)] for resource, capacity in manager_resources.items()],
                 count=count,
+                launcher=launcher,
                 lease_seconds=None,
                 heartbeat_interval=30.0,
                 poll_interval=poll_interval,

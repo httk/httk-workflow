@@ -25,6 +25,37 @@ from ._common import (
 _WORKER_RESOURCE_HELP = "advertise COUNT units of resource NAME to the scheduler (repeatable; procs and mem are shared fairly among --workers)"
 
 
+class _LauncherOption(argparse.Action):
+    """Reject the mutually exclusive ``--inline``/``--launcher`` pair."""
+
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        if self.dest == "launcher":
+            if getattr(namespace, "inline", False):
+                parser.error("argument --launcher: not allowed with argument --inline")
+            setattr(namespace, self.dest, values)
+        else:
+            if getattr(namespace, "launcher", None) is not None:
+                parser.error("argument --inline: not allowed with argument --launcher")
+            setattr(namespace, self.dest, True)
+
+
+def _add_launcher_argument(parser: argparse.ArgumentParser) -> None:
+    """Declare the invocation-specific launcher selector."""
+
+    parser.add_argument(
+        "--launcher",
+        metavar="NAME",
+        action=_LauncherOption,
+        help="use launcher NAME for this invocation",
+    )
+
+
 def _worker_resources(pairs: Sequence[Sequence[str]]) -> dict[str, int]:
     """Parse and validate repeatable worker-resource option pairs.
 
@@ -270,11 +301,15 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json-logs", action="store_true", help="log one JSON object per line")
     inline_detach = parser.add_mutually_exclusive_group()
     inline_detach.add_argument(
-        "--inline", action="store_true", help="run one manager in this process regardless of the workspace's launcher"
+        "--inline",
+        action=_LauncherOption,
+        nargs=0,
+        help="run one manager in this process regardless of the workspace's launcher",
     )
     inline_detach.add_argument(
         "--detach", action="store_true", help="start the managers and return; the default when invoked from a remote"
     )
+    _add_launcher_argument(parser)
     add_durability_arguments(parser)
 
 
@@ -333,11 +368,15 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     _add_adapter_timeout(parser)
     inline_detach = parser.add_mutually_exclusive_group()
     inline_detach.add_argument(
-        "--inline", action="store_true", help="run one manager in this process regardless of the workspace's launcher"
+        "--inline",
+        action=_LauncherOption,
+        nargs=0,
+        help="run one manager in this process regardless of the workspace's launcher",
     )
     inline_detach.add_argument(
         "--detach", action="store_true", help="start the managers and return; the default when invoked from a remote"
     )
+    _add_launcher_argument(parser)
     parser.add_argument(
         "--lease-seconds",
         type=float,
@@ -476,7 +515,7 @@ def _remote_manager_argv(arguments: argparse.Namespace, name: str) -> list[str]:
     count = getattr(arguments, "count", None)
     if count is not None and count < 1:
         raise ValueError("--count must be a positive integer")
-    return [
+    argv = [
         *REMOTE_MANAGER_COMMAND,
         "--workspace",
         name,
@@ -484,6 +523,9 @@ def _remote_manager_argv(arguments: argparse.Namespace, name: str) -> list[str]:
         *(["--count", str(count)] if count is not None else []),
         *manager_argv_tail(arguments),
     ]
+    if getattr(arguments, "launcher", None) is not None:
+        argv += ["--launcher", arguments.launcher]
+    return argv
 
 
 def _run_local_manager_children(
@@ -632,8 +674,18 @@ def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context
 
     root = Path(root)
     settings = Workspace(root).settings
-    forced_process = getattr(arguments, "inline", False) or getattr(arguments, "by_path", False)
-    profile = PROCESS_LAUNCHER if forced_process else settings.get("manager.launch", PROCESS_LAUNCHER)
+    inline = getattr(arguments, "inline", False)
+    requested_launcher = getattr(arguments, "launcher", None)
+    if inline and requested_launcher is not None:
+        raise ValueError("--launcher cannot be combined with --inline")
+    forced_process = inline or getattr(arguments, "by_path", False)
+    profile = (
+        PROCESS_LAUNCHER
+        if forced_process
+        else requested_launcher
+        if requested_launcher is not None
+        else settings.get("manager.launch", PROCESS_LAUNCHER)
+    )
     if not isinstance(profile, str) or not profile:
         raise ValueError(f"workspace {root} setting manager.launch must be a nonempty string")
     requested_count = getattr(arguments, "count", None)
@@ -643,7 +695,7 @@ def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context
         raise ValueError("--inline can only be combined with --count 1")
     count = 1 if forced_process else requested_count or _positive_setting(settings, "manager.count", 1)
     tail = manager_argv_tail(arguments)
-    if getattr(arguments, "workers", None) is None and "manager.workers" in settings:
+    if profile == PROCESS_LAUNCHER and getattr(arguments, "workers", None) is None and "manager.workers" in settings:
         tail += ["--workers", str(_positive_setting(settings, "manager.workers", 1))]
     argv = [
         sys.executable,
@@ -661,7 +713,8 @@ def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context
         try:
             target = resolve_launcher(profile, project=context.cwd)
         except (OSError, ValueError) as exc:
-            raise RuntimeError(f"workspace {root} setting manager.launch={profile!r}: {exc}") from exc
+            label = "--launcher" if requested_launcher is not None else "setting manager.launch"
+            raise RuntimeError(f"workspace {root} {label}={profile!r}: {exc}") from exc
         try:
             result = start_managers(
                 target,
@@ -672,7 +725,8 @@ def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context
                 timeout=getattr(arguments, "adapter_timeout", None),
             )
         except (OSError, RuntimeError, ValueError) as exc:
-            raise RuntimeError(f"workspace {root} setting manager.launch={profile!r}: {exc}") from exc
+            label = "--launcher" if requested_launcher is not None else "setting manager.launch"
+            raise RuntimeError(f"workspace {root} {label}={profile!r}: {exc}") from exc
         return target.name, result
     if getattr(arguments, "detach", False):
         return PROCESS_LAUNCHER, launch_processes(workspace_root=root, argv=argv, count=count, settings=settings)

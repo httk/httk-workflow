@@ -73,12 +73,13 @@ def _validate_setting_key(key: str) -> str:
 def _validate_setting_value(key: str, value: object) -> object:
     """Return one application-setting value, refusing a non-scalar.
 
-    ``bool`` is a subclass of ``int`` and is accepted as the JSON scalar it is.
+    Boolean values are refused even though ``bool`` is a subclass of ``int``;
+    application settings are textual or numeric configuration values.
     """
 
     if isinstance(value, str) and "\0" in value:
         raise ValueError(f"application setting {key!r} must not contain NUL characters")
-    if value is None or isinstance(value, (str, int, float)):
+    if value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool)):
         return value
     raise ValueError(f"application setting {key!r} must be a JSON scalar, not {type(value).__name__}")
 

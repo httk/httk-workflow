@@ -328,6 +328,49 @@ def test_start_managers_reports_the_qualified_remote_workspace_name(
     assert report[0]["mode"] == "remote"
 
 
+def test_campaign_start_managers_forwards_launcher_to_remote_partition(
+    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "project"
+    initialize_project(root, name="remote-campaign-launcher")
+    fake_remote(root)
+    context = CLIContext("httk", root)
+    assert command(["workspace", "init", "cluster:runs"], context) == 0
+    write_campaign({"kappa": "cluster:runs"}, assignment="explicit", project=root)
+
+    from httk.workflow import adapters
+
+    seen: list[list[str]] = []
+
+    def invoked(_bundle, _operation, payload, *, timeout):
+        seen.append(payload["argv"])
+        return {"returncode": 0, "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(adapters, "run_adapter", invoked)
+    assert campaign_managers(launcher="gpu", project=root) == [
+        {
+            "partition": "kappa",
+            "workspace": "cluster:runs",
+            "mode": "remote",
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+        }
+    ]
+    assert seen[0] == [
+        "httk",
+        "workflow",
+        "manager",
+        "run",
+        "--workspace",
+        "runs",
+        "--detach",
+        "--launcher",
+        "gpu",
+    ]
+    assert seen[0].count("--launcher") == 1
+
+
 def test_campaign_remote_manager_failure_is_reported_and_returns_nonzero(
     tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

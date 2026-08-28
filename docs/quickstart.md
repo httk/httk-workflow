@@ -152,6 +152,22 @@ Neither side of that loop is ever materialized: one runner publication is
 amortized over every job, and each job costs one payload directory and one state
 marker.
 
+## Launchers
+
+Managers normally run in-process when `httk workflow run` uses the built-in
+`process` launcher. On a cluster, set `manager.launch` to a named launcher so
+the same command submits managers through that launcher's scheduler profile.
+Use `--inline` for a one-manager debugging run or `--launcher NAME` for a
+one-invocation choice; see {doc}`launchers` for setup and scheduler settings.
+
+## Remotes
+
+A remote lets you reach another machine, move jobs to its workspace, and run
+the same workflow commands there. Initialize and address that workspace with
+`NAME:WORKSPACE`, such as `kappa:runs`; the remote invokes the manager on its
+owning machine, where that workspace's launcher still controls scheduling.
+See {doc}`remotes` for SSH setup, transfers, and the `local` adapter.
+
 ## Where to go next
 
 - {doc}`vasp_runners` — what the packaged VASP runners do, every job input and parameter they

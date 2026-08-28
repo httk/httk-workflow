@@ -13,6 +13,7 @@ from conftest import Remote
 from httk.workflow import Workspace, launch_runtime, launchers
 from httk.workflow.launchers import (
     add_launcher,
+    configure_launcher,
     launch_processes,
     list_launchers,
     resolve_launcher,
@@ -77,13 +78,80 @@ def test_launcher_cli_round_trip_project_and_global(
     assert command(["launcher", "add", "--template", "slurm", "--global", "shared"], context) == 0
     assert (Path(os.environ["HTTK_CONFIG_HOME"]) / "launchers" / "shared" / "launcher.json").is_file()
     assert [row["name"] for row in list_launchers(project)] == ["cluster", "shared"]
+    assert command(["launcher", "configure", "--set", "slurm.partition=devel", "cluster"], context) == 0
+    metadata = json.loads((local_bundle / "launcher.json").read_text(encoding="utf-8"))
+    assert metadata["settings"] == {"slurm.partition": "devel"}
     capsys.readouterr()
     assert command(["launcher", "show", "--json", "cluster"], context) == 0
-    assert json.loads(capsys.readouterr().out)[0]["kind"] == "slurm"
+    shown = json.loads(capsys.readouterr().out)[0]
+    assert shown["kind"] == "slurm"
+    assert shown["settings"] == {"slurm.partition": "devel"}
     assert command(["launcher", "check", "cluster"], context) == 0
     assert json.loads(capsys.readouterr().out)[0]["ok"] is True
     assert command(["launcher", "remove", "--force", "cluster"], context) == 0
     assert not local_bundle.exists()
+
+
+def test_launcher_add_persists_settings_and_slurm_prefers_them(tmp_path: Path, remote: Remote) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="launcher-settings")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    bundle = add_launcher(
+        "gpu",
+        template="slurm",
+        settings={
+            "slurm.partition": "gpu",
+            "manager.workers": "8",
+            "manager.command": "/opt/gpu-httk",
+            "environment.prelude": "module load gpu",
+        },
+        project=project,
+    )
+    configure_launcher("gpu", {"slurm.cpus_per_task": "8"}, project=project)
+    workspace_settings = {
+        "slurm.partition": "batch",
+        "slurm.cpus_per_task": "2",
+        "manager.workers": "4",
+        "manager.command": "/opt/batch-httk",
+        "environment.prelude": "module load batch",
+    }
+    result = start_managers(
+        resolve_launcher("gpu", project=project),
+        workspace_root=workspace.root,
+        argv=[sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"],
+        count=1,
+        settings=workspace_settings,
+        timeout=None,
+    )
+    script = Path(str(result["script"])).read_text(encoding="utf-8")
+    assert "#SBATCH --partition=gpu" in script
+    assert "#SBATCH --cpus-per-task=8" in script
+    assert "--workers 8" in script
+    assert "module load gpu" in script
+    assert "module load batch" not in script
+    assert "exec /opt/gpu-httk workflow manager run" in script
+    assert bundle.exists()
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"slurm.partition": {"gpu": True}},
+        {"slurm.partition": True},
+        {"slurm.partition": "gpu\x00partition"},
+        {"slurm-partition": "gpu"},
+    ],
+)
+def test_launcher_settings_use_workspace_validation_rules(
+    tmp_path: Path, remote: Remote, settings: dict[str, object]
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="launcher-setting-validation")
+    with pytest.raises(ValueError):
+        add_launcher("invalid", template="slurm", settings=settings, project=project)
+    add_launcher("cluster", template="slurm", project=project)
+    with pytest.raises(ValueError):
+        configure_launcher("cluster", settings, project=project)
 
 
 def test_launcher_add_process_is_reserved(tmp_path: Path, remote: Remote) -> None:

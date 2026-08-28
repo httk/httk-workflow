@@ -78,6 +78,7 @@ from ._launcher import (
     build_launcher_parser,
     handle_launcher_add,
     handle_launcher_check,
+    handle_launcher_configure,
     handle_launcher_list,
     handle_launcher_remove,
     handle_launcher_show,

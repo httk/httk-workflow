@@ -122,7 +122,9 @@ or a mismatched envelope is an engine error. Stderr is attached as
 the kind. It performs no submission.
 
 `start` receives an absolute `workspace`, the full manager `argv`, a positive
-manager `count`, and the workspace `settings` mapping. Settings are not copied
+manager `count`, the workspace `settings` mapping, and the bundle's
+`launcher_settings` mapping; for the maintained Slurm kind, bundle settings
+take precedence over workspace settings for keys the kind consumes. Settings are not copied
 into the bundle: `slurm.account`, `slurm.partition`, `slurm.time_limit`,
 `slurm.nodes`, `slurm.cpus_per_task`, and `slurm.reservation` are scheduler
 settings; `manager.workers` belongs to the manager command; and

@@ -314,8 +314,8 @@ stay non-failing. The JSON summary carries `claim_problems`,
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `run` | run managers through the workspace launcher, or keep one serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--detach`, `--adapter-timeout`, `--log-level` |
-| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `run` | run managers through the workspace launcher, or keep one serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--adapter-timeout`, `--log-level` |
+| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--launcher`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
 `manager run` follows the binding: a local workspace uses its `manager.launch`
 setting (the built-in `process` launcher by default), while a remote workspace
@@ -420,7 +420,8 @@ launchers are versioned bundles, resolved project-first and then globally.
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `launcher list` | list manager launchers visible to this project | |
-| `launcher add [OPTIONS] NAME...` | create launchers from a packaged template | `--template`, `--global`, `--non-interactive` |
+| `launcher add [OPTIONS] NAME...` | create launchers from a packaged template | `--template`, `--set`, `--global`, `--non-interactive` |
+| `launcher configure --set KEY=VALUE NAME...` | update launcher settings | `--set` |
 | `launcher show [--json] NAME...` | describe launchers and their settings | |
 | `launcher check [OPTIONS] NAME...` | check a launcher's required binaries | `--launcher-timeout` |
 | `launcher remove [--force] NAME...` | remove launcher bundles | |
@@ -555,7 +556,7 @@ job again, or edit the one `runner.path` member.
 | `campaign show` | show the partition map | `--json` |
 | `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
 | `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--raw`, `--allow-job-collector`, `--into PATH`, `--id-base BASE`, `--id-series SERIES` |
-| `campaign start-<wbr>managers` | start a manager per selected partition | `--partition`, `--workers`, `--worker-resource`, `--count`, `--idle-timeout`, `--adapter-timeout` |
+| `campaign start-<wbr>managers` | start a manager per selected partition | `--partition`, `--workers`, `--worker-resource`, `--count`, `--launcher`, `--idle-timeout`, `--adapter-timeout` |
 
 A campaign is a thin convention over the *registered workspaces* above: a
 partition map, stored in the project, that spreads a very large body of work

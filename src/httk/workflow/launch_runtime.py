@@ -122,6 +122,27 @@ def _settings(request: Mapping[str, object]) -> dict[str, object]:
     return dict(value)
 
 
+def _launcher_settings(request: Mapping[str, object]) -> dict[str, object]:
+    """Read settings packaged with the resolved launcher bundle."""
+
+    value = request.get("launcher_settings", {})
+    if not isinstance(value, Mapping):
+        raise ValueError("start launcher_settings must be an object")
+    return dict(value)
+
+
+def _manager_argv(argv: Sequence[str], settings: Mapping[str, object]) -> list[str]:
+    """Add configured manager workers when the caller supplied none."""
+
+    result = list(argv)
+    if "--workers" in result or "manager.workers" not in settings:
+        return result
+    value = _text(settings, "manager.workers")
+    if value is None or not value.isdigit() or int(value) < 1:
+        raise ValueError("launcher setting manager.workers must be a positive integer")
+    return [*result, "--workers", value]
+
+
 def _prelude_argv(argv: Sequence[str], settings: Mapping[str, object]) -> list[str]:
     """Use the post-prelude ``httk`` command for a canonical manager argv."""
 
@@ -157,13 +178,18 @@ def _batch_script(argv: Sequence[str], *, settings: Mapping[str, object], worksp
 
 def _start_slurm(request: Mapping[str, object]) -> None:
     workspace = _workspace(request)
-    settings = _settings(request)
+    settings = {**_settings(request), **_launcher_settings(request)}
     count = _count(request)
     directory = Path(workspace) / BATCH_DIRECTORY
     directory.mkdir(parents=True, exist_ok=True)
     script_path = directory / f"manager-{uuid.uuid4().hex}.sbatch"
     script_path.write_text(
-        _batch_script(_request_argv(request), settings=settings, workspace=workspace, directory=str(directory)),
+        _batch_script(
+            _manager_argv(_request_argv(request), settings),
+            settings=settings,
+            workspace=workspace,
+            directory=str(directory),
+        ),
         encoding="utf-8",
     )
     os.chmod(script_path, 0o700)

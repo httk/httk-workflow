@@ -454,13 +454,13 @@ def _load_inputs(
 
 
 def _settings(values: Sequence[str]) -> dict[str, str]:
-    """Return the ``KEY=VALUE`` adapter settings one command line carried."""
+    """Return the ``KEY=VALUE`` settings one command line carried."""
 
     result: dict[str, str] = {}
     for value in values:
         key, separator, item = value.partition("=")
         if not separator or not key:
-            raise ValueError(f"adapter setting must use KEY=VALUE: {value!r}")
+            raise ValueError(f"setting must use KEY=VALUE: {value!r}")
         result[key] = item
     return result
 

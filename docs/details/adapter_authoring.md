@@ -385,7 +385,7 @@ def _shell_command(argv: Sequence[str], *, cwd: str | None = None) -> str:
 
 Every remote command string is built by that helper and by nothing else. A
 manager launcher owns any generated scheduler script and its quoting; see
-{doc}`launcher_authoring` for that separate contract.
+{doc}`/launchers` for that separate contract.
 
 `rsync` transfers pass `--protect-args`, so even file names travel inside the
 protocol rather than through the remote shell. When an explicit `files` batch is
@@ -423,7 +423,7 @@ of a large campaign — belongs to a bundle whose `timeout_seconds` says so.
 For a PBS site, write a custom adapter that implements these six operations and
 uses `qsub` only when a command is explicitly invoked on that site. The manager
 launch policy belongs to the target workspace's launcher, not to the remote
-adapter. See {doc}`launcher_authoring` for the compact PBS launcher example,
+adapter. See {doc}`/launchers` for the compact PBS launcher example,
 including its batch directives, script lifecycle, and partial-submission rules.
 
 ## Reading the maintained implementation

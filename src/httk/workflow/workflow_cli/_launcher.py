@@ -13,12 +13,13 @@ from httk.core.cli import CLIContext
 from ..launchers import (
     add_launcher,
     check_launcher,
+    configure_launcher,
     describe_launcher,
     list_launchers,
     remove_launcher,
     resolve_launcher,
 )
-from ._common import _group, _leaf, _required
+from ._common import _group, _leaf, _required, _settings
 
 
 def _launcher_batch(
@@ -77,10 +78,20 @@ def handle_launcher_add(arguments: Namespace, context: CLIContext) -> int:
         add_launcher(
             arguments.name,
             template=template,
+            settings=_settings(arguments.set),
             project=context.cwd,
             global_=arguments.global_scope,
         )
     )
+    return 0
+
+
+def handle_launcher_configure(arguments: Namespace, context: CLIContext) -> int:
+    """Merge settings into one or more launcher bundles."""
+
+    if isinstance(arguments.name, list):
+        return _launcher_batch(arguments, context, handle_launcher_configure)
+    print(configure_launcher(arguments.name, _settings(arguments.set), project=context.cwd))
     return 0
 
 
@@ -176,6 +187,29 @@ def build_launcher_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
         help="define the launcher for this user rather than for this project",
     )
     add.add_argument("--non-interactive", action="store_true", help="never prompt; refuse a missing value")
+    add.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="one launcher setting (repeatable)",
+    )
+
+    configure = _leaf(
+        group,
+        "configure",
+        summary="configure one launcher",
+        description="Merge settings into one manager launcher bundle",
+        handler=handle_launcher_configure,
+    )
+    configure.add_argument("name", metavar="NAME", nargs="+", help="the launcher to configure")
+    configure.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="one launcher setting (repeatable)",
+    )
 
     show = _leaf(
         group,

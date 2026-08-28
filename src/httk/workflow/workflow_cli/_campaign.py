@@ -160,6 +160,7 @@ def handle_campaign_start_managers(arguments: argparse.Namespace, context: CLICo
         workers=arguments.workers,
         resources=_worker_resources(arguments.worker_resource),
         count=arguments.count,
+        launcher=arguments.launcher,
         idle_timeout=arguments.idle_timeout,
         adapter_timeout=arguments.adapter_timeout,
         project=context.cwd,
@@ -354,6 +355,7 @@ def build_campaign_parser(
         help="start a manager only for this partition (repeatable, default: all of them)",
     )
     managers.add_argument("--workers", type=int, metavar="COUNT", help="workers per manager")
+    managers.add_argument("--launcher", metavar="NAME", help="use launcher NAME for every selected partition")
     managers.add_argument(
         "--worker-resource",
         nargs=2,

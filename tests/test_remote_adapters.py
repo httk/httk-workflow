@@ -8,6 +8,7 @@ transfers, genuine quoting and genuine exit statuses are exercised.
 
 import json
 import os
+import shlex
 import stat
 import sys
 import uuid
@@ -306,6 +307,84 @@ def test_workspace_launcher_profile_dispatches_run_to_slurm(tmp_path: Path, remo
     )
 
 
+def test_invocation_launcher_overrides_workspace_launcher(tmp_path: Path, remote: Remote, capsys) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="invocation-launcher")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    add_launcher("cpu", template="slurm", project=project, settings={"slurm.partition": "batch"})
+    add_launcher("gpu", template="slurm", project=project, settings={"slurm.partition": "gpu"})
+    workspace.set_setting("manager.launch", "cpu")
+    context = CLIContext("httk", project)
+    register_ws(context, workspace.root, "station")
+
+    assert command(["run", "--workspace", "station", "--launcher", "gpu"], context) == 0
+    capsys.readouterr()
+    script = next(workspace.root.glob(".httk-workspace/batch/*.sbatch")).read_text(encoding="utf-8")
+    assert "#SBATCH --partition=gpu" in script
+    assert "--launcher" not in script
+
+
+def test_process_launcher_option_uses_exact_local_child_and_detached_argv(
+    tmp_path: Path,
+    remote: Remote,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="process-invocation-launcher")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    add_launcher("cluster", template="slurm", project=project)
+    workspace.set_setting("manager.launch", "cluster")
+    context = CLIContext("httk", project)
+    register_ws(context, workspace.root, "station")
+    expected = [
+        sys.executable,
+        "-m",
+        "httk.core.cli",
+        "workflow",
+        "manager",
+        "run",
+        "--by-path",
+        "--workspace",
+        str(workspace.root.resolve()),
+    ]
+    children: list[list[str]] = []
+
+    class Child:
+        def poll(self):
+            return None
+
+        def wait(self):
+            return 0
+
+        def terminate(self):
+            return None
+
+    def fake_popen(argv, **_kwargs):
+        children.append(list(argv))
+        return Child()
+
+    monkeypatch.setattr(_manager.subprocess, "Popen", fake_popen)
+    assert command(["run", "--workspace", "station", "--launcher", "process", "--count", "2"], context) == 0
+    assert children == [expected, expected]
+    assert all(argv.count("--launcher") == 0 for argv in children)
+    capsys.readouterr()
+
+    detached: list[dict[str, object]] = []
+
+    def fake_launch_processes(**kwargs):
+        detached.append(kwargs)
+        return {"ok": True, "kind": "process", "count": 1, "pids": [7]}
+
+    monkeypatch.setattr(_manager, "launch_processes", fake_launch_processes)
+    assert command(["run", "--workspace", "station", "--launcher", "process", "--detach"], context) == 0
+    assert detached[0]["argv"] == expected
+    detached_argv = detached[0]["argv"]
+    assert isinstance(detached_argv, list)
+    assert detached_argv.count("--launcher") == 0
+    capsys.readouterr()
+
+
 def test_unresolved_workspace_launcher_names_workspace_and_setting(tmp_path: Path, remote: Remote, capsys) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="unknown-workspace-launcher")
@@ -432,6 +511,8 @@ def test_remote_manager_forwards_execution_options(
                 "--log-level",
                 "debug",
                 "--json-logs",
+                "--launcher",
+                "process",
             ],
             context,
         )
@@ -439,6 +520,40 @@ def test_remote_manager_forwards_execution_options(
     )
     capsys.readouterr()
     command_line = remote.commands()[-1]
+    assert shlex.split(command_line) == [
+        "httk",
+        "workflow",
+        "manager",
+        "run",
+        "--workspace",
+        "options",
+        "--detach",
+        "--pool",
+        "gpu",
+        "--pool",
+        "cpu",
+        "--capability",
+        "cuda",
+        "--placement-prefix",
+        "volume/a",
+        "--lease-seconds",
+        "12.0",
+        "--heartbeat-interval",
+        "3.0",
+        "--poll-interval",
+        "4.0",
+        "--workers",
+        "2",
+        "--idle-timeout",
+        "9.0",
+        "--log-level",
+        "debug",
+        "--json-logs",
+        "--no-durable",
+        "--launcher",
+        "process",
+    ]
+    assert command_line.count("--launcher") == 1
     for option in (
         "--pool gpu",
         "--pool cpu",
@@ -452,6 +567,7 @@ def test_remote_manager_forwards_execution_options(
         "--no-durable",
         "--log-level debug",
         "--json-logs",
+        "--launcher process",
     ):
         assert option in command_line
 

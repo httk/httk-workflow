@@ -11,9 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ._util import write_json_atomic
 from .configuration import launchers_home
 from .errors import ResolutionMiss
 from .projects import PROJECT_DIRECTORY, discover_project
+from .workspace import _validate_settings
 
 __all__ = [
     "LAUNCHER_EXECUTABLE",
@@ -26,6 +28,7 @@ __all__ = [
     "LauncherTarget",
     "add_launcher",
     "check_launcher",
+    "configure_launcher",
     "describe_launcher",
     "host_capacity",
     "launch_processes",
@@ -98,6 +101,7 @@ def validate_launcher_bundle(bundle: str | os.PathLike[str]) -> dict[str, Any]:
     settings = metadata.get("settings", {})
     if not isinstance(settings, Mapping):
         raise ValueError("manager launcher settings must be an object")
+    _validate_settings(settings)
     timeout = metadata.get("timeout_seconds", 60.0)
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or timeout <= 0:
         raise ValueError("launcher timeout_seconds must be positive")
@@ -189,6 +193,7 @@ def add_launcher(
     name: str,
     *,
     template: str,
+    settings: Mapping[str, object] | None = None,
     project: str | os.PathLike[str] | None = None,
     global_: bool = False,
 ) -> Path:
@@ -196,6 +201,7 @@ def add_launcher(
 
     :param name: The launcher name to create.
     :param template: The maintained launcher template name.
+    :param settings: Settings to persist in the new launcher metadata.
     :param project: The project path for a project-local launcher.
     :param global_: Whether to create the launcher in global data.
     :return: The newly created launcher bundle path.
@@ -204,6 +210,7 @@ def add_launcher(
     """
 
     valid_launcher_name(name)
+    configured_settings = _validate_settings({} if settings is None else settings)
     if name == PROCESS_LAUNCHER:
         raise ValueError("the launcher name 'process' is reserved for the built-in process launcher")
     if template != "slurm":
@@ -223,6 +230,15 @@ def add_launcher(
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(template_path, destination)
     os.chmod(destination / LAUNCHER_EXECUTABLE, 0o755)
+    if configured_settings:
+        metadata_path = _metadata_path(destination)
+        metadata = _read_object(metadata_path)
+        configured = metadata.get("settings", {})
+        if not isinstance(configured, dict):
+            raise ValueError("launcher settings are not mutable JSON")
+        configured.update(configured_settings)
+        metadata["settings"] = configured
+        write_json_atomic(metadata_path, metadata)
     validate_launcher_bundle(destination)
     return destination
 
@@ -275,6 +291,36 @@ def describe_launcher(
         "launcher": str(bundle / LAUNCHER_EXECUTABLE),
         "settings": dict(metadata.get("settings", {})) if isinstance(metadata.get("settings", {}), Mapping) else {},
     }
+
+
+def configure_launcher(
+    name: str,
+    settings: Mapping[str, object],
+    *,
+    project: str | os.PathLike[str] | None = None,
+) -> Path:
+    """Merge settings into one launcher bundle's metadata.
+
+    :param name: Launcher bundle name.
+    :param settings: Settings to persist in ``launcher.json``.
+    :param project: Project directory used for project-local lookup.
+    :return: The configured launcher bundle path.
+    :raises ValueError: If the launcher or its metadata is invalid.
+    """
+
+    configured_settings = _validate_settings(settings)
+    bundle, _scope = _find_launcher_bundle(name, project)
+    validate_launcher_bundle(bundle)
+    path = _metadata_path(bundle)
+    metadata = _read_object(path)
+    configured = metadata.get("settings", {})
+    if not isinstance(configured, dict):
+        raise ValueError("launcher settings are not mutable JSON")
+    configured.update(configured_settings)
+    metadata["settings"] = configured
+    write_json_atomic(path, metadata)
+    validate_launcher_bundle(bundle)
+    return bundle
 
 
 def remove_launcher(
@@ -398,10 +444,20 @@ def start_managers(
     if not argv or not all(isinstance(item, str) for item in argv):
         raise ValueError("manager argv must be a nonempty string array")
     root = Path(workspace_root).expanduser().resolve()
+    metadata = validate_launcher_bundle(target.bundle)
+    launcher_settings = metadata.get("settings", {})
+    if not isinstance(launcher_settings, Mapping):
+        raise ValueError("launcher settings must be an object")
     return run_launcher(
         target.bundle,
         "start",
-        {"workspace": str(root), "argv": list(argv), "count": count, "settings": dict(settings)},
+        {
+            "workspace": str(root),
+            "argv": list(argv),
+            "count": count,
+            "settings": dict(settings),
+            "launcher_settings": dict(launcher_settings),
+        },
         timeout=timeout,
     )
 

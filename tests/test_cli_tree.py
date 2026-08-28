@@ -210,6 +210,9 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
         parser.parse_args(["manager", "run", "--workspace", "WS", "--fore" + "ground"])
     assert parser.parse_args(["run"]).workspace is None
     assert parser.parse_args(["run", "--workspace", "WS", "--idle"]).idle is True
+    assert parser.parse_args(["run", "--launcher", "gpu"]).launcher == "gpu"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", "--inline", "--launcher", "gpu"])
     with pytest.raises(SystemExit):
         parser.parse_args(["manager", "run", "--workspace", "WS", "--timeout", "5"])
     with pytest.raises(SystemExit):
