@@ -82,16 +82,16 @@ job UUIDs when precise attribution matters.
 | `workspace status [--json] [NAME...]` | summarize authoritative markers (remote: over the adapter) | |
 | `workspace managers [--json] [NAME...]` | list managers serving workspaces, live or stale | |
 | `workspace settings show [--key KEY] [--json] [NAME...]` | print application settings, or one selected key | |
-| `workspace settings set --key KEY --value VALUE NAME...` | store one application setting in each workspace | |
-| `workspace settings unset --key KEY NAME...` | remove one application setting from each workspace | |
+| `workspace settings set --key KEY --value VALUE [NAME...]` | store one application setting in each workspace | |
+| `workspace settings unset --key KEY [NAME...]` | remove one application setting from each workspace | |
 | `workspace workflow-prelude show [--workflow WORKFLOW] [--json] [NAME...]` | print per-workflow preludes, or one selected workflow | |
-| `workspace workflow-prelude set --workflow WORKFLOW --value VALUE [--no-durable] NAME...` | store one workflow's prelude in each workspace | `VALUE` may be `@FILE` |
-| `workspace workflow-prelude unset --workflow WORKFLOW [--no-durable] NAME...` | remove one workflow's prelude from each workspace | |
+| `workspace workflow-prelude set --workflow WORKFLOW --value VALUE [--no-durable] [NAME...]` | store one workflow's prelude in each workspace | `VALUE` may be `@FILE` |
+| `workspace workflow-prelude unset --workflow WORKFLOW [--no-durable] [NAME...]` | remove one workflow's prelude from each workspace | |
 | `workspace policy show [--json] [NAME...]` | print workspace policies | |
-| `workspace policy set --key KEY --value VALUE [--json] NAME...` | store one policy member in each workspace | |
+| `workspace policy set --key KEY --value VALUE [--json] [NAME...]` | store one policy member in each workspace | |
 | `workspace fsck [OPTIONS] [NAME...]` | check markers against journal frames; repair modes require names | `--repair`, `--quarantine-unrepairable`, `--json` |
 | `workspace gc [--dry-run] [--json] [NAME...]` | collect what retention policies allow (remote: over the adapter) | |
-| `workspace unlock [--force] NAME...` | release maintenance locks | |
+| `workspace unlock [--force] [NAME...]` | release maintenance locks | |
 
 `workspace init` creates and registers an explicit workspace. A canonical path may
 have only one registered name:

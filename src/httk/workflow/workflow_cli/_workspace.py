@@ -793,7 +793,7 @@ def build_workspace_parser(
         description="Store one member of the policy of an execution workspace",
         handler=handle_workspace_policy_set,
     )
-    _add_workspace_targets(store, help_text="the workspace whose policy to change", required=True)
+    _add_workspace_targets(store, help_text="the workspace whose policy to change")
     store.add_argument("--key", required=True, metavar="KEY", help="one of " + ", ".join(sorted(POLICY_KEYS)))
     store.add_argument("--value", required=True, metavar="VALUE", help="the JSON value to store")
     store.add_argument(
@@ -880,7 +880,7 @@ def build_workspace_parser(
         description="Store one application setting on a workspace, e.g. vasp.command",
         handler=handle_workspace_settings_set,
     )
-    _add_workspace_targets(settings_set, help_text="the workspace to change", required=True)
+    _add_workspace_targets(settings_set, help_text="the workspace to change")
     settings_set.add_argument("--key", required=True, metavar="KEY", help="the dotted setting name, e.g. vasp.command")
     settings_set.add_argument(
         "--value", required=True, metavar="VALUE", help="the JSON value, or a bare string, to store"
@@ -894,7 +894,7 @@ def build_workspace_parser(
         description="Remove one application setting from a workspace",
         handler=handle_workspace_settings_unset,
     )
-    _add_workspace_targets(settings_unset, help_text="the workspace to change", required=True)
+    _add_workspace_targets(settings_unset, help_text="the workspace to change")
     settings_unset.add_argument("--key", required=True, metavar="KEY", help="the dotted setting name to remove")
     _add_by_path_argument(settings_unset)
     add_durability_arguments(settings_unset)
@@ -925,7 +925,7 @@ def build_workspace_parser(
         description="Store one per-workflow shell prelude on a workspace, keyed by workflow id",
         handler=handle_workspace_workflow_prelude_set,
     )
-    _add_workspace_targets(prelude_set, help_text="the workspace to change", required=True)
+    _add_workspace_targets(prelude_set, help_text="the workspace to change")
     prelude_set.add_argument(
         "--workflow", required=True, metavar="WORKFLOW", help="the workflow id the prelude applies to"
     )
@@ -944,7 +944,7 @@ def build_workspace_parser(
         description="Remove one per-workflow prelude from a workspace",
         handler=handle_workspace_workflow_prelude_unset,
     )
-    _add_workspace_targets(prelude_unset, help_text="the workspace to change", required=True)
+    _add_workspace_targets(prelude_unset, help_text="the workspace to change")
     prelude_unset.add_argument(
         "--workflow", required=True, metavar="WORKFLOW", help="the workflow id whose prelude to remove"
     )
@@ -995,7 +995,7 @@ def build_workspace_parser(
         description="Release a stale, or with --force a live, workspace maintenance lock",
         handler=handle_workspace_unlock,
     )
-    _add_workspace_targets(unlock, help_text="the workspace whose lock to release", required=True)
+    _add_workspace_targets(unlock, help_text="the workspace whose lock to release")
     unlock.add_argument(
         "--force",
         action="store_true",

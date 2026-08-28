@@ -95,3 +95,21 @@ def test_settings_show_uses_explicit_key_option(tmp_path: Path, capsys) -> None:
     Workspace(default.path).set_setting("answer", 42)
     assert command(["workspace", "settings", "show", "--key", "answer"], _context(tmp_path)) == 0
     assert capsys.readouterr().out.strip() == "42"
+
+
+def test_mutating_workspace_commands_resolve_the_enclosing_workspace(tmp_path: Path, capsys) -> None:
+    enclosing = Workspace.initialize(tmp_path / "enclosing")
+    nested = enclosing.root / "subdir"
+    nested.mkdir()
+
+    assert command(["workspace", "settings", "set", "--key", "vasp.command", "--value", "mock"], _context(nested)) == 0
+    capsys.readouterr()
+    assert command(["workspace", "settings", "show", "--json"], _context(nested)) == 0
+    settings = json.loads(capsys.readouterr().out)
+    assert settings[0]["vasp.command"] == "mock"
+    assert (
+        command(["workspace", "policy", "set", "--key", "retention.journal_days", "--value", "keep"], _context(nested))
+        == 0
+    )
+    capsys.readouterr()
+    assert Workspace(enclosing.root).policy.retention.journal_days is None
