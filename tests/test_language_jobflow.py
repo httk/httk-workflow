@@ -584,7 +584,7 @@ class Maker:
     first_manager = TaskManager(
         workspace,
         heartbeat_interval=0.01,
-        lease_seconds=0.1,
+        lease_seconds=0.5,
         takeover_grace_factor=1.0,
     )
     try:
@@ -600,7 +600,7 @@ class Maker:
     with TaskManager(
         workspace,
         heartbeat_interval=0.01,
-        lease_seconds=0.1,
+        lease_seconds=0.5,
         takeover_grace_factor=1.0,
     ) as second_manager:
         second_manager.run_until_idle(timeout=300.0)
