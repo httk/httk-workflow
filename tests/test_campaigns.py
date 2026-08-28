@@ -326,3 +326,31 @@ def test_start_managers_reports_the_qualified_remote_workspace_name(
     assert report[0]["partition"] == "kappa"
     assert report[0]["workspace"] == "cluster:runs"
     assert report[0]["mode"] == "remote"
+
+
+def test_campaign_remote_manager_failure_is_reported_and_returns_nonzero(
+    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "project"
+    initialize_project(root, name="remote-campaign-failure")
+    fake_remote(root)
+    context = CLIContext("httk", root)
+    assert command(["workspace", "init", "cluster:runs"], context) == 0
+    capsys.readouterr()
+    write_campaign({"kappa": "cluster:runs"}, assignment="explicit", project=root)
+
+    from httk.workflow import adapters
+
+    seen: list[list[str]] = []
+
+    def refused(_bundle, _operation, payload, *, timeout):
+        seen.append(payload["argv"])
+        return {"returncode": 7, "stdout": "remote output\n", "stderr": "remote failure\n"}
+
+    monkeypatch.setattr(adapters, "run_adapter", refused)
+    assert command(["campaign", "start-managers"], context) == 1
+    report = json.loads(capsys.readouterr().out)[0]
+    assert report["returncode"] == 7
+    assert report["stdout"] == "remote output\n"
+    assert report["stderr"] == "remote failure\n"
+    assert "--count" not in seen[0]

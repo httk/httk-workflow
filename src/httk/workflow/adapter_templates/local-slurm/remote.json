@@ -1,1 +1,0 @@
-{"adapter_version":2,"format":"httk-computer-adapter","format_version":2,"kind":"local-slurm","settings":{},"required_binaries":["sbatch"],"timeout_seconds":60}

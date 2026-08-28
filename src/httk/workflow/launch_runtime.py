@@ -12,6 +12,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from .launchers import _manager_command
+
 BATCH_DIRECTORY = ".httk-workspace/batch"
 BATCH_DIRECTIVES = (
     ("slurm.account", "--account"),
@@ -42,7 +44,7 @@ def _result(operation: str, **values: object) -> None:
     )
 
 
-def _refusal(operation: str, message: str) -> None:
+def _refusal(operation: str, message: str, **values: object) -> None:
     print(
         json.dumps(
             {
@@ -51,6 +53,7 @@ def _refusal(operation: str, message: str) -> None:
                 "format_version": 2,
                 "operation": operation,
                 "ok": False,
+                **values,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -83,6 +86,14 @@ def _batch_value(key: str, value: str) -> str:
     return value
 
 
+class _PartialSubmissionError(RuntimeError):
+    """Identify a Slurm submission failure after earlier jobs were accepted."""
+
+    def __init__(self, message: str, job_ids: Sequence[str]) -> None:
+        self.job_ids = list(job_ids)
+        super().__init__(f"{message}; submitted: {len(self.job_ids)}; job_ids: {self.job_ids}")
+
+
 def _request_argv(request: Mapping[str, object]) -> list[str]:
     value = request.get("argv")
     if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
@@ -111,6 +122,17 @@ def _settings(request: Mapping[str, object]) -> dict[str, object]:
     return dict(value)
 
 
+def _prelude_argv(argv: Sequence[str], settings: Mapping[str, object]) -> list[str]:
+    """Use the post-prelude ``httk`` command for a canonical manager argv."""
+
+    command = _manager_command(settings)
+    if _text(settings, "environment.prelude") is None:
+        return list(argv)
+    if len(argv) < 3 or argv[1:3] != ["-m", "httk.core.cli"]:
+        return list(argv)
+    return [command, *argv[3:]]
+
+
 def _batch_script(argv: Sequence[str], *, settings: Mapping[str, object], workspace: str, directory: str) -> str:
     """Compose the Slurm script submitted for one manager."""
 
@@ -118,18 +140,18 @@ def _batch_script(argv: Sequence[str], *, settings: Mapping[str, object], worksp
     for key, directive in BATCH_DIRECTIVES:
         value = _text(settings, key)
         if value is not None:
-            lines.append(f"#SBATCH {directive}={_batch_value(key, value)}")
+            lines.append(f"#SBATCH {directive}={shlex.quote(_batch_value(key, value))}")
     lines += [
-        f"#SBATCH --chdir={_batch_value('workspace', workspace)}",
-        f"#SBATCH --output={_batch_value('workspace', directory)}/manager-%j.out",
-        f"#SBATCH --error={_batch_value('workspace', directory)}/manager-%j.err",
+        f"#SBATCH --chdir={shlex.quote(_batch_value('workspace', workspace))}",
+        f"#SBATCH --output={shlex.quote(_batch_value('directory', directory + '/manager-%j.out'))}",
+        f"#SBATCH --error={shlex.quote(_batch_value('directory', directory + '/manager-%j.err'))}",
         "",
         "set -e",
     ]
     prelude = _text(settings, "environment.prelude")
     if prelude:
         lines.append(prelude)
-    lines += [f"exec {shlex.join(argv)}", ""]
+    lines += [f"exec {shlex.join(_prelude_argv(argv, settings))}", ""]
     return "\n".join(lines)
 
 
@@ -147,15 +169,21 @@ def _start_slurm(request: Mapping[str, object]) -> None:
     os.chmod(script_path, 0o700)
     job_ids: list[str] = []
     for _ in range(count):
-        completed = subprocess.run(
-            ["sbatch", str(script_path)], cwd=workspace, text=True, capture_output=True, check=False
-        )
+        try:
+            completed = subprocess.run(
+                ["sbatch", str(script_path)], cwd=workspace, text=True, capture_output=True, check=False
+            )
+        except OSError as exc:
+            raise _PartialSubmissionError(f"sbatch failed: {exc}", job_ids) from exc
         if completed.returncode != 0:
-            raise RuntimeError(completed.stderr.strip() or f"sbatch exited with status {completed.returncode}")
+            raise _PartialSubmissionError(
+                completed.stderr.strip() or f"sbatch exited with status {completed.returncode}", job_ids
+            )
         match = _SUBMITTED_JOB.search(completed.stdout)
         if match is None:
-            raise RuntimeError(
-                completed.stderr.strip() or f"sbatch did not report a submitted job: {completed.stdout.strip()}"
+            raise _PartialSubmissionError(
+                completed.stderr.strip() or f"sbatch did not report a submitted job: {completed.stdout.strip()}",
+                job_ids,
             )
         job_ids.append(match.group(1))
     _result("start", kind="slurm", count=count, job_ids=job_ids, script=str(script_path))
@@ -202,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
             _result("check", kind=kind)
         else:
             _start_slurm(request)
+    except _PartialSubmissionError as exc:
+        _refusal(operation, str(exc), submitted=len(exc.job_ids), job_ids=exc.job_ids)
     except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
         _refusal(operation, f"launcher {operation}: {exc}")
     return 0

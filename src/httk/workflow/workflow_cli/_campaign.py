@@ -165,7 +165,19 @@ def handle_campaign_start_managers(arguments: argparse.Namespace, context: CLICo
         project=context.cwd,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
-    return 0
+    return 1 if any(_campaign_launch_failed(row) for row in report) else 0
+
+
+def _campaign_launch_failed(row: Mapping[str, object]) -> bool:
+    """Return whether one campaign manager launch reported a failure."""
+
+    returncode = row.get("returncode")
+    if isinstance(returncode, int) and returncode != 0:
+        return True
+    result = row.get("result")
+    if isinstance(result, int) and result != 0:
+        return True
+    return isinstance(result, Mapping) and result.get("ok") is False
 
 
 def build_campaign_parser(
@@ -331,7 +343,7 @@ def build_campaign_parser(
         group,
         "start-managers",
         summary="start a manager per selected partition",
-        description="Start a manager for each selected partition: in-process for local ones, via the scheduler for remote ones",
+        description="Start a manager for each selected partition: through its launcher locally, or on the remote owner",
         handler=handle_campaign_start_managers,
     )
     managers.add_argument(
@@ -353,9 +365,9 @@ def build_campaign_parser(
     managers.add_argument(
         "--count",
         type=int,
-        default=1,
+        default=None,
         metavar="COUNT",
-        help="remote managers to submit per partition (default: 1)",
+        help="managers to start per partition (default: each workspace's manager.count, or 1)",
     )
     managers.add_argument(
         "--idle-timeout",

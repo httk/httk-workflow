@@ -47,7 +47,7 @@ The canonical remote flow keeps scheduler settings with the remote workspace.
 with `pipx install httk-workflow`); `remote check` verifies that:
 
 ```console
-httk workflow remote add --template ssh-slurm kappa
+httk workflow remote add --template ssh kappa
 httk workflow remote configure \
     --set host=kappa.example.org --set username=rar \
     --set check_connectivity=yes kappa
@@ -63,8 +63,9 @@ httk workspace status kappa:runs
 
 The remote init command creates and registers `runs` on kappa; `kappa:runs` is
 resolved by kappa at use time. `transfer`
-detaches the selected job from the local default workspace, and `run` submits a
-manager through the remote adapter. Use `transfer kappa:runs default` after the
+detaches the selected job from the local default workspace, and `run` invokes
+the manager command through the remote adapter. The owning workspace's launcher
+then starts it. Use `transfer kappa:runs default` after the
 remote job stops, then `httk workflow collect` locally.
 
 ## Workspace policy
@@ -103,11 +104,11 @@ httk workspace settings set --key vasp.command --value '"srun -n 32 vasp_std"' W
 httk workspace settings show WORKSPACE
 ```
 
-For a Slurm manager, set its profile in the target workspace as well:
+For a Slurm manager, set its launcher profile in the target workspace as well:
 `slurm.account`, `slurm.partition`, `slurm.time_limit`, `slurm.nodes`,
 `slurm.cpus_per_task`, and `slurm.reservation` become batch directives, while
-`manager.workers` supplies the default worker count. The adapter reads these
-values from the workspace when it composes the batch script.
+`manager.workers` supplies the default worker count. The workspace launcher
+reads these values when it composes the batch script.
 
 A runner reads one through `a.setting("vasp.command")`, resolved in layers — the
 job's inputs, a real `HTTK_VASP_COMMAND` deployment override, the workspace

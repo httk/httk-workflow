@@ -7,59 +7,33 @@ selected by the ``kind`` recorded in the bundle's ``remote.json``:
 
 ``local``
     Files are copied in this filesystem and commands run in this process tree.
-``local-slurm``
-    Files stay local; the manager is submitted with a generated ``sbatch``
-    batch script.
-``ssh-slurm``
+``ssh``
     Files move with ``rsync`` over ``ssh`` and commands run on the configured
-    host, where the manager is submitted with ``sbatch``.
+    host.
 
 Any other kind is refused rather than silently executed in the wrong place.
-
-The ``start-manager`` operation reads its scheduler profile from the target
-workspace's ``.httk-workspace/format.json``: ``slurm.*`` settings become Slurm
-directives and ``manager.workers`` supplies the default worker count.
 
 Every subprocess started here is an argument vector; no shell is ever handed an
 interpolated string. ``ssh`` is the one unavoidable exception, because it always
 concatenates its command words and lets a login shell on the far side parse the
-result. All remote command strings, and the one line of the generated batch
-script that runs the manager, are therefore built by ``_shell_command``,
+result. All remote command strings are therefore built by ``_shell_command``,
 which quotes element-wise. Nothing else in this module may compose a command
 string from request or settings values.
 """
 
 import json
-import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
-import uuid
 from collections.abc import Mapping, Sequence
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol
 
-from .models import WORKSPACE_DIRECTORY
-
-#: Where generated batch scripts and their Slurm output files are kept, relative
-#: to the workspace the manager is started for.
-BATCH_DIRECTORY = f"{WORKSPACE_DIRECTORY}/batch"
-
-#: Workspace settings mapped onto ``#SBATCH`` directives, in written order.
-BATCH_DIRECTIVES = (
-    ("slurm.account", "--account"),
-    ("slurm.partition", "--partition"),
-    ("slurm.time_limit", "--time"),
-    ("slurm.nodes", "--nodes"),
-    ("slurm.cpus_per_task", "--cpus-per-task"),
-    ("slurm.reservation", "--reservation"),
-)
-
-SUPPORTED_KINDS = ("local", "local-slurm", "ssh-slurm")
+SUPPORTED_KINDS = ("local", "ssh")
 
 #: The bundle metadata file.
 METADATA_FILE = "remote.json"
@@ -70,10 +44,7 @@ METADATA_FILE = "remote.json"
 RESULT_FORMAT = "httk-computer-result"
 
 _CONNECT_TIMEOUT = 20
-_WORKSPACE_FORMAT_MAX_BYTES = 1024 * 1024
-_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 _FALSE_SETTINGS = frozenset({"0", "false", "no", "off"})
-_SUBMITTED_JOB = re.compile(r"Submitted batch job (\d+)")
 _WHITESPACE = re.compile(r"\s")
 
 _MISSING_HTTK = (
@@ -142,8 +113,8 @@ def _shell_command(argv: Sequence[str], *, cwd: str | None = None) -> str:
 
     ``ssh`` joins the command words it is given and the remote login shell parses
     the result, so element-wise :func:`shlex.quote` is the only construction that
-    keeps request and settings values out of that parser. The generated batch
-    script uses the same helper for the same reason.
+    keeps request and settings values out of that parser. Scheduler launchers
+    are a separate protocol and are not composed here.
     """
 
     quoted = " ".join(shlex.quote(item) for item in argv)
@@ -276,7 +247,7 @@ def _ssh_transport(settings: Mapping[str, object]) -> list[str]:
 def _ssh_destination(settings: Mapping[str, object]) -> str:
     host = _text(settings, "host")
     if host is None:
-        raise ValueError("the ssh-slurm adapter needs a remote setting host=HOSTNAME")
+        raise ValueError("the ssh adapter needs a remote setting host=HOSTNAME")
     if _WHITESPACE.search(host):
         raise ValueError(f"remote setting host must not contain whitespace: {host!r}")
     username = _text(settings, "username")
@@ -309,7 +280,7 @@ def _ssh_run(
 
 
 def _runner(kind: str, settings: Mapping[str, object]) -> _Runner:
-    if kind == "ssh-slurm":
+    if kind == "ssh":
 
         def remote(argv: Sequence[str], *, cwd: str | None = None) -> "subprocess.CompletedProcess[str]":
             return _ssh_run(settings, argv, cwd=cwd)
@@ -397,173 +368,10 @@ def _rsync(
         print(completed.stderr.rstrip("\n"), file=sys.stderr)
 
 
-def _batch_value(key: str, value: str) -> str:
-    if _CONTROL_CHARACTER.search(value):
-        raise ValueError(f"remote setting {key} must not contain control characters")
-    return value
-
-
-def _with_workers(argv: Sequence[str], workers: str | None) -> list[str]:
-    """Append the configured worker count unless the caller already chose one."""
-
-    arguments = list(argv)
-    if workers is None or "--workers" in arguments:
-        return arguments
-    if not workers.isdigit() or int(workers) < 1:
-        raise ValueError(f"workspace setting manager.workers must be a positive integer: {workers!r}")
-    return [*arguments, "--workers", workers]
-
-
-def _with_resources(argv: Sequence[str], resources: Mapping[str, int]) -> list[str]:
-    """Append resource capacities whose names are absent from *argv*."""
-
-    arguments = list(argv)
-    supplied = {
-        arguments[index + 1] for index, argument in enumerate(arguments[:-1]) if argument == "--worker-resource"
-    }
-    for name, count in resources.items():
-        if name not in supplied:
-            arguments += ["--worker-resource", name, str(count)]
-    return arguments
-
-
-def _workspace(request: Mapping[str, object], settings: Mapping[str, object]) -> str:
-    """Return the explicitly requested or configured workspace path."""
-
-    value = request.get("workspace")
-    if isinstance(value, str) and value:
-        return value
-    derived = _text(settings, "workspace")
-    if derived is None:
-        raise ValueError("start-manager needs a workspace path in the request")
-    return derived
-
-
-def _count(request: Mapping[str, object]) -> int:
-    value = request.get("count", 1)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError("start-manager count must be a positive integer")
-    return value
-
-
-def _workspace_settings(kind: str, settings: Mapping[str, object], workspace: str) -> dict[str, Any]:
-    path = Path(workspace) / WORKSPACE_DIRECTORY / "format.json"
-    try:
-        if kind == "ssh-slurm":
-            completed = _ssh_run(settings, ["head", "-c", str(_WORKSPACE_FORMAT_MAX_BYTES), str(path)])
-            if completed.returncode != 0:
-                raise ValueError(completed.stderr.strip() or completed.returncode)
-            raw = completed.stdout
-            if len(raw.encode("utf-8")) >= _WORKSPACE_FORMAT_MAX_BYTES:
-                raise ValueError("workspace format too large")
-        else:
-            with path.open("rb") as stream:
-                encoded = stream.read(_WORKSPACE_FORMAT_MAX_BYTES)
-            if len(encoded) >= _WORKSPACE_FORMAT_MAX_BYTES:
-                raise ValueError("workspace format too large")
-            raw = encoded.decode("utf-8")
-        document = json.loads(raw)
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"cannot read workspace format for {workspace}: {path}: {exc}") from exc
-    if not isinstance(document, Mapping):
-        raise ValueError(f"workspace format for {workspace} is not a JSON object: {path}")
-    settings = document.get("settings", {})
-    if not isinstance(settings, Mapping):
-        raise ValueError(f"workspace settings for {workspace} are not a JSON object: {path}")
-    return dict(settings)
-
-
-def _batch_script(
-    argv: Sequence[str],
-    *,
-    settings: Mapping[str, object],
-    workspace: str,
-    directory: str,
-) -> str:
-    lines = [
-        # Login shell so an ``environment.prelude`` that runs ``module load`` works
-        # here exactly as it does on the ``bash -lc`` local path and the ``bash -l``
-        # executor path. Login profiles are sourced before the body, so a non-zero
-        # command in a profile never trips the ``set -e`` below.
-        "#!/bin/bash -l",
-        "# Generated by the httk workflow start-manager adapter operation.",
-        "#SBATCH --job-name=httk-manager",
-    ]
-    for key, directive in BATCH_DIRECTIVES:
-        value = _text(settings, key)
-        if value is not None:
-            lines.append(f"#SBATCH {directive}={_batch_value(key, value)}")
-    lines += [
-        f"#SBATCH --chdir={_batch_value('workspace', workspace)}",
-        f"#SBATCH --output={_batch_value('workspace', directory)}/manager-%j.out",
-        f"#SBATCH --error={_batch_value('workspace', directory)}/manager-%j.err",
-        "",
-        # ``set -e`` aborts on a failing prelude line; no ``-u``, which breaks
-        # module scripts and only ever guarded the fully quoted exec line below.
-        "set -e",
-    ]
-    prelude = _text(settings, "environment.prelude")
-    if prelude:
-        lines.append(prelude)
-    lines += [
-        # One quoted line, built by the single helper every command string uses.
-        f"exec {_shell_command(argv)}",
-        "",
-    ]
-    return "\n".join(lines)
-
-
-def _submit(
-    kind: str,
-    settings: Mapping[str, object],
-    *,
-    script: str,
-    workspace: str,
-    directory: str,
-    count: int,
-) -> dict[str, object]:
-    """Write the batch script where sbatch runs and submit it *count* times."""
-
-    name = f"manager-{uuid.uuid4().hex}.sbatch"
-    if kind == "ssh-slurm":
-        remote = f"{directory}/{name}"
-        _ensure_remote_directory(settings, directory)
-        descriptor, temporary_name = tempfile.mkstemp(prefix="httk-adapter-batch-", suffix=".sbatch")
-        temporary = Path(temporary_name)
-        try:
-            with open(descriptor, "w", encoding="utf-8") as stream:
-                stream.write(script)
-            temporary.chmod(0o700)
-            _rsync(settings, source=str(temporary), destination=remote, directory=False, files=None, push=True)
-        finally:
-            temporary.unlink(missing_ok=True)
-        path = remote
-    else:
-        local_directory = Path(directory).expanduser()
-        local_directory.mkdir(parents=True, exist_ok=True)
-        local_path = local_directory / name
-        local_path.write_text(script, encoding="utf-8")
-        local_path.chmod(0o700)
-        path = str(local_path)
-    run = _runner(kind, settings)
-    job_ids: list[str] = []
-    for index in range(count):
-        completed = run(["sbatch", path], cwd=workspace)
-        if completed.returncode != 0:
-            raise RuntimeError(
-                f"sbatch submission {index + 1} of {count} failed ({completed.returncode}): {completed.stderr.strip()}"
-            )
-        if completed.stderr:
-            print(completed.stderr.rstrip("\n"), file=sys.stderr)
-        match = _SUBMITTED_JOB.search(completed.stdout)
-        job_ids.append(match.group(1) if match is not None else completed.stdout.strip())
-    return {"job_ids": job_ids, "script": path, "count": count}
-
-
 def _probe_httk(kind: str, run: _Runner, settings: Mapping[str, object]) -> tuple[list[str], str] | None:
     """Return the working httk argument vector and its version, if any."""
 
-    resolve = _remote_httk if kind == "ssh-slurm" else _local_httk
+    resolve = _remote_httk if kind == "ssh" else _local_httk
     candidates: list[list[str]] = [resolve(["httk"], settings)]
     if _httk_prefix(settings) is None:
         candidates.append(["python3", "-m", "httk.core.cli"])
@@ -584,7 +392,7 @@ def _install(kind: str, request: Mapping[str, object]) -> None:
 
     settings = _settings(request)
     run = _runner(kind, settings)
-    if kind == "ssh-slurm":
+    if kind == "ssh":
         reachable = run(["true"])
         if reachable.returncode != 0:
             _refusal("install", f"cannot reach {_ssh_destination(settings)}: {reachable.stderr.strip()}")
@@ -598,7 +406,7 @@ def _install(kind: str, request: Mapping[str, object]) -> None:
 
 
 def _configure(kind: str, request: Mapping[str, object]) -> None:
-    if kind != "ssh-slurm":
+    if kind != "ssh":
         _result("configure", configured=True)
         return
     # The command line stores settings only after this operation succeeds, so the
@@ -624,7 +432,7 @@ def _configure(kind: str, request: Mapping[str, object]) -> None:
 
 def _transfer(kind: str, operation: str, request: Mapping[str, object]) -> None:
     source, destination = _paths(request)
-    if kind == "ssh-slurm":
+    if kind == "ssh":
         settings = _settings(request)
         raw = request.get("directory")
         push = operation == "push"
@@ -654,64 +462,6 @@ def _invoke(kind: str, operation: str, request: Mapping[str, object]) -> None:
     cwd = _cwd(request) if operation == "invoke" else None
     completed = _runner(kind, settings)(argv, cwd=cwd)
     _result(operation, returncode=completed.returncode, stdout=completed.stdout, stderr=completed.stderr)
-
-
-def _start_manager(kind: str, request: Mapping[str, object]) -> None:
-    settings = _settings(request)
-    workspace = _workspace(request, settings)
-    workspace_settings = _workspace_settings(kind, settings, workspace)
-    argv = _with_workers(_argv(request, "start-manager"), _text(workspace_settings, "manager.workers"))
-    if kind == "local":
-        count = _count(request)
-        resources = {"procs": os.cpu_count() or 1}
-        try:
-            resources["mem"] = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // 2**20
-        except (ValueError, OSError, AttributeError):
-            pass
-        supplied = {argv[index + 1] for index, argument in enumerate(argv[:-1]) if argument == "--worker-resource"}
-        prelude = _text(workspace_settings, "environment.prelude")
-        pids: list[int] = []
-        for index in range(count):
-            injected = {
-                name: value // count + (1 if index < value % count else 0)
-                for name, value in resources.items()
-                if name not in supplied
-            }
-            manager_argv = _local_httk(_with_resources(argv, injected), settings)
-            if prelude:
-                launch_argv = ["bash", "-lc", "set -e\n" + prelude + '\nexec "$@"', "bash", *manager_argv]
-            else:
-                launch_argv = manager_argv
-            pids.append(
-                subprocess.Popen(
-                    launch_argv,
-                    cwd=_cwd(request),
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    start_new_session=True,
-                ).pid
-            )
-        # ``pid`` names the first one, so a caller that only ever started a
-        # single manager reads the same field it always did.
-        _result("start-manager", pid=pids[0], pids=pids, count=count)
-        return
-    directory = f"{workspace.rstrip('/')}/{BATCH_DIRECTORY}"
-    script = _batch_script(
-        _remote_httk(argv, settings) if kind == "ssh-slurm" else _local_httk(argv, settings),
-        settings=workspace_settings,
-        workspace=workspace,
-        directory=directory,
-    )
-    submitted = _submit(
-        kind,
-        settings,
-        script=script,
-        workspace=workspace,
-        directory=directory,
-        count=_count(request),
-    )
-    _result("start-manager", **submitted)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -751,8 +501,6 @@ def main(argv: list[str] | None = None) -> int:
             _transfer(kind, operation, request)
         elif operation in {"invoke", "status"}:
             _invoke(kind, operation, request)
-        elif operation == "start-manager":
-            _start_manager(kind, request)
         else:
             raise ValueError(f"unsupported maintained adapter operation: {operation}")
     except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:

@@ -64,7 +64,6 @@ __all__ = [
     "seed_application_settings",
     "split_settings",
     "store_credentials",
-    "submit_remote_managers",
     "valid_remote_name",
     "validate_adapter_bundle",
 ]
@@ -75,13 +74,12 @@ ADAPTER_OPERATIONS = (
     "invoke",
     "push",
     "pull",
-    "start-manager",
     "status",
 )
 
 #: The single dispatcher executable every bundle carries. One program serves
 #: every operation; the operation name travels inside the request JSON, so the
-#: seven historical per-operation wrappers collapsed into this one file.
+#: six maintained per-operation wrappers collapsed into this one file.
 ADAPTER_EXECUTABLE = "adapter"
 
 CREDENTIALS_FILE = "credentials.json"
@@ -144,43 +142,6 @@ REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND = ("httk", "workspace", "workflow-prel
 REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
 REMOTE_JOB_REQUEST_ENVELOPES_COMMAND = ("httk", "job", "request-envelopes")
 REMOTE_JOB_PUBLISH_REQUESTS_COMMAND = ("httk", "job", "publish-requests")
-
-
-def submit_remote_managers(
-    target: "RemoteTarget",
-    name: str,
-    root: str,
-    *,
-    count: int,
-    argv_tail: Sequence[str],
-    timeout: float | None,
-    adapter: Callable[..., dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    """Submit managers for a far-side workspace name using its probed root.
-
-    :param target: The resolved remote adapter bundle.
-    :param name: The remote workspace name.
-    :param root: The remote workspace root.
-    :param count: The number of managers to submit.
-    :param argv_tail: Additional manager arguments.
-    :param timeout: The adapter operation timeout.
-    :param adapter: The adapter callable, or :func:`run_adapter` when omitted.
-    :return: The adapter result document.
-    """
-
-    if count < 1:
-        raise ValueError("manager count must be a positive integer")
-    runner = run_adapter if adapter is None else adapter
-    return runner(
-        target.bundle,
-        "start-manager",
-        {
-            "argv": [*REMOTE_MANAGER_COMMAND, "--workspace", name, *argv_tail],
-            "workspace": root,
-            "count": count,
-        },
-        timeout=timeout,
-    )
 
 
 def probe_remote_workspace(
@@ -447,7 +408,7 @@ def add_remote(
         # "this machine". Defining one would make a binding to `local` ambiguous,
         # so the name is reserved.
         raise ValueError("the remote name 'local' is reserved for the built-in local remote")
-    if template not in {"local", "local-slurm", "ssh-slurm"}:
+    if template not in {"local", "ssh"}:
         raise ValueError(f"unknown maintained remote template: {template}")
     if global_scope:
         destination = remotes_home() / name
@@ -584,13 +545,9 @@ def import_v1_remote(
         raise ValueError("legacy computer definition does not contain the recognized executable set")
     base = _legacy_settings(legacy / "config")
     if "REMOTE_HOST" in base:
-        template = "ssh-slurm"
-    elif any(key.startswith("SLURM_") for key in base):
-        template = "local-slurm"
-    elif "LOCAL_HTTK_DIR" in base:
-        template = "local"
+        template = "ssh"
     else:
-        raise ValueError("legacy computer definition cannot be mapped to a maintained adapter")
+        template = "local"
 
     legacy_profiles: dict[str, dict[str, str]] = {}
     for queue_file in sorted(legacy.glob("config.*")):
@@ -618,15 +575,21 @@ def import_v1_remote(
     metadata = read_metadata(destination)
     legacy_settings = dict(selected)
     settings: dict[str, object] = {"legacy_settings": legacy_settings}
-    if template in {"local", "local-slurm"} and "LOCAL_HTTK_DIR" in selected:
+    if template == "local" and "LOCAL_HTTK_DIR" in selected:
         root = Path(selected["LOCAL_HTTK_DIR"]).expanduser()
         if not root.is_absolute():
             root = (legacy / root).resolve()
         legacy_settings["workspace_root"] = str(root / "Runs")
-    elif template == "ssh-slurm" and "REMOTE_HTTK_DIR" in selected:
+    elif template == "ssh" and "REMOTE_HTTK_DIR" in selected:
         legacy_settings["workspace_root"] = f"{selected['REMOTE_HTTK_DIR'].rstrip('/')}/Runs"
         settings["host"] = selected.get("REMOTE_HOST", "")
         settings["username"] = selected.get("USERNAME", "")
+    if any(key.startswith("SLURM_") for key in selected):
+        print(
+            "notice: scheduler settings belong to the workspace: `httk workflow launcher add --template slurm NAME` "
+            "and `httk workspace settings set --key manager.launch --value NAME`",
+            file=sys.stderr,
+        )
     metadata["settings"] = settings
     # The provenance format keeps its historical name: it records that this
     # bundle was mapped from an httk v1 *computer* definition, which is what

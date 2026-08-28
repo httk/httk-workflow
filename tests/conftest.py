@@ -81,7 +81,7 @@ def register_ws(
     return name
 
 
-#: The host every fake ``ssh-slurm`` remote is pointed at. The stand-in ``ssh``
+#: The host every fake ``ssh`` remote is pointed at. The stand-in ``ssh``
 #: ignores it beyond logging it, but the adapters must still carry it around.
 FAKE_HOST = "fake.example.test"
 
@@ -227,7 +227,7 @@ def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
 def fake_remote(
     project: Path,
     *,
-    template: str = "ssh-slurm",
+    template: str = "ssh",
     name: str = "cluster",
     **settings: object,
 ) -> Path:
@@ -236,7 +236,7 @@ def fake_remote(
     bundle = add_remote(name, template=template, project=project)
     metadata = json.loads((bundle / "remote.json").read_text(encoding="utf-8"))
     remote_settings = dict(metadata["settings"])
-    if template == "ssh-slurm":
+    if template == "ssh":
         remote_settings.update({"host": FAKE_HOST, "username": "someone"})
     remote_settings.update(settings)
     metadata["settings"] = remote_settings

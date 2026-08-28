@@ -2,13 +2,12 @@
 
 A remote adapter is a versioned directory with one executable ``adapter``
 program. Every operation -- ``configure``, ``install``, ``invoke``, ``push``,
-``pull``, ``start-manager`` and ``status`` -- runs that one program, which reads
+``pull`` and ``status`` -- runs that one program, which reads
 one JSON request file, learns which operation to perform from the request's
 ``operation`` member, and prints one JSON result. The ``install`` operation
 keeps its historical protocol spelling but only ever *verifies* that the target
 can run httk (the ``remote check`` CLI verb); adapters never install software.
-The maintained ``local``,
-``local-slurm`` and ``ssh-slurm`` templates implement that protocol by executing
+The maintained ``local`` and ``ssh`` templates implement that protocol by executing
 this module, which selects its behaviour from the ``kind`` recorded in the
 bundle's ``remote.json`` and refuses any other kind rather than running it in
 the wrong place.
@@ -26,16 +25,9 @@ login shell on the far side; every remote command string is therefore built by a
 single element-wise quoting helper.
 """
 
-from .adapter_runtime import (
-    BATCH_DIRECTIVES,
-    BATCH_DIRECTORY,
-    SUPPORTED_KINDS,
-    main,
-)
+from .adapter_runtime import SUPPORTED_KINDS, main
 
 __all__ = [
-    "BATCH_DIRECTIVES",
-    "BATCH_DIRECTORY",
     "SUPPORTED_KINDS",
     "main",
 ]

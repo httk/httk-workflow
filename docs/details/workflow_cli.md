@@ -314,13 +314,13 @@ stay non-failing. The JSON summary carries `claim_problems`,
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `run` | run a manager until idle, or keep serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--adapter-timeout`, `--log-level` |
-| `manager run` | run a manager locally, or submit managers to a remote workspace's scheduler | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
+| `run` | run managers through the workspace launcher, or keep one serving with `--idle` | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--detach`, `--adapter-timeout`, `--log-level` |
+| `manager run` | run managers through the workspace launcher, or invoke them on a remote workspace | `--workspace`, `--workers`, `--worker-resource`, `--count`, `--pool`, `--capability`, `--placement-prefix`, `--idle`, `--idle-timeout`, `--inline`, `--detach`, `--join-grace-seconds`, `--lease-seconds`, `--drain-timeout`, `--gc-interval`, `--runner-search-path`, `--adapter-timeout`, `--log-level`, `--log-file`, `--json-logs` |
 
-`manager run` follows the binding: a local workspace runs the manager in this
-process by default, or starts `--count N` local manager processes, and a remote
-workspace submits managers through the remote's scheduler — `--count N`
-managers, `--workers N` workers each. `--worker-resource NAME COUNT` is
+`manager run` follows the binding: a local workspace uses its `manager.launch`
+setting (the built-in `process` launcher by default), while a remote workspace
+invokes the same command on its owner. `--count N` means managers at that launch
+site, and `--workers N` means workers each. `--worker-resource NAME COUNT` is
 repeatable and advertises per-manager capacity to the scheduler; local
 managers also use SLURM allocation variables when present. With a local
 `--count N`, explicit `--worker-resource` pairs are passed to every manager
@@ -333,8 +333,8 @@ claim a capability-gated job and scope its scan; without them a gated job would
 stay unclaimable. Both print one startup banner and, on idle exit, one summary
 line that names any jobs left not claimable by the pools, capabilities,
 resources, or executors this manager serves, or left committing with an
-unreadable definition. This is the command that subsumed the old
-`transfer start-manager`.
+unreadable definition. `--inline` forces one in-process manager, and `--detach`
+returns after starting the managers.
 The default manager log is the append-only workspace file
 `.httk-workspace/managers.log`; each text line is prefixed with the manager id,
 and JSON records carry `manager_id`. `--log-file` selects another destination.
@@ -511,7 +511,7 @@ switch is likewise hidden: it makes the workspace argument a literal path with n
 registry lookup, which is exactly what one machine needs when it addresses another
 machine's workspace.
 
-The pre-release `transfer send`, `transfer fetch`, `transfer start-manager`, and
+The pre-release `transfer send` and `transfer fetch` and
 `transfer status` verbs are **gone** — they no longer parse. Move to the single
 `transfer SRC DST` verb, and to `manager run --workspace NAME` for starting managers (below)
 and `workspace status NAME` for reading a remote workspace's markers.
@@ -520,7 +520,6 @@ and `workspace status NAME` for reading a remote workspace's markers.
 | --- | --- |
 | `transfer send REMOTE JOB …` | `transfer --job JOB … LOCAL REMOTE` |
 | `transfer fetch --remote REMOTE --workspace LOCAL` | `transfer REMOTE LOCAL` |
-| `transfer start-manager REMOTE --count N` | `manager run --workspace REMOTE --count N` (local bindings also start `N` manager processes) |
 | `transfer status REMOTE` | `workspace status REMOTE` |
 
 An earlier release also renamed two whole groups: `httk workflow computer …`
@@ -540,7 +539,7 @@ job again, or edit the one `runner.path` member.
 | `campaign show` | show the partition map | `--json` |
 | `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
 | `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--raw`, `--allow-job-collector`, `--into PATH`, `--id-base BASE`, `--id-series SERIES` |
-| `campaign start-managers` | start a manager per selected partition | `--partition`, `--workers`, `--worker-resource`, `--count`, `--adapter-timeout` |
+| `campaign start-managers` | start a manager per selected partition | `--partition`, `--workers`, `--worker-resource`, `--count`, `--idle-timeout`, `--adapter-timeout` |
 
 A campaign is a thin convention over the *registered workspaces* above: a
 partition map, stored in the project, that spreads a very large body of work
@@ -1003,18 +1002,17 @@ with aged segments behind it; `collect` and `job log` report that timeline with
 
 ## Remote adapters
 
-Remote definitions are versioned directories containing `remote.json` and
-executable `configure`, `install`, `invoke`, `push`, `pull`, `start-manager`,
-and `status` operations. Each receives one versioned JSON request filename and
-prints one JSON result; diagnostics belong on stderr. Commands and remote
-commands are always argument arrays. The maintained templates implement that
+Remote definitions are versioned directories containing `remote.json` and one
+executable `adapter`. The operation name travels in each versioned JSON request;
+the dispatcher prints one JSON result and sends diagnostics to stderr. Commands
+and remote commands are always argument arrays. The maintained templates implement that
 protocol through {py:mod}`httk.workflow.adapter_protocol`, which is the public
 name of the packaged implementation. {doc}`adapter_authoring` is the reference
 for writing one of your own: the bundle layout, the exact request and result
-document of each of the seven operations, and a worked skeleton for a cluster
+document of each of the six operations, and a worked skeleton for a cluster
 none of the maintained kinds covers.
 
-Maintained `local`, `local-slurm`, and `ssh-slurm` templates are packaged with
+Maintained `local` and `ssh` templates are packaged with
 the module. Project definitions shadow global definitions. `REMOTE:NAME` names
 a workspace on a remote. `remote import-v1` maps recognized legacy *httk* v1 computer bundles
 by reading assignment-only configuration; legacy shell executables are never
@@ -1037,39 +1035,20 @@ credential.
 
 ### What each kind does
 
-`local` copies files in this filesystem, runs commands as child processes, and
-starts the requested `count` of managers as detached local processes.
+`local` copies files in this filesystem and runs commands as child processes.
+Manager launch policy is selected by each workspace's `manager.launch` setting.
 
-`local-slurm` keeps the same local copies and local commands, but submits the
-manager with a generated batch script through the local `sbatch`. It therefore
-requires `sbatch` on the machine that defines the remote, which is checked
-when the remote is added.
+`ssh` moves files with `rsync` over `ssh` and runs every command on the
+configured host. Only `ssh` and `rsync` are required locally. Operation by
+operation:
 
-`ssh-slurm` moves files with `rsync` over `ssh` and runs every command on the
-configured host, where the manager is submitted with `sbatch`. Only `ssh` and
-`rsync` are required locally. Operation by operation:
-
-| Operation | `ssh-slurm` behaviour | Settings used |
+| Operation | `ssh` behaviour | Settings used |
 | --- | --- | --- |
 | `configure` | verifies the host answers with a cheap remote `true`, so a mistyped host fails immediately instead of at the first transfer | `host`, `username`, `port`, `check_connectivity` |
 | `install` (the `remote check` verb) | checks that `httk` answers on the far side and reports its version | `host`, `username`, `port`, `httk_command` |
 | `push` / `pull` | one `rsync --archive` transfer, creating missing destination components; a `pull` is always the whole remote directory, a `push` is the whole tree or the request's explicit relative `files` batch | `host`, `username`, `port` |
 | `invoke` | runs the request's argument vector on the host, optionally in the request's directory, and returns its status, stdout and stderr | `host`, `username`, `port`, `httk_command` |
 | `status` | the same machinery running `httk workspace status --json NAME` remotely | as `invoke` |
-| `start-manager` | writes a generated batch script into `WORKSPACE/.httk-workspace/batch/`, then submits it with `sbatch` once, or the request's `count` times | workspace settings `slurm.*`, `manager.workers`, `workspace` |
-
-The generated batch script is a `#!/bin/bash` file carrying one `#SBATCH`
-directive per configured setting, `--chdir` set to the workspace, `--output`
-and `--error` beside the script, and a single `exec` line that runs the manager
-command. The workspace's `manager.workers` count is appended only when the
-request did not already choose one, so an explicit `--workers` always wins.
-For `local`, `procs` and `mem` pairs are appended when the caller did not
-provide them; the SLURM kinds leave capacities to the batch environment and
-the manager's SLURM detection. Both kinds report the submitted job identifiers.
-
-A `start-manager` request names the client-probed workspace root in its
-required `workspace` field. `local` starts `count` detached processes and
-reports their `pids`.
 
 `httk_command` overrides how `httk` is spelled on the far side, for example
 `httk_command="/proj/venv/bin/httk"`; without it the plain `httk` on the remote
@@ -1080,11 +1059,11 @@ reports their `pids`.
 Every subprocess an adapter starts is an argument vector, so no shell ever
 parses a value that came from a request or from settings. `ssh` is the one
 exception in the protocol, because it always joins its command words and lets a
-login shell on the far side parse the result. All remote command strings, and
-the one line of the generated batch script that runs the manager, are therefore
-built by a single helper that quotes element-wise; nothing else composes a
-command string. `rsync` transfers pass `--protect-args` so that even file names
-travel in the protocol rather than through the remote shell.
+login shell on the far side parse the result. All remote command strings are
+therefore built by a single helper that quotes element-wise; scheduler launcher
+bundles own their batch-script quoting separately. `rsync` transfers pass
+`--protect-args` so that even file names travel in the protocol rather than
+through the remote shell.
 
 ### httk on the target: `remote check`
 
@@ -1137,7 +1116,7 @@ Add and configure the machine, make sure *httk-workflow* is installed there
 `remote check`, create its workspace, then send and run a job:
 
 ```console
-httk workflow remote add --template ssh-slurm kappa
+httk workflow remote add --template ssh kappa
 httk workflow remote configure \
     --set host=kappa.example.org --set username=rar \
     --set check_connectivity=yes kappa
@@ -1158,8 +1137,9 @@ on the owning machine.
 `transfer default kappa:runs` detaches each selected job from the local default
 workspace and imports it on the remote, at the placement it had here unless
 `--destination-placement` puts it elsewhere. `run --workspace kappa:runs` submits the
-generated manager through the remote adapter; `--workers` fixes its worker count.
-`manager run` is the advanced spelling for the same operation.
+generated manager through the remote adapter; the owning workspace's launcher
+then decides how it starts. `--workers` fixes its worker count. `manager run`
+is the advanced spelling for the same operation.
 
 Before a transfer moves state, it checks each job's declared environment against
 the destination workspace settings. Unresolved default-less entries produce a

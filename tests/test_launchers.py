@@ -3,13 +3,14 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
 
 from conftest import Remote
-from httk.workflow import Workspace, launchers
+from httk.workflow import Workspace, launch_runtime, launchers
 from httk.workflow.launchers import (
     add_launcher,
     launch_processes,
@@ -164,7 +165,17 @@ def test_launch_processes_detaches_and_filters_slurm(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(launchers.subprocess, "Popen", fake_popen)
     result = launch_processes(
         workspace_root=tmp_path,
-        argv=["httk", "workflow", "manager", "run", "--worker-resource", "license", "99"],
+        argv=[
+            sys.executable,
+            "-m",
+            "httk.core.cli",
+            "workflow",
+            "manager",
+            "run",
+            "--worker-resource",
+            "license",
+            "99",
+        ],
         count=2,
         settings={"environment.prelude": "module load python"},
         capacity={"procs": 5, "mem": 3, "license": 8},
@@ -186,3 +197,57 @@ def test_launch_processes_detaches_and_filters_slurm(monkeypatch: pytest.MonkeyP
     assert "--worker-resource license 99" in " ".join(launched_argvs[0])
     assert "--worker-resource procs 3" in " ".join(launched_argvs[0])
     assert "--worker-resource procs 2" in " ".join(launched_argvs[1])
+    assert all(sys.executable not in argv for argv in launched_argvs)
+    assert all("httk workflow manager run" in " ".join(argv) for argv in launched_argvs)
+
+
+def test_manager_command_must_be_a_nonempty_string(tmp_path: Path) -> None:
+    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"]
+    with pytest.raises(ValueError, match="manager.command must be a nonempty string"):
+        launch_processes(
+            workspace_root=tmp_path,
+            argv=argv,
+            count=1,
+            settings={"manager.command": 7},
+            capacity={"procs": 1},
+        )
+    with pytest.raises(ValueError, match="manager.command must be a nonempty string"):
+        launch_runtime._batch_script(argv, settings={"manager.command": 7}, workspace="/ws", directory="/ws/.batch")
+
+
+def test_slurm_launcher_reports_partial_submission(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    bundle = tmp_path / "launcher"
+    bundle.mkdir()
+    (bundle / "launcher.json").write_text(json.dumps({"kind": "slurm", "required_binaries": []}), encoding="utf-8")
+    request = tmp_path / "request.json"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    request.write_text(
+        json.dumps(
+            {
+                "operation": "start",
+                "launcher_dir": str(bundle),
+                "workspace": str(workspace),
+                "argv": [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"],
+                "count": 2,
+                "settings": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls = 0
+
+    def fake_run(argv, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(argv, 0, stdout="Submitted batch job 4201\n", stderr="")
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="quota exceeded\n")
+
+    monkeypatch.setattr(launch_runtime.subprocess, "run", fake_run)
+    assert launch_runtime.main([str(request)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["ok"] is False
+    assert result["submitted"] == 1
+    assert result["job_ids"] == ["4201"]
+    assert "quota exceeded" in result["error"]

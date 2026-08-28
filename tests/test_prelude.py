@@ -1,20 +1,21 @@
-"""Two-layer shell prelude: storage, the executor wrap, and the slurm batch tail.
+"""Two-layer shell prelude: storage, the executor wrap, and the launcher batch tail.
 
 A prelude is shell text an operator configures to initialize the environment
 before a job runs — ``module load VASP/6.2.1`` and the like. Layer 2 is a
 workspace-side map keyed by workflow id, applied by the executor per launch;
 Layer 1 is the ``environment.prelude`` application setting, applied by the
-adapter. These tests cover the workspace round-trip and validation, the pure
-executor wrap, and the slurm ``_batch_script`` tail.
+launcher. These tests cover the workspace round-trip and validation, the pure
+executor wrap, and the slurm batch-script tail.
 """
 
+import sys
 from pathlib import Path, PurePosixPath
 
 import pytest
 
-from httk.workflow import Workspace, adapter_runtime
-from httk.workflow.adapter_runtime import _batch_script
+from httk.workflow import Workspace
 from httk.workflow.executors import AttemptLaunch, PathRunnerExecutor
+from httk.workflow.launch_runtime import _batch_script
 from httk.workflow.models import Marker
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 
@@ -103,7 +104,7 @@ def test_executor_with_prelude_wraps_in_login_shell(tmp_path: Path) -> None:
 
 
 def test_batch_script_runs_prelude_before_exec_under_set_e() -> None:
-    argv = ["httk", "workflow", "manager", "run"]
+    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run", "--by-path"]
     script = _batch_script(
         argv,
         settings={"environment.prelude": "module load VASP/6.2.1"},
@@ -115,86 +116,37 @@ def test_batch_script_runs_prelude_before_exec_under_set_e() -> None:
     prelude_at = script.index("module load VASP/6.2.1")
     exec_at = script.index("exec ")
     assert prelude_at < exec_at
+    assert "exec httk workflow manager run --by-path" in script
+    assert sys.executable not in script
+
+
+def test_batch_script_uses_configured_manager_command_after_prelude() -> None:
+    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"]
+    script = _batch_script(
+        argv,
+        settings={"environment.prelude": "module load python", "manager.command": "/opt/httk with space"},
+        workspace="/ws",
+        directory="/ws/.batch",
+    )
+    assert "exec '/opt/httk with space' workflow manager run" in script
 
 
 def test_batch_script_without_prelude_omits_it() -> None:
-    argv = ["httk", "workflow", "manager", "run"]
+    argv = [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"]
     script = _batch_script(argv, settings={}, workspace="/ws", directory="/ws/.batch")
     assert "module load" not in script
     assert "set -e\n" in script and "set -eu" not in script
-    assert "exec " in script
+    assert f"exec {sys.executable} -m httk.core.cli workflow manager run" in script
 
 
-class _FakePopen:
-    def __init__(self, argv, **_kwargs):
-        self.argv = argv
-        self.pid = 4321
-
-
-def _start_manager_local_argv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, prelude: str | None) -> list[str]:
-    """Drive the local ``start-manager`` adapter and return the argv it launched."""
-
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    if prelude is not None:
-        workspace.set_setting("environment.prelude", prelude)
-    argv = ["httk", "workflow", "manager", "run", "--workspace", "station"]
-    captured: list[list[str]] = []
-
-    def fake_popen(launch_argv, **kwargs):
-        captured.append(list(launch_argv))
-        return _FakePopen(launch_argv, **kwargs)
-
-    monkeypatch.setattr(adapter_runtime.os, "cpu_count", lambda: 8)
-    monkeypatch.setattr(
-        adapter_runtime.os,
-        "sysconf",
-        lambda name: {"SC_PHYS_PAGES": 4_194_304, "SC_PAGE_SIZE": 4096}[name],
+def test_batch_script_quotes_slurm_values_and_paths_with_spaces() -> None:
+    script = _batch_script(
+        [sys.executable, "-m", "httk.core.cli", "workflow", "manager", "run"],
+        settings={"slurm.partition": "main cluster"},
+        workspace="/ws with space",
+        directory="/ws with space/.httk-workspace/batch",
     )
-    monkeypatch.setattr(adapter_runtime.subprocess, "Popen", fake_popen)
-    adapter_runtime._start_manager("local", {"argv": argv, "workspace": str(workspace.root)})
-    assert len(captured) == 1
-    return captured[0]
-
-
-def test_start_manager_local_wraps_argv_when_prelude_is_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    manager_argv = adapter_runtime._local_httk(
-        [
-            "httk",
-            "workflow",
-            "manager",
-            "run",
-            "--workspace",
-            "station",
-            "--worker-resource",
-            "procs",
-            "8",
-            "--worker-resource",
-            "mem",
-            "16384",
-        ],
-        {},
-    )
-    launched = _start_manager_local_argv(tmp_path, monkeypatch, prelude="module load VASP/6.2.1")
-    assert launched == ["bash", "-lc", 'set -e\nmodule load VASP/6.2.1\nexec "$@"', "bash", *manager_argv]
-
-
-def test_start_manager_local_leaves_argv_bare_without_prelude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    manager_argv = adapter_runtime._local_httk(
-        [
-            "httk",
-            "workflow",
-            "manager",
-            "run",
-            "--workspace",
-            "station",
-            "--worker-resource",
-            "procs",
-            "8",
-            "--worker-resource",
-            "mem",
-            "16384",
-        ],
-        {},
-    )
-    launched = _start_manager_local_argv(tmp_path, monkeypatch, prelude=None)
-    assert launched == manager_argv
+    assert "#SBATCH --partition='main cluster'" in script
+    assert "#SBATCH --chdir='/ws with space'" in script
+    assert "#SBATCH --output='/ws with space/.httk-workspace/batch/manager-%j.out'" in script
+    assert "#SBATCH --error='/ws with space/.httk-workspace/batch/manager-%j.err'" in script

@@ -132,7 +132,13 @@ other settings, but should keep its interpretation explicit.
 The maintained Slurm dispatcher writes one mode-0700 script below
 `.httk-workspace/batch/`, adds `--chdir`, output, and error paths, and calls
 `sbatch` once per requested manager. Its final command is an argument-quoted
-`exec` line. The result contains the parsed Slurm job IDs and the script path.
+`exec` line. If `environment.prelude` is set, the prelude runs under `set -e`
+first and the manager command is resolved on the resulting `PATH` as
+`manager.command` (default `httk`); without a prelude, the supplied Python
+interpreter argv is preserved. If submission fails after some jobs were
+accepted, the refusal includes `submitted` and `job_ids` so the operator can
+cancel those jobs. The successful result contains the parsed Slurm job IDs and
+the script path.
 
 ## A PBS launcher
 

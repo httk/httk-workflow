@@ -18,9 +18,9 @@ you author a runner.
 
 Use repeatable `--worker-resource NAME COUNT` options to advertise capacities;
 inside an active SLURM allocation, local managers derive `procs`, `mem`,
-`gpus`, and `nodes` from the allocation variables. `--count N` starts N local
-manager processes, with metadata directories removed after clean exit and one
-workspace-level append-only manager log.
+`gpus`, and `nodes` from the allocation variables. `--count N` starts N managers
+at the selected launch site, with metadata directories removed after clean
+process exit and one workspace-level append-only manager log.
 
 For example, a manager can advertise CPUs, memory, and two license slots:
 
@@ -40,12 +40,13 @@ carried by two prelude layers, both run under `set -e` so a failing line aborts
 the job instead of running the calculation in a half-set-up environment:
 
 - **Layer 1, `environment.prelude`** — workspace-wide, applies to every job. Set
-  it with `workspace settings set --key environment.prelude --value "…" NAME`. For a **slurm**
-  remote it is written into the generated login-shell submit script, so it runs
-  once inside the allocation and the manager and every runner it spawns inherit
-  it; for a **local** remote it wraps the manager start; a manager you start
-  yourself with `manager run` inherits your own shell, so run it from a shell
-  that already has your setup.
+  it with `workspace settings set --key environment.prelude --value "…" NAME`. A
+  launcher runs it before the manager: the Slurm batch script runs the prelude
+  under `set -e`, and the process launcher wraps the child in the same shell.
+  After a prelude, the manager is invoked as `manager.command` on `PATH`
+  (default `httk`), so a module-loaded interpreter is selected; without a
+  prelude the launcher preserves the Python interpreter command supplied by the
+  caller. A manager started directly with `manager run` inherits your shell.
 - **Layer 2, `workflow-prelude`** — per workflow, keyed by workflow id, applies
   only to that workflow's jobs and runs *after* Layer 1. Each launch sources it
   with `bash -l` (a login shell, so `module` is available):

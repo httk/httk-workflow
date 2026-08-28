@@ -23,14 +23,18 @@ Two rules make this safe at scale without new machinery:
 
 Collect and management simply cross the partition list: :func:`campaign_collect`
 chains :func:`~httk.workflow.collecting.job_records` across every partition lazily,
-and :func:`campaign_managers` starts a manager per selected partition — in this
-process for a local partition, through the remote's scheduler for a remote one.
+and :func:`campaign_managers` starts a manager per selected partition — through
+the workspace launcher locally, or by invoking the command on a remote owner.
 """
 
+import argparse
 import hashlib
 import os
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+
+from httk.core.cli import CLIContext
 
 from .collecting import DEFAULT_COLLECT_STATES, JobRecord, job_records
 from .errors import FormatError
@@ -315,7 +319,7 @@ def campaign_managers(
     partitions: Sequence[str] | None = None,
     workers: int | None = None,
     resources: Mapping[str, int] | None = None,
-    count: int = 1,
+    count: int | None = None,
     poll_interval: float = 1.0,
     idle_timeout: float = 3600.0,
     adapter_timeout: float | None = None,
@@ -323,15 +327,15 @@ def campaign_managers(
 ) -> list[dict[str, object]]:
     """Start a manager per selected partition and report what each did.
 
-    A local partition is served in this process until it runs out of claimable
-    work; a remote partition's managers are submitted through its scheduler over
-    the adapter, exactly as ``httk workflow manager run`` does for one workspace.
+    A local partition follows its workspace launcher; a remote partition invokes
+    ``httk workflow manager run`` on the owning machine over its adapter.
     The report has one row per partition, so a caller sees where work ran.
 
     :param partitions: Select partitions, or use all partitions.
     :param workers: Limit concurrent workers for local managers.
     :param resources: Resource capacities advertised by each manager.
-    :param count: Number of remote managers to submit per remote partition.
+    :param count: Explicit number of managers to start at each launch site; when
+        omitted, each workspace's ``manager.count`` setting applies.
     :param poll_interval: Set the local manager polling interval.
     :param idle_timeout: Set the local manager idle timeout.
     :param adapter_timeout: Set the remote adapter timeout.
@@ -340,8 +344,7 @@ def campaign_managers(
     :raises ValueError: If a selected partition cannot be managed.
     """
 
-    from .adapters import probe_remote_workspace, resolve_remote, submit_remote_managers
-    from .manager import TaskManager
+    from .adapters import resolve_remote, run_adapter
 
     try:
         manager_resources = validate_resources({} if resources is None else resources, "manager.resources")
@@ -354,31 +357,84 @@ def campaign_managers(
         binding: WorkspaceBinding = resolve_workspace(name, project=project)
         if binding.remote == LOCAL_REMOTE:
             assert binding.path is not None
-            with TaskManager(
-                Workspace(binding.path),
-                resources=manager_resources,
-                maximum_workers=workers or 1,
-            ) as manager:
-                manager.run_until_idle(timeout=idle_timeout, poll_interval=poll_interval)
-            report.append({"partition": partition, "workspace": name, "mode": "local", "ran": True})
+            from .workflow_cli._manager import launch_workspace_managers
+
+            options = argparse.Namespace(
+                pool=[],
+                capability=[],
+                placement_prefix=[],
+                workers=workers,
+                worker_resource=[[resource, str(capacity)] for resource, capacity in manager_resources.items()],
+                count=count,
+                lease_seconds=None,
+                heartbeat_interval=30.0,
+                poll_interval=poll_interval,
+                join_grace_seconds=3600.0,
+                idle=False,
+                idle_timeout=idle_timeout,
+                unsafe_persistent_takeover=False,
+                unsafe_isolated_takeover=False,
+                takeover_grace_factor=2.0,
+                runner_search_path=[],
+                drain_timeout=30.0,
+                gc_interval=None,
+                log_level=None,
+                log_file=None,
+                json_logs=False,
+                adapter_timeout=adapter_timeout,
+                inline=False,
+                detach=False,
+                no_durable=False,
+            )
+            mode, result = launch_workspace_managers(
+                Path(binding.path), options, CLIContext("httk", Path(project) if project is not None else Path.cwd())
+            )
+            report.append({"partition": partition, "workspace": name, "mode": mode, "result": result})
         else:
             target = resolve_remote(binding.remote, project=project)
             remote_name = binding.name.split(":", 1)[1]
-            _workspace_id, root = probe_remote_workspace(target, remote_name, timeout=adapter_timeout)
-            manager_argv: list[str] = []
-            if workers is not None:
-                manager_argv += ["--workers", str(workers)]
-            for resource, capacity in manager_resources.items():
-                manager_argv += ["--worker-resource", resource, str(capacity)]
-            result = submit_remote_managers(
-                target,
-                remote_name,
-                root,
+            options = argparse.Namespace(
+                pool=[],
+                capability=[],
+                placement_prefix=[],
+                workers=workers,
+                worker_resource=[[resource, str(capacity)] for resource, capacity in manager_resources.items()],
                 count=count,
-                argv_tail=manager_argv,
+                lease_seconds=None,
+                heartbeat_interval=30.0,
+                poll_interval=poll_interval,
+                join_grace_seconds=3600.0,
+                idle=False,
+                idle_timeout=idle_timeout,
+                unsafe_persistent_takeover=False,
+                unsafe_isolated_takeover=False,
+                takeover_grace_factor=2.0,
+                runner_search_path=[],
+                drain_timeout=30.0,
+                gc_interval=None,
+                log_level=None,
+                log_file=None,
+                json_logs=False,
+                no_durable=False,
+            )
+            from .workflow_cli._manager import _remote_manager_argv
+
+            result = run_adapter(
+                target.bundle,
+                "invoke",
+                {"argv": _remote_manager_argv(options, remote_name)},
                 timeout=adapter_timeout,
             )
-            report.append({"partition": partition, "workspace": name, "mode": "remote", "result": result})
+            report.append(
+                {
+                    "partition": partition,
+                    "workspace": name,
+                    "mode": "remote",
+                    "returncode": int(result.get("returncode", 1) or 0),
+                    "stdout": str(result.get("stdout", "")),
+                    "stderr": str(result.get("stderr", "")),
+                }
+            )
     return report
 
 

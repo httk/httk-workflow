@@ -4,10 +4,10 @@ import os
 import signal
 import subprocess
 from collections.abc import Mapping, Sequence
+from typing import cast
 
-from ..adapters import submit_remote_managers
 from ..errors import FormatError
-from ..launchers import split_capacity
+from ..launchers import PROCESS_LAUNCHER, launch_processes, resolve_launcher, split_capacity, start_managers
 from ..manager import NotIdleError
 from ..models import WORKSPACE_DIRECTORY, validate_resources
 from ._common import *
@@ -19,8 +19,8 @@ from ._common import (
     _group,
     _leaf,
     _resolve_binding,
+    _run_remote_workspace,
 )
-from ._common import _run_adapter as run_adapter
 
 _WORKER_RESOURCE_HELP = "advertise COUNT units of resource NAME to the scheduler (repeatable; procs and mem are shared fairly among --workers)"
 
@@ -145,9 +145,9 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--count",
         type=int,
-        default=1,
+        default=None,
         metavar="COUNT",
-        help="for a remote workspace, how many managers to submit to its scheduler (default: 1)",
+        help="managers to start (default: the workspace's manager.count, or 1)",
     )
     _add_adapter_timeout(parser)
     _add_by_path_argument(parser)
@@ -268,6 +268,13 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
         help=f"manager log file (default: WORKSPACE/{WORKSPACE_DIRECTORY}/managers.log)",
     )
     parser.add_argument("--json-logs", action="store_true", help="log one JSON object per line")
+    inline_detach = parser.add_mutually_exclusive_group()
+    inline_detach.add_argument(
+        "--inline", action="store_true", help="run one manager in this process regardless of the workspace's launcher"
+    )
+    inline_detach.add_argument(
+        "--detach", action="store_true", help="start the managers and return; the default when invoked from a remote"
+    )
     add_durability_arguments(parser)
 
 
@@ -319,11 +326,77 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--count",
         type=int,
-        default=1,
+        default=None,
         metavar="COUNT",
-        help="for a remote workspace, how many managers to submit to its scheduler (default: 1)",
+        help="managers to start (default: the workspace's manager.count, or 1)",
     )
     _add_adapter_timeout(parser)
+    inline_detach = parser.add_mutually_exclusive_group()
+    inline_detach.add_argument(
+        "--inline", action="store_true", help="run one manager in this process regardless of the workspace's launcher"
+    )
+    inline_detach.add_argument(
+        "--detach", action="store_true", help="start the managers and return; the default when invoked from a remote"
+    )
+    parser.add_argument(
+        "--lease-seconds",
+        type=float,
+        metavar="SECONDS",
+        help="lease length for this manager (default: the workspace policy's lease_seconds)",
+    )
+    parser.add_argument(
+        "--heartbeat-interval",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="how often this manager refreshes its lease (default: 30)",
+    )
+    parser.add_argument(
+        "--poll-interval",
+        type=float,
+        default=1.0,
+        metavar="SECONDS",
+        help="how often this manager looks for work (default: 1)",
+    )
+    parser.add_argument(
+        "--join-grace-seconds",
+        type=float,
+        default=3600.0,
+        metavar="SECONDS",
+        help="how long a waiting job tolerates an unresolvable join child (default: 3600)",
+    )
+    parser.add_argument(
+        "--unsafe-persistent-takeover", action="store_true", help="take over a persistent workdir on lease expiry alone"
+    )
+    parser.add_argument(
+        "--unsafe-isolated-takeover",
+        action="store_true",
+        help="relaunch an isolated-workdir attempt on lease expiry alone",
+    )
+    parser.add_argument(
+        "--takeover-grace-factor",
+        type=float,
+        default=DEFAULT_TAKEOVER_GRACE_FACTOR,
+        metavar="FACTOR",
+        help="multiples of the lease before a silent attempt may be taken over (default: 2.0)",
+    )
+    parser.add_argument(
+        "--runner-search-path",
+        action="append",
+        default=[],
+        metavar="DIRECTORY",
+        help="ordered root for installed runners (repeatable)",
+    )
+    parser.add_argument(
+        "--drain-timeout",
+        type=float,
+        default=30.0,
+        metavar="SECONDS",
+        help="seconds to keep committing outcomes after a stop signal (default: 30)",
+    )
+    parser.add_argument("--gc-interval", type=float, metavar="SECONDS", help="background garbage collection interval")
+    parser.add_argument("--log-file", metavar="PATH", help="manager log file")
+    parser.add_argument("--json-logs", action="store_true", help="log one JSON object per line")
     add_durability_arguments(parser)
     parser.set_defaults(
         handler=handle_manager_run,
@@ -343,121 +416,79 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Submit one or more managers to a remote binding's scheduler."""
+def manager_argv_tail(arguments: argparse.Namespace) -> list[str]:
+    """Serialize the non-default manager options shared by every launch path."""
 
-    if arguments.count < 1:
-        raise ValueError("--count must be a positive integer")
-    if arguments.runner_search_path:
-        raise ValueError("--runner-search-path cannot be used with a remote workspace binding")
-    if arguments.gc_interval is not None:
-        raise ValueError("--gc-interval cannot be used with a remote workspace binding")
-    resources = _worker_resources(arguments.worker_resource)
-    target = resolve_remote(binding.remote, project=context.cwd)
-    from ._transfer import _remote_workspace_probe
-
-    name = binding.name.split(":", 1)[1]
-    _workspace_id, root = _remote_workspace_probe(target, name, timeout=arguments.adapter_timeout)
-    manager_argv: list[str] = []
-    for pool in arguments.pool:
-        manager_argv += ["--pool", pool]
-    for capability in arguments.capability:
-        manager_argv += ["--capability", capability]
-    for prefix in arguments.placement_prefix:
-        manager_argv += ["--placement-prefix", prefix]
-    if arguments.lease_seconds is not None:
-        manager_argv += ["--lease-seconds", str(arguments.lease_seconds)]
-    if arguments.heartbeat_interval != 30.0:
-        manager_argv += ["--heartbeat-interval", str(arguments.heartbeat_interval)]
-    if arguments.poll_interval != 1.0:
-        manager_argv += ["--poll-interval", str(arguments.poll_interval)]
-    if arguments.join_grace_seconds != 3600.0:
-        manager_argv += ["--join-grace-seconds", str(arguments.join_grace_seconds)]
-    # Left off unless asked for, so a remote configured with workers=N is not
-    # permanently shadowed by a command-line default.
-    if arguments.workers is not None:
-        if arguments.workers < 1:
-            raise ValueError("--workers must be a positive integer")
-        manager_argv += ["--workers", str(arguments.workers)]
-    for name, count in resources.items():
-        manager_argv += ["--worker-resource", name, str(count)]
-    if arguments.idle:
-        manager_argv.append("--idle")
-    elif arguments.idle_timeout != 3600.0:
-        manager_argv += ["--idle-timeout", str(arguments.idle_timeout)]
-    if not _durable(arguments):
-        manager_argv.append("--no-durable")
-    if arguments.log_level is not None:
-        manager_argv += ["--log-level", arguments.log_level]
-    if arguments.json_logs:
-        manager_argv.append("--json-logs")
-    print(
-        json.dumps(
-            submit_remote_managers(
-                target,
-                name,
-                root,
-                count=arguments.count,
-                argv_tail=manager_argv,
-                timeout=arguments.adapter_timeout,
-                adapter=run_adapter,
-            ),
-            indent=2,
-        )
-    )
-    return 0
-
-
-def _manager_child_argv(arguments: argparse.Namespace, root: Path, resources: Mapping[str, int]) -> list[str]:
-    """Serialize non-default manager options for a local child manager."""
-
-    argv = ["--by-path", "--workspace", str(root.resolve())]
-    for pool in arguments.pool:
+    argv: list[str] = []
+    for pool in getattr(arguments, "pool", []):
         argv += ["--pool", pool]
-    for capability in arguments.capability:
+    for capability in getattr(arguments, "capability", []):
         argv += ["--capability", capability]
-    for prefix in arguments.placement_prefix:
+    for prefix in getattr(arguments, "placement_prefix", []):
         argv += ["--placement-prefix", prefix]
-    if arguments.workers is not None:
-        argv += ["--workers", str(arguments.workers)]
-    for name, count in resources.items():
-        argv += ["--worker-resource", name, str(count)]
-    if arguments.lease_seconds is not None:
+    if getattr(arguments, "lease_seconds", None) is not None:
         argv += ["--lease-seconds", str(arguments.lease_seconds)]
-    if arguments.heartbeat_interval != 30.0:
+    if getattr(arguments, "heartbeat_interval", 30.0) != 30.0:
         argv += ["--heartbeat-interval", str(arguments.heartbeat_interval)]
-    if arguments.poll_interval != 1.0:
+    if getattr(arguments, "poll_interval", 1.0) != 1.0:
         argv += ["--poll-interval", str(arguments.poll_interval)]
-    if arguments.idle:
-        argv.append("--idle")
-    if arguments.idle_timeout != 3600.0:
-        argv += ["--idle-timeout", str(arguments.idle_timeout)]
-    if arguments.join_grace_seconds != 3600.0:
+    if getattr(arguments, "join_grace_seconds", 3600.0) != 3600.0:
         argv += ["--join-grace-seconds", str(arguments.join_grace_seconds)]
-    if arguments.unsafe_persistent_takeover:
+    workers = getattr(arguments, "workers", None)
+    if workers is not None:
+        if workers < 1:
+            raise ValueError("--workers must be a positive integer")
+        argv += ["--workers", str(workers)]
+    for name, count in _worker_resources(getattr(arguments, "worker_resource", [])).items():
+        argv += ["--worker-resource", name, str(count)]
+    if getattr(arguments, "idle", False):
+        argv.append("--idle")
+    elif getattr(arguments, "idle_timeout", 3600.0) != 3600.0:
+        argv += ["--idle-timeout", str(arguments.idle_timeout)]
+    if getattr(arguments, "unsafe_persistent_takeover", False):
         argv.append("--unsafe-persistent-takeover")
-    if arguments.unsafe_isolated_takeover:
+    if getattr(arguments, "unsafe_isolated_takeover", False):
         argv.append("--unsafe-isolated-takeover")
-    if arguments.takeover_grace_factor != DEFAULT_TAKEOVER_GRACE_FACTOR:
+    if getattr(arguments, "takeover_grace_factor", DEFAULT_TAKEOVER_GRACE_FACTOR) != DEFAULT_TAKEOVER_GRACE_FACTOR:
         argv += ["--takeover-grace-factor", str(arguments.takeover_grace_factor)]
-    for path in arguments.runner_search_path:
+    for path in getattr(arguments, "runner_search_path", []):
         argv += ["--runner-search-path", path]
-    if arguments.adapter_timeout is not None:
-        argv += ["--adapter-timeout", str(arguments.adapter_timeout)]
-    if arguments.drain_timeout != 30.0:
+    if getattr(arguments, "drain_timeout", 30.0) != 30.0:
         argv += ["--drain-timeout", str(arguments.drain_timeout)]
-    if arguments.gc_interval is not None:
+    if getattr(arguments, "gc_interval", None) is not None:
         argv += ["--gc-interval", str(arguments.gc_interval)]
-    if arguments.log_level is not None:
+    if getattr(arguments, "log_level", None) is not None:
         argv += ["--log-level", arguments.log_level]
-    if arguments.json_logs:
+    if getattr(arguments, "log_file", None) is not None:
+        argv += ["--log-file", arguments.log_file]
+    if getattr(arguments, "json_logs", False):
         argv.append("--json-logs")
-    if not _durable(arguments):
+    if getattr(arguments, "no_durable", False):
         argv.append("--no-durable")
+    elif getattr(arguments, "durable", False):
+        argv.append("--durable")
     return argv
 
 
-def _run_local_manager_children(arguments: argparse.Namespace, root: Path, context: CLIContext) -> int:
+def _remote_manager_argv(arguments: argparse.Namespace, name: str) -> list[str]:
+    """Build the complete far-side manager invocation for one workspace name."""
+
+    count = getattr(arguments, "count", None)
+    if count is not None and count < 1:
+        raise ValueError("--count must be a positive integer")
+    return [
+        *REMOTE_MANAGER_COMMAND,
+        "--workspace",
+        name,
+        "--detach",
+        *(["--count", str(count)] if count is not None else []),
+        *manager_argv_tail(arguments),
+    ]
+
+
+def _run_local_manager_children(
+    arguments: argparse.Namespace, root: Path, context: CLIContext, count: int | None = None
+) -> int:
     """Run multiple local manager children and return their maximum status."""
 
     children: list[subprocess.Popen[bytes]] = []
@@ -480,10 +511,14 @@ def _run_local_manager_children(arguments: argparse.Namespace, root: Path, conte
         cli_resources = _worker_resources(arguments.worker_resource)
         slurm_resources = _slurm_resources(os.environ)
         capacity = {**slurm_resources, **cli_resources}
-        for index in range(arguments.count):
+        actual_count = arguments.count if count is None else count
+        assert actual_count is not None
+        base_tail = manager_argv_tail(arguments)
+        explicit = set(_worker_resources(getattr(arguments, "worker_resource", [])))
+        for index in range(actual_count):
             if stopping:
                 break
-            resources = split_capacity(capacity, arguments.count, cli_resources)[index]
+            resources = split_capacity(capacity, actual_count, explicit)[index]
             child_argv = [
                 sys.executable,
                 "-m",
@@ -491,8 +526,14 @@ def _run_local_manager_children(arguments: argparse.Namespace, root: Path, conte
                 "workflow",
                 "manager",
                 "run",
-                *_manager_child_argv(arguments, root, resources),
+                "--by-path",
+                "--workspace",
+                str(root.resolve()),
+                *base_tail,
             ]
+            for name, value in resources.items():
+                if name not in explicit:
+                    child_argv += ["--worker-resource", name, str(value)]
             children.append(subprocess.Popen(child_argv, cwd=context.cwd))
         if stopping:
             terminate(0, None)
@@ -505,6 +546,150 @@ def _run_local_manager_children(arguments: argparse.Namespace, root: Path, conte
     finally:
         signal.signal(signal.SIGINT, previous[signal.SIGINT])
         signal.signal(signal.SIGTERM, previous[signal.SIGTERM])
+
+
+def _positive_setting(settings: Mapping[str, object], key: str, default: int) -> int:
+    """Read a positive integer manager setting."""
+
+    value = settings.get(key, str(default))
+    text = str(value)
+    if isinstance(value, bool) or not text.isdigit() or int(text) < 1:
+        raise ValueError(f"workspace setting {key} must be a positive integer: {value!r}")
+    return int(text)
+
+
+def _run_in_process_manager(
+    arguments: argparse.Namespace, root: Path, context: CLIContext, settings: Mapping[str, object]
+) -> int:
+    """Run one manager in this process using resolved workspace defaults."""
+
+    cli_resources = _worker_resources(getattr(arguments, "worker_resource", []))
+    capacity = {**_slurm_resources(os.environ), **cli_resources}
+    workspace = Workspace(root, durable=_durable(arguments))
+    configure_logging(
+        level=getattr(arguments, "log_level", None) or "warning", json_logs=getattr(arguments, "json_logs", False)
+    )
+    log_file = Path(arguments.log_file) if getattr(arguments, "log_file", None) else workspace.control / "managers.log"
+
+    def install_manager_log(manager_id: str) -> None:
+        add_log_file(
+            log_file,
+            level=getattr(arguments, "log_level", None) or "info",
+            json_logs=getattr(arguments, "json_logs", False),
+            manager_id=manager_id,
+        )
+
+    configured_workers = cast(int | None, getattr(arguments, "workers", None))
+    maximum_workers = (
+        configured_workers if configured_workers is not None else _positive_setting(settings, "manager.workers", 1)
+    )
+    with TaskManager(
+        workspace,
+        pools=getattr(arguments, "pool", []) or ["default"],
+        capabilities=getattr(arguments, "capability", []),
+        resources=capacity,
+        placement_prefixes=getattr(arguments, "placement_prefix", []),
+        maximum_workers=maximum_workers,
+        lease_seconds=getattr(arguments, "lease_seconds", None),
+        heartbeat_interval=getattr(arguments, "heartbeat_interval", 30.0),
+        join_grace_seconds=getattr(arguments, "join_grace_seconds", 3600.0),
+        unsafe_persistent_takeover=getattr(arguments, "unsafe_persistent_takeover", False),
+        unsafe_isolated_takeover=getattr(arguments, "unsafe_isolated_takeover", False),
+        takeover_grace_factor=getattr(arguments, "takeover_grace_factor", DEFAULT_TAKEOVER_GRACE_FACTOR),
+        runner_search_paths=getattr(arguments, "runner_search_path", []),
+        gc_interval=getattr(arguments, "gc_interval", None),
+        on_attached=install_manager_log,
+    ) as manager:
+        serving_line = (
+            f"manager {manager.manager_id} serving {workspace.root} "
+            f"(pools={','.join(sorted(manager.pools)) or '-'}, "
+            f"capabilities={','.join(sorted(manager.capabilities)) or '-'}, "
+            f"executors={','.join(sorted(manager.allowed_executors))}, "
+            f"resources={','.join(f'{name}={value}' for name, value in manager.resources.items()) or '-'}); log {log_file}"
+        )
+        print(serving_line, file=sys.stderr)
+        _LOGGER.info("%s", serving_line)
+        if getattr(arguments, "idle", False):
+            manager.serve(
+                poll_interval=getattr(arguments, "poll_interval", 1.0),
+                drain_timeout=getattr(arguments, "drain_timeout", 30.0),
+            )
+        else:
+            try:
+                census = manager.run_until_idle(
+                    timeout=getattr(arguments, "idle_timeout", 3600.0),
+                    poll_interval=getattr(arguments, "poll_interval", 1.0),
+                )
+            except NotIdleError as exc:
+                print(exc.census.timeout_message(getattr(arguments, "idle_timeout", 3600.0)), file=sys.stderr)
+                return 2
+            print(census.summary_line(), file=sys.stderr)
+    return 0
+
+
+def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context: CLIContext) -> tuple[str, object]:
+    """Dispatch managers for a local workspace through its configured launcher."""
+
+    root = Path(root)
+    settings = Workspace(root).settings
+    forced_process = getattr(arguments, "inline", False) or getattr(arguments, "by_path", False)
+    profile = PROCESS_LAUNCHER if forced_process else settings.get("manager.launch", PROCESS_LAUNCHER)
+    if not isinstance(profile, str) or not profile:
+        raise ValueError(f"workspace {root} setting manager.launch must be a nonempty string")
+    requested_count = getattr(arguments, "count", None)
+    if requested_count is not None and requested_count < 1:
+        raise ValueError("--count must be a positive integer")
+    if getattr(arguments, "inline", False) and requested_count not in (None, 1):
+        raise ValueError("--inline can only be combined with --count 1")
+    count = 1 if forced_process else requested_count or _positive_setting(settings, "manager.count", 1)
+    tail = manager_argv_tail(arguments)
+    if getattr(arguments, "workers", None) is None and "manager.workers" in settings:
+        tail += ["--workers", str(_positive_setting(settings, "manager.workers", 1))]
+    argv = [
+        sys.executable,
+        "-m",
+        "httk.core.cli",
+        "workflow",
+        "manager",
+        "run",
+        "--by-path",
+        "--workspace",
+        str(root.resolve()),
+        *tail,
+    ]
+    if profile != PROCESS_LAUNCHER:
+        try:
+            target = resolve_launcher(profile, project=context.cwd)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"workspace {root} setting manager.launch={profile!r}: {exc}") from exc
+        try:
+            result = start_managers(
+                target,
+                workspace_root=root,
+                argv=argv,
+                count=count,
+                settings=settings,
+                timeout=getattr(arguments, "adapter_timeout", None),
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise RuntimeError(f"workspace {root} setting manager.launch={profile!r}: {exc}") from exc
+        return target.name, result
+    if getattr(arguments, "detach", False):
+        return PROCESS_LAUNCHER, launch_processes(workspace_root=root, argv=argv, count=count, settings=settings)
+    if count > 1:
+        if getattr(arguments, "log_file", None) is not None:
+            raise ValueError("--log-file cannot be used with --count > 1: all managers share the workspace log")
+        return PROCESS_LAUNCHER, _run_local_manager_children(arguments, root, context, count)
+    return PROCESS_LAUNCHER, _run_in_process_manager(arguments, root, context, settings)
+
+
+def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Invoke the manager command on the far side of a remote binding."""
+
+    name = binding.name.split(":", 1)[1]
+    return _run_remote_workspace(
+        binding, context, _remote_manager_argv(arguments, name), timeout=arguments.adapter_timeout
+    )
 
 
 def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -520,73 +705,15 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
     if root is None:
         assert binding is not None
         return _submit_remote_manager(binding, arguments, context)
-    if arguments.count < 1:
-        raise ValueError("--count must be a positive integer")
-    if arguments.count > 1:
-        if arguments.log_file is not None:
-            raise ValueError("--log-file cannot be used with --count > 1: all managers share the workspace log")
-        return _run_local_manager_children(arguments, root, context)
-    cli_resources = _worker_resources(arguments.worker_resource)
-    capacity = {**_slurm_resources(os.environ), **cli_resources}
-    workspace = Workspace(root, durable=_durable(arguments))
-    # Without an explicit level the console stays quiet about normal lifecycle
-    # events while the manager log file keeps the complete info-level record.
-    configure_logging(level=arguments.log_level or "warning", json_logs=arguments.json_logs)
-    log_file = Path(arguments.log_file) if arguments.log_file else workspace.control / "managers.log"
-
-    def install_manager_log(manager_id: str) -> None:
-        """Install the manager's shared file handler before attach cleanup."""
-
-        add_log_file(
-            log_file,
-            level=arguments.log_level or "info",
-            json_logs=arguments.json_logs,
-            manager_id=manager_id,
-        )
-
-    with TaskManager(
-        workspace,
-        pools=arguments.pool or ["default"],
-        capabilities=arguments.capability,
-        resources=capacity,
-        placement_prefixes=arguments.placement_prefix,
-        maximum_workers=arguments.workers if arguments.workers is not None else 1,
-        lease_seconds=arguments.lease_seconds,
-        heartbeat_interval=arguments.heartbeat_interval,
-        join_grace_seconds=arguments.join_grace_seconds,
-        unsafe_persistent_takeover=arguments.unsafe_persistent_takeover,
-        unsafe_isolated_takeover=arguments.unsafe_isolated_takeover,
-        takeover_grace_factor=arguments.takeover_grace_factor,
-        runner_search_paths=arguments.runner_search_path,
-        gc_interval=arguments.gc_interval,
-        on_attached=install_manager_log,
-    ) as manager:
-        # One unconditional line, whatever the console log level: which manager
-        # is serving what, where its log is, and what it serves. Without it a
-        # normal run prints nothing at all, and a job that no configured pool,
-        # capability, or executor matches looks identical to an idle workspace.
-        serving_line = (
-            f"manager {manager.manager_id} serving {workspace.root} "
-            f"(pools={','.join(sorted(manager.pools)) or '-'}, "
-            f"capabilities={','.join(sorted(manager.capabilities)) or '-'}, "
-            f"executors={','.join(sorted(manager.allowed_executors))}, "
-            f"resources={','.join(f'{name}={value}' for name, value in manager.resources.items()) or '-'}); log {log_file}"
-        )
-        print(serving_line, file=sys.stderr)
-        _LOGGER.info("%s", serving_line)
-        if arguments.idle:
-            manager.serve(
-                poll_interval=arguments.poll_interval,
-                drain_timeout=arguments.drain_timeout,
-            )
-        else:
-            try:
-                census = manager.run_until_idle(timeout=arguments.idle_timeout, poll_interval=arguments.poll_interval)
-            except NotIdleError as exc:
-                print(exc.census.timeout_message(arguments.idle_timeout), file=sys.stderr)
-                return 2
-            print(census.summary_line(), file=sys.stderr)
-    return 0
+    try:
+        _mode, result = launch_workspace_managers(root, arguments, context)
+    except RuntimeError as exc:
+        print(f"{context.program} workflow: {exc}", file=sys.stderr)
+        return 1
+    if isinstance(result, Mapping):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get("ok", True) else 1
+    return cast(int, result)
 
 
 def build_manager_parser(

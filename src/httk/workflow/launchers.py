@@ -455,6 +455,27 @@ def _explicit_resources(argv: Sequence[str]) -> set[str]:
     return {argv[index + 1] for index, argument in enumerate(argv[:-1]) if argument == "--worker-resource"}
 
 
+def _manager_command(settings: Mapping[str, object]) -> str:
+    """Return the configured post-prelude manager command."""
+
+    value = settings.get("manager.command", "httk")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("workspace setting manager.command must be a nonempty string")
+    return value.strip()
+
+
+def _prelude_argv(argv: Sequence[str], settings: Mapping[str, object]) -> list[str]:
+    """Use the post-prelude ``httk`` command for a canonical manager argv."""
+
+    command = _manager_command(settings)
+    prelude = settings.get("environment.prelude")
+    if not isinstance(prelude, str) or not prelude.strip():
+        return list(argv)
+    if len(argv) < 3 or argv[1:3] != ["-m", "httk.core.cli"]:
+        return list(argv)
+    return [command, *argv[3:]]
+
+
 def launch_processes(
     *,
     workspace_root: str | os.PathLike[str],
@@ -478,6 +499,7 @@ def launch_processes(
     if not argv or not all(isinstance(item, str) for item in argv):
         raise ValueError("manager argv must be a nonempty string array")
     root = Path(workspace_root).expanduser().resolve()
+    _manager_command(settings)
     effective_capacity = host_capacity() if capacity is None else dict(capacity)
     resources = split_capacity(effective_capacity, count, _explicit_resources(argv))
     environment = {key: value for key, value in os.environ.items() if not key.startswith("SLURM_")}
@@ -492,7 +514,13 @@ def launch_processes(
                 child_argv += ["--worker-resource", name, str(value)]
         launch_argv: list[str]
         if prelude_text:
-            launch_argv = ["bash", "-lc", "set -e\n" + prelude_text + '\nexec "$@"', "bash", *child_argv]
+            launch_argv = [
+                "bash",
+                "-lc",
+                "set -e\n" + prelude_text + '\nexec "$@"',
+                "bash",
+                *_prelude_argv(child_argv, settings),
+            ]
         else:
             launch_argv = child_argv
         child = subprocess.Popen(

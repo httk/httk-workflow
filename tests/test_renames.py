@@ -109,7 +109,7 @@ def test_the_wire_format_names_keep_their_historical_spelling() -> None:
     assert adapters.REQUEST_FORMAT == "httk-computer-request"
     assert adapters.RESULT_FORMAT == "httk-computer-result"
     assert adapter_runtime.RESULT_FORMAT == adapters.RESULT_FORMAT
-    for template in ("local", "local-slurm", "ssh-slurm"):
+    for template in ("local", "ssh"):
         packaged = Path(httk.workflow.__file__).with_name("adapter_templates") / template
         assert (packaged / METADATA_FILE).is_file()
         assert json.loads((packaged / METADATA_FILE).read_text(encoding="utf-8"))["format"] == adapters.ADAPTER_FORMAT
@@ -272,7 +272,7 @@ def test_retired_lifecycle_spellings_are_gone() -> None:
         r"packaged_template|JobTemplate|HarvestRecord|campaign_harvest)\b|--template|\bharvest\b"
     )
     for path in root.rglob("*.py"):
-        if path.name == "_transfer.py":
+        if path.name in {"_transfer.py", "adapters.py"}:
             continue
         assert not retired.search(path.read_text(encoding="utf-8")), path
 

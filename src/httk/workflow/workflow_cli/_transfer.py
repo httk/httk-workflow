@@ -292,7 +292,7 @@ def build_remote_parser(
     add.add_argument(
         "--template",
         metavar="TEMPLATE",
-        help="local, local-slurm, or ssh-slurm (default: local)",
+        help="local or ssh (default: local)",
     )
     add.add_argument(
         "--global",

@@ -1,4 +1,4 @@
-"""The whole remote round trip, driven through the ``ssh-slurm`` adapter.
+"""The whole remote round trip, driven through the ``ssh`` adapter.
 
 One job is created in a local workspace, sent to a *remote* workspace that lives
 in the stand-in cluster's filesystem root, run there by a real
@@ -158,18 +158,12 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     there = _payload_of(campaign.station, campaign.job_id)
     assert stat.S_IMODE((there / "files" / "helper.sh").stat().st_mode) & 0o111
 
-    # (c) The managers the operator would start really are submitted, with a
-    # script that runs this workspace's manager, and the work itself is then
-    # done by the manager that batch script would have exec'd.
+    # (c) The manager command is invoked on the owning machine.
     assert command(["manager", "run", "--workspace", "cluster:station", "--count", "2"], campaign.context) == 0
-    submitted = json.loads(capsys.readouterr().out)
-    assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
-    spooled = sorted(remote.spool.glob("*.sbatch"))
-    assert len(spooled) == 2
-    script = spooled[0].read_text(encoding="utf-8")
-    assert script.startswith("#!/bin/bash -l\n")
-    assert f"#SBATCH --chdir={campaign.station.root}" in script
-    assert "exec httk workflow manager run --workspace station --workers 2" in script
+    capsys.readouterr()
+    manager_commands = [item for item in remote.commands() if "workflow manager run" in item]
+    assert len(manager_commands) == 1
+    assert "httk workflow manager run --workspace station --detach --count 2" in manager_commands[0]
     _run_there(campaign)
     finished = campaign.station.find_marker_by_id(campaign.job_id)
     assert finished is not None and finished.kind == "succeeded"
@@ -219,7 +213,6 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     assert any("transfer receive --workspace station --bundle" in item for item in commands)
     assert any("transfer offer --destination-workspace-id" in item and item.endswith(" station") for item in commands)
     assert any("transfer retire --destination-workspace-id" in item for item in commands)
-    assert any("sbatch" in item for item in commands)
     assert any(item.startswith("rsync ") or " rsync " in item for item in commands)
 
 

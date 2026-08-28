@@ -5,7 +5,6 @@ from typing import Self
 
 import pytest
 
-from httk.workflow import adapter_runtime
 from httk.workflow.workflow_cli import _manager
 
 
@@ -119,7 +118,6 @@ def test_remote_run_forwards_worker_resources(tmp_path: Path, monkeypatch: pytes
 
     from httk.workflow import workflow_cli
     from httk.workflow.registry import WorkspaceBinding
-    from httk.workflow.workflow_cli import _transfer
 
     context = CLIContext("httk", tmp_path)
     parser = workflow_cli.build_parser("httk workflow", context)
@@ -139,17 +137,29 @@ def test_remote_run_forwards_worker_resources(tmp_path: Path, monkeypatch: pytes
     )
     seen: dict[str, object] = {}
     monkeypatch.setattr(_manager, "resolve_remote", lambda *_args, **_kwargs: "target")
-    monkeypatch.setattr(_transfer, "_remote_workspace_probe", lambda *_args, **_kwargs: ("id", "/remote/station"))
-
-    def submit(_target, _name, _root, **kwargs):
-        seen.update(kwargs)
-        return {"ok": True}
-
-    monkeypatch.setattr(_manager, "submit_remote_managers", submit)
+    monkeypatch.setattr(
+        _manager,
+        "_run_remote_workspace",
+        lambda _binding, _context, argv, **kwargs: seen.update(argv=argv, **kwargs) or 0,
+    )
     assert (
         _manager._submit_remote_manager(WorkspaceBinding("cluster:station", "cluster", None), arguments, context) == 0
     )
-    assert seen["argv_tail"] == ["--worker-resource", "procs", "4", "--worker-resource", "mem", "100"]
+    assert seen["argv"] == [
+        "httk",
+        "workflow",
+        "manager",
+        "run",
+        "--workspace",
+        "station",
+        "--detach",
+        "--worker-resource",
+        "procs",
+        "4",
+        "--worker-resource",
+        "mem",
+        "100",
+    ]
     capsys.readouterr()
 
 
@@ -234,7 +244,7 @@ def test_local_count_splits_capacity_in_each_child_argv(tmp_path: Path, monkeypa
     )
 
 
-def test_local_adapter_splits_injected_capacity_by_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_launcher_is_available_for_detached_managers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from httk.workflow import Workspace
 
     workspace = Workspace.initialize(tmp_path / "workspace")
@@ -245,34 +255,13 @@ def test_local_adapter_splits_injected_capacity_by_count(tmp_path: Path, monkeyp
             captured.append(list(argv))
             self.pid = len(captured)
 
-    monkeypatch.setattr(adapter_runtime.os, "cpu_count", lambda: 3)
-    monkeypatch.setattr(
-        adapter_runtime.os,
-        "sysconf",
-        lambda name: {"SC_PHYS_PAGES": 4_194_304, "SC_PAGE_SIZE": 4096}[name],
+    monkeypatch.setattr(_manager.subprocess, "Popen", FakePopen)
+    result = _manager.launch_processes(
+        workspace_root=workspace.root,
+        argv=["python", "manager"],
+        count=2,
+        settings={},
+        capacity={"procs": 3},
     )
-    monkeypatch.setattr(adapter_runtime.subprocess, "Popen", FakePopen)
-    adapter_runtime._start_manager(
-        "local",
-        {
-            "argv": [
-                "httk",
-                "workflow",
-                "manager",
-                "run",
-                "--workspace",
-                "station",
-                "--worker-resource",
-                "mem",
-                "8",
-            ],
-            "workspace": str(workspace.root),
-            "count": 2,
-        },
-    )
+    assert result["pids"] == [1, 2]
     assert len(captured) == 2
-    assert [next(argv[index + 1] for index, value in enumerate(argv) if value == "procs") for argv in captured] == [
-        "2",
-        "1",
-    ]
-    assert all(next(argv[index + 1] for index, value in enumerate(argv) if value == "mem") == "8" for argv in captured)

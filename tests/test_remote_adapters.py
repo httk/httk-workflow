@@ -1,4 +1,4 @@
-"""Real ``ssh-slurm`` and ``local-slurm`` adapter behaviour.
+"""Real ``ssh`` adapter behaviour and launcher-profile forwarding.
 
 No test here needs a network or a batch system: the stand-in cluster of
 ``conftest`` provides an ``ssh`` that runs the remote command locally and an
@@ -9,6 +9,7 @@ transfers, genuine quoting and genuine exit statuses are exercised.
 import json
 import os
 import stat
+import sys
 import uuid
 from pathlib import Path
 
@@ -16,20 +17,12 @@ import pytest
 from httk.core.cli import CLIContext
 
 from conftest import FAKE_HOST, Remote, fake_remote, register_ws
-from httk.workflow import Workspace, adapter_runtime
+from httk.workflow import Workspace, adapter_runtime, launchers
 from httk.workflow.adapters import RemoteTarget, add_remote, probe_remote_workspace, run_adapter
+from httk.workflow.launchers import add_launcher
 from httk.workflow.manager import TaskManager
 from httk.workflow.projects import initialize_project
-from httk.workflow.workflow_cli import command
-
-
-def test_start_manager_rejects_a_workspace_format_at_the_size_limit(tmp_path: Path) -> None:
-    path = tmp_path / ".httk-workspace" / "format.json"
-    path.parent.mkdir()
-    path.write_bytes(b"{" + b" " * (1024 * 1024 - 1))
-    with pytest.raises(ValueError, match="workspace format too large"):
-        adapter_runtime._workspace_settings("local", {}, str(tmp_path))
-
+from httk.workflow.workflow_cli import _manager, command
 
 _FAKE_PYTHON = '''#!{python}
 """Stand-in for python3 that records ``-m pip`` instead of running it."""
@@ -275,165 +268,132 @@ def test_remote_status_returns_the_remote_workspace_json(tmp_path: Path, remote:
     assert reported[0]["workspace_id"] == workspace.workspace_id
 
 
-def test_ssh_start_manager_generates_and_submits_the_batch_script(tmp_path: Path, remote: Remote) -> None:
+def test_workspace_launcher_profile_dispatches_run_to_slurm(tmp_path: Path, remote: Remote, capsys) -> None:
     project = tmp_path / "project"
-    initialize_project(project, name="submit")
-    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
-    bundle = fake_remote(
-        project,
-        workspace=str(workspace.root),
-    )
+    initialize_project(project, name="workspace-launcher")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    add_launcher("cluster", template="slurm", project=project)
     for key, value in {
+        "manager.launch": "cluster",
+        "manager.count": "2",
+        "manager.workers": "4",
         "slurm.account": "p2026-1",
         "slurm.partition": "main",
         "slurm.time_limit": "04:00:00",
         "slurm.nodes": "2",
         "slurm.cpus_per_task": "16",
-        "manager.workers": "4",
     }.items():
         workspace.set_setting(key, value)
+    context = CLIContext("httk", project)
+    register_ws(context, workspace.root, "station")
 
-    result = run_adapter(
-        bundle,
-        "start-manager",
-        {
-            "remote_settings": {},
-            "argv": ["httk", "workflow", "manager", "run", "--workspace", str(workspace.root), "--by-path"],
-            "count": 3,
-        },
-    )
-
-    assert result["count"] == 3
-    assert result["job_ids"] == ["4201", "4202", "4203"]
-    script_path = Path(str(result["script"]))
-    assert script_path.parent == workspace.root / ".httk-workspace" / "batch"
-    script = script_path.read_text(encoding="utf-8")
-    assert script.startswith("#!/bin/bash -l\n")
-    assert "#SBATCH --account=p2026-1" in script
-    assert "#SBATCH --partition=main" in script
-    assert "#SBATCH --time=04:00:00" in script
-    assert "#SBATCH --nodes=2" in script
-    assert "#SBATCH --cpus-per-task=16" in script
+    assert command(["run", "--workspace", "station"], context) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["job_ids"] == ["4201", "4202"]
+    script = next(workspace.root.glob(".httk-workspace/batch/*.sbatch")).read_text(encoding="utf-8")
+    for directive in (
+        "--account=p2026-1",
+        "--partition=main",
+        "--time=04:00:00",
+        "--nodes=2",
+        "--cpus-per-task=16",
+    ):
+        assert f"#SBATCH {directive}" in script
     assert f"#SBATCH --chdir={workspace.root}" in script
-    assert f"exec httk workflow manager run --workspace {workspace.root} --by-path --workers 4" in script
-    submissions = sorted(remote.spool.glob("*.json"))
-    assert len(submissions) == 3
-    for submission in submissions:
-        recorded = json.loads(submission.read_text(encoding="utf-8"))
-        assert recorded["argv"] == [str(script_path)]
-        assert recorded["cwd"] == str(workspace.root)
-        assert (submission.parent / f"{submission.stem}.sbatch").read_text(encoding="utf-8") == script
-
-
-def test_start_manager_without_workspace_settings_has_no_scheduler_directives(tmp_path: Path, remote: Remote) -> None:
-    project = tmp_path / "project"
-    initialize_project(project, name="no-settings")
-    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
-    bundle = fake_remote(project, workspace=str(workspace.root))
-
-    result = run_adapter(
-        bundle,
-        "start-manager",
-        {
-            "remote_settings": {},
-            "argv": ["httk", "workflow", "manager", "run", "--workspace", str(workspace.root), "--by-path"],
-        },
+    assert (
+        f"exec {sys.executable} -m httk.core.cli workflow manager run --by-path --workspace {workspace.root} --workers 4"
+        in script
     )
 
-    script = Path(str(result["script"])).read_text(encoding="utf-8")
-    assert not any(line.startswith("#SBATCH --account=") for line in script.splitlines())
-    assert not any(line.startswith("#SBATCH --partition=") for line in script.splitlines())
-    assert not any(line.startswith("#SBATCH --time=") for line in script.splitlines())
-    assert not any(line.startswith("#SBATCH --nodes=") for line in script.splitlines())
-    assert not any(line.startswith("#SBATCH --cpus-per-task=") for line in script.splitlines())
-    assert not any(line.startswith("#SBATCH --reservation=") for line in script.splitlines())
 
-
-def test_start_manager_keeps_an_explicit_worker_count(tmp_path: Path, remote: Remote) -> None:
+def test_unresolved_workspace_launcher_names_workspace_and_setting(tmp_path: Path, remote: Remote, capsys) -> None:
     project = tmp_path / "project"
-    initialize_project(project, name="explicit-workers")
-    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
-    bundle = fake_remote(project, workspace=str(workspace.root))
-    workspace.set_setting("manager.workers", "4")
+    initialize_project(project, name="unknown-workspace-launcher")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    workspace.set_setting("manager.launch", "missing-cluster")
+    context = CLIContext("httk", project)
+    register_ws(context, workspace.root, "station")
 
-    result = run_adapter(
-        bundle,
-        "start-manager",
-        {
-            "remote_settings": {},
-            "argv": [
-                "httk",
-                "workflow",
-                "manager",
-                "run",
-                "--workspace",
-                str(workspace.root),
-                "--by-path",
-                "--workers",
-                "1",
-            ],
-        },
-    )
-
-    script = Path(str(result["script"])).read_text(encoding="utf-8")
-    assert "--workers 1" in script and "--workers 4" not in script
+    assert command(["run", "--workspace", "station"], context) == 1
+    captured = capsys.readouterr()
+    assert str(workspace.root) in captured.err
+    assert "manager.launch='missing-cluster'" in captured.err
+    assert "Traceback" not in captured.err
 
 
-def test_start_manager_prefers_the_stated_workspace_over_the_configured_default(
-    tmp_path: Path,
-    remote: Remote,
+def test_inline_overrides_workspace_launcher(
+    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     project = tmp_path / "project"
-    initialize_project(project, name="stated-workspace")
-    workspace = Workspace.initialize(remote.root / "runs" / "workspace")
-    bundle = fake_remote(project, workspace=str(remote.root / "runs" / "configured"))
+    initialize_project(project, name="inline-launcher")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    add_launcher("cluster", template="slurm", project=project)
+    workspace.set_setting("manager.launch", "cluster")
+    context = CLIContext("httk", project)
+    register_ws(context, workspace.root, "station")
+    assert command(["run", "--workspace", "station", "--inline", "--detach"], context) == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+    assert command(["run", "--workspace", "station", "--inline", "--count", "2"], context) == 2
+    assert "--inline can only be combined" in capsys.readouterr().err
+    workspace.set_setting("manager.count", "4")
+    called: list[Path] = []
 
-    result = run_adapter(
-        bundle,
-        "start-manager",
-        {
-            "remote_settings": {},
-            "workspace": str(workspace.root),
-            "argv": ["httk", "workflow", "manager", "run", "--workspace", "other"],
-        },
-    )
+    def fake_in_process(_arguments, root, _context, _settings):
+        called.append(root)
+        return 0
 
-    script_path = Path(str(result["script"]))
-    assert script_path.parent == workspace.root / ".httk-workspace" / "batch"
-    assert f"#SBATCH --chdir={workspace.root}" in script_path.read_text(encoding="utf-8")
+    monkeypatch.setattr(_manager, "_run_in_process_manager", fake_in_process)
+
+    assert command(["run", "--workspace", "station", "--inline"], context) == 0
+    assert called == [workspace.root]
+    assert not list(remote.spool.glob("*.json"))
 
 
-def test_start_manager_from_the_command_line_counts_managers_and_defers_workers(
+def test_missing_sbatch_refusal_is_returned_by_workspace_launcher(
+    tmp_path: Path, remote: Remote, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="missing-sbatch")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    add_launcher("cluster", template="slurm", project=project)
+    workspace.set_setting("manager.launch", "cluster")
+    context = CLIContext("httk", project)
+    register_ws(context, workspace.root, "station")
+    no_sbatch_path = tmp_path / "no-sbatch-bin"
+    no_sbatch_path.mkdir()
+    (no_sbatch_path / "python3").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", str(no_sbatch_path))
+    monkeypatch.setattr(launchers.shutil, "which", lambda name: "/fake/sbatch" if name == "sbatch" else None)
+
+    assert command(["run", "--workspace", "station"], context) == 1
+    captured = capsys.readouterr()
+    assert "manager.launch='cluster'" in captured.err
+    assert "sbatch" in captured.err
+
+
+def test_remote_manager_from_the_command_line_invokes_once(
     tmp_path: Path,
     remote: Remote,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     project = tmp_path / "project"
-    initialize_project(project, name="cli-start-manager")
+    initialize_project(project, name="cli-manager")
     workspace = Workspace.initialize(remote.root / "runs" / "workspace")
     fake_remote(project, workspace=str(workspace.root))
     workspace.set_setting("manager.workers", "4")
     context = CLIContext("httk", project)
     # `manager run` on a remote-bound workspace submits through the remote's
-    # scheduler, subsuming the retired `transfer start-manager` verb.
+    # The remote command is invoked directly on the owning machine.
     register_ws(context, workspace.root, "station", remote="cluster")
 
     assert command(["manager", "run", "--workspace", "cluster:station", "--count", "2"], context) == 0
-    submitted = json.loads(capsys.readouterr().out)
-    assert submitted["count"] == 2 and len(submitted["job_ids"]) == 2
-    # No --workers on the command line, so the workspace's setting is what runs.
-    script = Path(str(submitted["script"])).read_text(encoding="utf-8")
-    assert "exec httk workflow manager run --workspace station --workers 4" in script
-
-    assert command(["manager", "run", "--workspace", "cluster:station", "--workers", "1"], context) == 0
-    explicit = json.loads(capsys.readouterr().out)
-    assert explicit["count"] == 1 and len(explicit["job_ids"]) == 1
-    later = Path(str(explicit["script"])).read_text(encoding="utf-8")
-    assert "--workers 1" in later and "--workers 4" not in later
-    assert len(list(remote.spool.glob("*.json"))) == 3
+    capsys.readouterr()
+    manager_commands = [item for item in remote.commands() if "workflow manager run" in item]
+    assert len(manager_commands) == 1
+    assert "httk workflow manager run --workspace station --detach --count 2" in manager_commands[0]
 
 
-def test_remote_manager_forwards_execution_options_and_refuses_local_only_options(
+def test_remote_manager_forwards_execution_options(
     tmp_path: Path, remote: Remote, capsys: pytest.CaptureFixture[str]
 ) -> None:
     project = tmp_path / "project"
@@ -477,7 +437,8 @@ def test_remote_manager_forwards_execution_options_and_refuses_local_only_option
         )
         == 0
     )
-    script = Path(str(json.loads(capsys.readouterr().out)["script"])).read_text(encoding="utf-8")
+    capsys.readouterr()
+    command_line = remote.commands()[-1]
     for option in (
         "--pool gpu",
         "--pool cpu",
@@ -492,51 +453,19 @@ def test_remote_manager_forwards_execution_options_and_refuses_local_only_option
         "--log-level debug",
         "--json-logs",
     ):
-        assert option in script
+        assert option in command_line
 
     assert (
         command(["manager", "run", "--workspace", "cluster:options", "--runner-search-path", "/tmp/runners"], context)
-        == 2
+        == 0
     )
-    assert "cannot be used with a remote workspace binding" in capsys.readouterr().err
+    assert "--runner-search-path /tmp/runners" in remote.commands()[-1]
 
 
-def test_local_slurm_start_manager_submits_with_the_local_sbatch(tmp_path: Path, remote: Remote) -> None:
-    project = tmp_path / "project"
-    initialize_project(project, name="local-batch")
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    bundle = fake_remote(
-        project,
-        template="local-slurm",
-        name="batch",
-        workspace=str(workspace.root),
-    )
-    workspace.set_setting("slurm.account", "p2026-1")
-    workspace.set_setting("slurm.partition", "devel")
-
-    result = run_adapter(
-        bundle,
-        "start-manager",
-        {
-            "remote_settings": {},
-            "argv": ["httk", "workflow", "manager", "run", "--workspace", str(workspace.root), "--by-path"],
-            "count": 2,
-        },
-    )
-
-    script_path = Path(str(result["script"]))
-    assert script_path.parent == workspace.root / ".httk-workspace" / "batch"
-    assert "#SBATCH --partition=devel" in script_path.read_text(encoding="utf-8")
-    assert result["job_ids"] == ["4201", "4202"]
-    assert len(list(remote.spool.glob("*.json"))) == 2
-    # Nothing went over the transport for a remote that is not remote at all.
-    assert not remote.log.exists()
-
-
-def test_local_slurm_transfers_stay_in_this_filesystem(tmp_path: Path, remote: Remote) -> None:
+def test_local_transfers_stay_in_this_filesystem(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="local-copy")
-    bundle = fake_remote(project, template="local-slurm", name="batch")
+    bundle = fake_remote(project, template="local", name="batch")
     source = _tree(tmp_path / "source")
 
     pushed = run_adapter(
@@ -625,7 +554,7 @@ def test_configure_verifies_connectivity_for_ssh_remotes(
 def test_configure_checks_the_host_the_command_line_is_about_to_store(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="pending")
-    bundle = add_remote("cluster", template="ssh-slurm", project=project)
+    bundle = add_remote("cluster", template="ssh", project=project)
 
     assert run_adapter(bundle, "configure", {"remote_settings": {}, "settings": {}})["connectivity"] == "skipped"
     pending = {"host": FAKE_HOST, "username": "someone"}

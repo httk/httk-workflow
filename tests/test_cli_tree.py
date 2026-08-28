@@ -279,10 +279,23 @@ def test_campaign_start_managers_forwards_idle_timeout(tmp_path: Path, monkeypat
     )
     assert seen["idle_timeout"] == 10.0
     assert seen["resources"] == {"procs": 4}
+    assert seen["count"] is None
+
+    assert command(["campaign", "start-managers", "--count", "3"], _context(tmp_path)) == 0
+    assert seen["count"] == 3
+
+
+def test_campaign_start_managers_returns_nonzero_for_a_failed_partition(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        _campaign,
+        "campaign_managers",
+        lambda **_arguments: [{"partition": "north", "result": 2}],
+    )
+    assert command(["campaign", "start-managers"], _context(tmp_path)) == 1
 
 
 def test_transfer_is_a_single_verb_not_a_group(tmp_path: Path) -> None:
-    """`transfer SRC DST` replaced the old send/fetch/start-manager subcommands."""
+    """`transfer SRC DST` replaced the old send/fetch manager-submission subcommands."""
 
     parser = workflow_cli.build_parser("httk workflow", _context(tmp_path))
     parsed = parser.parse_args(["transfer", "--job", "J", "a", "b"])

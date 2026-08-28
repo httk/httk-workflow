@@ -13,7 +13,7 @@ from httk.workflow.workflow_cli import command
 def _request(operation: str, root: Path) -> dict[str, object]:
     if operation in {"push", "pull"}:
         return {"source": str(root / "source"), "destination": str(root / "destination")}
-    if operation in {"invoke", "start-manager", "status"}:
+    if operation in {"invoke", "status"}:
         return {"argv": ["true"]}
     return {}
 
@@ -43,7 +43,7 @@ def test_the_refusal_names_the_kinds_that_are_implemented(tmp_path: Path) -> Non
     project = tmp_path / "project"
     initialize_project(project, name="named-kinds")
     bundle = _unrecognized(project, "batch")
-    with pytest.raises(RuntimeError, match="local, local-slurm, ssh-slurm"):
+    with pytest.raises(RuntimeError, match="local, ssh"):
         run_adapter(bundle, "status", {"argv": ["true"]})
 
 
