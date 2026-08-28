@@ -165,12 +165,12 @@ after it has reaped the local process when the actual destination is `ready`,
 `waiting`, `paused`, or `succeeded`; failed and cancelled attempts remain as
 evidence. Transaction trash is normally removed with that control tree. A
 manager inheriting a commit leaves the tree for GC. The manager is never
-required to execute cleanup code, so it can disappear between any two
-instructions. Over a long campaign the workspace therefore accumulates the
-control directories of failed and cancelled attempts, one journal writer and
-manager directory per process start, transaction trash left by an interrupted
-commit, and an intact bundle for every transfer already acknowledged. On a
-quota'd HPC filesystem that is what fails first.
+required to execute policy-gated cleanup code, so it can disappear between any
+two instructions. It runs always-safe cleanup at startup and clean exit; a
+clean manager removes its own metadata directory, while a crash leaves it for
+`journal_days` collection. On a quota'd HPC filesystem, failed and cancelled
+attempt evidence, retained journal history, interrupted transaction trash, and
+acknowledged bundles are what remain to manage.
 
 Collection is a separate, explicit operation. Configure the retention limits
 once, then run it from a maintenance job or by hand:
@@ -478,9 +478,13 @@ lease is logged as a warning, and nine tenths of it as an error: raise
 
 Every claim, launch, transition, recovery decision, and refused request is
 logged. The console reports warnings and errors, while the complete info-level
-record is rotated into `.httk-workspace/managers/MANAGER_ID/log`. `--log-level`
-raises or lowers both, `--log-file` moves the file, and `--json-logs` emits one
+record is appended to `.httk-workspace/managers.log` with the manager id on
+each record. `--log-level` raises or lowers both, `--log-file` moves the file,
+and `--json-logs` emits one
 JSON object per line for ingestion.
+The shared log is rotated when a manager starts or every 1000 records once the
+file exceeds 16 MiB; one backup, `managers.log.1`, is kept. A manager that has
+not yet reopened the file keeps appending to the backup.
 
 A manager drains on `SIGTERM` or `SIGINT`, which is what a batch system sends
 at walltime. The first signal stops claiming, terminates the running attempts,
@@ -643,6 +647,10 @@ means a non-terminal marker has no payload; it is always reported and is never
 repaired or quarantined. Without `--repair` nothing is written.
 The command exits `0` when the workspace is clean or everything found was
 repaired, and `1` when something is left for an operator.
+Fsck also performs a dry-run count of always-safe leftovers and reports the
+total plus counts for `removed_jobs`, `tmp_entries`, `retired_requests`, and
+`placement_directories`; these informational counts do not affect the exit
+status.
 
 `--repair` re-points a damaged marker at the last good frame of its job. Since
 the frame holding the backward link is the unreadable one, the repair scans the

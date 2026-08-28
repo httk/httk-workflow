@@ -264,7 +264,7 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--log-file",
         metavar="PATH",
-        help=f"manager log file (default: WORKSPACE/{WORKSPACE_DIRECTORY}/managers/MANAGER_ID/log)",
+        help=f"manager log file (default: WORKSPACE/{WORKSPACE_DIRECTORY}/managers.log)",
     )
     parser.add_argument("--json-logs", action="store_true", help="log one JSON object per line")
     add_durability_arguments(parser)
@@ -512,7 +512,7 @@ def _run_local_manager_children(arguments: argparse.Namespace, root: Path, conte
 
 
 def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Run one task manager with its own log file.
+    """Run one task manager with the workspace manager log.
 
     A local binding runs the manager in this process. A remote binding submits
     managers through the remote's scheduler over its adapter. ``--idle`` keeps
@@ -528,7 +528,7 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
         raise ValueError("--count must be a positive integer")
     if arguments.count > 1:
         if arguments.log_file is not None:
-            raise ValueError("--log-file cannot be used with --count > 1: each manager writes its own log")
+            raise ValueError("--log-file cannot be used with --count > 1: all managers share the workspace log")
         return _run_local_manager_children(arguments, root, context)
     cli_resources = _worker_resources(arguments.worker_resource)
     capacity = {**_slurm_resources(os.environ), **cli_resources}
@@ -536,6 +536,18 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
     # Without an explicit level the console stays quiet about normal lifecycle
     # events while the manager log file keeps the complete info-level record.
     configure_logging(level=arguments.log_level or "warning", json_logs=arguments.json_logs)
+    log_file = Path(arguments.log_file) if arguments.log_file else workspace.control / "managers.log"
+
+    def install_manager_log(manager_id: str) -> None:
+        """Install the manager's shared file handler before attach cleanup."""
+
+        add_log_file(
+            log_file,
+            level=arguments.log_level or "info",
+            json_logs=arguments.json_logs,
+            manager_id=manager_id,
+        )
+
     with TaskManager(
         workspace,
         pools=arguments.pool or ["default"],
@@ -551,9 +563,8 @@ def handle_manager_run(arguments: argparse.Namespace, context: CLIContext) -> in
         takeover_grace_factor=arguments.takeover_grace_factor,
         runner_search_paths=arguments.runner_search_path,
         gc_interval=arguments.gc_interval,
+        on_attached=install_manager_log,
     ) as manager:
-        log_file = Path(arguments.log_file) if arguments.log_file else manager.manager_directory / "log"
-        add_log_file(log_file, level=arguments.log_level or "info", json_logs=arguments.json_logs)
         # One unconditional line, whatever the console log level: which manager
         # is serving what, where its log is, and what it serves. Without it a
         # normal run prints nothing at all, and a job that no configured pool,

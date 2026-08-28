@@ -551,7 +551,7 @@ def test_a_manager_collects_in_the_background_only_when_asked(tmp_path: Path) ->
     with TaskManager(workspace, heartbeat_interval=600.0) as manager:
         assert manager.gc_interval is None
         manager.tick()
-    assert quiet.exists()
+    assert not quiet.exists()
 
     collecting = abandoned("collecting")
     with TaskManager(workspace, heartbeat_interval=600.0, gc_interval=3600.0) as manager:

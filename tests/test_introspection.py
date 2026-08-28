@@ -6,6 +6,7 @@ import os
 import socket
 import uuid
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -273,7 +274,8 @@ def _run(workspace: Workspace, *, pools: tuple[str, ...] = ("default",)) -> None
         manager.run_until_idle(timeout=60.0)
 
 
-def _register(workspace: Workspace, *, pools: tuple[str, ...] = ("default",)) -> None:
+@contextmanager
+def _register(workspace: Workspace, *, pools: tuple[str, ...] = ("default",)) -> Iterator[TaskManager]:
     """Register every submission without waiting for anything to be claimable.
 
     A ready job whose pool no manager serves is never idle work for
@@ -284,6 +286,7 @@ def _register(workspace: Workspace, *, pools: tuple[str, ...] = ("default",)) ->
     with TaskManager(workspace, pools=pools, heartbeat_interval=0.01) as manager:
         manager.tick()
         manager.tick()
+        yield manager
 
 
 def _hold_maintenance_lock(workspace: Workspace) -> None:
@@ -499,47 +502,51 @@ def test_why_names_the_claim_pool_no_live_manager_serves(tmp_path: Path, capsys)
     workspace = _workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER, pool="gpu", capabilities=["cuda"])
     workspace.submit(payload, "project/unmatched")
-    _register(workspace)
+    with _register(workspace):
+        marker = resolve_job(workspace, job_id)
+        assert marker.kind == "ready"
+        diagnosis = explain_job(workspace, marker)
+        assert diagnosis.blocked
+        checks = {check.name: check for check in diagnosis.checks}
+        assert checks["claim pool"].detail == "this job asks for pool gpu"
+        assert checks["required capabilities"].detail == "cuda"
+        assert checks["eligible manager"].satisfied is False
+        assert any(
+            "does not serve claim pool gpu" in check.detail and "lacks capabilities cuda" in check.detail
+            for check in diagnosis.checks
+            if check.name == "live manager"
+        )
+        assert any("manager run --pool gpu --workspace WORKSPACE --capability cuda" in hint for hint in diagnosis.hints)
 
-    marker = resolve_job(workspace, job_id)
-    assert marker.kind == "ready"
-    diagnosis = explain_job(workspace, marker)
-    assert diagnosis.blocked
-    checks = {check.name: check for check in diagnosis.checks}
-    assert checks["claim pool"].detail == "this job asks for pool gpu"
-    assert checks["required capabilities"].detail == "cuda"
-    assert checks["eligible manager"].satisfied is False
-    assert any(
-        "does not serve claim pool gpu" in check.detail and "lacks capabilities cuda" in check.detail
-        for check in diagnosis.checks
-        if check.name == "live manager"
-    )
-    assert any("manager run --pool gpu --workspace WORKSPACE --capability cuda" in hint for hint in diagnosis.hints)
+        ws = register_ws(CLIContext("httk", tmp_path), workspace.root)
+        assert command(["job", "why", "--workspace", ws, job_id], CLIContext("httk", tmp_path)) == 0
+        rendered = capsys.readouterr().out
+        assert f"job example--{job_id} is ready" in rendered
+        assert "no  eligible manager" in rendered
 
-    ws = register_ws(CLIContext("httk", tmp_path), workspace.root)
-    assert command(["job", "why", "--workspace", ws, job_id], CLIContext("httk", tmp_path)) == 0
-    rendered = capsys.readouterr().out
-    assert f"job example--{job_id} is ready" in rendered
-    assert "no  eligible manager" in rendered
+    exited = explain_job(workspace, resolve_job(workspace, job_id))
+    registered = next(check for check in exited.checks if check.name == "registered manager")
+    assert registered.satisfied is False
+    assert "none has a live heartbeat" in registered.detail or "no manager has ever registered" in registered.detail
 
 
 def test_why_reports_a_live_maintenance_lock(tmp_path: Path, capsys) -> None:
     workspace = _workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER, pool="gpu")
     workspace.submit(payload, "project/locked")
-    _register(workspace)
-    _hold_maintenance_lock(workspace)
+    with _register(workspace):
+        _hold_maintenance_lock(workspace)
 
-    diagnosis = explain_job(workspace, resolve_job(workspace, job_id))
-    assert "maintenance lock stops every manager" in diagnosis.summary
-    lock = next(check for check in diagnosis.checks if check.name == "maintenance lock")
-    assert lock.satisfied is False and "launching is paused" in lock.detail
+        diagnosis = explain_job(workspace, resolve_job(workspace, job_id))
+        assert "maintenance lock stops every manager" in diagnosis.summary
+        lock = next(check for check in diagnosis.checks if check.name == "maintenance lock")
+        assert lock.satisfied is False and "launching is paused" in lock.detail
 
-    ws = register_ws(CLIContext("httk", tmp_path), workspace.root)
-    assert command(["job", "why", "--workspace", ws, "--json", job_id], CLIContext("httk", tmp_path)) == 0
-    reported = json.loads(capsys.readouterr().out)[0]
-    assert reported["format"] == "httk-workflow-job-diagnosis"
-    assert reported["blocked"] is True
+        ws = register_ws(CLIContext("httk", tmp_path), workspace.root)
+        assert command(["job", "why", "--workspace", ws, "--json", job_id], CLIContext("httk", tmp_path)) == 0
+        reported = json.loads(capsys.readouterr().out)[0]
+        assert reported["format"] == "httk-workflow-job-diagnosis"
+        assert reported["blocked"] is True
 
 
 def test_why_reports_a_failed_job_with_its_breadcrumb_and_continue(tmp_path: Path) -> None:
@@ -652,35 +659,36 @@ def test_why_lists_the_pending_child_of_a_waiting_parent(tmp_path: Path) -> None
         initial_step="branch",
     )
     workspace.submit(payload, "project/waiting")
-    _run(workspace)
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
 
-    parent = resolve_job(workspace, job_id)
-    assert parent.kind == "waiting"
-    diagnosis = explain_job(workspace, parent)
-    assert diagnosis.blocked
-    assert "waits for 1 of 1 child(ren)" in diagnosis.summary
-    children = [check for check in diagnosis.checks if check.name == "join child"]
-    assert len(children) == 1
-    assert children[0].satisfied is False
-    assert children[0].detail.startswith("only: child--")
-    assert "is submitted" in children[0].detail
-    condition = next(check for check in diagnosis.checks if check.name == "join condition")
-    assert condition.detail == "all_succeeded then step gather"
+        parent = resolve_job(workspace, job_id)
+        assert parent.kind == "waiting"
+        diagnosis = explain_job(workspace, parent)
+        assert diagnosis.blocked
+        assert "waits for 1 of 1 child(ren)" in diagnosis.summary
+        children = [check for check in diagnosis.checks if check.name == "join child"]
+        assert len(children) == 1
+        assert children[0].satisfied is False
+        assert children[0].detail.startswith("only: child--")
+        assert "is submitted" in children[0].detail
+        condition = next(check for check in diagnosis.checks if check.name == "join condition")
+        assert condition.detail == "all_succeeded then step gather"
 
-    report = describe_job(workspace, parent)
-    assert report["join"]["condition"] == "all_succeeded"
-    assert report["join"]["children"][0]["label"] == "only"
-    assert report["join"]["children"][0]["kind"] == "submitted"
+        report = describe_job(workspace, parent)
+        assert report["join"]["condition"] == "all_succeeded"
+        assert report["join"]["children"][0]["label"] == "only"
+        assert report["join"]["children"][0]["kind"] == "submitted"
 
-    # The blocked child itself explains that nothing here serves its executor.
-    child = next(marker for marker in workspace.scan_markers() if marker.job_key.startswith("child--"))
-    child_diagnosis = explain_job(workspace, child)
-    assert child_diagnosis.state == "submitted"
-    assert any(
-        "does not serve runner executor unserved" in check.detail
-        for check in child_diagnosis.checks
-        if check.name == "live manager"
-    )
+        # The blocked child itself explains that nothing here serves its executor.
+        child = next(marker for marker in workspace.scan_markers() if marker.job_key.startswith("child--"))
+        child_diagnosis = explain_job(workspace, child)
+        assert child_diagnosis.state == "submitted"
+        assert any(
+            "does not serve runner executor unserved" in check.detail
+            for check in child_diagnosis.checks
+            if check.name == "live manager"
+        )
 
 
 def test_why_reports_a_running_job_owned_by_a_live_manager(tmp_path: Path) -> None:

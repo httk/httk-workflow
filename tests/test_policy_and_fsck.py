@@ -339,6 +339,26 @@ def test_fsck_reports_nothing_about_a_healthy_workspace(tmp_path: Path, capsys) 
     assert json.loads(capsys.readouterr().out)[0]["findings"] == []
 
 
+def test_fsck_reports_always_safe_leftovers_without_failing(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    stale = workspace.control / "tmp" / "stale"
+    stale.mkdir()
+    stale.touch(exist_ok=True)
+    os.utime(stale, (time.time() - 2 * 86400, time.time() - 2 * 86400))
+
+    report = workspace.check()
+    assert report.ok and report.always_safe_candidates == 1
+    assert report.always_safe_counts["tmp_entries"] == 1
+    count_only = workspace.collect_garbage(dry_run=True, categories=("tmp_entries",), sizes=False)
+    assert count_only.bytes_reclaimed == 0
+    context = CLIContext("httk", tmp_path)
+    assert command(["workspace", "fsck", register_ws(context, workspace.root)], context) == 0
+    assert (
+        "1 always-safe leftovers (tmp_entries=1); any manager run or workspace gc collects them"
+        in capsys.readouterr().out
+    )
+
+
 def test_fsck_reports_missing_non_terminal_payload_without_repairing_it(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path)

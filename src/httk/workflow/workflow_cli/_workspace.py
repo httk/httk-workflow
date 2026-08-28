@@ -321,6 +321,14 @@ def handle_workspace_fsck(arguments: argparse.Namespace, context: CLIContext) ->
         for finding in report.findings:
             print(f"{finding.action}\t{finding.problem}\t{finding.job_key or '-'}\t{finding.entry}\t{finding.detail}")
         print(f"checked {report.markers_checked} markers, {len(report.findings)} findings")
+        if report.always_safe_candidates:
+            details = ", ".join(
+                f"{category}={count}" for category, count in sorted(report.always_safe_counts.items()) if count
+            )
+            print(
+                f"{report.always_safe_candidates} always-safe leftovers ({details}); "
+                "any manager run or workspace gc collects them"
+            )
     # A clean workspace and a fully repaired one both exit zero; anything an
     # operator still has to deal with exits one, as a check command should.
     return 1 if report.unresolved else 0

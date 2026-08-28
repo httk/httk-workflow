@@ -99,12 +99,17 @@ class FsckReport:
     :param markers_checked: Number of readable markers inspected.
     :param findings: Marker findings produced by the check.
     :param counts: Finding counts by action.
+    :param always_safe_candidates: Total always-safe leftovers found by a
+        non-mutating collection pass.
+    :param always_safe_counts: Always-safe leftovers by category.
     """
 
     workspace_id: str
     markers_checked: int
     findings: tuple[FsckFinding, ...] = ()
     counts: Mapping[str, int] = field(default_factory=dict)
+    always_safe_candidates: int = 0
+    always_safe_counts: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -136,6 +141,8 @@ class FsckReport:
             "workspace_id": self.workspace_id,
             "markers_checked": self.markers_checked,
             "counts": dict(self.counts),
+            "always_safe_candidates": self.always_safe_candidates,
+            "always_safe_counts": dict(self.always_safe_counts),
             "findings": [finding.as_mapping() for finding in self.findings],
         }
 
@@ -403,11 +410,25 @@ def check_workspace(
         if writer is not None:
             writer.close()
     counts = {action: sum(1 for finding in findings if finding.action == action) for action in ACTIONS}
+    from .gc import ALWAYS_SAFE_CATEGORIES
+
+    always_safe_report = workspace.collect_garbage(
+        dry_run=True,
+        categories=ALWAYS_SAFE_CATEGORIES,
+        sizes=False,
+    )
+    always_safe_counts = {
+        category.name: category.candidates
+        for category in always_safe_report.categories
+        if category.name in ALWAYS_SAFE_CATEGORIES
+    }
     return FsckReport(
         workspace_id=workspace.workspace_id,
         markers_checked=checked,
         findings=tuple(findings),
         counts=counts,
+        always_safe_candidates=sum(always_safe_counts.values()),
+        always_safe_counts=always_safe_counts,
     )
 
 

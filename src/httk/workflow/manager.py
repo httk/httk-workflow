@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import FrameType
@@ -41,12 +41,15 @@ from .errors import (
     WorkflowError,
 )
 from .executors import AttemptLaunch, PathRunnerExecutor, RunnerExecutor
+from .gc import ALWAYS_SAFE_CATEGORIES
+from .journal import SEGMENT_HEADER, parse_record_ref
 from .manifests import read_maintenance_lock
 from .models import (
     ATTEMPTS_DIRECTORY,
     CARRIED_STATE_MEMBERS,
     CORE_PROFILE,
     LOGS_DIRECTORY,
+    STATE_KINDS,
     TERMINAL_KINDS,
     JobDefinition,
     Marker,
@@ -417,6 +420,8 @@ class TaskManager:
     :param runner_search_paths: Search these locations for installed runners.
     :param runner_modules: Search these module prefixes for packaged runners.
     :param gc_interval: Run background collection at this interval when supplied.
+    :param on_attached: Call this after the manager directory and heartbeat are
+        published, before startup collection runs.
     :raises ValueError: If a manager limit is invalid or executor configuration conflicts.
     :raises httk.workflow.errors.UnsupportedExtensionError: If the workspace profile is not writable by this manager.
     """
@@ -445,6 +450,7 @@ class TaskManager:
         runner_search_paths: Iterable[str | os.PathLike[str]] = (),
         runner_modules: Iterable[str] = DEFAULT_RUNNER_MODULES,
         gc_interval: float | None = None,
+        on_attached: Callable[[str], None] | None = None,
     ) -> None:
         if maximum_workers < 1:
             raise ValueError("maximum_workers must be positive")
@@ -554,6 +560,7 @@ class TaskManager:
         self._reported: dict[str, str] = {}
         self._draining = False
         self._drain_signals = 0
+        self._closed = False
         write_json_atomic(
             self._manager_dir / "manager.json",
             {
@@ -576,6 +583,8 @@ class TaskManager:
             durable=workspace.durable,
         )
         self.heartbeat(force=True)
+        if on_attached is not None:
+            on_attached(self.manager_id)
         _LOGGER.info(
             "manager %s attached to workspace %s as %s pools=%s capabilities=%s executors=%s workers=%d",
             self.manager_id,
@@ -601,6 +610,7 @@ class TaskManager:
                 )
                 continue
         self._warn_unmatched_placement_prefixes()
+        self._collect_always_safe("startup")
 
     def __repr__(self) -> str:
         return f"TaskManager(workspace={self.workspace!r}, pools={tuple(sorted(self.pools))!r})"
@@ -638,10 +648,120 @@ class TaskManager:
         self.close()
 
     def close(self) -> None:
-        """Close local attempt tracking and the manager's journal writer."""
+        """Close local tracking and clean up after a clean manager exit."""
 
+        if self._closed:
+            return
+        clean = not self._running
+        if clean:
+            try:
+                clean = not self._has_live_owned_marker()
+            except Exception as exc:
+                _LOGGER.warning("cannot verify manager-owned live markers: %s", exc)
+                clean = False
+        if clean:
+            self._collect_always_safe("shutdown")
         self._running.clear()
-        self.writer.close()
+        try:
+            self.writer.close()
+        finally:
+            self._closed = True
+            if clean:
+                self._remove_empty_journal_writer()
+                self._remove_manager_directory()
+
+    def _collect_always_safe(self, phase: str) -> None:
+        """Collect always-safe workspace leftovers, without affecting service."""
+
+        try:
+            report = self.workspace.collect_garbage(
+                categories=ALWAYS_SAFE_CATEGORIES,
+                journal_writer=self.writer,
+            )
+        except Exception as exc:
+            _LOGGER.warning(
+                "always-safe collection at %s failed: %s",
+                phase,
+                exc,
+                extra=self._event("always_safe_gc_error", phase=phase),
+            )
+            return
+        _LOGGER.info(
+            "always-safe collection at %s removed %d entries and about %d bytes",
+            phase,
+            report.removed,
+            report.bytes_reclaimed,
+            extra=self._event(
+                "always_safe_gc_completed",
+                phase=phase,
+                removed=report.removed,
+                bytes_reclaimed=report.bytes_reclaimed,
+            ),
+        )
+
+    def _has_live_owned_marker(self) -> bool:
+        """Return whether this manager still owns a live-kind state marker."""
+
+        for marker in self.workspace.scan_markers(("claimed", "running", "committing", "cancelling")):
+            try:
+                state = self.workspace.read_state(marker)
+            except (WorkflowError, OSError):
+                return True
+            if state.get("manager_id") == self.manager_id:
+                return True
+        return False
+
+    def _remove_manager_directory(self) -> None:
+        """Remove this manager's metadata directory after its writer closes."""
+
+        for name in ("heartbeat.json", "manager.json"):
+            try:
+                (self._manager_dir / name).unlink(missing_ok=True)
+            except OSError as exc:
+                _LOGGER.warning("cannot remove manager metadata %s: %s", name, exc)
+                return
+        try:
+            self._manager_dir.rmdir()
+        except OSError as exc:
+            _LOGGER.debug("manager directory %s remains after clean exit: %s", self._manager_dir, exc)
+
+    def _remove_empty_journal_writer(self) -> None:
+        """Remove this manager's writer directory when it has no frames."""
+
+        writer_dir = self.workspace.control / "journal" / self.writer.writer_id
+        if self._writer_has_marker_reference():
+            return
+        try:
+            entries = list(writer_dir.iterdir())
+        except OSError as exc:
+            _LOGGER.debug("cannot inspect empty journal writer %s: %s", writer_dir, exc)
+            return
+        if not entries:
+            return
+        for entry in entries:
+            try:
+                if not entry.is_file() or entry.stat().st_size != len(SEGMENT_HEADER):
+                    return
+            except OSError:
+                return
+        try:
+            for entry in entries:
+                entry.unlink()
+            writer_dir.rmdir()
+        except OSError as exc:
+            _LOGGER.debug("journal writer %s remains after clean exit: %s", writer_dir, exc)
+
+    def _writer_has_marker_reference(self) -> bool:
+        """Return whether a current marker names this writer."""
+
+        for marker in self.workspace.scan_markers(STATE_KINDS):
+            try:
+                writer_id, _segment, _offset, _length, _checksum = parse_record_ref(marker.record_ref)
+            except (FormatError, ValueError):
+                continue
+            if writer_id == self.writer.writer_id:
+                return True
+        return False
 
     def _write_attempt_end(self, attempt: RunningAttempt, return_code: int) -> None:
         """Append the end marker for a locally reaped attempt."""
@@ -956,7 +1076,7 @@ class TaskManager:
             return
         self._last_gc = now
         try:
-            report = self.workspace.collect_garbage()
+            report = self.workspace.collect_garbage(journal_writer=self.writer)
         except (WorkflowError, OSError) as exc:
             self._report_anomaly(
                 "gc",

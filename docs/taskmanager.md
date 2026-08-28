@@ -19,7 +19,8 @@ you author a runner.
 Use repeatable `--worker-resource NAME COUNT` options to advertise capacities;
 inside an active SLURM allocation, local managers derive `procs`, `mem`,
 `gpus`, and `nodes` from the allocation variables. `--count N` starts N local
-manager processes, each with its own manager directory and log.
+manager processes, with metadata directories removed after clean exit and one
+workspace-level append-only manager log.
 
 For example, a manager can advertise CPUs, memory, and two license slots:
 

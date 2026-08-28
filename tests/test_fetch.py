@@ -442,8 +442,8 @@ def test_job_request_remote_wait_relays_far_side_result(pair: Pair, capsys: pyte
         == 1
     )
     captured = capsys.readouterr()
-    assert pair.ids["pending"] in captured.out
-    assert "timeout; still pending" in captured.out
+    assert "/requests/ready/" in captured.out
+    assert "waiting is pointless until a manager starts" in captured.err
 
 
 def test_job_request_remote_manager_records_local_operator_key(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:

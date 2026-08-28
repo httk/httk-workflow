@@ -334,6 +334,12 @@ line that names any jobs left not claimable by the pools, capabilities,
 resources, or executors this manager serves, or left committing with an
 unreadable definition. This is the command that subsumed the old
 `transfer start-manager`.
+The default manager log is the append-only workspace file
+`.httk-workspace/managers.log`; each text line is prefixed with the manager id,
+and JSON records carry `manager_id`. `--log-file` selects another destination.
+The log is rotated when a manager starts or every 1000 records once the file
+exceeds 16 MiB; one backup is kept, and a manager that has not yet reopened
+the file keeps appending to that backup.
 
 For a resource-aware run, advertise the manager's complete allotment:
 
@@ -901,7 +907,9 @@ httk workflow workspace fsck --repair --quarantine-unrepairable WORKSPACE
 
 It exits `1` while anything remains for an operator to deal with. See
 [the task-manager guide](taskmanager.md) for what each problem code means and
-for exactly what a repair will and will not touch.
+for exactly what a repair will and will not touch. When always-safe leftovers
+exist, it also prints their total and per-category counts; this informational
+line never changes the exit status.
 
 ## Freeing disk
 
@@ -909,11 +917,10 @@ A committing manager removes an attempt's control directory after its durable
 commit and after it has reaped the local process when the actual destination is
 `ready`, `waiting`, `paused`, or `succeeded`; failed and cancelled attempts stay
 as evidence. Transaction trash is normally removed with that control tree. An
-inherited commit is left for `workspace gc`. Apart from that bounded cleanup,
-nothing in the engine deletes anything on its own: neither a runner nor a
-manager is ever required to run cleanup code, so every other artefact a crash
-could orphan is simply left in place. `workspace gc` is the separate, explicit
-collector, driven entirely by the workspace's `policy.retention`:
+inherited commit is left for `workspace gc`. Policy-gated collection never runs
+on its own: managers run the always-safe categories at startup and clean exit,
+while every other artefact a crash could orphan is left for explicit
+`workspace gc`, driven entirely by the workspace's `policy.retention`:
 
 ```console
 httk workflow workspace gc --dry-run WORKSPACE

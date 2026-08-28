@@ -29,10 +29,11 @@ write files and atomically rename a file or directory.
 The design descends from the `ht.task.*` directories, `ht_steps`,
 `ht.nextstep`, subtasks, and `ht.atomic.*` replay mechanism in *httk* v1. It keeps
 the central property of that design: neither a workflow step nor a task manager
-is ever required to run cleanup code, apart from the owning manager's best-effort
-post-commit removal of a locally reaped successful attempt control tree. Either
-may disappear between any two instructions. A later task manager must be able
-to identify the last commit point and continue from it.
+is ever required to run policy-gated cleanup code. A manager does run
+always-safe cleanup at attach and clean exit, and its owning manager performs
+best-effort post-commit removal of a locally reaped successful attempt control
+tree. Either may disappear between any two instructions. A later task manager
+must be able to identify the last commit point and continue from it.
 
 The design target is workspaces larger than the measured local snapshot in
 {doc}`/benchmarks`; that target is not a capacity measurement. Metadata inode
@@ -246,6 +247,7 @@ WORKSPACE/
 │   │   └── <manager-id>/
 │   │       ├── manager.json
 │   │       └── heartbeat.json
+│   ├── managers.log
 │   └── requests/
 │       ├── tmp/
 │       ├── ready/
@@ -1289,6 +1291,13 @@ identity after repair is damage and cannot be used as `no_live_attempt` or as
 proof that the application never ran.
 
 Managers update `managers/<manager-id>/heartbeat.json` by atomic replacement.
+The directory contains only `manager.json` and `heartbeat.json`, and remains
+until that manager exits cleanly; a crash leaves it for policy-gated
+`manager_directories` collection. Manager diagnostics are appended to the
+workspace-level `managers.log`, with the manager id on every record.
+The log is rotated when a manager starts or every 1000 records once the file
+exceeds 16 MiB; one backup, `managers.log.1`, is kept. A manager that has not
+yet reopened the file keeps appending to the backup.
 A recoverer uses the state frame, heartbeat, batch scheduler when available,
 and a configured grace period. It MUST NOT steal a job merely because one
 delayed metadata read appears stale.
@@ -2577,7 +2586,9 @@ said nothing therefore loses nothing.
 
 These always-safe categories are exempt because the entries in them cannot carry
 information, plus the one conditional case of a terminal marker whose payload
-the operator removed; they are collected whatever `policy.retention` says:
+the operator removed; they are collected whatever `policy.retention` says.
+Every manager runs these categories after attaching and again at clean exit;
+`workspace gc` also collects them:
 
 - an empty placement mirror below a state kind, pruned by `rmdir` alone;
 - an entry still sitting in `.httk-workspace/tmp/` or

@@ -25,7 +25,14 @@ from httk.workflow import TaskManager, Workspace
 from httk.workflow import gc as gc_module
 from httk.workflow._util import read_json, utc_now, write_json_atomic
 from httk.workflow.gc import GcReport
-from httk.workflow.journal import parse_record_ref, read_record, segment_path
+from httk.workflow.journal import (
+    SEGMENT_HEADER,
+    encode_record_ref,
+    iter_journal_frames,
+    parse_record_ref,
+    read_record,
+    segment_path,
+)
 from httk.workflow.models import Marker
 from httk.workflow.workflow_cli import command
 
@@ -429,12 +436,14 @@ class _Fixture:
             self.job_ids.append(job_id)
         with TaskManager(self.workspace, heartbeat_interval=0.01) as manager:
             manager.run_until_idle()
-        self.manager_directory = manager.manager_directory
         self.manager_writer = manager.writer.writer_id
+        self.manager_directory = _manager_directory(self.workspace, self.manager_writer, live=False, days=60)
         _stale_heartbeat(self.manager_directory, days=60)
 
         markers = {marker.job_id: marker for marker in self.workspace.scan_markers()}
         assert all(markers[job_id].kind == "succeeded" for job_id in self.job_ids)
+        for kind in ("submitted", "ready", "claimed", "running", "committing"):
+            (control / "state" / kind / "project" / "deep" / "leftover").mkdir(parents=True, exist_ok=True)
         self.payloads = [
             self.workspace.payload_path(markers[job_id].placement, markers[job_id].job_key) for job_id in self.job_ids
         ]
@@ -637,6 +646,143 @@ def test_a_second_collection_is_a_no_op(aged: _Fixture) -> None:
     assert tree_digest(aged.workspace.root) == settled
 
 
+def test_a_collection_can_select_only_named_categories(aged: _Fixture) -> None:
+    report = aged.workspace.collect_garbage(categories=("placement_directories", "tmp_entries"))
+
+    assert [category.name for category in report.categories] == list(gc_module.GC_CATEGORIES)
+    assert report.category("tmp_entries").removed == 2
+    assert report.category("placement_directories").removed > 0
+    for name in set(gc_module.GC_CATEGORIES) - {"placement_directories", "tmp_entries"}:
+        category = report.category(name)
+        assert category.skipped and category.skip_reason == "not selected"
+
+
+def test_manager_directory_selection_also_checks_surviving_journal_segments(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    workspace.set_policy({"retention": {"journal_days": 30.0}})
+    with workspace.open_journal_writer() as writer:
+        writer.append({"format": "test-frame"})
+        writer_id = writer.writer_id
+    manager_dir = _manager_directory(workspace, writer_id, live=False, days=60)
+
+    report = workspace.collect_garbage(categories=("manager_directories",))
+
+    assert manager_dir.is_dir()
+    assert (workspace.control / "journal" / writer_id).is_dir()
+    assert report.category("journal_segments").skipped is False
+    assert report.category("manager_directories").removed == 0
+
+
+def test_manager_gc_frames_use_its_writer_and_clean_idle_removes_empty_writer(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    payload, _job_id = _payload(tmp_path / "source", "processed")
+    workspace.submit(payload, "project/processed")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+        writer_id = manager.writer.writer_id
+
+    writer_dirs = [path for path in (workspace.control / "journal").iterdir() if path.is_dir()]
+    assert [path.name for path in writer_dirs] == [writer_id]
+    gc_frames = [
+        frame for frame in iter_journal_frames(workspace.control) if frame.frame.get("format") == "httk-workflow-gc"
+    ]
+    assert gc_frames
+    assert all(parse_record_ref(frame.record_ref)[0] == writer_id for frame in gc_frames)
+
+    idle = Workspace.initialize(tmp_path / "idle", durable=False)
+    with TaskManager(idle, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+        idle_writer_id = manager.writer.writer_id
+    assert not (idle.control / "journal" / idle_writer_id).exists()
+
+
+def test_header_only_writer_stays_when_a_marker_names_it(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    payload, _job_id = _payload(tmp_path / "source", "marker")
+    submitted = workspace.submit(payload, "project/marker")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        reference = encode_record_ref(manager.writer.writer_id, 0, len(SEGMENT_HEADER), 1, b"0" * 32)
+        marker = workspace.marker_path(
+            "succeeded",
+            submitted.placement,
+            submitted.job_key,
+            submitted.priority,
+            submitted.generation + 1,
+            reference,
+        )
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        relocating = workspace.marker_path(
+            "relocating",
+            submitted.placement,
+            submitted.job_key,
+            submitted.priority,
+            submitted.generation + 2,
+            reference,
+        )
+        relocating.parent.mkdir(parents=True, exist_ok=True)
+        relocating.touch()
+        manager_id = manager.writer.writer_id
+
+    assert (workspace.control / "journal" / manager_id).is_dir()
+    assert any(item.record_ref == reference for item in workspace.scan_markers())
+
+
+def test_manager_startup_removes_a_terminal_orphan_without_cli_gc(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    payload, job_id = _payload(tmp_path / "source", "processed")
+    workspace.submit(payload, "project/processed")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+
+    assert workspace.find_marker_by_id(job_id) is None
+
+
+def test_clean_writer_segment_waits_for_journal_days(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    workspace.set_policy({"retention": {"journal_days": 30.0}})
+    stale_tmp = workspace.control / "tmp" / "stale"
+    stale_tmp.mkdir(parents=True)
+    _age(stale_tmp, 2)
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+        writer_id = manager.writer.writer_id
+
+    segment = next((workspace.control / "journal" / writer_id).glob("*.hwj"))
+    before = workspace.collect_garbage(categories=("journal_segments",))
+    assert before.category("journal_segments").removed == 0
+    assert segment.is_file()
+
+    _age(segment, 31)
+    after = workspace.collect_garbage(categories=("journal_segments",))
+    assert after.category("journal_segments").removed == 1
+    assert not segment.exists()
+
+
+def test_crashed_manager_directory_survives_another_manager_idle_run(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    workspace.set_policy({"retention": {"journal_days": 0.0}})
+    with workspace.open_journal_writer() as writer:
+        writer.append({"format": "crashed-manager-frame"})
+        writer_id = writer.writer_id
+    crashed_dir = _manager_directory(workspace, writer_id, live=False, days=60)
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+
+    assert crashed_dir.is_dir()
+    _age(workspace.control / "journal" / writer_id, 60)
+    report = workspace.collect_garbage()
+    assert report.category("manager_directories").removed == 1
+    assert not crashed_dir.exists()
+
+
 def test_a_collection_journals_one_frame_summarizing_what_it_removed(aged: _Fixture) -> None:
     from httk.workflow.journal import read_record
 
@@ -682,6 +828,8 @@ def test_empty_placement_mirrors_are_pruned_below_every_state_kind(tmp_path: Pat
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle()
     state = workspace.control / "state"
+    for kind in ("submitted", "ready", "claimed", "running", "committing"):
+        (state / kind / "project" / "deep" / "nested" / "leaf").mkdir(parents=True, exist_ok=True)
     assert (state / "ready" / "project" / "deep" / "nested" / "leaf").is_dir()
     report = workspace.collect_garbage()
     assert report.category("placement_directories").removed >= 4

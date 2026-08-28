@@ -645,17 +645,36 @@ class Workspace:
 
         return check_workspace(self, repair=repair, quarantine_unrepairable=quarantine_unrepairable)
 
-    def collect_garbage(self, *, dry_run: bool = False, now: float | None = None) -> "GcReport":
+    def collect_garbage(
+        self,
+        *,
+        dry_run: bool = False,
+        now: float | None = None,
+        categories: Sequence[str] | None = None,
+        journal_writer: JournalWriter | None = None,
+        sizes: bool = True,
+    ) -> "GcReport":
         """Collect the disk this workspace's retention policy permits freeing.
 
         :param dry_run: Report eligible removals without changing the workspace.
         :param now: Use this timestamp when evaluating retention deadlines.
+        :param categories: Restrict collection to these categories.
+        :param journal_writer: Append a collection frame to this already-open
+            writer instead of opening a new writer.
+        :param sizes: Whether to calculate byte estimates.
         :return: The garbage-collection report.
         """
 
         from .gc import collect_garbage
 
-        return collect_garbage(self, dry_run=dry_run, now=now)
+        return collect_garbage(
+            self,
+            dry_run=dry_run,
+            now=now,
+            categories=categories,
+            journal_writer=journal_writer,
+            sizes=sizes,
+        )
 
     def runner_store_path(self, path: str | PurePosixPath) -> Path:
         """Return the store location of one workspace runner.

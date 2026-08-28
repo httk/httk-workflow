@@ -2,9 +2,9 @@
 
 Except for a succeeded attempt's control directory, which its owning committing
 manager removes after the commit is durable and its process is reaped, nothing in the engine frees disk
-on its own. That is deliberate: neither a runner nor a manager is ever required
-to run cleanup code, so every other artefact a crash could orphan is simply left
-in place. Over a long campaign that costs
+on its own. Managers do run the always-safe categories at startup and clean
+exit; policy-gated artefacts orphaned by a crash are left in place. Over a long
+campaign that costs
 real space — one control directory per attempt, one journal writer directory
 and one manager directory per process start, a full copy of every tree a
 transaction replaced, an intact bundle for every transfer already acknowledged
@@ -33,7 +33,7 @@ import os
 import stat
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -41,7 +41,7 @@ from typing import TYPE_CHECKING, Any
 from ._manager_joins import children as join_children
 from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
 from .errors import FormatError, WorkflowError
-from .journal import parse_record_ref
+from .journal import JournalWriter, parse_record_ref
 from .models import (
     ATTEMPTS_DIRECTORY,
     QUIESCENT_KINDS,
@@ -81,6 +81,10 @@ GC_CATEGORIES = (
     "manager_directories",
     "placement_directories",
 )
+#: Categories whose entries cannot carry information and are safe to collect
+#: without a retention policy. Managers run exactly these categories when they
+#: attach and before a clean exit.
+ALWAYS_SAFE_CATEGORIES = ("removed_jobs", "tmp_entries", "retired_requests", "placement_directories")
 _SECONDS_PER_DAY = 86400.0
 
 
@@ -93,6 +97,8 @@ class GcCategory:
     :param removed: Number of entries removed.
     :param bytes_reclaimed: Estimated bytes held by the entries.
     :param entries: Paths of candidate entries.
+    :param skipped: Whether this category was not selected or was gated.
+    :param skip_reason: Why this category was skipped, when applicable.
     """
 
     name: str
@@ -100,6 +106,8 @@ class GcCategory:
     removed: int = 0
     bytes_reclaimed: int = 0
     entries: tuple[str, ...] = ()
+    skipped: bool = False
+    skip_reason: str | None = None
 
     def as_mapping(self) -> dict[str, object]:
         """Return the JSON representation of this category.
@@ -113,6 +121,8 @@ class GcCategory:
             "removed": self.removed,
             "bytes_reclaimed": self.bytes_reclaimed,
             "entries": list(self.entries),
+            "skipped": self.skipped,
+            **({} if self.skip_reason is None else {"skip_reason": self.skip_reason}),
         }
 
 
@@ -217,6 +227,8 @@ class _Accumulator:
     removed: int = 0
     bytes_reclaimed: int = 0
     entries: list[str] = field(default_factory=list)
+    skipped: bool = False
+    skip_reason: str | None = None
 
     def frozen(self) -> GcCategory:
         return GcCategory(
@@ -225,6 +237,8 @@ class _Accumulator:
             removed=self.removed,
             bytes_reclaimed=self.bytes_reclaimed,
             entries=tuple(self.entries),
+            skipped=self.skipped,
+            skip_reason=self.skip_reason,
         )
 
 
@@ -375,12 +389,33 @@ def _marker_record_ref(name: str) -> str | None:
 class _Collection:
     """One pass over a workspace, driven by its retention policy."""
 
-    def __init__(self, workspace: "Workspace", *, dry_run: bool, now: float) -> None:
+    def __init__(
+        self,
+        workspace: "Workspace",
+        *,
+        dry_run: bool,
+        now: float,
+        categories: Sequence[str] | None = None,
+        journal_writer: JournalWriter | None = None,
+        sizes: bool = True,
+    ) -> None:
         self.workspace = workspace
         self.control = workspace.control
         self.dry_run = dry_run
         self.now = now
         self.retention = workspace.policy.retention
+        self.journal_writer = journal_writer
+        self.sizes = sizes
+        requested = tuple(GC_CATEGORIES if categories is None else categories)
+        unknown = set(requested) - set(GC_CATEGORIES)
+        if unknown:
+            raise ValueError(f"unknown garbage-collection category: {', '.join(sorted(unknown))}")
+        selected = set(requested)
+        # Manager-directory eligibility depends on the journal pass counting
+        # the writer's surviving segments.
+        if "manager_directories" in selected:
+            selected.add("journal_segments")
+        self._selected = frozenset(selected)
         self._accumulators = {name: _Accumulator(name) for name in GC_CATEGORIES}
         self._skipped: list[str] = []
         self._skipped_foreign: dict[str, int] = {}
@@ -515,9 +550,17 @@ class _Collection:
         accumulator = self._accumulators[category]
         accumulator.candidates += 1
         accumulator.entries.append(str(path))
-        accumulator.bytes_reclaimed += _tree_bytes(path) if size is None else size
+        accumulator.bytes_reclaimed += 0 if not self.sizes else (_tree_bytes(path) if size is None else size)
+
+    def _entry_size(self, path: Path) -> int:
+        """Return an entry's size when this pass is measuring sizes."""
+
+        return _entry_bytes(path) if self.sizes else 0
 
     def _skip(self, category: str, reason: str) -> None:
+        accumulator = self._accumulators[category]
+        accumulator.skipped = True
+        accumulator.skip_reason = reason
         self._skipped.append(f"{category}: {reason}")
         _LOGGER.debug("skipping %s collection: %s", category, reason)
 
@@ -653,14 +696,14 @@ class _Collection:
         for marker, _payload in candidates:
             parent_keys = parents.get(marker.job_id)
             if parent_keys:
-                self._account_candidate("removed_jobs", marker.path, size=_entry_bytes(marker.path))
+                self._account_candidate("removed_jobs", marker.path, size=self._entry_size(marker.path))
                 parent_text = ", ".join(sorted(parent_keys))
                 self._skip(
                     "removed_jobs",
                     f"kept child {marker.job_key}: referenced by non-terminal parent(s) {parent_text}",
                 )
                 continue
-            removed = self._collect("removed_jobs", marker.path, size=_entry_bytes(marker.path))
+            removed = self._collect("removed_jobs", marker.path, size=self._entry_size(marker.path))
             if removed:
                 self._markers = [item for item in self.markers() if item.path != marker.path]
                 if self.dry_run:
@@ -739,7 +782,7 @@ class _Collection:
         for name in ("acks", "imported"):
             for entry in _iterdir(self.control / "transfers" / name):
                 if entry.is_file() and entry.suffix == ".json" and self._aged(entry, cutoff):
-                    self._collect("transfer_records", entry, size=_entry_bytes(entry))
+                    self._collect("transfer_records", entry, size=self._entry_size(entry))
 
     def collect_tmp_entries(self) -> None:
         """Collect abandoned staging entries, which need no retention policy.
@@ -773,11 +816,11 @@ class _Collection:
                 continue
             for entry in _iterdir(manager_dir):
                 if entry.is_file() and self._aged(entry, cutoff):
-                    self._collect("retired_requests", entry, size=_entry_bytes(entry))
+                    self._collect("retired_requests", entry, size=self._entry_size(entry))
             self._rmdir(manager_dir, "retired_requests")
         for entry in _iterdir(self.control / "requests" / "retired"):
             if entry.is_file() and self._aged(entry, cutoff):
-                self._collect("retired_requests", entry, size=_entry_bytes(entry))
+                self._collect("retired_requests", entry, size=self._entry_size(entry))
 
     def collect_journal_segments(self) -> None:
         """Collect aged journal segments no current marker references.
@@ -818,7 +861,7 @@ class _Collection:
                 if number is None or (writer_id, number) in referenced or not self._aged(path, cutoff):
                     surviving += 1
                     continue
-                self._collect("journal_segments", path, size=_entry_bytes(path))
+                self._collect("journal_segments", path, size=self._entry_size(path))
             self._surviving_segments[writer_id] = surviving
             if surviving == 0:
                 self._rmdir(writer_dir, "journal_segments")
@@ -835,8 +878,9 @@ class _Collection:
         """Collect the directories of dead manager incarnations.
 
         A manager directory is the only mapping from a journal writer to the
-        host, process, and pools that produced it, so it outlives its manager
-        for exactly as long as that writer's segments do. One whose
+        host, process, and pools that produced it. A crashed directory may
+        outlive its writer's segments until policy-gated collection removes it;
+        clean managers remove their own directory. One whose
         ``manager.json`` cannot be read names no writer and is therefore kept:
         it is already an anomaly, and it is a few hundred bytes.
         """
@@ -881,7 +925,8 @@ class _Collection:
                 accumulator = self._accumulators["placement_directories"]
                 accumulator.candidates += 1
                 accumulator.entries.append(directory)
-                accumulator.bytes_reclaimed += _entry_bytes(path)
+                if self.sizes:
+                    accumulator.bytes_reclaimed += _entry_bytes(path)
                 if self.dry_run:
                     if _owned_by_current_user(path):
                         emptied.add(directory)
@@ -918,16 +963,11 @@ class _Collection:
     def execute(self) -> GcReport:
         """Perform every category in order and publish the resulting report."""
 
-        self.collect_attempt_control()
-        self.collect_removed_jobs()
-        self.collect_transaction_trash()
-        self.collect_retired_bundles()
-        self.collect_transfer_records()
-        self.collect_tmp_entries()
-        self.collect_retired_requests()
-        self.collect_journal_segments()
-        self.collect_manager_directories()
-        self.collect_placement_directories()
+        for category in GC_CATEGORIES:
+            if category not in self._selected:
+                self._skip(category, "not selected")
+                continue
+            getattr(self, f"collect_{category}")()
         report = GcReport(
             workspace_id=self.workspace.workspace_id,
             dry_run=self.dry_run,
@@ -965,12 +1005,17 @@ class _Collection:
                     "candidates": category.candidates,
                     "removed": category.removed,
                     "bytes_reclaimed": category.bytes_reclaimed,
+                    "skipped": category.skipped,
+                    **({} if category.skip_reason is None else {"skip_reason": category.skip_reason}),
                 }
                 for category in report.categories
             },
         }
-        with self.workspace.open_journal_writer() as writer:
-            record_ref = writer.append(frame)
+        if self.journal_writer is not None:
+            record_ref = self.journal_writer.append(frame)
+        else:
+            with self.workspace.open_journal_writer() as writer:
+                record_ref = writer.append(frame)
         _LOGGER.info(
             "collected %d entries and about %d bytes from workspace %s",
             report.removed,
@@ -1022,6 +1067,9 @@ def collect_garbage(
     *,
     dry_run: bool = False,
     now: float | None = None,
+    categories: Sequence[str] | None = None,
+    journal_writer: JournalWriter | None = None,
+    sizes: bool = True,
 ) -> GcReport:
     """Collect what the retention policy of *workspace* permits.
 
@@ -1039,10 +1087,27 @@ def collect_garbage(
     :param workspace: Workspace whose retention policy is applied.
     :param dry_run: Whether to report candidates without removing them.
     :param now: Timestamp used to evaluate age limits.
+    :param categories: Restrict collection to these categories, in the
+        canonical :data:`GC_CATEGORIES` order. Selecting
+        ``manager_directories`` also selects ``journal_segments`` because the
+        manager-directory decision depends on that category's surviving
+        segment count.
+    :param journal_writer: Append a collection frame to this already-open
+        writer instead of opening a new writer.
+    :param sizes: Whether to calculate byte estimates. Set this to ``False``
+        for count-only scans; no tree byte-sizing is performed and reported
+        reclaimed bytes are zero.
     :return: Collection report.
     """
 
-    return _Collection(workspace, dry_run=dry_run, now=time.time() if now is None else now).execute()
+    return _Collection(
+        workspace,
+        dry_run=dry_run,
+        now=time.time() if now is None else now,
+        categories=categories,
+        journal_writer=journal_writer,
+        sizes=sizes,
+    ).execute()
 
 
 def iter_report_rows(report: GcReport) -> Iterator[tuple[str, int, int, int]]:

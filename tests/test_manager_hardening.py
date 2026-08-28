@@ -3,6 +3,8 @@ import logging
 import os
 import signal
 import socket
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -15,6 +17,7 @@ from httk.core.cli import CLIContext
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
+from httk.workflow import _logging as logging_module
 from httk.workflow._logging import reset_logging
 from httk.workflow.journal import JournalWriter
 from httk.workflow.workflow_cli import command
@@ -211,9 +214,9 @@ def test_serve_drains_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
     assert code == 0
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "failed"
-    logs = sorted((workspace.control / "managers").glob("*/log"))
-    assert len(logs) == 1
-    events = [json.loads(line).get("event") for line in logs[0].read_text(encoding="utf-8").splitlines() if line]
+    log = workspace.control / "managers.log"
+    assert log.is_file() and not list((workspace.control / "managers").iterdir())
+    events = [json.loads(line).get("event") for line in log.read_text(encoding="utf-8").splitlines() if line]
     assert "drain_started" in events and "drain_complete" in events
     assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
 
@@ -299,10 +302,11 @@ def test_json_log_records_carry_structured_fields(tmp_path: Path) -> None:
     )
 
     assert code == 0
-    logs = sorted((workspace.control / "managers").glob("*/log"))
-    assert len(logs) == 1
-    records = [json.loads(line) for line in logs[0].read_text(encoding="utf-8").splitlines() if line]
+    log = workspace.control / "managers.log"
+    assert log.is_file() and not list((workspace.control / "managers").iterdir())
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
     assert all({"ts", "level", "logger", "message"} <= set(record) for record in records)
+    assert all(record["manager_id"] == records[0]["manager_id"] for record in records)
     claims = [record for record in records if record.get("event") == "claim"]
     assert claims and claims[0]["job_id"] == job_id
     launches = [record for record in records if record.get("event") == "launch"]
@@ -311,3 +315,77 @@ def test_json_log_records_carry_structured_fields(tmp_path: Path) -> None:
     # mutation of the runner in the mutable payload is visible in the journal.
     assert isinstance(launches[0]["payload_digest"], str) and launches[0]["payload_digest"]
     assert any(record.get("event") == "transition" and record.get("kind") == "succeeded" for record in records)
+
+
+def test_shared_manager_log_rotates_once_before_startup_logging(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    ws = register_ws(None, workspace.root)
+    log = workspace.control / "managers.log"
+    log.write_bytes(b"x" * (16 * 1024 * 1024 + 1))
+
+    code = command(
+        ["manager", "run", "--workspace", ws, "--json-logs"],
+        CLIContext("httk", tmp_path),
+    )
+
+    assert code == 0
+    rotated = workspace.control / "managers.log.1"
+    assert rotated.is_file() and rotated.stat().st_size == 16 * 1024 * 1024 + 1
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
+    assert records
+    assert all(record["manager_id"] == records[0]["manager_id"] for record in records)
+    assert any(record.get("event") == "manager_started" for record in records)
+
+
+def test_concurrent_manager_log_startup_rotation_keeps_both_managers(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    log = workspace.control / "managers.log"
+    log.write_bytes(b"original-sentinel\n" + b"x" * (16 * 1024 * 1024 + 1))
+    script = """
+from pathlib import Path
+import sys
+from httk.workflow import TaskManager, Workspace
+from httk.workflow._logging import add_log_file, configure_logging
+
+workspace = Workspace(Path(sys.argv[1]))
+configure_logging()
+def setup(manager_id):
+    add_log_file(workspace.control / "managers.log", manager_id=manager_id)
+with TaskManager(workspace, on_attached=setup) as manager:
+    print(manager.manager_id, flush=True)
+    manager.run_until_idle(timeout=10)
+"""
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", script, str(workspace.root)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    results = [process.communicate(timeout=30) for process in processes]
+
+    assert all(process.returncode == 0 for process in processes), results
+    manager_ids = {stdout.strip() for stdout, _stderr in results}
+    assert len(manager_ids) == 2
+    assert list(workspace.control.glob("managers.log.1")) == [workspace.control / "managers.log.1"]
+    combined = log.read_text(encoding="utf-8") + (workspace.control / "managers.log.1").read_text(encoding="utf-8")
+    assert "original-sentinel" in combined
+    assert all(manager_id in combined for manager_id in manager_ids)
+
+
+def test_manager_log_rotates_after_1000_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    log = tmp_path / "managers.log"
+    monkeypatch.setattr(logging_module, "MANAGER_LOG_ROTATION_BYTES", 1000)
+    logging_module.configure_logging(level="info")
+    logging_module.add_log_file(log, manager_id="manager-test")
+    logger = logging.getLogger("httk.workflow")
+
+    for index in range(999):
+        logger.info("record-%d-%s", index, "x" * 20)
+    assert not log.with_name("managers.log.1").exists()
+    logger.info("record-999-%s", "x" * 20)
+
+    assert log.with_name("managers.log.1").is_file()
+    assert "record-999" in log.read_text(encoding="utf-8")
