@@ -39,10 +39,11 @@ httk workflow transfer   [OPTIONS] SRC DST      (plus the protocol spellings: re
 
 ### Workspace selection
 
-A `WORKSPACE` is an optional registered local name. A project may record a
-default name with `workspace default NAME`; otherwise commands use the per-user
-default workspace. Explicit local names are created with `workspace init PATH`,
-and remote names use `REMOTE:NAME` at use time.
+A `WORKSPACE` is an optional registered local name. When it is omitted, commands
+resolve workspaces in this order: the closest enclosing workspace containing
+`.httk-workspace/format.json`, the project's recorded default, the registry's
+default, then an auto-created per-user default. Explicit local names are created
+with `workspace init PATH`, and remote names use `REMOTE:NAME` at use time.
 
 The registry is machine-owned: it stores only absolute local paths in
 `$XDG_CONFIG_HOME/httk/workspaces.json`. When a command reaches a remote
@@ -797,7 +798,7 @@ published this document*; it grants nothing, and no operation is permitted
 because a document is signed. Anyone who can write the workspace's request
 directory can still publish an unsigned request.
 
-The fence is `.httk-workflow/maintenance.lock`, holding the recording process
+The fence is `.httk-workspace/maintenance.lock`, holding the recording process
 identifier, hostname, and creation time. A lock whose same-host process is gone,
 whose content is unreadable, or that is older than twenty-four hours is
 reclaimed automatically; any other lock is reported with its holder. Operators
@@ -1018,7 +1019,7 @@ configured host, where the manager is submitted with `sbatch`. Only `ssh` and
 | `push` / `pull` | one `rsync --archive` transfer, creating missing destination components; a `pull` is always the whole remote directory, a `push` is the whole tree or the request's explicit relative `files` batch | `host`, `username`, `port` |
 | `invoke` | runs the request's argument vector on the host, optionally in the request's directory, and returns its status, stdout and stderr | `host`, `username`, `port`, `httk_command` |
 | `status` | the same machinery running `httk workflow workspace status --json NAME` remotely | as `invoke` |
-| `start-manager` | writes a generated batch script into `WORKSPACE/.httk-workflow/batch/`, then submits it with `sbatch` once, or the request's `count` times | workspace settings `slurm.*`, `manager.workers`, `workspace` |
+| `start-manager` | writes a generated batch script into `WORKSPACE/.httk-workspace/batch/`, then submits it with `sbatch` once, or the request's `count` times | workspace settings `slurm.*`, `manager.workers`, `workspace` |
 
 The generated batch script is a `#!/bin/bash` file carrying one `#SBATCH`
 directive per configured setting, `--chdir` set to the workspace, `--output`
@@ -1160,7 +1161,7 @@ per bundle; it requires `--destination-workspace-id`, because a bundle is sealed
 for exactly one destination. `--job` is repeatable, accepts any quiescent state
 when no `--state` is supplied, and fails all-or-nothing if an id is missing or
 filtered. `retire` moves the sealed source of an already
-imported job under `.httk-workflow/transfers/retired/` — a rename, never a
+imported job under `.httk-workspace/transfers/retired/` — a rename, never a
 delete, so a source is only ever whole or moved whole; its
 `--destination-workspace-id` is optional and, when given, refuses a bundle that
 was sealed for somebody else. `offer` narrows what it seals with the same

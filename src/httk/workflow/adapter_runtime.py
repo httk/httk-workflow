@@ -17,7 +17,7 @@ selected by the ``kind`` recorded in the bundle's ``remote.json``:
 Any other kind is refused rather than silently executed in the wrong place.
 
 The ``start-manager`` operation reads its scheduler profile from the target
-workspace's ``.httk-workflow/format.json``: ``slurm.*`` settings become Slurm
+workspace's ``.httk-workspace/format.json``: ``slurm.*`` settings become Slurm
 directives and ``manager.workers`` supplies the default worker count.
 
 Every subprocess started here is an argument vector; no shell is ever handed an
@@ -43,9 +43,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol
 
+from .models import WORKSPACE_DIRECTORY
+
 #: Where generated batch scripts and their Slurm output files are kept, relative
 #: to the workspace the manager is started for.
-BATCH_DIRECTORY = ".httk-workflow/batch"
+BATCH_DIRECTORY = f"{WORKSPACE_DIRECTORY}/batch"
 
 #: Workspace settings mapped onto ``#SBATCH`` directives, in written order.
 BATCH_DIRECTIVES = (
@@ -445,7 +447,7 @@ def _count(request: Mapping[str, object]) -> int:
 
 
 def _workspace_settings(kind: str, settings: Mapping[str, object], workspace: str) -> dict[str, Any]:
-    path = Path(workspace) / ".httk-workflow" / "format.json"
+    path = Path(workspace) / WORKSPACE_DIRECTORY / "format.json"
     try:
         if kind == "ssh-slurm":
             completed = _ssh_run(settings, ["head", "-c", str(_WORKSPACE_FORMAT_MAX_BYTES), str(path)])

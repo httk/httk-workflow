@@ -74,7 +74,7 @@ def test_run_passes_cli_resources_over_slurm(tmp_path: Path, monkeypatch: pytest
         pools = frozenset({"default"})
         capabilities: frozenset[str] = frozenset()
         allowed_executors = frozenset({"path"})
-        manager_directory = workspace.root / ".httk-workflow" / "managers" / "manager"
+        manager_directory = workspace.root / ".httk-workspace" / "managers" / "manager"
 
         def __init__(self, _workspace, **kwargs: object) -> None:
             seen.update(kwargs)
@@ -178,7 +178,7 @@ def test_local_count_starts_multiple_manager_processes(tmp_path: Path) -> None:
         )
         == 0
     )
-    managers = list((tmp_path / "workspace" / ".httk-workflow" / "managers").iterdir())
+    managers = list((tmp_path / "workspace" / ".httk-workspace" / "managers").iterdir())
     assert len(managers) == 2
 
 

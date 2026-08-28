@@ -23,7 +23,7 @@ def test_workflow_project_init_does_not_create_a_workspace(tmp_path: Path, capsy
     root = tmp_path / "project"
     assert command(["project", "init", "--name", "detached", str(root)], CLIContext("httk", tmp_path)) == 0
     capsys.readouterr()
-    assert not (root / ".httk-workflow" / "format.json").exists()
+    assert not (root / ".httk-workspace" / "format.json").exists()
 
 
 def test_workflow_project_init_batch_is_one_json_array(tmp_path: Path, capsys) -> None:

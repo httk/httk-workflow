@@ -43,7 +43,7 @@ def _dead_pid() -> int:
 
 
 def _write_lock(project: Path, value: object) -> Path:
-    path = project / ".httk-workflow" / MAINTENANCE_LOCK_FILE
+    path = project / ".httk-workspace" / MAINTENANCE_LOCK_FILE
     path.write_text(value if isinstance(value, str) else json.dumps(value), encoding="utf-8")
     return path
 
@@ -62,7 +62,7 @@ def _lock_json(**overrides: object) -> dict[str, object]:
 def test_guard_records_json_and_removes_it(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch)
     workspace = Workspace(project)
-    path = project / ".httk-workflow" / MAINTENANCE_LOCK_FILE
+    path = project / ".httk-workspace" / MAINTENANCE_LOCK_FILE
     with workspace_maintenance_guard(workspace):
         holder = read_maintenance_lock(workspace)
         assert holder is not None

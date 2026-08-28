@@ -234,7 +234,8 @@ def test_top_level_run_reports_an_idle_timeout_without_a_traceback(tmp_path: Pat
 
     assert command(["run", "--idle-timeout", "0.05"], _context(tmp_path)) == 2
     error = capsys.readouterr().err
-    assert "workspace is not idle after 0s; jobs are still running or claimable" in error
+    assert "workspace is not idle after 0s" in error
+    assert "does not serve pool(s) unserved" in error
     assert "Traceback" not in error
 
 

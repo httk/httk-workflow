@@ -146,7 +146,7 @@ def build_precheck_parser(subparsers: "argparse._SubParsersAction[argparse.Argum
     parser.add_argument(
         "--workspace",
         metavar="WORKSPACE",
-        help="the workspace to precheck (default: this project's workspace, or the per-user default)",
+        help="the workspace to precheck (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
     parser.add_argument("--placement", metavar="PLACEMENT", help="check only jobs at or below this placement")
     parser.add_argument(

@@ -625,7 +625,7 @@ def test_a_sigkilled_manager_process_leaves_a_job_a_fresh_manager_finishes(tmp_p
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    state_running = root / ".httk-workflow" / "state" / "running"
+    state_running = root / ".httk-workspace" / "state" / "running"
     try:
         running = _wait_for(lambda: any(path.is_file() for path in state_running.rglob("*")))
         if running:

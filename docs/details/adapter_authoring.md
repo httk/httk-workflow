@@ -314,16 +314,16 @@ target.
 manifest must not be able to name anything outside the workspace it came from.
 
 ```json
-{"destination": "/scratch/me/runs/.httk-workflow/transfers/incoming/6f1c…",
+{"destination": "/scratch/me/runs/.httk-workspace/transfers/incoming/6f1c…",
  "format": "httk-computer-request", "format_version": 2, "operation": "push",
- "source": "/home/me/ws/.httk-workflow/transfers/outgoing/6f1c…",
+ "source": "/home/me/ws/.httk-workspace/transfers/outgoing/6f1c…",
  "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
  "remote_settings": {"host": "login.example.org"}}
 ```
 
 ```json
 {"format": "httk-computer-result", "format_version": 2, "operation": "push", "ok": true,
- "path": "/scratch/me/runs/.httk-workflow/transfers/incoming/6f1c…"}
+ "path": "/scratch/me/runs/.httk-workspace/transfers/incoming/6f1c…"}
 ```
 
 `path` is where the data actually landed, and callers use it rather than the
@@ -367,7 +367,7 @@ Batch implementations report the submitted identifiers:
 ```json
 {"count": 2, "format": "httk-computer-result", "format_version": 2,
  "job_ids": ["1840271", "1840272"], "operation": "start-manager", "ok": true,
- "script": "/scratch/me/runs/.httk-workflow/batch/manager-9c1f….sbatch"}
+ "script": "/scratch/me/runs/.httk-workspace/batch/manager-9c1f….sbatch"}
 ```
 
 Process implementations report the process identifiers instead, with `pid`

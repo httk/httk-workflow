@@ -205,7 +205,7 @@ def build_build_parser(subparsers: "argparse._SubParsersAction[argparse.Argument
     parser.add_argument(
         "--workspace",
         metavar="WORKSPACE",
-        help="the workspace to build workflow runners in (default: this project's workspace, or the per-user default)",
+        help="the workspace to build workflow runners in (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
     _add_by_path_argument(parser)
     parser.add_argument(

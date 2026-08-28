@@ -211,12 +211,12 @@ is best effort rather than a strict global ordering guarantee.
 ## Workspace layout and arbitrary placement
 
 A workspace is an ordinary directory. Its protocol control data are below
-`WORKSPACE/.httk-workflow/`; job payload directories may be placed at any valid
+`WORKSPACE/.httk-workspace/`; job payload directories may be placed at any valid
 relative path outside that reserved directory:
 
 ```text
 WORKSPACE/
-├── .httk-workflow/
+├── .httk-workspace/
 │   ├── format.json
 │   ├── tmp/
 │   ├── quarantine/
@@ -260,7 +260,7 @@ Here the job placement is `project-17/0/03a`. Its authoritative marker has a
 parallel path such as:
 
 ```text
-.httk-workflow/state/ready/project-17/0/03a/
+.httk-workspace/state/ready/project-17/0/03a/
 └── silicon-relax--01234567-89ab-cdef-0123-456789abcdef.p500.g4.<record-ref>
 ```
 
@@ -332,12 +332,12 @@ Managers therefore provide best-effort priority scheduling: a cold start and an
 incremental scan may temporarily discover lower-priority work first. Strict
 global priority is not a guarantee of this protocol.
 
-`.httk-workflow/tmp/` contains unpublished entries. Task managers MUST ignore
+`.httk-workspace/tmp/` contains unpublished entries. Task managers MUST ignore
 it for scheduling. Garbage collection may remove old temporary entries, but
 correctness MUST NOT depend on cleanup.
 
 Placement components MUST be normalized relative path components. Empty
-components, `.`, `..`, NUL bytes, and `.httk-workflow` are forbidden. Each
+components, `.`, `..`, NUL bytes, and `.httk-workspace` are forbidden. Each
 component must fit the underlying filesystem's filename limit. A workspace MAY set
 policy limits on depth and total relative path length, but these are operational
 limits rather than a protocol sharding scheme.
@@ -367,7 +367,13 @@ A task manager accepts any combination of:
 
 - explicit workspace paths;
 - watch roots below which it discovers directories containing
-  `.httk-workflow/format.json`.
+  `.httk-workspace/format.json`.
+
+Commands that omit `--workspace` resolve the closest enclosing workspace by
+walking upward from the current directory. This takes precedence over the
+project's recorded default, the registry default, and the auto-created
+per-user default, in that order. The walk treats a file current path as its
+containing directory and stops only at the filesystem root.
 
 The manager identifies a workspace by `workspace_id`, not its current absolute path.
 The same underlying workspace discovered through two path aliases is attached
@@ -391,9 +397,9 @@ WORKSPACE/project-a/00/17/<job-key>
 WORKSPACE/project-b/hash/x9/<job-key>
 
 # A watch root containing self-contained project workspaces
-WATCH/project-a/.httk-workflow/format.json
+WATCH/project-a/.httk-workspace/format.json
 WATCH/project-a/00/17/<job-key>
-WATCH/project-b/.httk-workflow/format.json
+WATCH/project-b/.httk-workspace/format.json
 WATCH/project-b/hash/x9/<job-key>
 ```
 
@@ -481,8 +487,8 @@ Consequently, an operator can use ordinary shell completion or `find` to find
 both payload and state:
 
 ```bash
-find . -path './.httk-workflow' -prune -o -type d -name 'silicon-relax--*' -print
-find .httk-workflow/state -type f -name 'silicon-relax--*'
+find . -path './.httk-workspace' -prune -o -type d -name 'silicon-relax--*' -print
+find .httk-workspace/state -type f -name 'silicon-relax--*'
 ```
 
 Renaming a tag by hand is forbidden because the payload and state key must
@@ -505,7 +511,7 @@ and the bundle is not schedulable until import republishes that marker.
 For example:
 
 ```text
-.httk-workflow/state/ready/project-17/0/03a/
+.httk-workspace/state/ready/project-17/0/03a/
 └── silicon-relax--01234567-89ab-cdef-0123-456789abcdef.p500.g4.<record-ref>
 ```
 
@@ -916,7 +922,7 @@ to `payload`:
 | `runner.source` | Root of `runner.path` |
 | --- | --- |
 | `payload` | the job's own payload directory |
-| `workspace` | `<workspace>/.httk-workflow/runners/` |
+| `workspace` | `<workspace>/.httk-workspace/runners/` |
 | `installed` | one ordered runner search path configured in the manager |
 
 `runner.path` MUST remain beneath its root under every source. `arguments` is an
@@ -998,14 +1004,14 @@ correctness.
 
 To submit:
 
-1. Create a complete job below `.httk-workflow/tmp/`, including `job.json` and
+1. Create a complete job below `.httk-workspace/tmp/`, including `job.json` and
    any initial `files/` or `data/`.
 2. Choose any placement and atomically rename it to
    `<workspace>/<placement>/<job-key>/`.
 3. Create a temporary zero-length marker named
    `<job-key>.p<priority>.g0.init`.
 4. Atomically rename that marker to
-   `.httk-workflow/state/submitted/<placement>/<job-key>.p<priority>.g0.init`.
+   `.httk-workspace/state/submitted/<placement>/<job-key>.p<priority>.g0.init`.
 
 Step 4 is the **submission commit point**. Before it, the placed payload is an
 unsubmitted orphan and may be completed, retried, or eventually collected.
@@ -1037,7 +1043,7 @@ Implementations MUST NOT leave invalid jobs indefinitely in `submitted`.
 
 An entry whose marker name or placement is itself not parseable cannot enter
 the normal job state machine. A workspace repair tool moves it to a shared
-`.httk-workflow/quarantine/` area outside `state/`; managers report it loudly
+`.httk-workspace/quarantine/` area outside `state/`; managers report it loudly
 and never schedule it. Names in quarantine MUST preserve or record the original
 relative path without permitting collisions or traversal. Quarantine is
 exceptional workspace corruption, not another job state.
@@ -1799,7 +1805,7 @@ files are required.
 
 ### Moving new jobs into a running workspace
 
-Files may be copied or generated under `.httk-workflow/tmp/` while managers
+Files may be copied or generated under `.httk-workspace/tmp/` while managers
 continue working. The complete payload is renamed to any chosen placement and
 becomes schedulable only when its `submitted` marker is published. A partial
 copy has no marker and is invisible.
@@ -2415,7 +2421,7 @@ is still acting on, and re-pointing it at an older frame would take away the
 attempt identity that manager needs to finish stopping and verifying the
 process. A marker with no readable older frame is
 unrepairable and is likewise reported, and may be moved into
-`.httk-workflow/quarantine/` only when an operator asks for that explicitly.
+`.httk-workspace/quarantine/` only when an operator asks for that explicitly.
 
 ## Garbage collection and compaction
 
@@ -2458,7 +2464,7 @@ not an orphan even though it has no marker in a workspace state tree. Generic
 temporary/orphan GC MUST NOT collect, alter, or unseal it. Only an explicit
 transfer import, abort, or transfer-specific retention action may do so.
 
-Entries in `.httk-workflow/quarantine/` are likewise outside generic orphan
+Entries in `.httk-workspace/quarantine/` are likewise outside generic orphan
 GC. They are removed only by an explicit repair decision or a separately
 configured quarantine-retention policy that preserves an audit record.
 
@@ -2481,12 +2487,12 @@ information, plus the one conditional case of a terminal marker whose payload
 the operator removed; they are collected whatever `policy.retention` says:
 
 - an empty placement mirror below a state kind, pruned by `rmdir` alone;
-- an entry still sitting in `.httk-workflow/tmp/` or
-  `.httk-workflow/requests/tmp/` more than 24 hours after it was written, since
+- an entry still sitting in `.httk-workspace/tmp/` or
+  `.httk-workspace/requests/tmp/` more than 24 hours after it was written, since
   every publication renames its staging entry away within one operation;
-- a request in `.httk-workflow/requests/claimed/<manager-id>/` more than 30
+- a request in `.httk-workspace/requests/claimed/<manager-id>/` more than 30
   days old whose manager is no longer heartbeating;
-- a request in `.httk-workflow/requests/retired/`, and its `.retirement`
+- a request in `.httk-workspace/requests/retired/`, and its `.retirement`
   record, more than 30 days old. A retired request was already decided about
   and is never rescanned, so it is evidence for an operator and nothing else.
 - a terminal marker whose complete payload directory is absent. It is removed
@@ -2575,11 +2581,11 @@ The layout is intentionally legible without a database:
 - `state/waiting/` is the join backlog;
 - `state/failed/` is the current broken-job collection;
 - `state/succeeded/` is the finalized-success collection;
-- `.httk-workflow/quarantine/` contains malformed entries requiring workspace
+- `.httk-workspace/quarantine/` contains malformed entries requiring workspace
   repair rather than workflow scheduling;
 - every marker begins with the optional human tag plus UUID job key;
 - the matching payload is at the same relative placement outside
-  `.httk-workflow`;
+  `.httk-workspace`;
 - a first placement component such as `project-17` groups a project without
   imposing a protocol-specific hierarchy.
 

@@ -56,6 +56,7 @@ QUIESCENT_KINDS = frozenset({"submitted", "ready", "waiting", "paused", "failed"
 # travel with it, and neither is part of what the payload digest pins.
 ATTEMPT_CONTROL_PREFIX = ".httk-attempt."
 JOB_STATE_DIRECTORY = ".httk-job"
+WORKSPACE_DIRECTORY = ".httk-workspace"
 # Workspace policy: the tunables the specification calls "configured", stored
 # once in format.json so that two implementations attaching the same workspace
 # cannot disagree about them.
@@ -98,7 +99,7 @@ _DECLARATION_NAME_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,63}")
 _FAILURE_MEMBERS = frozenset({"code", "message", "details", "retryable"})
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _MODULE_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*")
-_UNSAFE_PATH_COMPONENTS = frozenset({"", ".", "..", ".httk-workflow"})
+_UNSAFE_PATH_COMPONENTS = frozenset({"", ".", "..", WORKSPACE_DIRECTORY})
 
 
 def canonical_uuid(value: object, name: str = "id") -> str:
@@ -535,7 +536,7 @@ def normalize_placement(value: str | PurePosixPath) -> PurePosixPath:
     if placement.is_absolute() or not placement.parts:
         raise FormatError("placement must be a nonempty relative POSIX path")
     for part in placement.parts:
-        if part in {"", ".", "..", ".httk-workflow"} or "\x00" in part:
+        if part in _UNSAFE_PATH_COMPONENTS or "\x00" in part:
             raise FormatError(f"invalid placement component: {part!r}")
         if len(part.encode()) > 255:
             raise FormatError(f"placement component is too long: {part!r}")

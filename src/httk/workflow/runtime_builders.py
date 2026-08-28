@@ -31,6 +31,7 @@ from ._util import (
 )
 from .errors import FormatError
 from .models import (
+    _UNSAFE_PATH_COMPONENTS,
     JOB_STATE_DIRECTORY,
     JobDefinition,
     normalize_placement,
@@ -52,12 +53,14 @@ if TYPE_CHECKING:
 type OutcomeAction = Literal["advance", "retry", "wait", "succeed", "fail", "pause"]
 type JoinCondition = Literal["all_succeeded", "all_terminal", "any_succeeded", "any_terminal", "at_least"]
 
+_RUNNER_UNSAFE_PATH_COMPONENTS = _UNSAFE_PATH_COMPONENTS | {".httk-runner"}
+
 
 def _relative(value: str | os.PathLike[str], name: str) -> PurePosixPath:
     result = PurePosixPath(os.fspath(value))
     if result.is_absolute() or not result.parts:
         raise ValueError(f"{name} must be a nonempty relative path")
-    if any(part in {"", ".", "..", ".httk-workflow", ".httk-runner"} or "\x00" in part for part in result.parts):
+    if any(part in _RUNNER_UNSAFE_PATH_COMPONENTS or "\x00" in part for part in result.parts):
         raise ValueError(f"{name} is not a safe normalized relative path")
     return result
 

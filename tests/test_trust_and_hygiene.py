@@ -554,9 +554,9 @@ def test_project_doctor_reports_then_repairs(tmp_path: Path, monkeypatch) -> Non
     metadata = read_project(project)
     del metadata["public_key"]
     _write_project(project, metadata)
-    lock = project / ".httk-workflow" / "maintenance.lock"
+    lock = project / ".httk-workspace" / "maintenance.lock"
     lock.write_text(json.dumps({"pid": 1, "hostname": "gone.example.test", "created": "2000-01-01T00:00:00.000000Z"}))
-    leftover = project / ".httk-workflow" / "tmp" / "import.abandoned"
+    leftover = project / ".httk-workspace" / "tmp" / "import.abandoned"
     leftover.mkdir(parents=True, exist_ok=True)
     old = time.time() - 3 * 24 * 60 * 60
     os.utime(leftover, (old, old))
@@ -592,7 +592,7 @@ def test_project_doctor_journals_what_it_repaired(tmp_path: Path, monkeypatch) -
     del metadata["public_key"]
     _write_project(project, metadata)
 
-    journal = project / ".httk-workflow" / "journal"
+    journal = project / ".httk-workspace" / "journal"
     assert project_doctor(project)["repaired"] == 0
     # A read-only check opens no writer, so it creates no writer directory.
     assert not list(journal.glob("*/*.hwj"))
@@ -684,7 +684,7 @@ def test_detached_project_manifests_and_reports_its_recorded_workspace(tmp_path:
     (project / "content.txt").write_text("content\n", encoding="utf-8")
 
     create_manifest(project)
-    assert not (project / ".httk-workflow").exists()
+    assert not (project / ".httk-workspace").exists()
     description = _fields(describe_project(project, verify=False))
     assert description["workspace"]["present"] is False
     assert description["workspace"]["default"] == {"name": "runs", "resolves": True}

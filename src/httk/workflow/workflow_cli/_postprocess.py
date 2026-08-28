@@ -114,7 +114,7 @@ def build_postprocess_parser(subparsers: argparse._SubParsersAction[argparse.Arg
     parser.add_argument(
         "--workspace",
         metavar="WORKSPACE",
-        help="the workspace to postprocess (default: this project's workspace, or the per-user default)",
+        help="the workspace to postprocess (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
     parser.add_argument("--script", required=True, metavar="NAME", help="declared postprocess script name")
     parser.add_argument("--workflow-dir", metavar="PKG", help="use this workflow package for every job")

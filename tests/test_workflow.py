@@ -79,7 +79,7 @@ os.rename(temporary, control / "outcome.ready")
 
 
 def test_journal_round_trip(tmp_path: Path) -> None:
-    control = tmp_path / ".httk-workflow"
+    control = tmp_path / ".httk-workspace"
     (control / "journal").mkdir(parents=True)
     with JournalWriter(control) as writer:
         reference = writer.append({"answer": 42})

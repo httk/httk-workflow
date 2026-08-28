@@ -16,6 +16,7 @@ from ._util import read_json, write_json_atomic
 from .adapters import resolve_remote, valid_remote_name
 from .configuration import config_home, data_home, machine_names
 from .errors import ResolutionMiss
+from .models import WORKSPACE_DIRECTORY
 from .projects import discover_project, read_project_section
 from .workspace import Workspace
 
@@ -228,7 +229,7 @@ def forget_workspace(name: str, *, durable: bool = True, force: bool = False) ->
     binding = _local_binding(name)
     assert binding.path is not None
     if not force:
-        transfers = Path(binding.path) / ".httk-workflow" / "transfers"
+        transfers = Path(binding.path) / WORKSPACE_DIRECTORY / "transfers"
         pending = []
         for ledger_path in sorted(transfers.glob("*.json")) if transfers.is_dir() else ():
             ledger = read_json(ledger_path)
@@ -285,7 +286,7 @@ def default_workspace(*, project: str | os.PathLike[str] | None = None, durable:
         pass
 
     root = data_home() / "workspace"
-    format_path = root / ".httk-workflow" / "format.json"
+    format_path = root / WORKSPACE_DIRECTORY / "format.json"
     if not format_path.exists():
         try:
             Workspace.initialize(root, durable=durable)
@@ -294,7 +295,7 @@ def default_workspace(*, project: str | os.PathLike[str] | None = None, durable:
             while not format_path.is_file() and time.monotonic() < deadline:
                 time.sleep(0.01)
             if not format_path.is_file():
-                control = root / ".httk-workflow"
+                control = root / WORKSPACE_DIRECTORY
                 raise ValueError(
                     f"default workspace initialization left a partial directory at {control}; "
                     f"delete {control} and retry"
@@ -380,6 +381,6 @@ def remove_local_workspace(path: Path) -> None:
     :raises ValueError: If the path is not a workflow workspace.
     """
     resolved = path.expanduser().resolve()
-    if not (resolved / ".httk-workflow" / "format.json").is_file():
+    if not (resolved / WORKSPACE_DIRECTORY / "format.json").is_file():
         raise ValueError(f"not an httk workflow workspace: {resolved}")
     shutil.rmtree(resolved)

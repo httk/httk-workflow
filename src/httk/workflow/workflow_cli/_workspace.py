@@ -10,7 +10,7 @@ from ..adapters import REMOTE_WORKSPACE_DELETE_COMMAND, REMOTE_WORKSPACE_INIT_CO
 from ..configuration import machine_names
 from ..introspection import read_managers
 from ..manifests import read_maintenance_lock, workspace_maintenance_guard
-from ..models import DEFAULT_LEASE_SECONDS
+from ..models import DEFAULT_LEASE_SECONDS, WORKSPACE_DIRECTORY
 from ..projects import read_project_section, require_project, write_project_section
 from ..registry import _update_workspace_path, valid_workspace_name
 from ._common import *
@@ -71,7 +71,7 @@ def _add_workspace_targets(parser: argparse.ArgumentParser, *, help_text: str, r
         "workspace",
         metavar="WORKSPACE",
         nargs="+" if required else "*",
-        help=f"{help_text} (default: this project's workspace, or the per-user default)",
+        help=f"{help_text} (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
 
 
@@ -139,7 +139,7 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
     root = (Path(context.cwd) / local_path).resolve()
     name = arguments.name or root.name
     valid_workspace_name(name)
-    format_path = root / ".httk-workflow" / "format.json"
+    format_path = root / WORKSPACE_DIRECTORY / "format.json"
     if format_path.exists():
         if settings:
             raise ValueError("existing workspace adopted unchanged; use `workspace settings set`")
@@ -394,7 +394,7 @@ def handle_workspace_list(arguments: argparse.Namespace, context: CLIContext) ->
     rows: list[dict[str, object]] = []
     for binding in list_workspaces():
         assert binding.path is not None
-        reachable = (Path(binding.path) / ".httk-workflow" / "format.json").is_file()
+        reachable = (Path(binding.path) / WORKSPACE_DIRECTORY / "format.json").is_file()
         rows.append(
             {
                 "name": binding.name,

@@ -21,7 +21,7 @@ from httk.core.digests import sha256_file
 from httk.core.project import LegacyProjectError
 
 from ._util import json_bytes, retry_delay, timestamp_seconds, utc_now
-from .models import QUIESCENT_KINDS, STATE_KINDS
+from .models import QUIESCENT_KINDS, STATE_KINDS, WORKSPACE_DIRECTORY
 from .projects import (
     PROJECT_DIRECTORY,
     PROJECT_FILE,
@@ -328,7 +328,7 @@ def create_manifest(
         exclusions = (*exclusions, destination.relative_to(root).as_posix())
     workspace = (
         Workspace(root)
-        if (root / PROJECT_DIRECTORY).is_dir() and (root / ".httk-workflow" / "format.json").is_file()
+        if (root / PROJECT_DIRECTORY).is_dir() and (root / WORKSPACE_DIRECTORY / "format.json").is_file()
         else None
     )
     guard = workspace_maintenance_guard(workspace) if workspace is not None else nullcontext()

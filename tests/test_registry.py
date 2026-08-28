@@ -109,7 +109,7 @@ def test_default_workspace_lazily_uses_data_home(tmp_path: Path) -> None:
     binding = default_workspace(project=tmp_path)
     assert binding == WorkspaceBinding("default", "local", str((data_home() / "workspace").resolve()))
     assert binding.path is not None
-    assert Path(binding.path).joinpath(".httk-workflow", "format.json").is_file()
+    assert Path(binding.path).joinpath(".httk-workspace", "format.json").is_file()
 
 
 def test_create_and_delete_are_local_only(tmp_path: Path) -> None:

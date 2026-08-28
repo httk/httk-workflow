@@ -13,7 +13,7 @@ from .._runner_builds import workspace_build_command
 from ..adapters import probe_remote_workspace
 from ..adapters import run_adapter as read_adapter
 from ..errors import ResolutionMiss, WorkflowError
-from ..models import QUIESCENT_KINDS, JobDefinition
+from ..models import QUIESCENT_KINDS, WORKSPACE_DIRECTORY, JobDefinition
 from ..packages import read_build_spec
 from ..precheck import environment_findings
 from ..transfers import DEFAULT_OFFER_STATES, TransferCandidate, offer_transfers, select_transfer_jobs
@@ -565,7 +565,7 @@ def _send_jobs_to_remote(
             destination_placement=destination_placement,
             transfer_id=transfer_id,
         )
-        incoming = f"{destination_root.rstrip('/')}/.httk-workflow/transfers/incoming/{transfer_id}"
+        incoming = f"{destination_root.rstrip('/')}/{WORKSPACE_DIRECTORY}/transfers/incoming/{transfer_id}"
         push = run_adapter(
             target.bundle,
             "push",
@@ -986,7 +986,7 @@ def _transfer_remote_to_remote(
                 timeout=timeout,
             )
             local_bundle = str(pulled.get("path", staging))
-            incoming = f"{destination_root.rstrip('/')}/.httk-workflow/transfers/incoming/{transfer_id}"
+            incoming = f"{destination_root.rstrip('/')}/{WORKSPACE_DIRECTORY}/transfers/incoming/{transfer_id}"
             pushed = run_adapter(
                 destination_target.bundle,
                 "push",

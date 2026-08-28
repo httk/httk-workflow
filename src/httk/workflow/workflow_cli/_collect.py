@@ -405,7 +405,7 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
     parser.add_argument(
         "--workspace",
         metavar="WORKSPACE",
-        help="the workspace to collect from (default: this project's workspace, or the per-user default)",
+        help="the workspace to collect from (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
     parser.add_argument(
         "--state",

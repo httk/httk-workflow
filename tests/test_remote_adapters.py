@@ -24,7 +24,7 @@ from httk.workflow.workflow_cli import command
 
 
 def test_start_manager_rejects_a_workspace_format_at_the_size_limit(tmp_path: Path) -> None:
-    path = tmp_path / ".httk-workflow" / "format.json"
+    path = tmp_path / ".httk-workspace" / "format.json"
     path.parent.mkdir()
     path.write_bytes(b"{" + b" " * (1024 * 1024 - 1))
     with pytest.raises(ValueError, match="workspace format too large"):
@@ -306,7 +306,7 @@ def test_ssh_start_manager_generates_and_submits_the_batch_script(tmp_path: Path
     assert result["count"] == 3
     assert result["job_ids"] == ["4201", "4202", "4203"]
     script_path = Path(str(result["script"]))
-    assert script_path.parent == workspace.root / ".httk-workflow" / "batch"
+    assert script_path.parent == workspace.root / ".httk-workspace" / "batch"
     script = script_path.read_text(encoding="utf-8")
     assert script.startswith("#!/bin/bash -l\n")
     assert "#SBATCH --account=p2026-1" in script
@@ -399,7 +399,7 @@ def test_start_manager_prefers_the_stated_workspace_over_the_configured_default(
     )
 
     script_path = Path(str(result["script"]))
-    assert script_path.parent == workspace.root / ".httk-workflow" / "batch"
+    assert script_path.parent == workspace.root / ".httk-workspace" / "batch"
     assert f"#SBATCH --chdir={workspace.root}" in script_path.read_text(encoding="utf-8")
 
 
@@ -525,7 +525,7 @@ def test_local_slurm_start_manager_submits_with_the_local_sbatch(tmp_path: Path,
     )
 
     script_path = Path(str(result["script"]))
-    assert script_path.parent == workspace.root / ".httk-workflow" / "batch"
+    assert script_path.parent == workspace.root / ".httk-workspace" / "batch"
     assert "#SBATCH --partition=devel" in script_path.read_text(encoding="utf-8")
     assert result["job_ids"] == ["4201", "4202"]
     assert len(list(remote.spool.glob("*.json"))) == 2

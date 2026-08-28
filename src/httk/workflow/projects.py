@@ -43,6 +43,8 @@ from httk.core.project import (
 from httk.core.project import import_v1_project as _import_v1_anchor
 from httk.core.project import initialize_project as _initialize_anchor
 
+from .models import WORKSPACE_DIRECTORY
+
 __all__ = [
     "DEFAULT_MANIFEST_EXCLUSIONS",
     "PROJECT_DIRECTORY",
@@ -101,8 +103,8 @@ DEFAULT_MANIFEST_EXCLUSIONS = (
     ".httk-project/remotes/**/credentials*",
     ".httk-project/computers/**/credentials*",
     ".httk-project/manifest.jsonl.bz2",
-    ".httk-workflow",
-    ".httk-workflow/**",
+    WORKSPACE_DIRECTORY,
+    f"{WORKSPACE_DIRECTORY}/**",
     ".httk-attempt.*",
     ".httk-attempt.*/**",
     ".httk-job",

@@ -38,6 +38,7 @@ from .models import (
     CORE_STATE_KINDS,
     STATE_KINDS,
     SUPPORTED_EXTENSIONS,
+    WORKSPACE_DIRECTORY,
     JobDefinition,
     Marker,
     WorkspacePolicy,
@@ -252,7 +253,7 @@ class Workspace:
             raise ValueError("marker_index_capacity must be positive")
         self._marker_index_capacity = marker_index_capacity
         self.root = Path(root).resolve()
-        self.control = self.root / ".httk-workflow"
+        self.control = self.root / WORKSPACE_DIRECTORY
         self.runners = self.control / "runners"
         self.runner_builds = self.control / "runner-builds"
         self.durable = durable
@@ -343,7 +344,7 @@ class Workspace:
         name_max = os.pathconf(root_path, "PC_NAME_MAX")
         if name_max < 213:
             raise FormatError(f"filesystem NAME_MAX {name_max} is below the {CORE_PROFILE} requirement of 213")
-        control = root_path / ".httk-workflow"
+        control = root_path / WORKSPACE_DIRECTORY
         control.mkdir(exist_ok=False)
         for relative in (
             "tmp",
@@ -376,11 +377,35 @@ class Workspace:
         return cls(root_path, durable=durable)
 
     @classmethod
+    def discover(cls, start: str | os.PathLike[str] | None = None) -> Path | None:
+        """Find the nearest workspace root at or above *start*.
+
+        Discovery walks from *start* and its parents, treating a file start as
+        its containing directory.
+
+        :param start: Directory or file from which to begin the upward search, or None for the current directory.
+        :return: Nearest workspace root, or None when no workspace marker is found.
+        """
+
+        path = Path.cwd() if start is None else Path(start)
+        path = path.expanduser().resolve()
+        if path.is_file():
+            path = path.parent
+        for candidate in (path, *path.parents):
+            if (candidate / WORKSPACE_DIRECTORY / "format.json").is_file():
+                return candidate
+        return None
+
+    @classmethod
     def default(cls) -> Self:
-        """Resolve the project or per-user default workspace, creating it if needed.
+        """Resolve the enclosing, project, or per-user default workspace, creating it if needed.
 
         :return: The default workspace.
         """
+
+        discovered = cls.discover()
+        if discovered is not None:
+            return cls(discovered)
 
         from . import registry
 
@@ -635,7 +660,7 @@ class Workspace:
     def runner_store_path(self, path: str | PurePosixPath) -> Path:
         """Return the store location of one workspace runner.
 
-        The store is flat and name-keyed below ``.httk-workflow/runners/``.
+        The store is flat and name-keyed below ``.httk-workspace/runners/``.
         Relative subdirectories are permitted so a campaign can group runners,
         but a name can never escape the store.
 

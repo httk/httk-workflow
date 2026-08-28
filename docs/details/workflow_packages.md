@@ -228,7 +228,7 @@ one `any` registration, so every node uses the same binary regardless of its
 architecture.
 
 Registrations live under
-`WORKSPACE/.httk-workflow/runner-builds/<store-name>/<tag>/current.json`, which
+`WORKSPACE/.httk-workspace/runner-builds/<store-name>/<tag>/current.json`, which
 points to `<tag>/gen-*/artifacts/`. Each generation's `build.json` stamp records
 the source digest, command, platform probe, and time; the sibling `<tag>.log`
 records the command metadata and exit status. Re-registration leaves prior

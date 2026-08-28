@@ -7,11 +7,12 @@ Every command below is under `httk workflow …`; see
 
 ## Initialize a workspace
 
-`WORKSPACE` is optional inside a project: omitting it uses the project's
-recorded default, or the per-user default workspace when none is recorded. A
-project does not contain workspaces; record its routing explicitly with
-`workspace default NAME`. Explicit local names are created with
-`workspace init PATH`; an existing path is adopted and registered. `REMOTE:PATH`
+`WORKSPACE` is optional: omitting it uses the closest enclosing workspace,
+then the project's recorded default, the registry default, or the per-user
+default workspace when none is found. A project does not contain workspaces;
+record its routing explicitly with `workspace default NAME`. Explicit local
+names are created with `workspace init PATH`; an existing path is adopted and
+registered. `REMOTE:PATH`
 initializes and names a workspace on that remote.
 
 ```console
@@ -65,7 +66,7 @@ remote job stops, then `httk workflow collect` locally.
 
 Four tunables belong to the workspace rather than to any one process, so that
 every manager, CLI, and independent implementation attaching it agrees on them.
-They live in `.httk-workflow/format.json` and are read and written with:
+They live in `.httk-workspace/format.json` and are read and written with:
 
 ```console
 httk workflow workspace policy show WORKSPACE
@@ -467,7 +468,7 @@ lease is logged as a warning, and nine tenths of it as an error: raise
 
 Every claim, launch, transition, recovery decision, and refused request is
 logged. The console reports warnings and errors, while the complete info-level
-record is rotated into `.httk-workflow/managers/MANAGER_ID/log`. `--log-level`
+record is rotated into `.httk-workspace/managers/MANAGER_ID/log`. `--log-level`
 raises or lowers both, `--log-file` moves the file, and `--json-logs` emits one
 JSON object per line for ingestion.
 
@@ -577,7 +578,7 @@ shape-checks the request).
 Requests capture the exact current marker generation and record reference.
 A delayed request therefore cannot mutate a newer job state. One that can never
 apply again — because the job has moved on — is moved to
-`.httk-workflow/requests/retired/` with the reason recorded beside it instead
+`.httk-workspace/requests/retired/` with the reason recorded beside it instead
 of being reread on every pass; a request for a runner executor this manager does
 not serve is left alone for a manager that does.
 
@@ -651,7 +652,7 @@ Two things are deliberately never repaired:
   for its lease to expire, and run the repair again;
 - a marker with no readable older frame — typically a job damaged before its
   second transition — cannot be restored at all. It is reported, and moved into
-  `.httk-workflow/quarantine/` with an audit record only if
+  `.httk-workspace/quarantine/` with an audit record only if
   `--quarantine-unrepairable` is also given.
 
 Run it when a node crashed while writing, when a filesystem was restored from a

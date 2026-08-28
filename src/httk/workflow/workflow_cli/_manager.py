@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from ..adapters import submit_remote_managers
 from ..errors import FormatError
 from ..manager import NotIdleError
-from ..models import validate_resources
+from ..models import WORKSPACE_DIRECTORY, validate_resources
 from ._common import *
 from ._common import (
     _LOGGER,
@@ -132,7 +132,7 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--workspace",
         metavar="WORKSPACE",
-        help="the workspace this manager serves (default: this project's workspace, or the per-user default)",
+        help="the workspace this manager serves (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
     parser.add_argument(
         "--pool",
@@ -264,7 +264,7 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--log-file",
         metavar="PATH",
-        help="manager log file (default: WORKSPACE/.httk-workflow/managers/MANAGER_ID/log)",
+        help=f"manager log file (default: WORKSPACE/{WORKSPACE_DIRECTORY}/managers/MANAGER_ID/log)",
     )
     parser.add_argument("--json-logs", action="store_true", help="log one JSON object per line")
     add_durability_arguments(parser)
@@ -276,7 +276,7 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--workspace",
         metavar="WORKSPACE",
-        help="the workspace this manager serves (default: this project's workspace, or the per-user default)",
+        help="the workspace this manager serves (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
     parser.add_argument(
         "--pool",

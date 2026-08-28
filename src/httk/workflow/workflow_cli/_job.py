@@ -38,7 +38,7 @@ def _add_workspace_option(parser: argparse.ArgumentParser, *, help_text: str) ->
     parser.add_argument(
         "--workspace",
         metavar="WORKSPACE",
-        help=f"{help_text} (default: this project's workspace, or the per-user default)",
+        help=f"{help_text} (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
 
 

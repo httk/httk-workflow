@@ -273,7 +273,7 @@ def add_workspace_argument(parser: argparse.ArgumentParser, *, help_text: str) -
         metavar="WORKSPACE",
         nargs="?",
         default=None,
-        help=f"{help_text} (default: this project's workspace, or the per-user default)",
+        help=f"{help_text} (default: the enclosing workspace, this project's workspace, or the per-user default)",
     )
 
 
@@ -464,11 +464,13 @@ def _field(name: str, value: object) -> str:
 # ---------------------------------------------------------------------------
 # Workspace name resolution
 #
-# Every user-typed command names a *registered* workspace, never a bare path.
-# The helpers below turn that name into either a local path or a remote binding.
-# The one exception is ``--by-path``: a hidden switch the transfer choreography
-# and remote-workspace creation set when one machine invokes a command on
-# another, where there is no registry and the workspace is addressed by its path.
+# Every explicitly named workspace is a registered name, never a bare path. The
+# helpers below turn that name into either a local path or a remote binding.
+# An omitted name may resolve to an enclosing workspace path. The other
+# unregistered path spelling is ``--by-path``: a hidden switch the transfer
+# choreography and remote-workspace creation set when one machine invokes a
+# command on another, where there is no registry and the workspace is addressed
+# by its path.
 # ---------------------------------------------------------------------------
 
 
@@ -483,15 +485,21 @@ def _resolve_binding(arguments: argparse.Namespace, context: CLIContext) -> tupl
 
     ``--by-path`` yields ``(None, path)``: a literal filesystem path with no
     registry lookup, for the protocol spellings one machine runs on another. A
-    registered name yields the binding, and its path too when the binding is
-    local; a remote binding yields ``(binding, None)`` so the caller either
-    dispatches over the adapter or refuses.
+    missing workspace argument first checks for an enclosing workspace and
+    yields ``(None, path)`` in the same way. A registered name yields the
+    binding, and its path too when the binding is local; a remote binding yields
+    ``(binding, None)`` so the caller either dispatches over the adapter or
+    refuses.
     """
 
     if _by_path(arguments):
         if arguments.workspace is None:
             raise ValueError("--by-path requires an explicit path")
         return None, Path(arguments.workspace)
+    if arguments.workspace is None:
+        discovered = Workspace.discover(context.cwd)
+        if discovered is not None:
+            return None, discovered
     binding = (
         default_workspace(project=context.cwd)
         if arguments.workspace is None

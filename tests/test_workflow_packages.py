@@ -1020,7 +1020,7 @@ def test_directory_workflow_scaffolds_from_the_published_tree_and_pins_declarati
     # tree. Assert the hook ran from a published runner store, not which one.
     instantiated = (job.payload / "instantiated.txt").read_text(encoding="utf-8")
     assert instantiated.endswith("instantiate.py")
-    assert "/.httk-workflow/runners/" in instantiated
+    assert "/.httk-workspace/runners/" in instantiated
     digest = str(job.runner["path"]).rsplit(".", 1)[-1]
     assert Path(instantiated).parent.name.endswith(digest)
     assert workspace.runner_store_path(job.runner["path"]).is_dir()  # type: ignore[arg-type]

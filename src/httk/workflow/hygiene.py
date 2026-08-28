@@ -33,7 +33,7 @@ from .manifests import (
     release_maintenance_lock,
     verify_manifest,
 )
-from .models import STATE_KINDS
+from .models import STATE_KINDS, WORKSPACE_DIRECTORY
 from .projects import (
     PROJECT_DIRECTORY,
     discover_project,
@@ -71,7 +71,7 @@ DOCTOR_REPORT_FORMAT = "httk-project-doctor"
 #: so every reader that walks the journal for job history ignores it.
 DOCTOR_FRAME_FORMAT = "httk-workflow-doctor"
 
-#: How long a staging entry may sit below ``.httk-workflow/tmp`` before the
+#: How long a staging entry may sit below ``.httk-workspace/tmp`` before the
 #: doctor calls it a leftover. Every publication renames its staging entry out
 #: within one operation, so a day is far beyond any honest in-flight window.
 TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
@@ -94,7 +94,7 @@ def _workspace_summary(project: Path, metadata: Mapping[str, object]) -> dict[st
     """Summarize the project workspace without mutating anything in it."""
 
     summary: dict[str, object] = {
-        "present": (project / ".httk-workflow" / "format.json").is_file(),
+        "present": (project / WORKSPACE_DIRECTORY / "format.json").is_file(),
         "initialization_failed": metadata.get("workspace_initialization_failed") is True,
     }
     section = read_project_section(project, "workspace")
@@ -104,7 +104,7 @@ def _workspace_summary(project: Path, metadata: Mapping[str, object]) -> dict[st
         try:
             binding = resolve_workspace(recorded, project=project)
             if binding.remote == "local" and (
-                binding.path is None or not (Path(binding.path) / ".httk-workflow" / "format.json").is_file()
+                binding.path is None or not (Path(binding.path) / WORKSPACE_DIRECTORY / "format.json").is_file()
             ):
                 raise ValueError("registered workspace path is not reachable")
         except (OSError, ValueError, WorkflowError):
@@ -301,7 +301,7 @@ def _pending_remote_transfers(remote: str) -> list[str]:
     names: list[str] = []
     for binding in list_workspaces():
         assert binding.path is not None
-        directory = Path(binding.path) / ".httk-workflow" / "transfers"
+        directory = Path(binding.path) / WORKSPACE_DIRECTORY / "transfers"
         for path in sorted(directory.glob("*.json")) if directory.is_dir() else ():
             try:
                 ledger = read_json(path)
@@ -457,7 +457,7 @@ def _check_key_pin(project: Path, metadata: dict[str, object], repair: bool) -> 
 def _check_tmp_leftovers(project: Path, repair: bool) -> Finding:
     """Staging entries nothing renamed out are pure leftovers."""
 
-    tmp = project / ".httk-workflow" / "tmp"
+    tmp = project / WORKSPACE_DIRECTORY / "tmp"
     if not tmp.is_dir():
         return Finding("tmp_leftovers", "ok", "there is no workspace staging directory")
     deadline = time.time() - TMP_MAXIMUM_AGE_SECONDS

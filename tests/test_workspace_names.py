@@ -27,7 +27,7 @@ def test_plain_init_uses_path_basename_and_explicit_name(tmp_path: Path, capsys)
     context = _context(tmp_path)
     assert command(["workspace", "init", "runs"], context) == 0
     capsys.readouterr()
-    assert (tmp_path / "runs" / ".httk-workflow" / "format.json").is_file()
+    assert (tmp_path / "runs" / ".httk-workspace" / "format.json").is_file()
 
     deep = tmp_path / "deep" / "dir"
     deep.mkdir(parents=True)
@@ -42,7 +42,7 @@ def test_machine_name_init_uses_local_path_remainder(tmp_path: Path, capsys) -> 
     capsys.readouterr()
     assert command(["workspace", "init", "kappa:runs"], context) == 0
     capsys.readouterr()
-    assert (tmp_path / "runs" / ".httk-workflow" / "format.json").is_file()
+    assert (tmp_path / "runs" / ".httk-workspace" / "format.json").is_file()
 
     binding = resolve_workspace("kappa:runs")
     assert binding.name == "runs"
@@ -80,7 +80,7 @@ def test_remote_init_sends_path_command_and_far_side_registers_name(
     assert command(["workspace", "init", "--name", "runs", "cluster:runs/named"], context) == 0
     capsys.readouterr()
     assert any("workspace init --name runs runs/named" in item for item in remote.commands())
-    assert (remote.root / "runs" / "named" / ".httk-workflow" / "format.json").is_file()
+    assert (remote.root / "runs" / "named" / ".httk-workspace" / "format.json").is_file()
     assert command(["workspace", "status", "cluster:runs"], context) == 0
     capsys.readouterr()
     assert any(row["name"] == "runs" for row in _local_rows(context, capsys))
@@ -233,7 +233,7 @@ def test_move_updates_the_registry_and_refuses_a_fresh_manager(tmp_path: Path, c
     command(["workspace", "init", "old"], context)
     capsys.readouterr()
     root = tmp_path / "old"
-    managers = root / ".httk-workflow" / "managers" / "live"
+    managers = root / ".httk-workspace" / "managers" / "live"
     managers.mkdir(parents=True)
     (managers / "manager.json").write_text(json.dumps({"manager_id": "live"}), encoding="utf-8")
     (managers / "heartbeat.json").write_text(json.dumps({"updated_at": utc_now()}), encoding="utf-8")
@@ -243,14 +243,14 @@ def test_move_updates_the_registry_and_refuses_a_fresh_manager(tmp_path: Path, c
     assert command(["workspace", "move", "old", "new"], context) == 0
     capsys.readouterr()
     assert _local_rows(context, capsys)[0]["path"] == str(tmp_path / "new")
-    assert not (tmp_path / "new" / ".httk-workflow" / "maintenance.lock").exists()
+    assert not (tmp_path / "new" / ".httk-workspace" / "maintenance.lock").exists()
     assert command(["workspace", "fsck", "old"], context) == 0
     capsys.readouterr()
     assert command(["workspace", "gc", "--dry-run", "old"], context) == 0
     capsys.readouterr()
     assert command(["workspace", "move", "old", "newer"], context) == 0
     capsys.readouterr()
-    assert not (tmp_path / "newer" / ".httk-workflow" / "maintenance.lock").exists()
+    assert not (tmp_path / "newer" / ".httk-workspace" / "maintenance.lock").exists()
 
 
 def test_move_refuses_cross_filesystem_without_copying(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -280,11 +280,11 @@ def test_move_holds_the_lock_at_the_destination_until_registry_update(tmp_path: 
     real_update = workspace_cli._update_workspace_path
 
     def observe_update(name: str, path: Path, *, durable: bool = True):
-        observed.append((path / ".httk-workflow" / "maintenance.lock").is_file())
+        observed.append((path / ".httk-workspace" / "maintenance.lock").is_file())
         return real_update(name, path, durable=durable)
 
     monkeypatch.setattr(workspace_cli, "_update_workspace_path", observe_update)
     assert command(["workspace", "move", "old", "new"], context) == 0
     capsys.readouterr()
     assert observed == [True]
-    assert not (destination / ".httk-workflow" / "maintenance.lock").exists()
+    assert not (destination / ".httk-workspace" / "maintenance.lock").exists()

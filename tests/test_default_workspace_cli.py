@@ -1,9 +1,10 @@
 """Project-recorded defaults and the per-user fallback."""
 
+import json
 from pathlib import Path
 
 from httk.core.cli import CLIContext
-from httk.core.project import initialize_project
+from httk.core.project import initialize_project, write_project_section
 
 from httk.workflow import Workspace
 from httk.workflow.configuration import data_home
@@ -50,6 +51,34 @@ def test_omitted_workspace_uses_the_global_default_outside_a_project(tmp_path: P
 def test_workspace_default_class_still_uses_the_per_user_workspace() -> None:
     workspace = Workspace.default()
     assert workspace.root == data_home() / "workspace"
+
+
+def test_workspace_discover_walks_from_nested_directories_and_files(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    nested = workspace.root / "project" / "jobs"
+    nested.mkdir(parents=True)
+    marker_file = nested / "input.json"
+    marker_file.write_text("{}", encoding="utf-8")
+
+    assert Workspace.discover(nested) == workspace.root.resolve()
+    assert Workspace.discover(marker_file) == workspace.root.resolve()
+    assert Workspace.discover(tmp_path / "outside") is None
+
+
+def test_enclosing_workspace_wins_over_project_and_registry_defaults(tmp_path: Path, capsys) -> None:
+    enclosing = Workspace.initialize(tmp_path / "enclosing")
+    project = enclosing.root / "project"
+    initialize_project(project, name="defaults")
+    project_default = tmp_path / "project-default"
+    create_workspace("project-default", project_default)
+    create_workspace("default", tmp_path / "registry-default")
+    write_project_section(project, "workspace", {"default": "project-default"})
+    nested = project / "subdir"
+    nested.mkdir()
+
+    assert command(["workspace", "status", "--json"], _context(nested)) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status[0]["root"] == str(enclosing.root)
 
 
 def test_by_path_requires_an_explicit_path(tmp_path: Path, capsys) -> None:
