@@ -573,7 +573,7 @@ def _probe_httk(kind: str, run: _Runner, settings: Mapping[str, object]) -> tupl
             continue
         # A recorded version only proves httk-core answered; the workflow group
         # exists exactly when this package is installed beside it.
-        workflow = run([*candidate, "workflow", "workspace", "--help"])
+        workflow = run([*candidate, "workspace", "--help"])
         if workflow.returncode == 0:
             return candidate, version.stdout.strip()
     return None

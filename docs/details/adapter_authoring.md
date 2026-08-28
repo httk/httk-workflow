@@ -241,7 +241,7 @@ No request members beyond the envelope.
 | `httk_version` | its `--version` output, stripped |
 
 Answering "httk-core is installed" is not enough: the maintained implementation
-also runs `httk workflow workspace --help`, because the `workflow` command group
+also runs `httk workspace --help`, because the `workflow` command group
 exists exactly when *this* package is installed beside the core. A target with
 no httk is a refusal carrying the remedy: log in there and make sure *httk₂* is
 installed and reachable from a non-interactive shell, or set `httk_command=` to
@@ -629,7 +629,7 @@ mkdir -p httk_project/remotes/my-cluster
 cp -a my-cluster/. httk_project/remotes/my-cluster/
 httk workflow remote configure --set username=me my-cluster
 httk workflow remote check my-cluster
-httk workflow workspace init --name runs my-cluster:/scratch/me/runs
+httk workspace init --name runs my-cluster:/scratch/me/runs
 httk workflow manager run --workspace my-cluster:runs --workers 8
 ```
 

@@ -29,11 +29,12 @@ write files and atomically rename a file or directory.
 The design descends from the `ht.task.*` directories, `ht_steps`,
 `ht.nextstep`, subtasks, and `ht.atomic.*` replay mechanism in *httk* v1. It keeps
 the central property of that design: neither a workflow step nor a task manager
-is ever required to run policy-gated cleanup code. A manager does run
-always-safe cleanup at attach and clean exit, and its owning manager performs
-best-effort post-commit removal of a locally reaped successful attempt control
-tree. Either may disappear between any two instructions. A later task manager
-must be able to identify the last commit point and continue from it.
+is ever required to run policy-gated cleanup code. A manager runs always-safe
+cleanup at attach and the full policy-gated collection at clean exit, and its
+owning manager performs best-effort post-commit removal of a locally reaped
+successful attempt control tree. Either may disappear between any two
+instructions. A later task manager must be able to identify the last commit
+point and continue from it.
 
 The design target is workspaces larger than the measured local snapshot in
 {doc}`/benchmarks`; that target is not a capacity measurement. Metadata inode
@@ -300,7 +301,7 @@ rename/prune rules below.
     "visibility_deadline_seconds": 5.0,
     "lease_seconds": 900.0,
     "journal_segment_bytes": 67108864,
-    "retention": {}
+    "retention": {"journal_days": 1.0, "trash_days": 1.0}
   }
 }
 ```
@@ -317,12 +318,14 @@ part of format version 2 and holds exactly these members:
 | `visibility_deadline_seconds` | number | `5.0` | How long a reader keeps re-probing before it declares a marker rename or a referenced journal frame incoherent. |
 | `lease_seconds` | number | `900.0` | The default claim lease of a manager that does not state its own. |
 | `journal_segment_bytes` | integer | `67108864` | The size at which a writer rotates to its next journal segment. |
-| `retention` | object | `{}` | Optional `attempt_control_days`, `journal_days`, and `trash_days` limits for collection. |
+| `retention` | object | `{"journal_days": 1.0, "trash_days": 1.0}` | `journal_days` and `trash_days` default to one day; `attempt_control_days` is unset. An explicit `null` or `"keep"` keeps a category forever. |
 
 An implementation MUST refuse a `policy` member it does not know rather than
 ignore it, and MUST read an absent `policy` object, or an absent member of one,
 as the default above; a workspace written before this section existed is
-therefore attached without migration. Values are validated on write:
+therefore attached without migration. For retention, an absent
+`attempt_control_days` means keep, while absent `journal_days` and
+`trash_days` mean one day. Values are validated on write:
 `lease_seconds` is at least one second, `visibility_deadline_seconds` is at
 most one day, and `journal_segment_bytes` is at least 4096.
 
@@ -2541,7 +2544,7 @@ workspace publishes in `policy.retention`:
 - retained diagnostic application files.
 
 That list is permissive: it bounds what a conforming collector *may* touch, not
-what one must. The `httk workflow workspace gc` implementation collects the
+what one must. The `httk workspace gc` implementation collects the
 subset tabulated in “Retention gates and always-safe collection” below, and
 adds the retired transfer bundles and per-transfer receipts core-v2 accumulates.
 It deliberately leaves isolated
@@ -2580,15 +2583,16 @@ Cleanup is separate from correctness.
 
 ### Retention gates and always-safe collection
 
-An absent member of `policy.retention` means **keep**. A collector MUST NOT
-prune a category whose limit is unconfigured; a workspace whose operator has
-said nothing therefore loses nothing.
+An explicit `null` or `"keep"` member of `policy.retention` means **keep**. A
+collector MUST NOT prune a category whose limit is unlimited. Thus
+`attempt_control_days` is unlimited by default, while `journal_days` and
+`trash_days` default to one day.
 
 These always-safe categories are exempt because the entries in them cannot carry
 information, plus the one conditional case of a terminal marker whose payload
 the operator removed; they are collected whatever `policy.retention` says.
-Every manager runs these categories after attaching and again at clean exit;
-`workspace gc` also collects them:
+Every manager runs these categories after attaching; at clean exit it runs the
+full policy-gated collection. `workspace gc` also collects them:
 
 - an empty placement mirror below a state kind, pruned by `rmdir` alone;
 - an entry still sitting in `.httk-workspace/tmp/` or
@@ -2618,7 +2622,7 @@ The remaining categories are gated as follows.
 | Transaction trash | `trash_days` | The job's marker has reached a quiescent kind, so the destination transition has happened and no replay consults the trash again. |
 | Retired transfer bundle | `trash_days` | Below `transfers/retired/`; the ledger describing it is kept. |
 | Import acknowledgement and import record | `trash_days` | Below `transfers/acks/` and `transfers/imported/`. |
-| Journal segment | `journal_days` | No current marker — nor the sealed marker of a bundle awaiting handover — references it, and its writer belongs to no manager heartbeating within its lease. |
+| Journal segment | `journal_days` | No current terminal marker, nor sealed marker of a bundle awaiting handover, references it; no frame chain of a current non-terminal marker contains it; and its writer belongs to no manager heartbeating within its lease. |
 | Manager directory | `journal_days` | The manager's heartbeat is expired and none of its writer's segments were retained. |
 
 Failed and cancelled jobs retain their newest attempt-control directory
@@ -2638,13 +2642,13 @@ one.
 
 ### The cost of collecting journal history
 
-Only the segment a marker's `record_ref` points *into* is protected, not the
-whole chain behind it. Collecting older segments of the same writer is exactly
-what `journal_days` buys, and the consequence must be stated plainly: the deep
-history of an old job goes with those segments. `collect` and `job log` then
-report that job's timeline from whatever frames remain and set `gaps` — the
-job's current state, marker, payload, and terminal outcome are unaffected,
-because they never depended on the older frames.
+Every segment in the frame chain of a current non-terminal marker is protected;
+a terminal marker protects only its current segment. Collecting older segments
+of a terminal job's same writer is exactly what `journal_days` buys, and the
+consequence must be stated plainly: that job's deep history goes with those
+segments. `collect` and `job log` then report the terminal job's timeline from
+whatever frames remain and set `gaps`; a non-terminal job's current state and
+future transitions retain their complete reachable chain.
 
 ### Crash safety and journaling of a collection
 

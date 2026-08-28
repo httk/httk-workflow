@@ -4,10 +4,10 @@
 leave behind.* The everyday cycle is four commands:
 
 ```console
-$ httk workflow workspace init --name default .
-$ httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
+$ httk workspace init --name default .
+$ httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
 $ httk workflow run                 # serve jobs until idle (--idle keeps serving)
-$ httk workflow workspace status
+$ httk workspace status
 ```
 
 Managers drive every claimable job through its steps and record everything
@@ -51,7 +51,7 @@ the job instead of running the calculation in a half-set-up environment:
   with `bash -l` (a login shell, so `module` is available):
 
   ```console
-  $ httk workflow workspace workflow-prelude set --workflow relax-vasp --value "module load VASP/6.2.1" default
+  $ httk workspace workflow-prelude set --workflow relax-vasp --value "module load VASP/6.2.1" default
   ```
 
 Enabling either layer runs the manager and runners under a **login shell**,

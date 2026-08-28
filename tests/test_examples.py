@@ -124,7 +124,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     # The page really is seven commands, including explicit workspace setup.
     assert sum(1 for line in commands if line.startswith("httk")) == 7
     assert "httk project init --name quickstart ." in commands
-    assert any(line.startswith("httk workflow job new --workflow vasp-relax") for line in commands)
+    assert any(line.startswith("httk job new --workflow vasp-relax") for line in commands)
 
     completed = _run(
         ["bash", "-e", "-c", "\n".join(commands)],

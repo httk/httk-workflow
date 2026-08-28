@@ -4,8 +4,8 @@
 `httk workflow …` — where every group and command answers `--help`:
 
 ```text
-httk workflow workspace  init | list | default | status | managers | settings | fsck | gc | ...
-httk workflow job        new | submit | request | list | show | log | why | debug
+httk workspace           init | list | default | status | managers | settings | fsck | gc | ...
+httk job                 new | submit | request | list | show | log | why | debug
 httk workflow runner     publish | describe
 httk workflow build      (compiled packages: build and register binaries)
 httk workflow describe | precheck | collect | postprocess

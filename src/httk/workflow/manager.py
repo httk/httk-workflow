@@ -328,8 +328,7 @@ class WorkCensus:
             parts.append(advice)
         if self.unreadable:
             parts.append(
-                f"{self.unreadable} job(s) have an unreadable definition — "
-                "repair them with 'httk workflow workspace fsck'"
+                f"{self.unreadable} job(s) have an unreadable definition — repair them with 'httk workspace fsck'"
             )
         if not parts:
             parts.append(
@@ -610,7 +609,7 @@ class TaskManager:
                 )
                 continue
         self._warn_unmatched_placement_prefixes()
-        self._collect_always_safe("startup")
+        self._collect_garbage("startup", categories=ALWAYS_SAFE_CATEGORIES)
 
     def __repr__(self) -> str:
         return f"TaskManager(workspace={self.workspace!r}, pools={tuple(sorted(self.pools))!r})"
@@ -660,7 +659,7 @@ class TaskManager:
                 _LOGGER.warning("cannot verify manager-owned live markers: %s", exc)
                 clean = False
         if clean:
-            self._collect_always_safe("shutdown")
+            self._collect_garbage("shutdown")
         self._running.clear()
         try:
             self.writer.close()
@@ -670,24 +669,24 @@ class TaskManager:
                 self._remove_empty_journal_writer()
                 self._remove_manager_directory()
 
-    def _collect_always_safe(self, phase: str) -> None:
-        """Collect always-safe workspace leftovers, without affecting service."""
+    def _collect_garbage(self, phase: str, *, categories: Sequence[str] | None = None) -> None:
+        """Collect workspace garbage, without affecting manager service."""
 
         try:
             report = self.workspace.collect_garbage(
-                categories=ALWAYS_SAFE_CATEGORIES,
+                categories=categories,
                 journal_writer=self.writer,
             )
         except Exception as exc:
             _LOGGER.warning(
-                "always-safe collection at %s failed: %s",
+                "garbage collection at %s failed: %s",
                 phase,
                 exc,
                 extra=self._event("always_safe_gc_error", phase=phase),
             )
             return
         _LOGGER.info(
-            "always-safe collection at %s removed %d entries and about %d bytes",
+            "garbage collection at %s removed %d entries and about %d bytes",
             phase,
             report.removed,
             report.bytes_reclaimed,
@@ -1113,8 +1112,7 @@ class TaskManager:
         if lock.is_stale():
             self._report_anomaly(
                 "maintenance",
-                f"ignoring a stale maintenance lock held by {lock.describe()}; "
-                "clear it with 'httk workflow workspace unlock'",
+                f"ignoring a stale maintenance lock held by {lock.describe()}; clear it with 'httk workspace unlock'",
                 self._event("maintenance_lock_stale", lock=str(lock.path)),
                 level=logging.WARNING,
             )

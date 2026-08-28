@@ -46,9 +46,9 @@ END
 
 ```console
 $ httk project init --name quickstart .
-$ httk workflow workspace init --name default .
-$ httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
-$ httk workflow workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
+$ httk workspace init --name default .
+$ httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
+$ httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 $ httk workflow run
 $ httk workflow collect --into results.sqlite --id-base httk.quickstart
 $ httk workflow postprocess --script relaxation-plot
@@ -104,12 +104,12 @@ published OUTCAR and wrote
 ## Looking at a job
 
 ```console
-$ httk workflow job list
+$ httk job list
 JOB                                  STATE       STEP             PRI PLACEMENT
 silicon--0c4f…                       succeeded   publish          500 jobs
 
-$ httk workflow job show silicon
-$ httk workflow job why silicon
+$ httk job show silicon
+$ httk job why silicon
 ```
 
 Any job UUID, complete `tag--uuid` key, or unique prefix of either names a job.
@@ -128,7 +128,7 @@ Point `--input-from structure` at a *directory* and every readable structure
 file in it becomes one job, each tagged after its file:
 
 ```console
-$ httk workflow job new --workspace quickstart-workspace --workflow vasp-relax --input-from structure structures/ \
+$ httk job new --workspace quickstart-workspace --workflow vasp-relax --input-from structure structures/ \
       --parameter kpoint_density=30.0 --placement project/screening
 ```
 
@@ -166,7 +166,7 @@ marker.
 - {doc}`sdks/native_bash_api` — the same runner protocol from Bash.
 - {doc}`workflow_languages` — a Python Workflow Definition, CWL workflow,
   jobflow Maker document, or explicitly selected httk-v1 template becomes one
-  job with `httk workflow job new --workflow DOCUMENT`, without being rewritten
+  job with `httk job new --workflow DOCUMENT`, without being rewritten
   and without a runner file.
 - {doc}`collecting` — turning finished jobs into stored results.
 - Running on a cluster — add and configure a remote, initialize `R:NAME`, then

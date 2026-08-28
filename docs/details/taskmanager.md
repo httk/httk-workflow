@@ -16,7 +16,7 @@ registered. `REMOTE:PATH`
 initializes and names a workspace on that remote.
 
 ```console
-httk workflow workspace init --name WORKSPACE runs/WORKSPACE
+httk workspace init --name WORKSPACE runs/WORKSPACE
 ```
 
 A workspace on a cluster is created there over the adapter; its owning machine
@@ -47,13 +47,13 @@ httk workflow remote configure \
     --set host=kappa.example.org --set username=rar \
     --set check_connectivity=yes kappa
 httk workflow remote check kappa
-httk workflow workspace init kappa:/scratch/rar/httk/runs
-httk workflow workspace settings set --key slurm.partition --value batch kappa:runs
-httk workflow workspace settings set --key vasp.command --value "srun -n 32 vasp_std" kappa:runs
-httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
+httk workspace init kappa:/scratch/rar/httk/runs
+httk workspace settings set --key slurm.partition --value batch kappa:runs
+httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" kappa:runs
+httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
 httk workflow transfer --job JOB-ID default kappa:runs
 httk workflow run --workspace kappa:runs --workers 8
-httk workflow workspace status kappa:runs
+httk workspace status kappa:runs
 ```
 
 The remote init command creates and registers `runs` on kappa; `kappa:runs` is
@@ -69,9 +69,9 @@ every manager, CLI, and independent implementation attaching it agrees on them.
 They live in `.httk-workspace/format.json` and are read and written with:
 
 ```console
-httk workflow workspace policy show WORKSPACE
-httk workflow workspace policy set --key visibility_deadline_seconds --value 60 WORKSPACE
-httk workflow workspace policy set --key retention.journal_days --value 90 WORKSPACE
+httk workspace policy show WORKSPACE
+httk workspace policy set --key visibility_deadline_seconds --value 60 WORKSPACE
+httk workspace policy set --key retention.journal_days --value 90 WORKSPACE
 ```
 
 | Key | Default | Meaning |
@@ -79,7 +79,7 @@ httk workflow workspace policy set --key retention.journal_days --value 90 WORKS
 | `visibility_deadline_seconds` | `5.0` | How long a marker rename or a referenced journal frame may take to become visible before it is called damage. |
 | `lease_seconds` | `900.0` | The claim lease of a manager started without `--lease-seconds`. |
 | `journal_segment_bytes` | `67108864` | The size at which a journal writer rotates to its next segment. |
-| `retention` | `{}` | Optional `attempt_control_days`, `journal_days`, and `trash_days` collection limits. |
+| `retention` | `{"journal_days": 1.0, "trash_days": 1.0}` | `journal_days` and `trash_days` collect after one day; `attempt_control_days` is unset. Set a member to `null` or `"keep"` to keep that category forever. |
 
 Values are given as JSON and validated on write; an unknown key is refused
 rather than stored. A change reaches a manager when it attaches, so restart
@@ -94,8 +94,8 @@ command and a pseudopotential library. The manager submission profile is also a
 workspace setting, so each workspace can carry its own scheduler requirements.
 
 ```console
-httk workflow workspace settings set --key vasp.command --value '"srun -n 32 vasp_std"' WORKSPACE
-httk workflow workspace settings show WORKSPACE
+httk workspace settings set --key vasp.command --value '"srun -n 32 vasp_std"' WORKSPACE
+httk workspace settings show WORKSPACE
 ```
 
 For a Slurm manager, set its profile in the target workspace as well:
@@ -146,7 +146,7 @@ this report is advisory and can become stale. The `HTTK_*` layer is this
 process's environment, not a promise about the environment of a later compute
 node.
 
-`httk workflow workspace managers WORKSPACE` answers "what serves this
+`httk workspace managers WORKSPACE` answers "what serves this
 workspace?" directly — one line per registered manager, live or stale, with its
 pools, capabilities, executors, and runner modules — rather than by reading it
 off a `job why` on an arbitrary job.
@@ -166,21 +166,24 @@ after it has reaped the local process when the actual destination is `ready`,
 evidence. Transaction trash is normally removed with that control tree. A
 manager inheriting a commit leaves the tree for GC. The manager is never
 required to execute policy-gated cleanup code, so it can disappear between any
-two instructions. It runs always-safe cleanup at startup and clean exit; a
-clean manager removes its own metadata directory, while a crash leaves it for
-`journal_days` collection. On a quota'd HPC filesystem, failed and cancelled
+two instructions. It runs always-safe cleanup at startup and the full
+policy-gated collection at clean exit; a clean manager removes its own metadata
+directory, while a crash leaves it for `journal_days` collection. On a quota'd
+HPC filesystem, failed and cancelled
 attempt evidence, retained journal history, interrupted transaction trash, and
 acknowledged bundles are what remain to manage.
 
-Collection is a separate, explicit operation. Configure the retention limits
-once, then run it from a maintenance job or by hand:
+Collection also runs in full at a clean manager exit. A workspace with no
+manager visits still needs an explicit collection. Configure the retention
+limits once, then run it from a maintenance job or by hand:
 
 ```console
-httk workflow workspace policy set --key retention.attempt_control_days --value 14 WORKSPACE
-httk workflow workspace policy set --key retention.trash_days --value 14 WORKSPACE
-httk workflow workspace policy set --key retention.journal_days --value 90 WORKSPACE
-httk workflow workspace gc --dry-run WORKSPACE
-httk workflow workspace gc WORKSPACE
+httk workspace policy set --key retention.attempt_control_days --value 14 WORKSPACE
+httk workspace policy set --key retention.trash_days --value 14 WORKSPACE
+httk workspace policy set --key retention.journal_days --value 90 WORKSPACE
+httk workspace policy set --key retention.journal_days --value null WORKSPACE  # keep forever
+httk workspace gc --dry-run WORKSPACE
+httk workspace gc WORKSPACE
 ```
 
 It is safe to run against a live workspace: a manager that is still
@@ -188,8 +191,11 @@ heartbeating keeps its own directory and every journal segment it wrote, no
 non-terminal marker or payload is touched beyond the aged attempt-control
 directories of terminal jobs; GC may remove a terminal marker whose payload
 the operator removed. Pruning an empty placement mirror that a transition is
-recreating underneath is an ordinary outcome rather than an error. A limit
-left unset means keep. See
+recreating underneath is an ordinary outcome rather than an error. Every
+segment in a non-terminal job's current frame chain is protected; terminal jobs
+protect only their current segment. A `null` or
+`"keep"` member means keep forever. `attempt_control_days` is unlimited when
+omitted; `journal_days` and `trash_days` default to one day. See
 [the command guide](workflow_cli.md#freeing-disk) for the full category table
 and for what collecting journal history costs.
 
@@ -209,7 +215,7 @@ scheduling passes do not need done often.
 
 To remove a finished (`succeeded`, `failed`, or `cancelled`) job, remove the
 payload directory named by `job show` with `rm -r`, then run
-`httk workflow workspace gc WORKSPACE`, or let a manager started with
+`httk workspace gc WORKSPACE`, or let a manager started with
 `--gc-interval` perform it. Cancel a non-terminal job first with `job request
 cancel`, and remove children only when their parent is terminal: GC's join
 guard is best-effort, not a lock, and a parent that publishes a join during the
@@ -266,7 +272,7 @@ A prepared payload is a directory containing an immutable `job.json` and its
 runner. Submit it at any arbitrary placement:
 
 ```console
-httk workflow job submit --workspace WORKSPACE --placement project-a/00/17 PAYLOAD
+httk job submit --workspace WORKSPACE --placement project-a/00/17 PAYLOAD
 ```
 
 Submission copies by default. `--move` performs a same-filesystem rename and
@@ -568,13 +574,13 @@ Phase 14 campaign recipes add it.
 ## Inspect and control
 
 ```console
-httk workflow workspace status WORKSPACE
-httk workflow workspace status --json WORKSPACE
+httk workspace status WORKSPACE
+httk workspace status --json WORKSPACE
 
-httk workflow job request pause --workspace WORKSPACE \
+httk job request pause --workspace WORKSPACE \
   --reason "inspection" JOB_UUID
 
-httk workflow job request continue --workspace WORKSPACE \
+httk job request continue --workspace WORKSPACE \
   --reason "inputs repaired" JOB_UUID
 ```
 
@@ -609,7 +615,7 @@ applied. It is attribution and not authorization; see
 **Cancelling a running job** is fenced and verified, not a single signal:
 
 ```console
-httk workflow job request cancel --workspace WORKSPACE \
+httk job request cancel --workspace WORKSPACE \
   --reason "wrong inputs" JOB_UUID
 ```
 
@@ -630,10 +636,10 @@ because `cancelled` asserts that nothing is still writing the workdir.
 every state marker still resolves to its journal frame.
 
 ```console
-httk workflow workspace fsck WORKSPACE
-httk workflow workspace fsck --json WORKSPACE
-httk workflow workspace fsck --repair WORKSPACE
-httk workflow workspace fsck --repair --quarantine-unrepairable WORKSPACE
+httk workspace fsck WORKSPACE
+httk workspace fsck --json WORKSPACE
+httk workspace fsck --repair WORKSPACE
+httk workspace fsck --repair --quarantine-unrepairable WORKSPACE
 ```
 
 It reads every marker of every state kind and checks that its record reference
@@ -683,10 +689,10 @@ the journal frame that marker names, and the immutable `job.json` — and none o
 them writes protocol state:
 
 ```console
-httk workflow job list --workspace WORKSPACE --kind ready --placement project-a
-httk workflow job show --workspace WORKSPACE JOB
-httk workflow job log --workspace WORKSPACE --limit 20 JOB
-httk workflow job why --workspace WORKSPACE JOB
+httk job list --workspace WORKSPACE --kind ready --placement project-a
+httk job show --workspace WORKSPACE JOB
+httk job log --workspace WORKSPACE --limit 20 JOB
+httk job why --workspace WORKSPACE JOB
 ```
 
 `JOB` is a job UUID, a complete `tag--uuid` job key, or any unique prefix of
@@ -750,8 +756,8 @@ WORKSPACE` streams `CollectedJob` summaries, while `--raw` exposes the
 ## The foreground debug runner
 
 ```console
-httk workflow job debug --workspace WORKSPACE --step relax PAYLOAD
-httk workflow job debug --workspace WORKSPACE --follow-children JOB
+httk job debug --workspace WORKSPACE --step relax PAYLOAD
+httk job debug --workspace WORKSPACE --follow-children JOB
 ```
 
 `job debug` drives exactly one job to a terminal state in the foreground and

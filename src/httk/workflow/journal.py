@@ -251,6 +251,43 @@ def read_record(control_dir: Path, record_ref: str, *, deadline_seconds: float |
     raise WorkspaceUnavailableError(f"journal record is not coherently visible: {record_ref}") from last_error
 
 
+def iter_record_chain(
+    control_dir: Path,
+    record_ref: str,
+    *,
+    deadline_seconds: float | None = None,
+) -> Iterator[tuple[str, dict[str, Any] | None]]:
+    """Yield a record reference and its frame while walking history backwards.
+
+    The current reference is yielded with ``None`` when its frame cannot be
+    read, allowing a conservative caller to protect the segment it names and
+    stop the walk. A missing or malformed ``previous_record_ref`` ends the
+    walk after the readable frame that named it.
+
+    :param control_dir: Locate the workspace control directory.
+    :param record_ref: Identify the current journal record.
+    :param deadline_seconds: Bound retries for metadata visibility.
+    :yield: Each visited reference and its verified frame, or ``None`` when unreadable.
+    """
+
+    visited: set[str] = set()
+    current = record_ref
+    while current != "init" and current not in visited:
+        visited.add(current)
+        try:
+            frame = read_record(control_dir, current, deadline_seconds=deadline_seconds)
+        except (FormatError, OSError, WorkspaceUnavailableError, WorkspaceCorruptionError):
+            yield current, None
+            return
+        yield current, frame
+        previous = frame.get("previous_record_ref")
+        if previous is None or previous == "init":
+            return
+        if not isinstance(previous, str):
+            return
+        current = previous
+
+
 @dataclass(frozen=True)
 class RecordVerification:
     """Report the outcome of reading one referenced frame without raising.

@@ -152,8 +152,13 @@ from ._workspace import (
 )
 
 
-def build_parser(program: str, context: CLIContext) -> argparse.ArgumentParser:
-    """Build the whole canonical :command:`httk workflow` tree."""
+def build_parser(
+    program: str,
+    context: CLIContext,
+    *,
+    include_workspace_job: bool = True,
+) -> argparse.ArgumentParser:
+    """Build the canonical command tree, optionally without standalone groups."""
 
     parser = argparse.ArgumentParser(
         prog=program,
@@ -162,9 +167,11 @@ def build_parser(program: str, context: CLIContext) -> argparse.ArgumentParser:
     )
     parser.set_defaults(handler=None, help_parser=parser)
     groups = parser.add_subparsers(metavar="GROUP")
-    build_workspace_parser(groups)
+    if include_workspace_job:
+        build_workspace_parser(groups, program=f"{context.program} workspace")
     build_runner_parser(groups)
-    build_job_parser(groups)
+    if include_workspace_job:
+        build_job_parser(groups, program=f"{context.program} job")
     build_describe_parser(groups)
     build_collect_parser(groups)
     build_build_parser(groups)
@@ -219,6 +226,24 @@ def dispatch(parser: argparse.ArgumentParser, argv: Sequence[str], context: CLIC
 
 
 def command(argv: Sequence[str], context: CLIContext) -> int:
-    """Handle the registered top-level ``workflow`` command."""
+    """Handle the internal super-dispatcher for every workflow command group."""
 
     return dispatch(build_parser(f"{context.program} workflow", context), argv, context)
+
+
+def workflow_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered ``workflow`` command, excluding standalone groups."""
+
+    return dispatch(build_parser(f"{context.program} workflow", context, include_workspace_job=False), argv, context)
+
+
+def workspace_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``workspace`` command."""
+
+    return command(["workspace", *argv], context)
+
+
+def job_command(argv: Sequence[str], context: CLIContext) -> int:
+    """Handle the registered top-level ``job`` command."""
+
+    return command(["job", *argv], context)

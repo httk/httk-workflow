@@ -275,7 +275,7 @@ def register_workflow(provider: WorkflowProvider) -> None:
     """Register one packaged workflow, replacing any registered under its name.
 
     A domain calls this once per workflow it ships when its package is imported,
-    which is how ``httk workflow job new --workflow NAME`` resolves a packaged
+    which is how ``httk job new --workflow NAME`` resolves a packaged
     runner the generic scaffold never names.
 
     :param provider: Supply the workflow provider to register.

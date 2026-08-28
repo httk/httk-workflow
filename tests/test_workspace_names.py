@@ -145,14 +145,14 @@ def test_remote_workspace_adapter_requests_are_exact_argv(tmp_path: Path, monkey
         capsys.readouterr()
 
     assert captured == [
-        ("httk", "workflow", "workspace", "init", "--name", "runs", "runs"),
-        ("httk", "workflow", "workspace", "status", "--json", "runs"),
-        ("httk", "workflow", "workspace", "fsck", "--json", "runs"),
-        ("httk", "workflow", "workspace", "gc", "--dry-run", "--json", "runs"),
-        ("httk", "workflow", "workspace", "settings", "show", "--json", "runs"),
-        ("httk", "workflow", "workspace", "list", "--json"),
-        ("httk", "workflow", "workspace", "move", "runs", "moved"),
-        ("httk", "workflow", "workspace", "delete", "--force", "runs"),
+        ("httk", "workspace", "init", "--name", "runs", "runs"),
+        ("httk", "workspace", "status", "--json", "runs"),
+        ("httk", "workspace", "fsck", "--json", "runs"),
+        ("httk", "workspace", "gc", "--dry-run", "--json", "runs"),
+        ("httk", "workspace", "settings", "show", "--json", "runs"),
+        ("httk", "workspace", "list", "--json"),
+        ("httk", "workspace", "move", "runs", "moved"),
+        ("httk", "workspace", "delete", "--force", "runs"),
     ]
 
 

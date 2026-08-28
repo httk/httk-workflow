@@ -11,8 +11,8 @@ manager, capability, or executor; run it with the normal manager and select its
 claim pool with `--pool`.
 
 ```console
-httk workflow workspace init WORKSPACE
-httk workflow job new --workspace WORKSPACE --workflow-dir ./legacy-package \
+httk workspace init WORKSPACE
+httk job new --workspace WORKSPACE --workflow-dir ./legacy-package \
   --placement project-a/00/17
 httk workflow run --workspace WORKSPACE --pool vasp
 ```
@@ -103,7 +103,7 @@ The v1 language declares these workflow environment entries:
 Override these per job with either the CLI or Python API:
 
 ```console
-httk workflow job new --workspace WORKSPACE --workflow-dir ./legacy-package \
+httk job new --workspace WORKSPACE --workflow-dir ./legacy-package \
   --environment httk_v1.timeout=3600
 ```
 
@@ -123,7 +123,7 @@ Bare documents and directories are not packages. Use the generic format switch
 when the path does not carry its language:
 
 ```console
-httk workflow job new --workspace WORKSPACE --workflow ./old-task \
+httk job new --workspace WORKSPACE --workflow ./old-task \
   --format httk-v1 --parameter encut=520
 ```
 

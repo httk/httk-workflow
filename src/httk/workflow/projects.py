@@ -15,7 +15,7 @@ the pieces that are workflow policy rather than anchor:
   ``httk-workflow-job`` and whose id matches the UUID in its valid job-key
   basename.
 * :func:`initialize_project` and :func:`import_v1_project` — the anchor plus the
-  project's registered default workflow workspace.
+  project's registered default execution workspace.
 """
 
 import os

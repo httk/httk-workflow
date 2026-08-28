@@ -502,14 +502,14 @@ def _maintenance_check(workspace: Workspace, report: _Diagnosing) -> bool:
             True,
             f"a stale lock held by {lock.describe()} is ignored by managers",
         )
-        report.hint("clear the stale lock with 'httk workflow workspace unlock WORKSPACE'")
+        report.hint("clear the stale lock with 'httk workspace unlock WORKSPACE'")
         return False
     report.check(
         "maintenance lock",
         False,
         f"launching is paused by the maintenance lock held by {lock.describe()}",
     )
-    report.hint("wait for the maintenance operation, or 'httk workflow workspace unlock --force WORKSPACE'")
+    report.hint("wait for the maintenance operation, or 'httk workspace unlock --force WORKSPACE'")
     return True
 
 
@@ -694,7 +694,7 @@ def _continue_checks(job: JobDefinition | None, state: Mapping[str, Any], report
             "'continue' would immediately end the job again with retry_exhausted: " + "; ".join(budgets.describe()),
         )
         report.hint(
-            "use 'httk workflow job request override_step --workspace WORKSPACE --step STEP --operator NAME --reason WHY JOB' to start a new activation instead"
+            "use 'httk job request override_step --workspace WORKSPACE --step STEP --operator NAME --reason WHY JOB' to start a new activation instead"
         )
         return
     report.check(
@@ -702,9 +702,7 @@ def _continue_checks(job: JobDefinition | None, state: Mapping[str, Any], report
         True,
         "'continue' repeats this activation: " + "; ".join(budgets.describe()),
     )
-    report.hint(
-        "resume it with 'httk workflow job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB'"
-    )
+    report.hint("resume it with 'httk job request continue --workspace WORKSPACE --operator NAME --reason WHY JOB'")
 
 
 def _attempt_history_check(workspace: Workspace, marker: Marker, state: Mapping[str, Any], report: _Diagnosing) -> None:
@@ -1070,7 +1068,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
             )
         elif blocking:
             summary = f"this job waits for {len(blocking)} of {len(observations)} child(ren) to become terminal"
-            report.hint("inspect a blocking child with 'httk workflow job why --workspace WORKSPACE CHILD_JOB'")
+            report.hint("inspect a blocking child with 'httk job why --workspace WORKSPACE CHILD_JOB'")
         elif observations:
             summary = "every join child is terminal, so the next manager pass resolves this join"
             blocked = False
@@ -1189,7 +1187,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
         summary = f"state {kind} is not a core state of this profile; inspect it with a workspace tool"
 
     if kind in QUIESCENT_KINDS and kind not in TERMINAL_KINDS:
-        report.hint("drive it in the foreground with 'httk workflow job debug WORKSPACE JOB'")
+        report.hint("drive it in the foreground with 'httk job debug WORKSPACE JOB'")
     return Diagnosis(
         job_id=marker.job_id,
         job_key=marker.job_key,

@@ -75,9 +75,9 @@ One workspace, one job of a packaged runner, and one manager that runs it:
 
 ```console
 httk project init --name quickstart .
-httk workflow workspace init --name default .
-httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
-httk workflow workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
+httk workspace init --name default .
+httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
+httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 httk workflow run
 httk workflow collect
 ```
@@ -87,7 +87,7 @@ without VASP installed. A complete payload prepared some other way is still
 submitted directly:
 
 ```console
-httk workflow job submit --workspace workflow-workspace --placement project/00 prepared-job
+httk job submit --workspace workflow-workspace --placement project/00 prepared-job
 ```
 
 ```{toctree}

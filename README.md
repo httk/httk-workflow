@@ -33,8 +33,8 @@ From nothing to a finished VASP relaxation, without writing a runner:
 
 ```console
 httk project init --name quickstart .
-httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
-httk workflow workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
+httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
+httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 httk workflow run
 httk workflow collect
 ```
@@ -106,5 +106,5 @@ stay serial within their group while the rest of the suite runs in parallel.
 ```console
 httk workflow project init --name example .
 httk workflow project manifest create .
-httk workflow workspace status
+httk workspace status
 ```

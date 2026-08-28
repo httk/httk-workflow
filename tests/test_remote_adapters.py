@@ -265,7 +265,7 @@ def test_remote_status_returns_the_remote_workspace_json(tmp_path: Path, remote:
         "status",
         {
             "remote_settings": {},
-            "argv": ["httk", "workflow", "workspace", "status", "--by-path", "--json", str(workspace.root)],
+            "argv": ["httk", "workspace", "status", "--by-path", "--json", str(workspace.root)],
         },
     )
 

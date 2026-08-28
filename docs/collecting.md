@@ -130,7 +130,7 @@ records = job_records(
 `states` defaults to `("succeeded",)` and accepts only the kinds a stopped job
 can be in — `succeeded`, `failed`, `cancelled`, and `paused`; anything else is
 refused by name. `placement` restricts the collect to the jobs at or below one
-placement, exactly as `httk workflow job list --placement` does.
+placement, exactly as `httk job list --placement` does.
 
 ## From the command line
 

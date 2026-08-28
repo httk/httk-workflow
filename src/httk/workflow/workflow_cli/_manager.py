@@ -253,7 +253,7 @@ def add_manager_run_arguments(parser: argparse.ArgumentParser) -> None:
         metavar="SECONDS",
         help=(
             "also collect garbage from this manager, at most once per SECONDS "
-            "(default: no background collection; use 'httk workflow workspace gc' instead)"
+            "(default: no background collection; use 'httk workspace gc' instead)"
         ),
     )
     parser.add_argument(
@@ -609,7 +609,7 @@ def build_manager_parser(
             group,
             "run",
             summary="run the task manager",
-            description="Run one task manager against one workflow workspace",
+            description="Run one task manager against one execution workspace",
             handler=handle_manager_run,
         )
     )
@@ -625,7 +625,7 @@ def build_run_parser(
             subparsers,
             "run",
             summary="run a task manager until the workspace is idle",
-            description="Run one task manager against one workflow workspace",
+            description="Run one task manager against one execution workspace",
             handler=handle_manager_run,
         )
     )

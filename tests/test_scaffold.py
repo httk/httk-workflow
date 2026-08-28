@@ -1,7 +1,7 @@
 """Job scaffolding: one workflow, some files, and a submitted job.
 
 Nothing here fabricates protocol state. Every job is built by
-:func:`httk.workflow.scaffold.new_job` or by ``httk workflow job new`` and then
+:func:`httk.workflow.scaffold.new_job` or by ``httk job new`` and then
 read back from the workspace it was submitted to, and the jobs that have to prove
 they *run* are driven to completion by a real
 :class:`httk.workflow.TaskManager` with the mock VASP of ``examples/mock_vasp.py``

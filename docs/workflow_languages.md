@@ -222,11 +222,11 @@ and legacy runtime behavior.
 `.json` document, or a bare v1 template directory when its format is explicit:
 
 ```console
-httk workflow job new --workspace WS --workflow flow.cwl --input message=echo
-httk workflow job new --workspace WS --workflow workflow.json \
+httk job new --workspace WS --workflow flow.cwl --input message=echo
+httk job new --workspace WS --workflow workflow.json \
   --parameter pwd_module_path='["."]'
-httk workflow job new --workspace WS --workflow maker.json
-httk workflow job new --workspace WS --workflow ./v1-template --format httk-v1 \
+httk job new --workspace WS --workflow maker.json
+httk job new --workspace WS --workflow ./v1-template --format httk-v1 \
   --parameter structure=structures/si.cif
 ```
 

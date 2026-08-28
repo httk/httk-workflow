@@ -58,19 +58,19 @@ actual input files, logs, expected results, and exit behavior.
 Initialize an *httk₂* workspace:
 
 ```console
-httk workflow workspace init workflow-workspace
+httk workspace init workflow-workspace
 ```
 
 The standalone workspace alias is equivalent:
 
 ```console
-httk workflow workspace init workflow-workspace
+httk workspace init workflow-workspace
 ```
 
 Wrap the task in a converted package and submit it through the normal path:
 
 ```console
-httk workflow job new --workspace workflow-workspace --workflow-dir ./legacy-package \
+httk job new --workspace workflow-workspace --workflow-dir ./legacy-package \
   --placement migration/reference/silicon-relax
 httk workflow run --workspace workflow-workspace --pool vasp --workers 4
 ```
@@ -86,7 +86,7 @@ source "$HTTK_DIR/Execution/tasks/vasp/vasptools.sh"
 Inspect the result through the *httk₂* source of truth:
 
 ```console
-httk workflow workspace status --json workflow-workspace
+httk workspace status --json workflow-workspace
 ```
 
 The packaged v1 runner preserves the persistent `ht.run.current/` workdir,
@@ -128,7 +128,7 @@ Recognized *httk* v1 computer definitions can be mapped explicitly into
 
 ```console
 httk workflow remote import-v1 --name cluster-a ~/.httk/computers/cluster-a
-httk workflow workspace init --name default cluster-a:/remote/path/to/workflow-workspace
+httk workspace init --name default cluster-a:/remote/path/to/workflow-workspace
 ```
 
 `workspace_root` is retired. `workspace init REMOTE:PATH` performs the remote
@@ -259,7 +259,7 @@ legacy decision code or write `ht.nextstep`.
 The `collect` example uses transactional data. Its workspace is core-v2:
 
 ```console
-httk workflow workspace init native-workspace
+httk workspace init native-workspace
 ```
 
 If the job uses `data.mode: "none"`, omit the transaction and keep restartable
@@ -301,7 +301,7 @@ prepare_job_payload(
 Submit and run it:
 
 ```console
-httk workflow job submit --workspace native-workspace \
+httk job submit --workspace native-workspace \
   --placement migration/native/silicon-relax native-job
 httk workflow manager run --workspace native-workspace \
   --pool vasp-native \
@@ -744,7 +744,7 @@ For each migrated job type:
    result publication; verify that restart does not duplicate work or lose the
    authoritative outcome.
 6. Exercise a failed child as well as an all-successful child set.
-7. Verify `httk workflow workspace status --json workflow-workspace` and the journal
+7. Verify `httk workspace status --json workflow-workspace` and the journal
    rather than relying on directory names.
 8. Run several jobs with the intended pool, capabilities, resources, and
    worker count.
@@ -758,7 +758,7 @@ Stop instantiating new converted jobs first. Let submitted *httk* v1 jobs reach 
 terminal state or cancel them through recorded operator requests:
 
 ```console
-httk workflow job request cancel --workspace workflow-workspace \
+httk job request cancel --workspace workflow-workspace \
   --reason "replaced by validated native workflow" JOB_UUID
 ```
 
@@ -811,7 +811,7 @@ package-hook collection; re-scaffold them.
 Submit a one-shot job or a structure campaign:
 
 ```console
-httk workflow job new --workspace WS --workflow ./silicon-relax \
+httk job new --workspace WS --workflow ./silicon-relax \
   --format httk-v1 --input-from structure structures/*.cif --parameter encut=520
 httk workflow run --workspace WS --pool vasp
 httk workflow collect --workspace WS

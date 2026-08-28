@@ -129,21 +129,21 @@ _RETIRED_REMOTE_SETTINGS = frozenset(
     }
 )
 
-REMOTE_WORKSPACE_INIT_COMMAND = ("httk", "workflow", "workspace", "init")
-REMOTE_WORKSPACE_DELETE_COMMAND = ("httk", "workflow", "workspace", "delete")
-REMOTE_WORKSPACE_FSCK_COMMAND = ("httk", "workflow", "workspace", "fsck")
-REMOTE_WORKSPACE_GC_COMMAND = ("httk", "workflow", "workspace", "gc")
-REMOTE_WORKSPACE_LIST_COMMAND = ("httk", "workflow", "workspace", "list")
-REMOTE_WORKSPACE_MOVE_COMMAND = ("httk", "workflow", "workspace", "move")
+REMOTE_WORKSPACE_INIT_COMMAND = ("httk", "workspace", "init")
+REMOTE_WORKSPACE_DELETE_COMMAND = ("httk", "workspace", "delete")
+REMOTE_WORKSPACE_FSCK_COMMAND = ("httk", "workspace", "fsck")
+REMOTE_WORKSPACE_GC_COMMAND = ("httk", "workspace", "gc")
+REMOTE_WORKSPACE_LIST_COMMAND = ("httk", "workspace", "list")
+REMOTE_WORKSPACE_MOVE_COMMAND = ("httk", "workspace", "move")
 REMOTE_RECEIVE_COMMAND = ("httk", "workflow", "transfer", "receive")
 REMOTE_OFFER_COMMAND = ("httk", "workflow", "transfer", "offer")
 REMOTE_RETIRE_COMMAND = ("httk", "workflow", "transfer", "retire")
-REMOTE_STATUS_COMMAND = ("httk", "workflow", "workspace", "status")
-REMOTE_WORKSPACE_SETTINGS_COMMAND = ("httk", "workflow", "workspace", "settings")
-REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND = ("httk", "workflow", "workspace", "workflow-prelude")
+REMOTE_STATUS_COMMAND = ("httk", "workspace", "status")
+REMOTE_WORKSPACE_SETTINGS_COMMAND = ("httk", "workspace", "settings")
+REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND = ("httk", "workspace", "workflow-prelude")
 REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
-REMOTE_JOB_REQUEST_ENVELOPES_COMMAND = ("httk", "workflow", "job", "request-envelopes")
-REMOTE_JOB_PUBLISH_REQUESTS_COMMAND = ("httk", "workflow", "job", "publish-requests")
+REMOTE_JOB_REQUEST_ENVELOPES_COMMAND = ("httk", "job", "request-envelopes")
+REMOTE_JOB_PUBLISH_REQUESTS_COMMAND = ("httk", "job", "publish-requests")
 
 
 def submit_remote_managers(
@@ -215,7 +215,7 @@ def probe_remote_workspace(
     try:
         documents = json.loads(str(status.get("stdout", "")))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"{noun} did not return a compatible workflow workspace status") from exc
+        raise ValueError(f"{noun} did not return a compatible workspace status") from exc
     if isinstance(documents, dict):
         raise ValueError(
             "remote httk-workflow is older than this client: upgrade the remote "
@@ -237,7 +237,7 @@ def probe_remote_workspace(
             raise ValueError
         uuid.UUID(workspace_id)
     except (AttributeError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
-        raise ValueError(f"{noun} did not return a compatible workflow workspace status") from exc
+        raise ValueError(f"{noun} did not return a compatible workspace status") from exc
     return workspace_id, root
 
 

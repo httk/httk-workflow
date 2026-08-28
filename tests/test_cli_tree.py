@@ -10,7 +10,7 @@ import argparse
 from pathlib import Path
 
 import pytest
-from httk.core.cli import CLIContext
+from httk.core.cli import CLIContext, main
 
 from httk.workflow import Workspace, workflow_cli
 from httk.workflow.projects import initialize_project
@@ -96,7 +96,8 @@ def test_every_group_help_exits_zero_and_names_its_subcommands(group: str, tmp_p
 @pytest.mark.parametrize("group", sorted(GROUPS))
 def test_every_group_prints_its_own_help_when_given_no_action(group: str, tmp_path: Path, capsys) -> None:
     assert command([group], _context(tmp_path)) == 0
-    assert f"usage: httk workflow {group}" in capsys.readouterr().out
+    expected = f"usage: httk {group}" if group in {"workspace", "job"} else f"usage: httk workflow {group}"
+    assert expected in capsys.readouterr().out
 
 
 def test_every_leaf_documents_every_argument_it_takes(tmp_path: Path) -> None:
@@ -148,7 +149,7 @@ def test_an_unknown_action_under_a_known_group_names_that_group(tmp_path: Path, 
 
     assert command(["workspace", "frobnicate"], _context(tmp_path)) == 2
     captured = capsys.readouterr().err
-    assert "httk workflow workspace" in captured
+    assert "httk workspace" in captured
     assert "invalid choice: 'frobnicate'" in captured
     # The group's own actions are what it offers instead, not the tree's groups.
     assert "'fsck'" in captured and "'remote'" not in captured
@@ -168,7 +169,21 @@ def test_an_unknown_group_names_the_tree(tmp_path: Path, capsys) -> None:
 
 def test_a_missing_required_argument_names_the_leaf(tmp_path: Path, capsys) -> None:
     assert command(["workspace", "policy", "set"], _context(tmp_path)) == 2
-    assert "httk workflow workspace policy set" in capsys.readouterr().err
+    assert "httk workspace policy set" in capsys.readouterr().err
+
+
+def test_workflow_rejects_the_standalone_groups(tmp_path: Path, capsys) -> None:
+    assert workflow_cli.workflow_command(["workspace", "status"], _context(tmp_path)) == 2
+    captured = capsys.readouterr().err
+    assert "httk workflow" in captured
+    assert "invalid choice: 'workspace'" in captured
+
+
+def test_core_dispatches_the_standalone_groups(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert main(["workspace", "--help"]) == 0
+    assert capsys.readouterr().out.startswith("usage: httk workspace")
+    assert main(["job", "list"]) == 0
 
 
 # ---------------------------------------------------------------------------

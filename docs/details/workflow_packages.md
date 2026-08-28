@@ -52,7 +52,7 @@ The command line can use the directory without registering it:
 
 ```console
 httk workflow describe ./my-workflow
-httk workflow job new --workspace WS --workflow-dir ./my-workflow --input structure=POSCAR
+httk job new --workspace WS --workflow-dir ./my-workflow --input structure=POSCAR
 ```
 
 ## Runner realizations
@@ -218,7 +218,7 @@ The operational sequence is one foreground registration per platform class:
 
 ```console
 httk workflow build --workspace WORKSPACE ./my-workflow
-httk workflow job new --workspace WORKSPACE --workflow-dir ./my-workflow --step prepare
+httk job new --workspace WORKSPACE --workflow-dir ./my-workflow --step prepare
 httk workflow run --workspace WORKSPACE
 ```
 
@@ -689,7 +689,7 @@ after preparation do not change later jobs; symlinks are rejected.
 The usual lifecycle is instantiate, run, then collect:
 
 ```console
-httk workflow job new --workspace WS --workflow-dir ./my-workflow \\
+httk job new --workspace WS --workflow-dir ./my-workflow \\
     --input-from structure structures/ \\
     --parameter kpoint_density=30.0 \\
     --placement project/screening

@@ -26,14 +26,14 @@ characterization — the point is the campaign, not the physics):
 .. code-block:: console
 
     httk project init --name campaign .
-    httk workflow job new \\
+    httk job new \\
         --workflow examples/defect_campaign.py --step characterize \\
         --parameter sites=3 --parameter diverging=1 --tag campaign
     httk workflow run
-    httk workflow job list
+    httk job list
 
 The campaign then fails by design, with ``defects.child_failed``, because
-``diverging=1`` made site 1 fail: ``httk workflow job show`` on the parent and on
+``diverging=1`` made site 1 fail: ``httk job show`` on the parent and on
 one child is what this example is for. ``examples/defect_campaign.sh`` is the same
 campaign authored in Bash, publishing the same outcomes byte for byte.
 

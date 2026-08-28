@@ -6,7 +6,7 @@
 # SDKs. Every child job runs this same file at the "relax" step.
 #
 #     httk project init --name campaign .
-#     httk workflow job new \
+#     httk job new \
 #         --workflow examples/defect_campaign.sh --step characterize \
 #         --parameter sites=3 --parameter diverging=1 --tag campaign
 #     httk workflow run

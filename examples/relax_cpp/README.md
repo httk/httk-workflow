@@ -9,7 +9,7 @@ job and start a manager:
 
 ```console
 httk workflow build --workspace WORKSPACE ./relax_cpp
-httk workflow job new --workspace WORKSPACE --workflow-dir ./relax_cpp --step prepare \
+httk job new --workspace WORKSPACE --workflow-dir ./relax_cpp --step prepare \
     --file POSCAR=POSCAR --data-mode transactional --tag silicon
 httk workflow run --workspace WORKSPACE
 httk workflow collect --workspace WORKSPACE

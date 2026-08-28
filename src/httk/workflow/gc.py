@@ -1,27 +1,29 @@
 """Collect bounded, explicitly configured workspace garbage.
 
 Except for a succeeded attempt's control directory, which its owning committing
-manager removes after the commit is durable and its process is reaped, nothing in the engine frees disk
-on its own. Managers do run the always-safe categories at startup and clean
-exit; policy-gated artefacts orphaned by a crash are left in place. Over a long
-campaign that costs
+manager removes after the commit is durable and its process is reaped, the
+engine's collection is bounded by explicit safety and retention rules. Managers
+run the always-safe categories at startup and the full policy-gated collection
+at clean exit; policy-gated artefacts orphaned by a crash are left in place.
+Over a long campaign that costs
 real space — one control directory per attempt, one journal writer directory
 and one manager directory per process start, a full copy of every tree a
 transaction replaced, an intact bundle for every transfer already acknowledged
 — and on a quota'd HPC filesystem that is what fails first.
 
 This module is the separate, explicit collector the specification asks for. It
-is driven by ``policy.retention`` for aged categories: a limit that is not
-configured means *keep*. A workspace whose operator has said nothing is still
-tidied of things that cannot carry information at all — empty placement
+is driven by ``policy.retention`` for aged categories: ``journal_days`` and
+``trash_days`` default to one day, while an explicit ``null`` or ``"keep"``
+means *keep*. A workspace whose operator has said nothing is still tidied of
+things that cannot carry information at all — empty placement
 mirrors, abandoned staging entries, and long-dead request receipts — plus the
 one conditional case: a terminal marker whose payload the operator removed.
 
 Everything here is conservative by construction. It never touches the
 quarantine, a sealed transfer bundle, a persistent workdir, a payload beyond
 its aged attempt-control directories, a marker of any job except a terminal
-job whose payload directory is absent, a journal segment
-that a current marker references, the directory of a manager that is still
+job whose payload directory is absent, a journal segment protected by a current
+marker or non-terminal frame chain, the directory of a manager that is still
 heartbeating, ``runner-builds`` (machine-local rebuildable derived state), or
 the runner store. Removal is bottom-up and mutates no
 workspace state, so a collector that is killed halfway leaves a workspace that
@@ -41,7 +43,7 @@ from typing import TYPE_CHECKING, Any
 from ._manager_joins import children as join_children
 from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
 from .errors import FormatError, WorkflowError
-from .journal import JournalWriter, parse_record_ref
+from .journal import JournalWriter, iter_record_chain, parse_record_ref
 from .models import (
     ATTEMPTS_DIRECTORY,
     QUIESCENT_KINDS,
@@ -445,18 +447,21 @@ class _Collection:
         when its ``manager.json`` cannot be read. A live manager whose writer
         cannot be determined makes every writer potentially live, which is
         recorded so that journal collection stands down entirely rather than
-        guessing.
+        guessing. The supplied collection writer and its manager directory are
+        treated as live regardless of heartbeat age.
         """
 
         if self._live_managers is None:
             lease = self.workspace.policy.lease_seconds
+            caller_writer_id = None if self.journal_writer is None else self.journal_writer.writer_id
             live: dict[str, str | None] = {}
             for manager_dir in _iterdir(self.control / "managers"):
                 if not manager_dir.is_dir():
                     continue
-                if not self._heartbeat_within(manager_dir, lease):
-                    continue
                 writer_id = self._writer_of(manager_dir)
+                caller_manager = caller_writer_id is not None and writer_id == caller_writer_id
+                if not caller_manager and not self._heartbeat_within(manager_dir, lease):
+                    continue
                 live[manager_dir.name] = writer_id
                 if writer_id is None:
                     self._opaque_live_manager = True
@@ -479,12 +484,12 @@ class _Collection:
         return writer_id if isinstance(writer_id, str) and writer_id else None
 
     def referenced_segments(self) -> set[tuple[str, int]]:
-        """Return every journal segment a current marker's reference names.
+        """Return every journal segment protected by current history.
 
-        Only the segment a marker points *into* is protected. The frames behind
-        it are deep history: collecting them is exactly what ``journal_days``
-        buys, and the cost is that ``collect`` and ``job log`` report the job's
-        timeline with ``gaps`` set rather than in full.
+        A terminal marker protects only its current segment. A non-terminal
+        marker protects every segment in its frame chain, so collecting cannot
+        remove the history a live job may still need. If a chain frame cannot
+        be read, its named segment is protected and the walk stops there.
 
         A sealed transfer bundle keeps its marker inside the payload instead of
         the state tree, so the ledgers of bundles not yet retired are consulted
@@ -492,7 +497,39 @@ class _Collection:
         """
 
         referenced: set[tuple[str, int]] = set()
-        names = [marker.path.name for marker in self.markers()]
+        markers = self.markers()
+
+        def protect(reference: str, *, walk: bool) -> None:
+            try:
+                writer_id, segment, _offset, _length, _checksum = parse_record_ref(reference)
+            except (FormatError, ValueError):
+                return
+            referenced.add((writer_id, segment))
+            if not walk:
+                return
+            for chain_reference, frame in iter_record_chain(
+                self.control,
+                reference,
+                deadline_seconds=self.workspace.visibility_deadline,
+            ):
+                try:
+                    chain_writer, chain_segment, _offset, _length, _checksum = parse_record_ref(chain_reference)
+                except (FormatError, ValueError):
+                    _LOGGER.debug("stopping journal chain walk at invalid reference %r", chain_reference)
+                    break
+                referenced.add((chain_writer, chain_segment))
+                if frame is None:
+                    _LOGGER.debug(
+                        "stopping journal chain walk at unreadable frame %s; its segment remains protected",
+                        chain_reference,
+                    )
+                    break
+
+        for marker in markers:
+            reference = _marker_record_ref(marker.path.name)
+            if reference is not None:
+                protect(reference, walk=marker.kind not in TERMINAL_KINDS)
+
         for ledger_path in _iterdir(self.control / "transfers"):
             if not ledger_path.is_file() or ledger_path.suffix != ".json":
                 continue
@@ -501,16 +538,9 @@ class _Collection:
             except WorkflowError:
                 continue
             if ledger.get("status") == "sealed" and isinstance(ledger.get("sealed_marker"), str):
-                names.append(str(ledger["sealed_marker"]))
-        for name in names:
-            reference = _marker_record_ref(name)
-            if reference is None:
-                continue
-            try:
-                writer_id, segment, _offset, _length, _checksum = parse_record_ref(reference)
-            except (FormatError, ValueError):
-                continue
-            referenced.add((writer_id, segment))
+                reference = _marker_record_ref(str(ledger["sealed_marker"]))
+                if reference is not None:
+                    protect(reference, walk=False)
         return referenced
 
     # -- bookkeeping ---------------------------------------------------------
@@ -823,15 +853,14 @@ class _Collection:
                 self._collect("retired_requests", entry, size=self._entry_size(entry))
 
     def collect_journal_segments(self) -> None:
-        """Collect aged journal segments no current marker references.
+        """Collect aged journal segments outside protected frame chains.
 
         Three conditions must hold together: the segment is older than
-        ``journal_days``, no marker of this workspace — nor the sealed marker
-        of a bundle awaiting handover — references it, and the writer that
-        produced it belongs to no manager still heartbeating. The consequence
-        is honest and worth stating: the deep history of an old job goes with
-        the segments, and ``collect`` and ``job log`` then report that job's
-        timeline with ``gaps`` set.
+        ``journal_days``, no current marker or sealed marker of a bundle
+        awaiting handover protects it, and the writer that produced it belongs
+        to no manager still heartbeating. Terminal jobs protect only their
+        current segment; non-terminal jobs protect every segment in their
+        frame chain.
         """
 
         journal = self.control / "journal"
@@ -846,6 +875,8 @@ class _Collection:
             self._count_all_segments(journal)
             return
         live_writers = {writer_id for writer_id in live.values() if writer_id is not None}
+        if self.journal_writer is not None:
+            live_writers.add(self.journal_writer.writer_id)
         referenced = self.referenced_segments()
         for writer_dir in _iterdir(journal):
             writer_id = _writer_id_of(writer_dir)
@@ -1073,12 +1104,13 @@ def collect_garbage(
 ) -> GcReport:
     """Collect what the retention policy of *workspace* permits.
 
-    Nothing is removed for a category whose limit is unset: an unconfigured
-    retention means keep. The exceptions are the categories that cannot carry
-    information — empty placement mirrors, staging entries abandoned for a day,
-    and month-old request leftovers, whether claimed by a manager that is gone
-    or explicitly retired — plus ``removed_jobs``, which is collected whatever
-    the policy says.
+    Nothing is removed for a category whose limit is unlimited (``None``): the
+    retention defaults gate journal history and trash after one day, while an
+    explicit ``null`` or ``"keep"`` disables a category. The exceptions are
+    the categories that cannot carry information — empty placement mirrors,
+    staging entries abandoned for a day, and month-old request leftovers,
+    whether claimed by a manager that is gone or explicitly retired — plus
+    ``removed_jobs``, which is collected whatever the policy says.
 
     With *dry_run* the workspace is not touched at all and the report describes
     what a real run would have removed. *now* overrides the moment every age is

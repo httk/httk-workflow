@@ -122,7 +122,7 @@ static int step_run(void) {
         free(command);
         httk_workflow_fail("vasp.command_missing",
                            "no VASP command is configured: set it with "
-                           "httk workflow workspace settings set --key vasp.command --value '...' WORKSPACE, or set "
+                           "httk workspace settings set --key vasp.command --value '...' WORKSPACE, or set "
                            "HTTK_VASP_COMMAND, or give the job a vasp_command parameter",
                            NULL);
         return 0;

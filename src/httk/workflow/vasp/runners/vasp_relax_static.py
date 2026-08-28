@@ -244,7 +244,7 @@ def execute(a: Attempt, *, next_step: str) -> None:
     if not argv:
         a.fail(
             "vasp.command_missing",
-            "no VASP command is configured: set it with `httk workflow workspace settings set --key vasp.command --value '...' WORKSPACE`, "
+            "no VASP command is configured: set it with `httk workspace settings set --key vasp.command --value '...' WORKSPACE`, "
             "or set HTTK_VASP_COMMAND on the machine that runs this job, or give the job a vasp_command parameter",
         )
         return

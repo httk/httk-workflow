@@ -283,7 +283,7 @@ def _acquire_maintenance_lock(path: Path) -> None:
             if holder is not None and not holder.is_stale():
                 raise ValueError(
                     "project maintenance is already in progress; the maintenance lock is held by "
-                    f"{holder.describe()}; release it with 'httk workflow workspace unlock' once that "
+                    f"{holder.describe()}; release it with 'httk workspace unlock' once that "
                     "operation is known to be finished"
                 ) from None
             path.unlink(missing_ok=True)

@@ -248,6 +248,8 @@ def handle_workspace_managers(arguments: argparse.Namespace, context: CLIContext
 def _policy_value(key: str, text: str) -> object:
     """Parse one command-line policy value as the JSON it denotes."""
 
+    if key.startswith("retention.") and text == "keep":
+        return "keep"
     try:
         return json.loads(text)
     except json.JSONDecodeError as exc:
@@ -414,7 +416,7 @@ def handle_workspace_list(arguments: argparse.Namespace, context: CLIContext) ->
         print(json.dumps(rows, indent=2, sort_keys=True))
         return 0
     if not rows:
-        print("no workspaces are registered; create one with `httk workflow workspace init`")
+        print("no workspaces are registered; create one with `httk workspace init`")
         return 0
     for row in rows:
         mark = "?" if row["reachable"] is None else ("ok" if row["reachable"] else "missing")
@@ -726,6 +728,8 @@ def handle_workspace_workflow_prelude_unset(arguments: argparse.Namespace, conte
 
 def build_workspace_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
+    *,
+    program: str | None = None,
 ) -> None:
     """Declare the ``workspace`` group: the workspace itself, not its jobs."""
 
@@ -733,15 +737,16 @@ def build_workspace_parser(
         subparsers,
         "workspace",
         summary="create, inspect, tune, check, and collect one workspace",
-        description="Manage one filesystem-native workflow workspace",
+        description="Manage one filesystem-native execution workspace",
+        prog=program,
     )
 
     add_workspace_init_arguments(
         _leaf(
             group,
             "init",
-            summary="initialize a workflow workspace",
-            description="Initialize one workflow workspace",
+            summary="initialize an execution workspace",
+            description="Initialize one execution workspace",
             handler=handle_workspace_init,
         )
     )
@@ -776,7 +781,7 @@ def build_workspace_parser(
         policy_actions,
         "show",
         summary="print the current policy",
-        description="Print the policy of one workflow workspace",
+        description="Print the policy of one execution workspace",
         handler=handle_workspace_policy_show,
     )
     _add_workspace_targets(show, help_text="the workspace whose policy to print")
@@ -785,7 +790,7 @@ def build_workspace_parser(
         policy_actions,
         "set",
         summary="store one policy member",
-        description="Store one member of the policy of a workflow workspace",
+        description="Store one member of the policy of an execution workspace",
         handler=handle_workspace_policy_set,
     )
     _add_workspace_targets(store, help_text="the workspace whose policy to change", required=True)
@@ -971,7 +976,7 @@ def build_workspace_parser(
         group,
         "gc",
         summary="collect the garbage the retention policy allows",
-        description="Collect the garbage one workflow workspace has accumulated",
+        description="Collect the garbage one execution workspace has accumulated",
         handler=handle_workspace_gc,
     )
     _add_workspace_targets(collect, help_text="the workspace to collect")

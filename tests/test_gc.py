@@ -765,22 +765,122 @@ def test_clean_writer_segment_waits_for_journal_days(tmp_path: Path) -> None:
     assert not segment.exists()
 
 
-def test_crashed_manager_directory_survives_another_manager_idle_run(tmp_path: Path) -> None:
+def test_clean_manager_exit_collects_aged_dead_writer_and_manager(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
-    workspace.set_policy({"retention": {"journal_days": 0.0}})
-    with workspace.open_journal_writer() as writer:
-        writer.append({"format": "crashed-manager-frame"})
-        writer_id = writer.writer_id
+    workspace.set_policy({"journal_segment_bytes": 4096, "retention": {"journal_days": 0.0}})
+    writer_id, segments, _ = _two_segment_writer(workspace, days=60)
     crashed_dir = _manager_directory(workspace, writer_id, live=False, days=60)
 
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle()
+        exiting_writer_id = manager.writer.writer_id
 
-    assert crashed_dir.is_dir()
+    assert not crashed_dir.exists()
+    assert not any(segment.exists() for segment in segments)
+    gc_frames = [
+        frame for frame in iter_journal_frames(workspace.control) if frame.frame.get("format") == "httk-workflow-gc"
+    ]
+    assert gc_frames
+    assert all(parse_record_ref(frame.record_ref)[0] == exiting_writer_id for frame in gc_frames)
+
+
+def test_supplied_writer_is_protected_even_with_a_stale_self_heartbeat(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(
+        tmp_path / "workspace",
+        durable=False,
+        policy={"journal_segment_bytes": 4096, "retention": {"journal_days": 0.0}},
+    )
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+        own_writer_id = manager.writer.writer_id
+        own_manager_dir = manager.manager_directory
+        own_segment = next((workspace.control / "journal" / own_writer_id).glob("*.hwj"))
+        _age(own_segment, 60)
+        heartbeat = read_json(own_manager_dir / "heartbeat.json")
+        heartbeat["updated_at"] = _timestamp(60)
+        write_json_atomic(own_manager_dir / "heartbeat.json", heartbeat)
+
+        with workspace.open_journal_writer() as writer:
+            writer.append({"format": "unreferenced-external-frame"})
+            external_writer_id = writer.writer_id
+        external_segment = next((workspace.control / "journal" / external_writer_id).glob("*.hwj"))
+        _age(external_segment, 60)
+
+        report = workspace.collect_garbage(journal_writer=manager.writer)
+
+        assert own_segment.is_file()
+        assert own_manager_dir.is_dir()
+        assert not external_segment.exists()
+        assert report.record_ref is not None
+        gc_writer_id, gc_segment, _offset, _length, _checksum = parse_record_ref(report.record_ref)
+        assert gc_writer_id == own_writer_id
+        assert segment_path(workspace.control, gc_writer_id, gc_segment).is_file()
+        assert read_record(workspace.control, report.record_ref)["format"] == "httk-workflow-gc"
+
+
+def test_non_terminal_frame_chain_protects_aged_history_until_terminal(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False, policy={"journal_segment_bytes": 4096})
+    workspace.set_policy({"retention": {"journal_days": 0.0}})
+    payload, _job_id = _payload(tmp_path / "source", "chain")
+    marker = workspace.submit(payload, "jobs")
+    with workspace.open_journal_writer() as writer:
+        marker = workspace.transition(writer, marker, "ready", {})
+        writer.append({"format": "chain-filler", "filler": "x" * 4000})
+        marker = workspace.transition(writer, marker, "paused", {})
+        writer_id = writer.writer_id
+    current_writer_segments = sorted((workspace.control / "journal" / writer_id).glob("*.hwj"))
+    assert len(current_writer_segments) == 3
+    _age(workspace.control / "journal" / writer_id, 60)
+
+    report = workspace.collect_garbage()
+    assert report.category("journal_segments").removed == 1
+    assert current_writer_segments[0].is_file()
+    assert not current_writer_segments[1].exists()
+    assert current_writer_segments[2].is_file()
+
+    with workspace.open_journal_writer() as writer:
+        workspace.transition(writer, marker, "succeeded", {})
     _age(workspace.control / "journal" / writer_id, 60)
     report = workspace.collect_garbage()
-    assert report.category("manager_directories").removed == 1
-    assert not crashed_dir.exists()
+    old_writer_entries = set(report.category("journal_segments").entries)
+    assert sum(str(segment) in old_writer_entries for segment in current_writer_segments) == 2
+    assert not current_writer_segments[0].exists()
+    assert not current_writer_segments[2].exists()
+
+
+def test_keep_disables_a_retention_category(aged: _Fixture) -> None:
+    aged.workspace.set_policy({"retention": {"journal_days": "keep"}})
+    report = aged.workspace.collect_garbage()
+
+    assert report.category("journal_segments").skipped is True
+    assert report.category("journal_segments").skip_reason == "retention.journal_days is not configured"
+    assert all(path.is_file() for path in aged.dead_segments)
+
+
+def test_default_retention_collects_policy_gated_categories(aged: _Fixture) -> None:
+    aged.workspace.set_policy({"retention": {}})
+    report = aged.workspace.collect_garbage()
+    collected = {category.name for category in report.categories if category.candidates}
+    assert {"transaction_trash", "retired_bundles", "transfer_records", "journal_segments"} <= collected
+    assert report.category("attempt_control").skipped is True
+    assert report.category("attempt_control").skip_reason == "retention.attempt_control_days is not configured"
+    assert report.category("transaction_trash").removed == 1
+    assert report.category("retired_bundles").removed == 1
+    assert report.category("transfer_records").removed == 2
+    assert report.category("journal_segments").removed == 3
+    assert not any(path.exists() for path in aged.dead_segments)
+    assert not aged.dead_manager.exists()
+    assert not aged.referenced_segments[0].exists()
+    assert aged.referenced_segments[1].exists()
+    assert aged.live_manager.is_dir()
+
+
+def test_unset_attempt_control_retention_keeps_aged_attempts(aged: _Fixture) -> None:
+    aged.workspace.set_policy({"retention": {"journal_days": "keep", "trash_days": "keep"}})
+    report = aged.workspace.collect_garbage()
+
+    assert report.category("attempt_control").skipped is True
+    assert all(directory.is_dir() for directory in aged.old_attempts)
 
 
 def test_a_collection_journals_one_frame_summarizing_what_it_removed(aged: _Fixture) -> None:
@@ -798,27 +898,6 @@ def test_a_collection_journals_one_frame_summarizing_what_it_removed(aged: _Fixt
     assert categories["attempt_control"]["removed"] == 4
     # The frame is not a state frame, so it never disturbs a workspace check.
     assert aged.workspace.check().ok
-
-
-def test_unset_retention_collects_only_the_always_safe_categories(aged: _Fixture) -> None:
-    aged.workspace.set_policy({"retention": {}})
-    report = aged.workspace.collect_garbage()
-    collected = {category.name for category in report.categories if category.candidates}
-    assert collected <= {"placement_directories", "tmp_entries", "retired_requests"}
-    assert "tmp_entries" in collected
-    assert {reason.split(":")[0] for reason in report.skipped} == {
-        "attempt_control",
-        "transaction_trash",
-        "retired_bundles",
-        "transfer_records",
-        "journal_segments",
-        "manager_directories",
-    }
-    # Everything a configured retention would have collected is still there.
-    assert all(directory.is_dir() for directory in aged.old_attempts)
-    assert aged.retired_bundle.is_dir()
-    assert all(path.is_file() for path in aged.dead_segments)
-    assert aged.dead_manager.is_dir()
 
 
 def test_empty_placement_mirrors_are_pruned_below_every_state_kind(tmp_path: Path) -> None:

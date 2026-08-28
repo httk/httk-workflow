@@ -90,7 +90,7 @@ WORKFLOW = "pwd.workflow"
 #: The checkpoint: one JSON value per completed node, keyed by node id.
 STATE_RESULTS = "pwd_results"
 #: The node ids completed so far, in completion order, for an operator reading
-#: ``httk workflow job show``.
+#: ``httk job show``.
 STATE_COMPLETED = "pwd_completed"
 DEFAULT_DATA_PREFIX = "pwd"
 OUTPUTS_FILE = "pwd-outputs.json"

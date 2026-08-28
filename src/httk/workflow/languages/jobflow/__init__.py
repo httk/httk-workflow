@@ -1,4 +1,4 @@
-"""Prepare atomate2 jobflow Maker workflows for httk workflow jobs.
+"""Prepare atomate2 jobflow Maker workflows for httk jobs.
 
 Declared workflow parameters are Maker constructor configuration: the runner builds ``Class(**params)`` for the
 ``maker=`` form and ``dataclasses.replace(maker, **params)`` for the document form, so declared parameters override

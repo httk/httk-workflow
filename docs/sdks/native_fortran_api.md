@@ -111,7 +111,7 @@ Fortran 2008).
 
 Because dispatch lives in the C library, the breadcrumb an aborted handler leaves
 carries the exception label **`CError`** (not a Fortran-specific name). A Fortran
-author who set `code` nonzero recognizes their handler in `httk workflow job why`
+author who set `code` nonzero recognizes their handler in `httk job why`
 output by that `CError` exception together with the `"<step> exited with status
 N"` message.
 
@@ -287,9 +287,9 @@ runner and the mock VASP as the command:
 
 ```console
 httk project init --name relax-fortran .
-httk workflow workspace init --name default .
-httk workflow job new --workflow ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workflow workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
+httk workspace init --name default .
+httk job new --workflow ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
+httk workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
 httk workflow run
 httk workflow collect
 ```

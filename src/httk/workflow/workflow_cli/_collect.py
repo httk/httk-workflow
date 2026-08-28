@@ -399,7 +399,7 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
         subparsers,
         "collect",
         summary="stream collected workflow summaries",
-        description="Collect finished jobs from one workflow workspace",
+        description="Collect finished jobs from one execution workspace",
         handler=handle_collect,
     )
     parser.add_argument(

@@ -58,7 +58,7 @@ int step_run() {
     const auto command = Attempt::setting("vasp.command", from_parameter.value_or(""));
     if (!command || command->empty()) {
         Attempt::fail("vasp.command_missing",
-                      "no VASP command is configured: set it with httk workflow workspace settings set "
+                      "no VASP command is configured: set it with httk workspace settings set "
                       "--key vasp.command --value '...' WORKSPACE, or set HTTK_VASP_COMMAND, or give the job a vasp_command parameter");
         return 0;
     }

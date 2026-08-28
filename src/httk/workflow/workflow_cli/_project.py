@@ -573,7 +573,7 @@ def build_project_parser(
         group,
         "init",
         summary="create a project, its key, and its workspace",
-        description="Create one project directory with its identity key and workflow workspace",
+        description="Create one project directory with its identity key and execution workspace",
         handler=handle_project_init,
     )
     initialize.add_argument(

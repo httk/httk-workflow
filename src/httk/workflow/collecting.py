@@ -845,7 +845,7 @@ def job_records(
     successful ones; every requested kind is validated against
     ``COLLECTABLE_KINDS`` before anything is read. *placement* restricts the
     job_records to the jobs at or below one placement, exactly as
-    ``httk workflow job list --placement`` does.
+    ``httk job list --placement`` does.
 
     The result is a lazy iterator over one scan of the requested state
     directories. Nothing is materialized, and building a record reads only that

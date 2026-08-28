@@ -159,8 +159,8 @@ def _write_global(workspaces: Mapping[str, Mapping[str, str]], *, durable: bool 
 
 def _unknown(name: str) -> ValueError:
     return ResolutionMiss(
-        f"unknown workspace: {name}; register it with `httk workflow workspace init` "
-        "or list the registered ones with `httk workflow workspace list`"
+        f"unknown workspace: {name}; register it with `httk workspace init` "
+        "or list the registered ones with `httk workspace list`"
     )
 
 
@@ -375,12 +375,12 @@ def delete_workspace(name: str, *, force: bool = False) -> WorkspaceBinding:
 
 
 def remove_local_workspace(path: Path) -> None:
-    """Remove one local workflow workspace directory.
+    """Remove one local execution workspace directory.
 
     :param path: Locate the workspace directory to remove.
-    :raises ValueError: If the path is not a workflow workspace.
+    :raises ValueError: If the path is not an execution workspace.
     """
     resolved = path.expanduser().resolve()
     if not (resolved / WORKSPACE_DIRECTORY / "format.json").is_file():
-        raise ValueError(f"not an httk workflow workspace: {resolved}")
+        raise ValueError(f"not an httk execution workspace: {resolved}")
     shutil.rmtree(resolved)

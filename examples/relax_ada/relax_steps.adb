@@ -143,7 +143,7 @@ package body Relax_Steps is
       Httk_Workflow.Httk_Workflow_Setting ("vasp.command", U.To_String (From_Parameter), Command, Present, Status);
       if not Present or else U.Length (Command) = 0 then
          Status := Httk_Workflow.Httk_Workflow_Fail
-           ("vasp.command_missing", "no VASP command is configured: set it with httk workflow workspace settings set --key vasp.command --value '...' WORKSPACE, or set HTTK_VASP_COMMAND, or give the job a vasp_command parameter");
+           ("vasp.command_missing", "no VASP command is configured: set it with httk workspace settings set --key vasp.command --value '...' WORKSPACE, or set HTTK_VASP_COMMAND, or give the job a vasp_command parameter");
          return 0;
       end if;
       Httk_Workflow.Httk_Workflow_Parameter ("timeout", "86400", Timeout, Present, Status);

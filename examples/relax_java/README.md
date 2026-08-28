@@ -9,7 +9,7 @@ on each machine before starting a manager:
 
 ```console
 httk workflow build --workspace WORKSPACE ./relax_java
-httk workflow job new --workspace WORKSPACE --workflow-dir ./relax_java --step prepare \
+httk job new --workspace WORKSPACE --workflow-dir ./relax_java --step prepare \
     --file POSCAR=POSCAR --data-mode transactional --tag silicon
 httk workflow run --workspace WORKSPACE
 httk workflow collect --workspace WORKSPACE

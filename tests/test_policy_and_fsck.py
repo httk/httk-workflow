@@ -21,7 +21,7 @@ from httk.workflow.journal import (
     read_record,
     segment_path,
 )
-from httk.workflow.models import DEFAULT_JOURNAL_SEGMENT_BYTES, WorkspacePolicy
+from httk.workflow.models import DEFAULT_JOURNAL_SEGMENT_BYTES, RetentionPolicy, WorkspacePolicy
 from httk.workflow.workflow_cli import command
 from httk.workflow.workspace import Marker
 
@@ -134,9 +134,12 @@ def test_policy_is_written_at_initialization_and_round_trips(tmp_path: Path) -> 
         "visibility_deadline_seconds": 5.0,
         "lease_seconds": 900.0,
         "journal_segment_bytes": DEFAULT_JOURNAL_SEGMENT_BYTES,
-        "retention": {},
+        "retention": {"journal_days": 1.0, "trash_days": 1.0},
     }
     assert workspace.policy == WorkspacePolicy()
+    assert workspace.policy.retention.attempt_control_days is None
+    assert workspace.policy.retention.journal_days == 1.0
+    assert workspace.policy.retention.trash_days == 1.0
     updated = workspace.set_policy({"visibility_deadline_seconds": 90, "retention": {"journal_days": 30}})
     assert updated.visibility_deadline_seconds == 90.0
     # Another implementation attaching the same workspace sees the same policy,
@@ -189,7 +192,9 @@ def test_policy_command_shows_sets_and_refuses(tmp_path: Path, capsys) -> None:
     context = CLIContext("httk", tmp_path)
     ws = register_ws(context, root)
     assert command(["workspace", "policy", "show", "--json", ws], context) == 0
-    assert json.loads(capsys.readouterr().out)[0]["visibility_deadline_seconds"] == 5.0
+    shown = json.loads(capsys.readouterr().out)[0]
+    assert shown["visibility_deadline_seconds"] == 5.0
+    assert shown["retention"] == {"journal_days": 1.0, "trash_days": 1.0}
     assert (
         command(["workspace", "policy", "set", "--key", "visibility_deadline_seconds", "--value", "60", ws], context)
         == 0
@@ -203,8 +208,36 @@ def test_policy_command_shows_sets_and_refuses(tmp_path: Path, capsys) -> None:
     assert policy.visibility_deadline_seconds == 60.0
     assert policy.retention.trash_days == 14.0
     assert policy.lease_seconds == 900.0
+    assert (
+        command(["workspace", "policy", "set", "--key", "retention.journal_days", "--value", "null", ws], context) == 0
+    )
+    assert Workspace(root, mutable=False).policy.retention.journal_days is None
+    assert (
+        command(["workspace", "policy", "set", "--key", "retention.journal_days", "--value", "keep", ws], context) == 0
+    )
+    assert Workspace(root, mutable=False).policy.retention.journal_days is None
     assert command(["workspace", "policy", "show", ws], context) == 0
     assert "visibility_deadline_seconds\t60.0" in capsys.readouterr().out
+
+
+def test_retention_keep_is_persisted_and_disables_collection(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    updated = workspace.set_policy({"retention": {"journal_days": "keep", "trash_days": None}})
+
+    assert updated.retention.journal_days is None
+    assert updated.retention.trash_days is None
+    stored = json.loads((workspace.control / "format.json").read_text(encoding="utf-8"))
+    assert stored["policy"]["retention"] == {"journal_days": None, "trash_days": None}
+    attached = Workspace(workspace.root, mutable=False)
+    assert attached.policy.retention.journal_days is None
+    assert attached.policy.retention.trash_days is None
+
+
+def test_public_retention_none_round_trips_as_keep() -> None:
+    policy = RetentionPolicy(journal_days=None, trash_days=None)
+
+    assert policy.as_mapping() == {"journal_days": None, "trash_days": None}
+    assert RetentionPolicy.from_mapping(policy.as_mapping()) == policy
 
 
 def test_the_manager_takes_its_lease_from_policy_unless_it_is_overridden(tmp_path: Path) -> None:

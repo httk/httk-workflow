@@ -8,7 +8,7 @@ The implementation is split across cohesive sibling modules — ``inputs``,
 ``diagnostics``, ``remedies``, and ``reports`` — and this package is a thin
 public facade that re-exports their surface unchanged. Importing the package
 also registers the packaged VASP workflows with the generic scaffold (see the
-``workflows`` module), which is how ``httk workflow job new --workflow
+``workflows`` module), which is how ``httk job new --workflow
 vasp-relax`` resolves a runner the scaffold never names.
 """
 

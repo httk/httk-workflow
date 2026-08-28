@@ -133,7 +133,7 @@ contains
     if (len_trim(command) == 0) then
       call ignore(httk_workflow_fail("vasp.command_missing", &
         "no VASP command is configured: set it with "// &
-        "httk workflow workspace settings set --key vasp.command --value '...' WORKSPACE, or set "// &
+        "httk workspace settings set --key vasp.command --value '...' WORKSPACE, or set "// &
         "HTTK_VASP_COMMAND, or give the job a vasp_command parameter"))
       code = 0
       return

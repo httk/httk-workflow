@@ -2,8 +2,8 @@
 
 *For operators and campaign owners: the whole command tree, including projects, configuration, signed manifests, remotes, and work that travels to them.*
 
-Installing *httk-workflow* registers the lazy `workflow` command with
-*httk-core*:
+Installing *httk-workflow* registers lazy `workflow`, `workspace`, and `job`
+commands with *httk-core*:
 
 ```console
 httk workflow --help
@@ -11,18 +11,19 @@ httk workflow --help
 
 ## One command tree
 
-**`httk workflow …` is the spelling of every command in this
-package.** It is one nested command tree: each group answers `--help`, each
-command answers `--help`, and a mistyped action is reported by the group it was
-mistyped in.
+`httk workflow …` remains the spelling for workflow execution and project
+commands. Workspace and job management are top-level command trees:
+`httk workspace …` and `httk job …`. Each group answers `--help`, each command
+answers `--help`, and a mistyped action is reported by the group it was mistyped
+in.
 
 ## The complete tree
 
 ```text
-httk workflow workspace  init | list | default | move | forget | delete | status | managers | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock
+httk workspace          init | list | default | move | forget | delete | status | managers | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock
 httk workflow runner     publish | describe
 httk workflow build      [--workspace WORKSPACE] TARGET...
-httk workflow job        new | submit | request | list | show | log | why | debug
+httk job                 new | submit | request | list | show | log | why | debug
 httk workflow describe   TARGET [--json]
 httk workflow precheck   [--workspace WORKSPACE] [--placement P] [--json]
 httk workflow collect
@@ -96,7 +97,7 @@ job UUIDs when precise attribution matters.
 have only one registered name:
 
 ```console
-httk workflow workspace init --name my-workspace runs/my-workspace
+httk workspace init --name my-workspace runs/my-workspace
 ```
 
 A workspace on a cluster is addressed as `REMOTE:NAME`; its owning machine
@@ -484,9 +485,9 @@ or newer than yours:
 httk workflow transfer receive --workspace PATH --bundle BUNDLE
 httk workflow transfer offer --destination-workspace-id UUID [--job JOB_ID …] --json PATH
 httk workflow transfer retire --destination-workspace-id UUID --json PATH JOB_ID …
-httk workflow job request-envelopes ACTION --workspace WORKSPACE --operator=LABEL --reason=TEXT [--priority N] [--step S] [--force] --json JOB_ID …
-httk workflow job publish-requests --workspace WORKSPACE --document JSON [--document JSON …] [--wait] [--timeout S] [--durable|--no-durable]
-httk workflow workspace status --by-path --json PATH
+httk job request-envelopes ACTION --workspace WORKSPACE --operator=LABEL --reason=TEXT [--priority N] [--step S] [--force] --json JOB_ID …
+httk job publish-requests --workspace WORKSPACE --document JSON [--document JSON …] [--wait] [--timeout S] [--durable|--no-durable]
+httk workspace status --by-path --json PATH
 httk workflow manager run --by-path --workspace PATH
 ```
 
@@ -540,9 +541,9 @@ alias, runner file, package directory, or bare language document — and needs n
 prepared payload:
 
 ```console
-httk workflow job new --workspace WORKSPACE --workflow vasp-relax --input structure=POSCAR --tag silicon
-httk workflow job new --workspace WORKSPACE --workflow vasp-relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening
-httk workflow job new --workspace WORKSPACE --workflow ./my_runner.py --step characterize --parameter sites=8
+httk job new --workspace WORKSPACE --workflow vasp-relax --input structure=POSCAR --tag silicon
+httk job new --workspace WORKSPACE --workflow vasp-relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening
+httk job new --workspace WORKSPACE --workflow ./my_runner.py --step characterize --parameter sites=8
 ```
 
 `--parameter NAME=VALUE` supplies an opaque implementation knob;
@@ -575,10 +576,10 @@ Run a PWD, CWL, or jobflow document directly with `job new --workflow DOCUMENT`;
 the document or template directory is resolved as a language realization:
 
 ```console
-httk workflow job new --workspace WS --workflow flow.cwl --input message=echo
-httk workflow job new --workspace WS --workflow workflow.json --parameter pwd_module_path='["."]'
-httk workflow job new --workspace WS --workflow maker.json
-httk workflow job new --workspace WS --workflow ./v1-template --format httk-v1 --parameter encut=520
+httk job new --workspace WS --workflow flow.cwl --input message=echo
+httk job new --workspace WS --workflow workflow.json --parameter pwd_module_path='["."]'
+httk job new --workspace WS --workflow maker.json
+httk job new --workspace WS --workflow ./v1-template --format httk-v1 --parameter encut=520
 ```
 
 The same `--format` option accepts `cwl`, `pwd`, `jobflow`, and `httk-v1` for
@@ -602,11 +603,11 @@ writing anything, and `job debug` drives a single job to a terminal state in the
 foreground:
 
 ```console
-httk workflow job list --workspace WORKSPACE --kind ready
-httk workflow job show --workspace WORKSPACE JOB
-httk workflow job log --workspace WORKSPACE --limit 20 JOB
-httk workflow job why --workspace WORKSPACE JOB
-httk workflow job debug --workspace WORKSPACE --follow-children PAYLOAD_OR_JOB
+httk job list --workspace WORKSPACE --kind ready
+httk job show --workspace WORKSPACE JOB
+httk job log --workspace WORKSPACE --limit 20 JOB
+httk job why --workspace WORKSPACE JOB
+httk job debug --workspace WORKSPACE --follow-children PAYLOAD_OR_JOB
 ```
 
 `JOB` is a job UUID, a `tag--uuid` job key, or any unique prefix of either, and
@@ -653,7 +654,7 @@ document and are written by *httk* itself. A configuration whose `format` or
 its members meant what *httk* means by them.
 
 A project has `httk_project/project.json` and a standard 32-byte Ed25519 seed
-stored with mode `0600`. Its default workflow workspace is recorded by name and
+stored with mode `0600`. Its default workspace for workflows is recorded by name and
 may live outside the project; commands discover the nearest project in the
 working directory's parent chain.
 
@@ -792,7 +793,7 @@ then `httk workflow config identity add SHORT ...`, or restore the key file.
 The two request protocol spellings are additive; when a remote cannot parse
 them, upgrade `httk-workflow` on the remote.
 
-The selected key signs operator requests (`httk workflow job request …`).
+The selected key signs operator requests (`httk job request …`).
 Transfer acknowledgements always use the DEFAULT identity resolution; they do
 not carry a per-request identity selection. Signatures are detached, cover the
 canonical JSON of the whole document, and are domain-separated from every
@@ -817,8 +818,8 @@ reclaimed automatically; any other lock is reported with its holder. Operators
 can also clear one explicitly:
 
 ```console
-httk workflow workspace unlock WORKSPACE
-httk workflow workspace unlock --force WORKSPACE
+httk workspace unlock WORKSPACE
+httk workspace unlock --force WORKSPACE
 ```
 
 Without `--force` only a stale lock is removed.
@@ -831,9 +832,9 @@ library — distinct from the engine `policy` above, which tunes scheduling. The
 are stored in the workspace and edited by name:
 
 ```console
-httk workflow workspace settings set --key vasp.command --value "srun -n 32 vasp_std" my-workspace
-httk workflow workspace settings show my-workspace
-httk workflow workspace settings unset --key vasp.command my-workspace
+httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" my-workspace
+httk workspace settings show my-workspace
+httk workspace settings unset --key vasp.command my-workspace
 ```
 
 A value that parses as JSON is stored as that scalar; a bare word is stored as a
@@ -868,10 +869,10 @@ environment:
   jobs of that workflow and runs *after* the workspace-wide prelude:
 
   ```console
-  httk workflow workspace workflow-prelude set --workflow relax-vasp --value "module load VASP/6.2.1" my-workspace
-  httk workflow workspace workflow-prelude set --workflow relax-vasp --value @prelude.sh my-workspace
-  httk workflow workspace workflow-prelude show my-workspace
-  httk workflow workspace workflow-prelude unset --workflow relax-vasp my-workspace
+  httk workspace workflow-prelude set --workflow relax-vasp --value "module load VASP/6.2.1" my-workspace
+  httk workspace workflow-prelude set --workflow relax-vasp --value @prelude.sh my-workspace
+  httk workspace workflow-prelude show my-workspace
+  httk workspace workflow-prelude unset --workflow relax-vasp my-workspace
   ```
 
   `VALUE` is stored verbatim (never JSON-parsed); `@FILE` reads the shell text
@@ -889,10 +890,10 @@ visibility deadline, the default lease, the journal segment size, and the
 retention limits — are stored in `format.json` and edited in place:
 
 ```console
-httk workflow workspace policy show WORKSPACE
-httk workflow workspace policy show --json WORKSPACE
-httk workflow workspace policy set --key visibility_deadline_seconds --value 60 WORKSPACE
-httk workflow workspace policy set --key retention.trash_days --value 14 WORKSPACE
+httk workspace policy show WORKSPACE
+httk workspace policy show --json WORKSPACE
+httk workspace policy set --key visibility_deadline_seconds --value 60 WORKSPACE
+httk workspace policy set --key retention.trash_days --value 14 WORKSPACE
 ```
 
 `workspace fsck` verifies that every state marker still resolves to a readable
@@ -900,9 +901,9 @@ journal frame that agrees with it, and can re-point damaged markers at the last
 good frame of their job:
 
 ```console
-httk workflow workspace fsck WORKSPACE
-httk workflow workspace fsck --repair --json WORKSPACE
-httk workflow workspace fsck --repair --quarantine-unrepairable WORKSPACE
+httk workspace fsck WORKSPACE
+httk workspace fsck --repair --json WORKSPACE
+httk workspace fsck --repair --quarantine-unrepairable WORKSPACE
 ```
 
 It exits `1` while anything remains for an operator to deal with. See
@@ -917,15 +918,15 @@ A committing manager removes an attempt's control directory after its durable
 commit and after it has reaped the local process when the actual destination is
 `ready`, `waiting`, `paused`, or `succeeded`; failed and cancelled attempts stay
 as evidence. Transaction trash is normally removed with that control tree. An
-inherited commit is left for `workspace gc`. Policy-gated collection never runs
-on its own: managers run the always-safe categories at startup and clean exit,
-while every other artefact a crash could orphan is left for explicit
-`workspace gc`, driven entirely by the workspace's `policy.retention`:
+inherited commit is left for `workspace gc`. Managers run the always-safe
+categories at startup and the full policy-gated collection at clean exit;
+artefacts orphaned by a crash still require explicit `workspace gc`, driven by
+the workspace's `policy.retention`:
 
 ```console
-httk workflow workspace gc --dry-run WORKSPACE
-httk workflow workspace gc WORKSPACE
-httk workflow workspace gc --json WORKSPACE
+httk workspace gc --dry-run WORKSPACE
+httk workspace gc WORKSPACE
+httk workspace gc --json WORKSPACE
 ```
 
 It prints one row per category with the candidates it found, what it removed,
@@ -935,18 +936,17 @@ remove. A run that removed anything also appends one `httk-workflow-gc` frame
 to the journal summarizing the same counts, so the collection is itself part of
 the workspace's durable history.
 
-A retention limit that is not configured means *keep*, so on a workspace whose
-policy is empty the command only prunes what cannot carry information, plus
-terminal markers whose payloads the operator removed: empty placement mirrors
-below the state kinds, staging entries abandoned for a day, month-old request
-leftovers — those claimed by a manager that is gone and those a manager
-explicitly retired — and eligible `removed_jobs`. Configure the limits to
-collect the rest:
+A `null` or `"keep"` retention member means *keep*. On a fresh workspace,
+`journal_days` and `trash_days` default to one day while
+`attempt_control_days` stays unlimited. The command always prunes what cannot
+carry information, plus terminal markers whose payloads the operator removed;
+configure the limits to change the policy-gated categories:
 
 ```console
-httk workflow workspace policy set --key retention.attempt_control_days --value 14 WORKSPACE
-httk workflow workspace policy set --key retention.trash_days --value 14 WORKSPACE
-httk workflow workspace policy set --key retention.journal_days --value 90 WORKSPACE
+httk workspace policy set --key retention.attempt_control_days --value 14 WORKSPACE
+httk workspace policy set --key retention.trash_days --value 14 WORKSPACE
+httk workspace policy set --key retention.journal_days --value 90 WORKSPACE
+httk workspace policy set --key retention.journal_days --value null WORKSPACE  # keep forever
 ```
 
 | Category | Retention limit | What goes |
@@ -956,7 +956,7 @@ httk workflow workspace policy set --key retention.journal_days --value 90 WORKS
 | `retired_bundles` | `trash_days` | acknowledged transfer bundles below `transfers/retired/` |
 | `transfer_records` | `trash_days` | per-transfer receipts below `transfers/acks/` and `transfers/imported/` |
 | `removed_jobs` | always safe | state markers for terminal jobs whose payload directories are absent, unless a non-terminal parent still references them as join children |
-| `journal_segments` | `journal_days` | segments no current marker references, written by a writer no live manager owns |
+| `journal_segments` | `journal_days` | segments outside every current non-terminal frame chain (and outside terminal current segments), written by a writer no live manager owns |
 | `manager_directories` | `journal_days` | directories of dead managers whose segments are gone |
 | `placement_directories` | always safe | empty placement mirrors below `state/<kind>/` |
 | `tmp_entries` | always safe | staging entries older than 24 hours |
@@ -964,7 +964,7 @@ httk workflow workspace policy set --key retention.journal_days --value 90 WORKS
 
 To remove a finished (`succeeded`, `failed`, or `cancelled`) job, remove its
 payload directory with `rm -r` (use the path from `job show`), then run
-`httk workflow workspace gc WORKSPACE`, or wait for a manager started with
+`httk workspace gc WORKSPACE`, or wait for a manager started with
 `--gc-interval`; GC clears the orphaned state entry. A non-terminal job must be
 cancelled first with `job request cancel`. Remove children only when their
 parent is terminal: GC's join guard is best-effort, not a lock, and a parent
@@ -975,15 +975,17 @@ absent, `fsck` reports `payload_missing`.
 
 The collector never touches the quarantine, a sealed transfer bundle, a
 persistent workdir, a payload beyond its aged attempt-control directories, a
-non-terminal marker, a segment a current marker references, a manager that is
-still heartbeating, or the runner store. Removal is bottom-up and rewrites no
-state, so a collection killed halfway leaves the workspace exactly as
-consistent as it was, and running it again simply finishes the job.
+non-terminal marker, a segment in a frame chain protected by a current
+non-terminal marker, a manager that is still heartbeating, or the runner store.
+Removal is bottom-up and rewrites no state, so a collection killed halfway
+leaves the workspace exactly as consistent as it was, and running it again
+simply finishes the job.
 
-Collecting journal segments has one honest cost. Only the segment a marker
-points into is protected, so the deep history of an old job goes with the
-segments behind it; `collect` and `job log` then report that job's timeline
-with `gaps` set. Its state, payload, and outcome are unaffected.
+Collecting journal segments has one honest cost. Every segment in a current
+non-terminal marker's frame chain is protected, while a terminal marker protects
+only its current segment. The deep history of a terminal job therefore goes
+with aged segments behind it; `collect` and `job log` report that timeline with
+`gaps` set, while a non-terminal job's reachable chain remains intact.
 
 ## Remote adapters
 
@@ -1039,7 +1041,7 @@ configured host, where the manager is submitted with `sbatch`. Only `ssh` and
 | `install` (the `remote check` verb) | checks that `httk` answers on the far side and reports its version | `host`, `username`, `port`, `httk_command` |
 | `push` / `pull` | one `rsync --archive` transfer, creating missing destination components; a `pull` is always the whole remote directory, a `push` is the whole tree or the request's explicit relative `files` batch | `host`, `username`, `port` |
 | `invoke` | runs the request's argument vector on the host, optionally in the request's directory, and returns its status, stdout and stderr | `host`, `username`, `port`, `httk_command` |
-| `status` | the same machinery running `httk workflow workspace status --json NAME` remotely | as `invoke` |
+| `status` | the same machinery running `httk workspace status --json NAME` remotely | as `invoke` |
 | `start-manager` | writes a generated batch script into `WORKSPACE/.httk-workspace/batch/`, then submits it with `sbatch` once, or the request's `count` times | workspace settings `slurm.*`, `manager.workers`, `workspace` |
 
 The generated batch script is a `#!/bin/bash` file carrying one `#SBATCH`
@@ -1126,13 +1128,13 @@ httk workflow remote configure \
     --set host=kappa.example.org --set username=rar \
     --set check_connectivity=yes kappa
 httk workflow remote check kappa
-httk workflow workspace init kappa:/scratch/rar/httk/runs
-httk workflow workspace settings set --key slurm.partition --value batch kappa:runs
-httk workflow workspace settings set --key vasp.command --value "srun -n 32 vasp_std" kappa:runs
-httk workflow job new --workflow vasp-relax --input structure=POSCAR --tag silicon
+httk workspace init kappa:/scratch/rar/httk/runs
+httk workspace settings set --key slurm.partition --value batch kappa:runs
+httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" kappa:runs
+httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
 httk workflow transfer --job JOB-ID default kappa:runs
 httk workflow run --workspace kappa:runs --workers 8
-httk workflow workspace status kappa:runs
+httk workspace status kappa:runs
 ```
 
 The machine that owns a workspace chooses its path; scheduler settings belong

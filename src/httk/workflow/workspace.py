@@ -1,4 +1,4 @@
-"""Workflow workspace creation, submission, marker discovery, and transitions."""
+"""Execution workspace creation, submission, marker discovery, and transitions."""
 
 import bisect
 import errno

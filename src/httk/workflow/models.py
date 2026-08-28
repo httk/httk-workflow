@@ -606,10 +606,12 @@ def parse_job_key(value: str) -> tuple[str | None, str]:
 class RetentionPolicy:
     """How long a workspace keeps the history it is allowed to collect.
 
-    Every member is optional and means "no configured limit" when absent. The
-    collector that acts on these numbers is a separate concern; the workspace
-    only carries them so that every implementation attaching to it agrees on
-    what may be removed and when.
+    ``journal_days`` and ``trash_days`` default to one day. An explicit
+    ``null`` or ``"keep"`` value means that category has no limit; omitted
+    ``attempt_control_days`` likewise remains unlimited. The collector that
+    acts on these numbers is a separate concern; the workspace only carries
+    them so that every implementation attaching to it agrees on what may be
+    removed and when.
 
     :param attempt_control_days: The retention period for attempt controls.
     :param journal_days: The retention period for journal history.
@@ -617,8 +619,8 @@ class RetentionPolicy:
     """
 
     attempt_control_days: float | None = None
-    journal_days: float | None = None
-    trash_days: float | None = None
+    journal_days: float | None = 1.0
+    trash_days: float | None = 1.0
 
     @classmethod
     def from_mapping(cls, value: object, name: str = "policy.retention") -> "RetentionPolicy":
@@ -634,9 +636,15 @@ class RetentionPolicy:
         if unsupported:
             raise FormatError(f"{name} has unsupported members: {', '.join(unsupported)}")
 
+        defaults = cls()
+
         def optional_days(key: str) -> float | None:
-            raw = mapping.get(key)
-            return None if raw is None else require_number(raw, f"{name}.{key}", minimum=0.0)
+            if key not in mapping:
+                return getattr(defaults, key)
+            raw = mapping[key]
+            if raw is None or raw == "keep":
+                return None
+            return require_number(raw, f"{name}.{key}", minimum=0.0)
 
         return cls(
             attempt_control_days=optional_days("attempt_control_days"),
@@ -645,7 +653,7 @@ class RetentionPolicy:
         )
 
     def as_mapping(self) -> dict[str, object]:
-        """Return the JSON representation, omitting unconfigured limits.
+        """Return the JSON representation, omitting only unset attempt retention.
 
         :return: The JSON policy mapping.
         """
@@ -653,7 +661,7 @@ class RetentionPolicy:
         result: dict[str, object] = {}
         for key in sorted(RETENTION_KEYS):
             value = getattr(self, key)
-            if value is not None:
+            if value is not None or key in {"journal_days", "trash_days"}:
                 result[key] = value
         return result
 

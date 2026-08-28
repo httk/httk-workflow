@@ -10,7 +10,7 @@ from httk.workflow.workflow_cli import command
 
 
 def test_workflow_cli_registration_is_discovered() -> None:
-    assert "workflow" in known_cli_commands()
+    assert {"job", "workflow", "workspace"} <= set(known_cli_commands())
 
 
 def test_workflow_project_commands_are_not_umbrella_extensions(capsys) -> None:

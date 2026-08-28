@@ -1044,6 +1044,8 @@ def _add_job_selector(parser: argparse.ArgumentParser) -> None:
 
 def build_job_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
+    *,
+    program: str | None = None,
 ) -> None:
     """Declare the ``job`` group: making jobs, and finding out about them."""
 
@@ -1051,7 +1053,8 @@ def build_job_parser(
         subparsers,
         "job",
         summary="create, submit, inspect, and debug individual jobs",
-        description="Create, submit, inspect, and debug the jobs of one workflow workspace",
+        description="Create, submit, inspect, and debug the jobs of one execution workspace",
+        prog=program,
     )
 
     new = _leaf(
@@ -1207,7 +1210,7 @@ def build_job_parser(
         group,
         "list",
         summary="list the jobs of a workspace",
-        description="List the jobs of one workflow workspace",
+        description="List the jobs of one execution workspace",
         handler=handle_job_list,
     )
     _add_workspace_option(listing, help_text="the workspace to list")

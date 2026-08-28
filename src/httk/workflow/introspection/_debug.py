@@ -152,7 +152,7 @@ def debug_job(
     if lock is not None and not lock.is_stale():
         raise ValueError(
             f"the workspace maintenance lock held by {lock.describe()} pauses every launch; "
-            "release it with 'httk workflow workspace unlock WORKSPACE' first"
+            "release it with 'httk workspace unlock WORKSPACE' first"
         )
     source = Path(target).expanduser()
     if (source / "job.json").is_file():
@@ -175,7 +175,7 @@ def debug_job(
             raise ValueError(
                 f"job {marker.job_key} already has a history, so its step cannot be overridden here; "
                 "publish an operator request instead: "
-                "'httk workflow job request override_step --workspace WORKSPACE --step STEP --operator NAME --reason WHY JOB'"
+                "'httk job request override_step --workspace WORKSPACE --step STEP --operator NAME --reason WHY JOB'"
             )
     final = _drive(
         workspace,
