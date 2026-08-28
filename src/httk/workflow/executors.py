@@ -24,8 +24,9 @@ class AttemptLaunch:
     """Paths and context needed to construct an attempt command.
 
     ``runner`` is the executable the manager resolved for this attempt. A
-    payload runner is the file inside ``payload``; a shared runner is the
-    verified copy the manager staged below ``control``, never the original.
+    payload runner is the file inside ``payload``; a shared file runner is the
+    verified ``/dev/fd/N`` alias and a shared tree runner is its verified entry
+    at the original source path.
 
     :param job: Immutable job definition being attempted.
     :param marker: Authoritative marker for the attempt.
@@ -98,7 +99,7 @@ class RunnerExecutor(Protocol):
 
 
 class PathRunnerExecutor:
-    """Execute the runner path directly from the payload or staged copy."""
+    """Execute the runner path directly from the payload or shared store."""
 
     name = "path"
 
@@ -112,7 +113,7 @@ class PathRunnerExecutor:
         """
         if job.runner_source != "payload":
             # A shared runner lives outside the immutable payload, so it is
-            # resolved, staged, and digest-verified per attempt instead.
+            # resolved and digest-verified per attempt instead.
             return
         runner = payload.joinpath(*job.runner_path.parts)
         if not runner.is_file():

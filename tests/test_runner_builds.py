@@ -225,7 +225,9 @@ def _compiled_package(root: Path) -> Path:
         "[workflow.build]\ncommand = './build.sh'\nartifacts = ['build']\n",
         encoding="utf-8",
     )
-    (package / "run").write_text("#!/bin/sh\nexec \"$(dirname \"$0\")/build/runner.py\"\n", encoding="utf-8")
+    (package / "run").write_text(
+        "#!/bin/sh\nexec \"${HTTK_WORKFLOW_RUNNER_ARTIFACTS:?}/build/runner.py\"\n", encoding="utf-8"
+    )
     (package / "run").chmod(0o755)
     (package / "runner.py").write_text(
         "#!/usr/bin/env python3\n"

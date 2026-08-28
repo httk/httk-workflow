@@ -61,10 +61,6 @@ from .workspace import DISCOVERY_HEARTBEAT_STRIDE, MarkerStream, Workspace
 _LOGGER = logging.getLogger(__name__)
 _DRAIN_SIGNALS = (signal.SIGTERM, signal.SIGINT)
 DEFAULT_RUNNER_MODULES = ("httk.workflow",)
-# The entry point of a staged runner tree. A single file is the common case; a
-# tree is pinned and staged as a whole, and this is the one name inside it the
-# manager will execute.
-RUNNER_TREE_ENTRY = "run"
 #: The largest fraction of its own lease a manager will go without
 #: heartbeating, whatever heartbeat interval it was configured with. A manager
 #: whose interval exceeds its lease would expire its own claims.
@@ -1401,11 +1397,6 @@ class TaskManager:
     def _contained(root: Path, parts: Sequence[str]) -> Path | None:
         return _manager_runners.contained(root, parts)
 
-    def _stage_runner(self, job: JobDefinition, control: Path) -> Path:
-        return _manager_runners.stage_runner(
-            self, job, control, tree_digest=tree_digest, sha256_file=sha256_file, log=_LOGGER
-        )
-
     def _launch_claimed(
         self,
         marker: Marker,
@@ -1437,8 +1428,7 @@ class TaskManager:
         attempts.mkdir(parents=True, exist_ok=True)
         control.mkdir(exist_ok=False)
         runner = payload.joinpath(*job.runner_path.parts)
-        if job.runner_source != "payload":
-            runner = self._stage_runner(job, control)
+        verified: _manager_runners.VerifiedRunner | None = None
         if job.workdir_mode == "persistent":
             workdir = payload.joinpath(*job.workdir_path.parts)
             workdir_reused = workdir.exists()
@@ -1496,6 +1486,8 @@ class TaskManager:
         context_path = control / "context.json"
         write_json_atomic(context_path, context, durable=self.workspace.durable)
         environment = os.environ.copy()
+        environment.pop("HTTK_WORKFLOW_RUNNER_ARTIFACTS", None)
+        environment.pop("HTTK_WORKFLOW_RUNNER_ROOT", None)
         environment.update(
             {
                 "HTTK_WORKFLOW_CONTEXT": str(context_path),
@@ -1543,6 +1535,12 @@ class TaskManager:
                 )
                 continue
             environment.setdefault(variable, str(value))
+        if job.runner_source != "payload":
+            verified = _manager_runners.verify_runner(self, job)
+            runner = Path(f"/dev/fd/{verified.fd}") if verified.fd is not None else verified.path
+            environment["HTTK_WORKFLOW_RUNNER_ROOT"] = str(verified.root)
+            if verified.artifacts is not None:
+                environment["HTTK_WORKFLOW_RUNNER_ARTIFACTS"] = str(verified.artifacts)
         stdio_fd = -1
         gate_read = -1
         gate_write = -1
@@ -1575,11 +1573,14 @@ class TaskManager:
             if not runner_command:
                 raise FormatError(f"runner executor {job.runner_executor!r} returned an empty command")
             gate_read, gate_write = os.pipe()
-            try:
-                runner_sha256 = job.runner_sha256 or sha256_file(runner)
-            except Exception as exc:
-                runner_sha256 = None
-                _LOGGER.warning("cannot hash the runner for %s: %s", marker.job_key, exc)
+            if verified is not None:
+                runner_sha256 = verified.sha256
+            else:
+                try:
+                    runner_sha256 = job.runner_sha256 or sha256_file(runner)
+                except Exception as exc:
+                    runner_sha256 = None
+                    _LOGGER.warning("cannot hash the runner for %s: %s", marker.job_key, exc)
             _append_attempt_event(
                 logs / "runlog.jsonl",
                 {
@@ -1592,7 +1593,7 @@ class TaskManager:
                     "activation_id": claimed_state.activation_id,
                     "step": context["step"],
                     "runner_source": job.runner_source,
-                    "runner_path": str(runner if job.runner_source == "payload" else control / "runner"),
+                    "runner_path": str(verified.path if verified is not None else runner),
                     "runner_sha256": runner_sha256,
                     "files": [],
                 },
@@ -1611,7 +1612,7 @@ class TaskManager:
                 stdout=stdio_fd,
                 stderr=stdio_fd,
                 start_new_session=True,
-                pass_fds=(gate_read,),
+                pass_fds=(gate_read, *([verified.fd] if verified and verified.fd is not None else [])),
             )
             os.close(stdio_fd)
             stdio_fd = -1
@@ -1644,6 +1645,11 @@ class TaskManager:
                 ),
             )
             os.write(gate_write, b"R")
+            if verified is not None and verified.fd is not None:
+                os.close(verified.fd)
+                verified = _manager_runners.VerifiedRunner(
+                    verified.path, verified.root, verified.sha256, None, verified.artifacts
+                )
         except Exception as exc:
             if gate_read >= 0:
                 os.close(gate_read)
@@ -1679,6 +1685,8 @@ class TaskManager:
                 os.close(gate_read)
             if gate_write >= 0:
                 os.close(gate_write)
+            if verified is not None and verified.fd is not None:
+                os.close(verified.fd)
         assert process is not None
         assert running is not None
         self._running[attempt_id] = RunningAttempt(

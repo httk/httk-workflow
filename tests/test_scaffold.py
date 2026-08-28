@@ -628,6 +628,20 @@ def test_a_runner_file_of_ones_own_is_described_and_published(tmp_path: Path, wo
     assert (job.payload / "run" / "done.txt").is_file()
 
 
+def test_describe_runner_scrubs_shared_runner_variables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    runner = tmp_path / "describe.py"
+    runner.write_text(
+        "import json, os\n"
+        "if os.environ.get('HTTK_WORKFLOW_RUNNER_ROOT') or os.environ.get('HTTK_WORKFLOW_RUNNER_ARTIFACTS'):\n"
+        "    raise SystemExit('runner variables leaked')\n"
+        "print(json.dumps({'workflow': 'tests.scaffold.describe', 'steps': ['start']}))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HTTK_WORKFLOW_RUNNER_ROOT", "poison-root")
+    monkeypatch.setenv("HTTK_WORKFLOW_RUNNER_ARTIFACTS", "poison-artifacts")
+    assert describe_runner(runner) == {"workflow": "tests.scaffold.describe", "steps": ["start"]}
+
+
 def test_a_runner_with_several_steps_needs_the_starting_step_named(tmp_path: Path, workspace: Workspace) -> None:
     runner = tmp_path / "two.py"
     runner.write_text(_TWO_STEP_RUNNER, encoding="utf-8")

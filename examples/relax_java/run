@@ -1,2 +1,2 @@
 #!/bin/sh
-exec "$(dirname "$0")/relax" "$@"
+exec java -cp "${HTTK_WORKFLOW_RUNNER_ARTIFACTS:?}/classes" Relax "$@"

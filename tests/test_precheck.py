@@ -394,6 +394,28 @@ def test_precheck_flags_a_deleted_workspace_runner(tmp_path: Path, capsys) -> No
     assert "not published" in report["jobs"][0]["runner"]["problem"]
 
 
+def test_precheck_flags_a_non_executable_workspace_runner(tmp_path: Path, capsys) -> None:
+    """A pinned workspace runner must remain executable for launch."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    source = tmp_path / "runner.py"
+    source.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    reference = workspace.publish_runner(source, name="test/runner")
+    stored = workspace.runner_store_path("test/runner")
+    stored.chmod(0o644)
+    payload = _job(tmp_path, "job", {"declared": {}, "overrides": {}})
+    definition = json.loads((payload / "job.json").read_text(encoding="utf-8"))
+    definition["runner"] = {**reference, "executor": "path", "arguments": []}
+    (payload / "job.json").write_text(json.dumps(definition), encoding="utf-8")
+    workspace.submit(payload, "ready")
+    name = register_ws(CLIContext("httk", tmp_path), workspace.root, "runner-check")
+
+    assert command(["precheck", "--workspace", name, "--json"], CLIContext("httk", tmp_path)) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["summary"]["runner_problems"] == 1
+    assert report["jobs"][0]["runner"]["problem"] == "runner is not executable"
+
+
 def test_local_transfer_warns_and_strict_mode_moves_nothing(tmp_path: Path, capsys) -> None:
     """The destination environment is checked before local transfer detach."""
 

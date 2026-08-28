@@ -25,7 +25,8 @@ make
 Build registration compiles the vendored sources and stores `classes/` in the
 workspace's machine-local runner-build cache. Package publication transfers
 sources only, so the same package can be built independently on another
-machine.
+machine. When the manager runs it, `run` reads the compiled classes from
+`$HTTK_WORKFLOW_RUNNER_ARTIFACTS`.
 
 The example is intentionally minimal and mock-VASP compatible; the packaged
 `vasp-relax` runner adds the production restart and diagnostic behavior.

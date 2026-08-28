@@ -285,11 +285,14 @@ The command prints the reference to embed in every `job.json` that uses it:
 Publication is content addressed. Publishing identical bytes again changes
 nothing, and replacing a stored name whose content differs requires `--replace`,
 because live jobs already reference the stored digest. Before each attempt the
-manager copies the runner below the attempt control directory, verifies the
-pinned digest against that copy, and executes only the copy; a mismatch fails
-the job with `runner_mismatch` and an unresolvable runner with
-`runner_unavailable`. A detached transfer carries the runners its job
-references, and importing installs the missing ones at the destination.
+manager verifies the runner in place and executes it with the job workdir as
+cwd; a mismatch fails the job with `runner_mismatch` and an unresolvable or
+non-executable runner with `runner_unavailable`. A detached transfer carries
+the runners its job references, and importing installs the missing ones at the
+destination. Compiled package runners locate their registered binaries under
+`HTTK_WORKFLOW_RUNNER_ARTIFACTS`. A file runner is invoked through its verified
+`/dev/fd/<N>` descriptor, so code that needs sibling files uses
+`HTTK_WORKFLOW_RUNNER_ROOT`.
 
 Runners deployed outside any workspace use `"source": "installed"` and resolve
 against the ordered `--runner-search-path` roots of the manager.

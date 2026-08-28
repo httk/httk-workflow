@@ -1,5 +1,6 @@
 """Read-only readiness checks for jobs before an attempt starts."""
 
+import os
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import replace
 from importlib.machinery import ModuleSpec, PathFinder
@@ -137,6 +138,11 @@ def _runner_problem(
             candidate = contained(root, resource.parts)
             if candidate is None or not candidate.exists():
                 return "problem", f"installed runner pkg:{module}/{resource.as_posix()} does not exist"
+            executable = candidate / "run" if candidate.is_dir() else candidate
+            if not executable.is_file():
+                return "problem", f"runner tree {resource.as_posix()} has no run entry point"
+            if not os.access(executable, os.X_OK):
+                return "problem", "runner is not executable"
             actual = tree_digest(candidate) if candidate.is_dir() else sha256_file(candidate)
             if actual != job.runner_sha256:
                 return "problem", f"runner digest {actual} does not match pinned {job.runner_sha256}"

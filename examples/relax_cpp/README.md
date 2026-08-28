@@ -28,4 +28,6 @@ make
 
 Build registration stores `relax` and its object files in the workspace's
 machine-local cache. Publication transfers sources only, so each platform
-build is reproducible from the self-contained package.
+build is reproducible from the self-contained package. When the manager runs
+it, `run` reads the compiled executable from
+`$HTTK_WORKFLOW_RUNNER_ARTIFACTS`.

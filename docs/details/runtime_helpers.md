@@ -274,6 +274,10 @@ because a synthesized child has no payload to copy it into: publish it with
 `Workspace.publish_runner`, or spawn a prepared payload directory
 instead:
 
+Shared runners execute from their published file or tree. Compiled package
+runners use the manager-provided `HTTK_WORKFLOW_RUNNER_ARTIFACTS` directory for
+registered build outputs.
+
 ```python
 prepare_job_payload(
     a.workdir / "child",

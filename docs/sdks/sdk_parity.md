@@ -165,6 +165,12 @@ wins. Boolean and non-scalar settings are not exported. The
 **`HTTK_WORKFLOW_*`** namespace is reserved and no setting may derive a
 variable in it.
 
+For a shared runner, the manager also exports **`HTTK_WORKFLOW_RUNNER_ROOT`**
+with the runner file or tree root. For a workspace package with a registered
+build, it exports **`HTTK_WORKFLOW_RUNNER_ARTIFACTS`** with the build-artifacts
+directory; the package's `run` entry uses that directory to locate compiled
+binaries.
+
 ## Exit-code discipline
 
 Python raises and returns typed values; Bash cannot, so every Bash function

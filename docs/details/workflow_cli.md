@@ -146,8 +146,9 @@ means the registration completed (or the list was read); malformed targets,
 probe/build failures, and missing artifacts are nonzero failures.
 
 The build vocabulary and engine come from `httk.core.building`; this layer keeps
-the workspace runner-build store, platform-tagged registrations, and manager
-artifact overlay. A plugin-sourced workflow is first resolved and pinned into
+the workspace runner-build store and platform-tagged registrations. The
+manager passes registered artifacts through `HTTK_WORKFLOW_RUNNER_ARTIFACTS`
+without modifying the published source tree. A plugin-sourced workflow is first resolved and pinned into
 the workspace like any other package, then built with the same command using
 its job or store runner target.
 

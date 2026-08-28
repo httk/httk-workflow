@@ -700,6 +700,8 @@ def describe_runner(runner: str | os.PathLike[str]) -> dict[str, object]:
         "HTTK_WORKFLOW_WORKSPACE_DIR",
         "HTTK_WORKFLOW_DATA_DIR",
         "HTTK_WORKFLOW_STEP",
+        "HTTK_WORKFLOW_RUNNER_ROOT",
+        "HTTK_WORKFLOW_RUNNER_ARTIFACTS",
     ):
         environment.pop(name, None)
     try:

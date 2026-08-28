@@ -44,8 +44,10 @@ workflows declare `[workflow.build]` (sources-only digests, binaries built and
 registered per machine with `httk workflow build`).
 
 The `[workflow.build]` vocabulary and engine are shared `httk.core.building`
-machinery. *httk-workflow* owns the workspace store layout, platform-tagged
-registrations, and manager artifact overlay; the build semantics are unchanged.
+machinery. *httk-workflow* owns the workspace store layout and platform-tagged
+registrations; the manager passes registered build artifacts through
+`HTTK_WORKFLOW_RUNNER_ARTIFACTS` without modifying the published source tree.
+The build semantics are unchanged.
 
 An installed *httk₂* plugin may bundle workflow packages. Resolution checks
 in-process registrations first, then installed plugins; workflow listings label

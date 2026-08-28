@@ -203,9 +203,11 @@ compiled packages must vendor their SDK and other build inputs. For example,
 
 The `[workflow.build]` vocabulary and build engine are shared
 `httk.core.building` machinery; `BuildSpec` and its execution helpers live
-there. *httk-workflow* owns the workspace store layout, platform-tagged build
-registrations, and the manager's artifact overlay. The package build semantics
-described here are unchanged.
+there. *httk-workflow* owns the workspace store layout and platform-tagged
+build registrations. The manager passes a registered artifact directory to the
+runner as `HTTK_WORKFLOW_RUNNER_ARTIFACTS`; it does not modify or overlay the
+published source tree. The package build semantics described here are
+unchanged.
 
 Publication is sources-only for build-declaring packages. Declared artifacts are
 stripped before publication, and the digest pins those remaining sources, not a
@@ -246,6 +248,9 @@ are reported as indeterminate because the local precheck cannot stand in for the
 manager's machine; the manager probes its own platform at attempt start. The
 build command is never inferred from `run`: `run` must be committed, executable,
 and usable as the package's source entry point before any build is registered.
+At execution time a compiled package's `run` entry must locate its binaries
+under `$HTTK_WORKFLOW_RUNNER_ARTIFACTS`; the source tree remains unchanged and
+the runner is executed from that tree with the job workdir as its cwd.
 
 ### Hook tables
 

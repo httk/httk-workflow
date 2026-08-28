@@ -944,13 +944,18 @@ the digest of a file is over its bytes, and the digest of a tree is the
 canonical tree digest. Sharing one runner file across a large partitioned
 campaign is the purpose of the non-payload sources.
 
-A manager MUST NOT execute a shared runner in place. It resolves the runner,
-copies it below the attempt control directory as `runner`, verifies
-`runner.sha256` against that staged copy, and executes only the copy. A digest
-disagreement fails the job with `runner_mismatch`; a runner that cannot be
-resolved fails it with `runner_unavailable`. Both are ordinary continuable
-failures, never silent substitutions. A staged tree is entered at its top-level
-`run` file.
+A manager MUST verify a shared runner's digest against the bytes it will
+execute — a file through the open descriptor it keeps until launch, a tree in
+place — and executes it in place with the job workdir as cwd; it MUST NOT
+modify the runner or its tree. A digest disagreement fails the job with
+`runner_mismatch`; a runner that cannot be resolved or entered fails it with
+`runner_unavailable`. Both are ordinary continuable failures, never silent
+substitutions. A tree is entered at its top-level `run` file. File verification
+pins the inode through launch; tree verification accepts the TOCTOU window
+between its digest check and execution because the store owner is trusted not
+to overwrite a runner concurrently. For a file runner, `argv[0]` and Python's
+`__file__` identify its `/dev/fd/<N>` descriptor path; siblings are located via
+`HTTK_WORKFLOW_RUNNER_ROOT`.
 
 An `installed` path may also use the reserved form `pkg:<module>/<resource>`,
 which resolves inside an installed Python package. A manager MUST restrict that
@@ -1321,7 +1326,6 @@ workdir.
 ├── attempts/<attempt-id>/
 │   ├── context.json
 │   ├── process.json
-│   ├── runner                   # the verified staged copy of a shared runner
 │   ├── outcome.tmp.<nonce>/
 │   └── outcome.ready/
 ├── logs/
@@ -1434,9 +1438,11 @@ HTTK_WORKFLOW_ATTEMPT_REASON=<reason>
 HTTK_WORKFLOW_STEP=<current step>
 HTTK_WORKFLOW_PYTHON=<manager Python interpreter>
 HTTK_WORKFLOW_BASH_API=<absolute native workflow Bash library>
+HTTK_WORKFLOW_RUNNER_ROOT=<absolute shared runner file or tree root>
 ```
 
 `HTTK_WORKFLOW_DATA_DIR` is additionally set only for transactional-data jobs.
+For a shared runner, `HTTK_WORKFLOW_RUNNER_ROOT` names its file or tree root.
 The JSON file is the source of truth; scalar environment variables are
 language-neutral conveniences.
 
@@ -1456,7 +1462,11 @@ rather than as a protocol violation. The ones this implementation exports are:
 
 ```text
 HTTK_WORKFLOW_VASP_BASH_API=<absolute native VASP Bash library>
+HTTK_WORKFLOW_RUNNER_ARTIFACTS=<absolute registered build-artifacts directory>
 ```
+
+`HTTK_WORKFLOW_RUNNER_ARTIFACTS` is set only when a workspace package has a
+registered build; a compiled package's `run` entry must find its binaries there.
 
 ### Executable workflow-hook wire formats
 
@@ -2175,8 +2185,8 @@ Codes emitted by this manager itself are reserved. Those currently in use are:
   midway; a transaction manifest or outcome the manager cannot parse is a
   `protocol_error`, not this;
 - `runner_unavailable` — a runner outside the payload could not be resolved,
-  staged, or entered at all;
-- `runner_mismatch` — the staged copy of such a runner did not match the
+  opened, or entered at all;
+- `runner_mismatch` — the bytes of such a runner did not match the
   `runner.sha256` the job pinned.
 
 A runner library that dispatches steps on a runner's behalf publishes ordinary
@@ -2554,8 +2564,8 @@ The remaining categories are gated as follows.
 | Manager directory | `journal_days` | The manager's heartbeat is expired and none of its writer's segments were retained. |
 
 The newest attempt-control directory of a terminal job is retained regardless
-of age: it holds the outcome, the failure breadcrumb, and the runner logs of
-the attempt that decided the job.
+of age: it holds the outcome and failure breadcrumb of the attempt that
+decided the job, plus the metadata needed to identify it.
 
 A collector MUST NOT prune the runner store. A runner is referenced by digest
 from `job.json` and from transfer manifests, an attached workspace can gain a

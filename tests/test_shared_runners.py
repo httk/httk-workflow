@@ -11,8 +11,8 @@ from httk.core.cli import CLIContext
 from httk.core.digests import tree_digest
 
 from conftest import register_ws
-from httk.workflow import TaskManager, Workspace
-from httk.workflow.errors import FormatError, WorkspaceCorruptionError
+from httk.workflow import TaskManager, Workspace, _manager_runners
+from httk.workflow.errors import FormatError, RunnerResolutionError, WorkspaceCorruptionError
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.workflow_cli import command as workflow_command
 
@@ -38,6 +38,14 @@ os.rename(temporary, control / "outcome.ready")
 """
 
 _OTHER_RUNNER = _SUCCEED_RUNNER.replace('"ran.txt"', '"also-ran.txt"')
+_RESERVED_CHECK_RUNNER = _SUCCEED_RUNNER.replace(
+    'control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])',
+    'control = Path(os.environ["HTTK_WORKFLOW_CONTROL_DIR"])\n'
+    '(Path(os.environ["HTTK_WORKFLOW_WORKDIR"]) / "reserved.txt").write_text(\n'
+    '    ",".join(os.environ.get(name, "absent") for name in '
+    '["HTTK_WORKFLOW_RUNNER_ROOT", "HTTK_WORKFLOW_RUNNER_ARTIFACTS"])\n'
+    ')',
+)
 
 
 def _runner_file(root: Path, source: str = _SUCCEED_RUNNER, *, name: str = "succeed.py") -> Path:
@@ -95,7 +103,7 @@ def _failure(workspace: Workspace, job_id: str) -> dict[str, object]:
     return failure
 
 
-def test_workspace_runner_is_published_resolved_staged_and_verified(tmp_path: Path) -> None:
+def test_workspace_runner_is_published_resolved_and_verified_in_place(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     reference = workspace.publish_runner(_runner_file(tmp_path / "source"))
     assert reference["source"] == "workspace"
@@ -118,11 +126,15 @@ def test_workspace_runner_is_published_resolved_staged_and_verified(tmp_path: Pa
         assert marker is not None and marker.kind == "succeeded"
         job_root = workspace.payload_path(marker.placement, marker.job_key)
         assert (job_root / "run" / "ran.txt").read_text(encoding="utf-8") == "only"
-        # The verified copy below the attempt control directory is what ran.
-        staged = sorted(job_root.glob("attempts/*/runner"))
-        assert len(staged) == 1
-        assert staged[0].read_text(encoding="utf-8") == _SUCCEED_RUNNER
-        assert stat.S_IMODE(staged[0].stat().st_mode) == 0o500
+        attempt = next(job_root.joinpath("attempts").iterdir())
+        assert not (attempt / "runner").exists()
+        assert {entry.name for entry in attempt.iterdir()} <= {"context.json", "process.json", "outcome.ready"}
+        events = [
+            json.loads(line) for line in (job_root / "logs" / "runlog.jsonl").read_text(encoding="utf-8").splitlines()
+        ]
+        event = next(item for item in events if item["kind"] == "attempt")
+        assert event["runner_path"] == str(stored)
+        assert event["runner_sha256"] == reference["sha256"]
 
 
 def test_installed_runner_resolves_from_a_manager_search_path(tmp_path: Path) -> None:
@@ -146,7 +158,24 @@ def test_installed_runner_resolves_from_a_manager_search_path(tmp_path: Path) ->
     assert marker is not None and marker.kind == "succeeded"
 
 
-def test_an_installed_runner_tree_is_pinned_and_staged_whole(tmp_path: Path) -> None:
+def test_a_non_executable_installed_runner_is_unavailable(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    installed = _runner_file(tmp_path / "opt" / "runners", name="tool.py")
+    digest = workspace.publish_runner(installed)["sha256"]
+    (workspace.runners / "tool.py").unlink()
+    installed.chmod(0o644)
+    payload, job_id = _payload(
+        tmp_path / "payloads",
+        {"source": "installed", "path": "tool.py", "sha256": digest},
+        tag="not-executable",
+    )
+    workspace.submit(payload, "project/not-executable")
+    with TaskManager(workspace, heartbeat_interval=0.01, runner_search_paths=(installed.parent,)) as manager:
+        manager.run_until_idle()
+    assert _failure(workspace, job_id)["code"] == "runner_unavailable"
+
+
+def test_an_installed_runner_tree_is_pinned_and_executed_in_place(tmp_path: Path) -> None:
     bundle = tmp_path / "opt" / "toolbox"
     bundle.mkdir(parents=True)
     (bundle / "outcome.py").write_text(_SUCCEED_RUNNER, encoding="utf-8")
@@ -170,9 +199,9 @@ def test_an_installed_runner_tree_is_pinned_and_staged_whole(tmp_path: Path) -> 
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "succeeded"
     job_root = workspace.payload_path(marker.placement, marker.job_key)
-    staged = sorted(job_root.glob("attempts/*/runner"))
-    assert len(staged) == 1 and staged[0].is_dir()
-    assert {item.name for item in staged[0].iterdir()} == {"run", "outcome.py"}
+    attempt = next(job_root.joinpath("attempts").iterdir())
+    assert not (attempt / "runner").exists()
+    assert (bundle / "run").is_file()
 
 
 def test_a_replaced_runner_fails_the_job_with_runner_mismatch(tmp_path: Path) -> None:
@@ -189,6 +218,119 @@ def test_a_replaced_runner_fails_the_job_with_runner_mismatch(tmp_path: Path) ->
     failure = _failure(workspace, job_id)
     assert failure["code"] == "runner_mismatch"
     assert str(reference["sha256"]) in str(failure["message"])
+
+
+def test_verifying_a_file_does_not_advance_its_launch_fd(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    reference = workspace.publish_runner(_runner_file(tmp_path / "source"))
+    payload, job_id = _payload(tmp_path / "payloads", dict(reference), tag="offset")
+    workspace.submit(payload, "project/offset")
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None
+    job = workspace.load_job(marker)
+    manager = type(
+        "Manager",
+        (),
+        {"workspace": workspace, "runner_search_paths": (), "runner_modules": ("httk.workflow",)},
+    )()
+    verified = _manager_runners.verify_runner(manager, job)
+    assert verified.fd is not None
+    try:
+        assert os.lseek(verified.fd, 0, os.SEEK_CUR) == 0
+    finally:
+        os.close(verified.fd)
+
+
+def test_a_file_replaced_during_verification_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    reference = workspace.publish_runner(_runner_file(tmp_path / "source"))
+    payload, job_id = _payload(tmp_path / "payloads", dict(reference), tag="replaced-during-verification")
+    workspace.submit(payload, "project/replaced-during-verification")
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None
+    job = workspace.load_job(marker)
+    stored = workspace.runner_store_path("succeed.py")
+    replacement = _runner_file(tmp_path / "replacement", _OTHER_RUNNER, name="replacement.py")
+    original_hash = _manager_runners._hash_fd
+
+    def replace_after_hash(fd: int) -> str:
+        digest = original_hash(fd)
+        os.replace(replacement, stored)
+        return digest
+
+    monkeypatch.setattr(_manager_runners, "_hash_fd", replace_after_hash)
+    manager = type(
+        "Manager", (), {"workspace": workspace, "runner_search_paths": (), "runner_modules": ("httk.workflow",)}
+    )()
+    with pytest.raises(RunnerResolutionError, match="replaced during verification") as failure:
+        _manager_runners.verify_runner(manager, job)
+    assert failure.value.code == "runner_unavailable"
+
+
+def test_a_file_replaced_after_verification_executes_the_verified_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    reference = workspace.publish_runner(_runner_file(tmp_path / "source"))
+    payload, job_id = _payload(tmp_path / "payloads", dict(reference), tag="inode-pinned")
+    workspace.submit(payload, "project/inode-pinned")
+    stored = workspace.runner_store_path("succeed.py")
+    replacement = _runner_file(tmp_path / "replacement", _OTHER_RUNNER, name="replacement.py")
+    original_write = os.write
+    replaced = False
+
+    def replace_before_gate(fd: int, data: bytes) -> int:
+        nonlocal replaced
+        if data == b"R" and not replaced:
+            os.replace(replacement, stored)
+            replaced = True
+        return original_write(fd, data)
+
+    monkeypatch.setattr(os, "write", replace_before_gate)
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None and marker.kind == "succeeded"
+    job_root = workspace.payload_path(marker.placement, marker.job_key)
+    assert (job_root / "run" / "ran.txt").is_file()
+    assert not (job_root / "run" / "also-ran.txt").exists()
+
+
+def test_reserved_runner_variables_are_not_inherited_by_payload_or_buildless_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HTTK_WORKFLOW_RUNNER_ROOT", "poison-root")
+    monkeypatch.setenv("HTTK_WORKFLOW_RUNNER_ARTIFACTS", "poison-artifacts")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    payload, payload_id = _payload(
+        tmp_path / "payloads" / "payload",
+        {"source": "payload", "path": "runner.py"},
+        tag="payload",
+    )
+    payload_runner = payload / "runner.py"
+    payload_runner.write_text(_RESERVED_CHECK_RUNNER, encoding="utf-8")
+    payload_runner.chmod(0o755)
+    tree = _runner_tree(tmp_path / "tree" / "toolbox")
+    (tree / "outcome.py").write_text(_RESERVED_CHECK_RUNNER, encoding="utf-8")
+    tree_reference = workspace.publish_runner(tree, name="toolbox")
+    tree_payload, tree_id = _payload(tmp_path / "payloads" / "tree", dict(tree_reference), tag="tree")
+    workspace.submit(payload, "project/payload")
+    workspace.submit(tree_payload, "project/tree")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle()
+
+    payload_marker = workspace.find_marker_by_id(payload_id)
+    tree_marker = workspace.find_marker_by_id(tree_id)
+    assert payload_marker is not None and payload_marker.kind == "succeeded"
+    assert tree_marker is not None and tree_marker.kind == "succeeded"
+    payload_root = workspace.payload_path(payload_marker.placement, payload_marker.job_key)
+    tree_root = workspace.payload_path(tree_marker.placement, tree_marker.job_key)
+    assert (payload_root / "run" / "reserved.txt").read_text(encoding="utf-8") == "absent,absent"
+    assert (tree_root / "run" / "reserved.txt").read_text(encoding="utf-8") == (
+        f"{workspace.runners / 'toolbox'},absent"
+    )
 
 
 def test_an_unpublished_runner_fails_the_job_with_runner_unavailable(tmp_path: Path) -> None:
@@ -318,7 +460,7 @@ def test_publish_runner_tree_rejects_symlinks_and_type_mismatches(tmp_path: Path
         workspace.publish_runner(file_source, name="tree")
 
 
-def test_workspace_runner_tree_is_staged_and_verified_by_manager(tmp_path: Path) -> None:
+def test_workspace_runner_tree_is_verified_and_executed_in_place(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     reference = workspace.publish_runner(_runner_tree(tmp_path / "source" / "toolbox"), name="toolbox")
     payload = tmp_path / "payload"
@@ -340,9 +482,9 @@ def test_workspace_runner_tree_is_staged_and_verified_by_manager(tmp_path: Path)
     marker = workspace.find_marker_by_id(job.id)
     assert marker is not None and marker.kind == "succeeded"
     job_root = workspace.payload_path(marker.placement, marker.job_key)
-    staged = sorted(job_root.glob("attempts/*/runner"))
-    assert len(staged) == 1 and staged[0].is_dir()
-    assert (staged[0] / "run").is_file()
+    attempt = next(job_root.joinpath("attempts").iterdir())
+    assert not (attempt / "runner").exists()
+    assert (workspace.runners / "toolbox" / "run").is_file()
 
 
 def test_tampering_with_a_pinned_tree_support_member_fails_at_execution(tmp_path: Path) -> None:

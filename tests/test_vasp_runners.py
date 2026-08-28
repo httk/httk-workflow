@@ -241,9 +241,12 @@ def test_the_installed_package_form_resolves_the_packaged_runner(
 
     kind, payload = _payload_of(workspace, job_id)
     assert kind == "succeeded"
-    staged = sorted(payload.glob("attempts/*/runner"))
-    assert staged, "the manager stages every runner that lives outside the payload"
-    assert staged[0].read_text(encoding="utf-8") == runner_path("vasp_relax.py").read_text(encoding="utf-8")
+    attempts = sorted(payload.glob("attempts/*"))
+    assert attempts
+    assert not (attempts[-1] / "runner").exists()
+    assert json.loads((payload / "logs" / "runlog.jsonl").read_text(encoding="utf-8").splitlines()[0])[
+        "runner_path"
+    ] == str(runner_path("vasp_relax.py"))
     assert json.loads((payload / "job.json").read_text(encoding="utf-8"))["runner"]["path"] == (
         f"pkg:{PACKAGE}/vasp_relax.py"
     )

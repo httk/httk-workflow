@@ -24,6 +24,8 @@ def main() -> int:
     if token != b"R":
         return 125
     command = sys.argv[3:]
+    if not command:
+        return 125
     try:
         os.execvpe(command[0], command, os.environ)
     except OSError:

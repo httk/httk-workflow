@@ -1,18 +1,31 @@
-"""Private runner resolution, staging, and digest verification helpers."""
+"""Private runner resolution and digest verification helpers."""
 
-import shutil
-from collections.abc import Callable, Iterable, Sequence
+import hashlib
+import os
+import stat
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from httk.core.building import overlay_artifacts
 from httk.core.digests import sha256_file, tree_digest
 
 from .errors import FormatError, RunnerResolutionError
 from .models import JobDefinition, parse_package_runner
 
 RUNNER_TREE_ENTRY = "run"
+
+
+@dataclass(frozen=True)
+class VerifiedRunner:
+    """Describe a shared runner verified for one launch."""
+
+    path: Path
+    root: Path
+    sha256: str
+    fd: int | None
+    artifacts: Path | None
 
 
 def runner_module_allowed(module: str, runner_modules: Sequence[str] = ("httk.workflow",)) -> bool:
@@ -134,10 +147,15 @@ def check_runner_reference(
                 runner_modules=runner_modules,
             )
         if candidate.is_dir():
-            if not (candidate / tree_entry).is_file():
+            executable = candidate / tree_entry
+            if not executable.is_file():
                 return f"runner tree {job.runner_path.as_posix()} has no {tree_entry} entry point"
+            if not os.access(executable, os.X_OK):
+                return "runner is not executable"
             actual = tree_digest(candidate)
         elif candidate.is_file():
+            if not os.access(candidate, os.X_OK):
+                return "runner is not executable"
             actual = sha256_file(candidate)
         else:
             return f"runner is not a regular file or directory: {candidate}"
@@ -148,83 +166,105 @@ def check_runner_reference(
     return None
 
 
-def stage_runner(
-    manager: Any,
-    job: JobDefinition,
-    control: Path,
-    *,
-    tree_digest: Callable[..., str],
-    sha256_file: Callable[[Path], str],
-    log: Any,
-) -> Path:
-    source = resolve_shared_runner(manager, job)
-    staged = control / "runner"
-    try:
-        if source.is_dir():
-            shutil.copytree(source, staged, symlinks=False)
-            digest = tree_digest(staged)
-        else:
-            shutil.copyfile(source, staged)
-            digest = sha256_file(staged)
-    except OSError as exc:
-        raise RunnerResolutionError(
-            "runner_unavailable", f"cannot stage runner {source} for {job.job_key}: {exc}"
-        ) from exc
-    except ValueError as exc:
-        raise RunnerResolutionError("runner_unavailable", f"cannot pin runner {source}: {exc}") from exc
-    if digest != job.runner_sha256:
-        raise RunnerResolutionError(
-            "runner_mismatch",
-            f"{job.runner_source} runner {job.runner_path.as_posix()} has digest {digest}, but the job pinned {job.runner_sha256}",
-        )
-    if source.is_dir() and job.runner_source == "workspace":
-        from ._runner_builds import platform_tag, registered_artifacts, workspace_build_command
-        from .packages import read_build_spec
+def _hash_fd(fd: int) -> str:
+    digest = hashlib.sha256()
+    offset = 0
+    while chunk := os.pread(fd, 1024 * 1024, offset):
+        digest.update(chunk)
+        offset += len(chunk)
+    return digest.hexdigest()
 
+
+def _close_fd(fd: int | None) -> None:
+    if fd is not None:
         try:
-            spec = read_build_spec(staged)
-            if spec is not None:
-                tag = platform_tag(spec)
-                artifacts = registered_artifacts(
-                    manager.workspace,
-                    job.runner_path,
-                    tag,
-                    expected_source_sha256=job.runner_sha256,
-                )
-                if artifacts is None:
-                    raise RunnerResolutionError(
-                        "runner_not_built",
-                        f"workflow package {job.runner_path.as_posix()} is not built on this machine for "
-                        f"platform {tag}; run: {workspace_build_command(manager.workspace, job.runner_path)}",
-                    )
-                for entry in (staged, *staged.rglob("*")):
-                    entry.chmod(entry.stat().st_mode | 0o700 if entry.is_dir() else entry.stat().st_mode | 0o600)
-                overlay_artifacts(artifacts, staged)
-        except ValueError as exc:
-            raise RunnerResolutionError("runner_unavailable", f"published runner manifest is malformed: {exc}") from exc
-        except OSError as exc:
-            raise RunnerResolutionError("runner_unavailable", f"cannot overlay runner artifacts: {exc}") from exc
-    if staged.is_dir():
-        for entry in sorted(staged.rglob("*")):
-            entry.chmod(0o500)
-        staged.chmod(0o500)
-    else:
-        staged.chmod(0o500)
-    executable = staged / RUNNER_TREE_ENTRY if staged.is_dir() else staged
-    if not executable.is_file():
-        raise RunnerResolutionError(
-            "runner_unavailable",
-            f"staged runner tree {job.runner_path.as_posix()} has no {RUNNER_TREE_ENTRY} entry point",
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _registered_runner_artifacts(manager: Any, job: JobDefinition, source: Path) -> Path | None:
+    if job.runner_source != "workspace" or not source.is_dir():
+        return None
+    from ._runner_builds import platform_tag, registered_artifacts, workspace_build_command
+    from .packages import read_build_spec
+
+    try:
+        spec = read_build_spec(source)
+        if spec is None:
+            return None
+        tag = platform_tag(spec)
+        artifacts = registered_artifacts(
+            manager.workspace,
+            job.runner_path,
+            tag,
+            expected_source_sha256=job.runner_sha256,
         )
-    log.info(
-        "staged %s runner %s for %s as %s (digest %s)",
-        job.runner_source,
-        job.runner_path.as_posix(),
-        job.job_key,
-        executable,
-        digest,
-        extra=manager._event(
-            "runner_staged", runner=job.runner_path.as_posix(), runner_source=job.runner_source, sha256=digest
-        ),
-    )
-    return executable
+        if artifacts is None:
+            raise RunnerResolutionError(
+                "runner_not_built",
+                f"workflow package {job.runner_path.as_posix()} is not built on this machine for "
+                f"platform {tag}; run: {workspace_build_command(manager.workspace, job.runner_path)}",
+            )
+        return artifacts
+    except ValueError as exc:
+        raise RunnerResolutionError("runner_unavailable", f"published runner manifest is malformed: {exc}") from exc
+    except OSError as exc:
+        raise RunnerResolutionError("runner_unavailable", f"cannot locate runner artifacts: {exc}") from exc
+
+
+def verify_runner(manager: Any, job: JobDefinition) -> VerifiedRunner:
+    """Resolve and verify a shared runner without modifying its source tree.
+
+    File runners are hashed through an open descriptor retained until launch;
+    tree runners are hashed in place and consequently retain a small accepted
+    TOCTOU window between tree verification and execution.
+    """
+
+    source = resolve_shared_runner(manager, job)
+    if source.is_dir():
+        try:
+            digest = tree_digest(source)
+        except (OSError, ValueError) as exc:
+            raise RunnerResolutionError("runner_unavailable", f"cannot pin runner {source}: {exc}") from exc
+        if digest != job.runner_sha256:
+            raise RunnerResolutionError(
+                "runner_mismatch",
+                f"{job.runner_source} runner {job.runner_path.as_posix()} has digest {digest}, but the job pinned {job.runner_sha256}",
+            )
+        executable = source / RUNNER_TREE_ENTRY
+        if not executable.is_file():
+            raise RunnerResolutionError(
+                "runner_unavailable",
+                f"runner tree {job.runner_path.as_posix()} has no {RUNNER_TREE_ENTRY} entry point",
+            )
+        if not os.access(executable, os.X_OK):
+            raise RunnerResolutionError("runner_unavailable", "runner is not executable")
+        return VerifiedRunner(
+            source / RUNNER_TREE_ENTRY, source, digest, None, _registered_runner_artifacts(manager, job, source)
+        )
+
+    fd: int | None = None
+    try:
+        fd = os.open(source, os.O_RDONLY | os.O_CLOEXEC)
+        descriptor_stat = os.fstat(fd)
+        if not stat.S_ISREG(descriptor_stat.st_mode):
+            raise RunnerResolutionError("runner_unavailable", f"runner is not a regular file: {source}")
+        digest = _hash_fd(fd)
+        path_stat = os.stat(source)
+        if (descriptor_stat.st_ino, descriptor_stat.st_dev) != (path_stat.st_ino, path_stat.st_dev):
+            raise RunnerResolutionError("runner_unavailable", "runner replaced during verification")
+        if not os.access(source, os.X_OK):
+            raise RunnerResolutionError("runner_unavailable", "runner is not executable")
+        if digest != job.runner_sha256:
+            raise RunnerResolutionError(
+                "runner_mismatch",
+                f"{job.runner_source} runner {job.runner_path.as_posix()} has digest {digest}, but the job pinned {job.runner_sha256}",
+            )
+        return VerifiedRunner(source, source, digest, fd, None)
+    except RunnerResolutionError:
+        _close_fd(fd)
+        raise
+    except (OSError, ValueError) as exc:
+        _close_fd(fd)
+        raise RunnerResolutionError("runner_unavailable", f"cannot verify runner {source}: {exc}") from exc
