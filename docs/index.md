@@ -12,6 +12,10 @@ three layers, each with its own import home: the **filesystem protocol**
 `TaskManager`, `collect`, and named submodules for transfers, remotes, and
 compatibility). Installations register the `httk workflow` command tree.
 
+Managers are started by the workspace's `manager.launch` setting, using the
+built-in `process` launcher or a launcher bundle such as `slurm`. A remote is
+only the transport for files and commands on another machine.
+
 *httk₂* workflows are language-independent: runners, hooks, and postprocess
 scripts can be written in any language; a workflow is a manifest plus the
 members it references. Python hooks remain first-class, with an in-process fast

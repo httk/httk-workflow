@@ -30,7 +30,7 @@ httk workflow collect
 httk workflow postprocess
 httk workflow run        [--workspace WORKSPACE]  (the recommended spelling of `manager run`)
 httk workflow manager    run
-httk workflow campaign   init | show | submit | collect | start-managers
+httk workflow campaign   init | show | submit | collect | start-"managers"
 httk workflow v1         collect
 httk workflow config     init | show | set | unset | import-v1
 httk workflow project    init | import-v1 | show | doctor | manifest create | manifest verify
@@ -342,6 +342,16 @@ The log is rotated when a manager starts or every 1000 records once the file
 exceeds 16 MiB; one backup is kept, and a manager that has not yet reopened
 the file keeps appending to that backup.
 
+The workspace settings `manager.launch`, `manager.count`, `manager.workers`, and
+`manager.command` control launch-site behavior: `manager.launch` selects the
+built-in `process` launcher or a named launcher bundle; `manager.count` supplies
+the default number of managers; `manager.workers` supplies each manager's
+concurrency; and `manager.command` is used after `environment.prelude` to find
+the manager on the resulting `PATH`. `--count` and `--workers` override the
+corresponding settings for the invocation. `--inline` forces one in-process
+manager, while `--detach` returns after launch. `--count` always counts managers
+at the launch site, not workers or remote adapters.
+
 For a resource-aware run, advertise the manager's complete allotment:
 
 ```console
@@ -432,6 +442,12 @@ unambiguous.
 | `remote import-v1 [OPTIONS] SOURCE...` | map legacy *httk* v1 computer bundles | `--name` (one source only), `--global` |
 | `remote show [--json] NAME...` | describe remotes and their settings | |
 | `remote remove [--force] NAME...` | remove remote bundles | |
+
+`remote add --template` accepts `local` (same-machine transport) or `ssh`
+(rsync plus command execution over SSH). These templates describe how to reach
+a machine; they do not describe how that machine starts managers. Configure
+manager launch separately in the target workspace with `manager.launch`, such
+as a packaged `slurm` launcher.
 
 `remote show` never prints a credential *value*: a remote setting stored in
 the manifest-excluded `credentials.json` is reported by name only, so a
@@ -539,7 +555,7 @@ job again, or edit the one `runner.path` member.
 | `campaign show` | show the partition map | `--json` |
 | `campaign submit` | assign one root job to a partition and submit it there | `--workflow` (required), `--key` (required), `--index`, `--input`, `--input-from`, `--parameter`, `--file`, `--tag`, `--placement`, `--priority`, `--name`, `--json` |
 | `campaign collect` | collect every partition, one workspace after another | `--partition`, `--state`, `--placement`, `--raw`, `--allow-job-collector`, `--into PATH`, `--id-base BASE`, `--id-series SERIES` |
-| `campaign start-managers` | start a manager per selected partition | `--partition`, `--workers`, `--worker-resource`, `--count`, `--idle-timeout`, `--adapter-timeout` |
+| `campaign start-<wbr>managers` | start a manager per selected partition | `--partition`, `--workers`, `--worker-resource`, `--count`, `--idle-timeout`, `--adapter-timeout` |
 
 A campaign is a thin convention over the *registered workspaces* above: a
 partition map, stored in the project, that spreads a very large body of work
@@ -893,8 +909,8 @@ environment:
   `--json`, `show` is line-oriented (`WORKFLOW⇥text`), so a multi-line prelude's
   continuation lines carry no id prefix — machine consumers should use `--json`.
 
-See {doc}`/taskmanager` for how each layer is delivered on a local versus a
-remote (slurm) manager, and why preludes stay behind when a job is transferred.
+See {doc}`/taskmanager` for how each layer is delivered by the workspace's
+launcher, and why preludes stay behind when a job is transferred.
 
 ## Workspace policy and integrity
 
@@ -1009,8 +1025,8 @@ and remote commands are always argument arrays. The maintained templates impleme
 protocol through {py:mod}`httk.workflow.adapter_protocol`, which is the public
 name of the packaged implementation. {doc}`adapter_authoring` is the reference
 for writing one of your own: the bundle layout, the exact request and result
-document of each of the six operations, and a worked skeleton for a cluster
-none of the maintained kinds covers.
+document of the six operations (`configure`, `install`, `invoke`, `push`, `pull`,
+and `status`), and the rules for a custom adapter.
 
 Maintained `local` and `ssh` templates are packaged with
 the module. Project definitions shadow global definitions. `REMOTE:NAME` names
@@ -1018,6 +1034,15 @@ a workspace on a remote. `remote import-v1` maps recognized legacy *httk* v1 com
 by reading assignment-only configuration; legacy shell executables are never
 copied or run. Any other `kind` in a `remote.json` is refused rather than
 executed in the wrong place.
+
+`remote import-v1` selects `ssh` when the legacy configuration contains
+`REMOTE_HOST`, otherwise `local`. It maps the first legacy submission profile
+into `legacy_settings`; if several `config.*` profiles exist, the others are
+skipped with a warning because submission profiles are now workspace settings.
+Legacy `SLURM_*` values are not remote settings: add a `slurm` launcher and set
+the target workspace's `manager.launch` instead. The legacy executables are
+never copied or executed. Review the imported `legacy_settings` and initialize
+the workspace path explicitly before transferring jobs.
 
 `remote configure --set KEY=VALUE` persists only the machine-level keys
 `check_connectivity`, `host`, `httk_command`, `legacy_settings`,
@@ -1039,16 +1064,16 @@ credential.
 Manager launch policy is selected by each workspace's `manager.launch` setting.
 
 `ssh` moves files with `rsync` over `ssh` and runs every command on the
-configured host. Only `ssh` and `rsync` are required locally. Operation by
-operation:
+configured host. Only `ssh` and `rsync` are required locally. Both kinds
+implement the same six operations:
 
-| Operation | `ssh` behaviour | Settings used |
+| Operation | `local` behaviour | `ssh` behaviour |
 | --- | --- | --- |
-| `configure` | verifies the host answers with a cheap remote `true`, so a mistyped host fails immediately instead of at the first transfer | `host`, `username`, `port`, `check_connectivity` |
-| `install` (the `remote check` verb) | checks that `httk` answers on the far side and reports its version | `host`, `username`, `port`, `httk_command` |
-| `push` / `pull` | one `rsync --archive` transfer, creating missing destination components; a `pull` is always the whole remote directory, a `push` is the whole tree or the request's explicit relative `files` batch | `host`, `username`, `port` |
-| `invoke` | runs the request's argument vector on the host, optionally in the request's directory, and returns its status, stdout and stderr | `host`, `username`, `port`, `httk_command` |
-| `status` | the same machinery running `httk workspace status --json NAME` remotely | as `invoke` |
+| `configure` | validates pending machine settings | verifies the host answers with a cheap remote `true` |
+| `install` (the `remote check` verb) | checks that local `httk` answers | checks that `httk` answers on the far side and reports its version |
+| `invoke` | runs the argument vector as a child process | runs it on the configured host and returns status, stdout, and stderr |
+| `push` / `pull` | copies the requested tree or relative file batch locally | transfers it with `rsync --archive` over SSH |
+| `status` | runs the workspace status command locally | runs `httk workspace status --json NAME` remotely |
 
 `httk_command` overrides how `httk` is spelled on the far side, for example
 `httk_command="/proj/venv/bin/httk"`; without it the plain `httk` on the remote
@@ -1060,8 +1085,8 @@ Every subprocess an adapter starts is an argument vector, so no shell ever
 parses a value that came from a request or from settings. `ssh` is the one
 exception in the protocol, because it always joins its command words and lets a
 login shell on the far side parse the result. All remote command strings are
-therefore built by a single helper that quotes element-wise; scheduler launcher
-bundles own their batch-script quoting separately. `rsync` transfers pass
+therefore built by a single helper that quotes element-wise. Manager launcher
+bundles own any scheduler-script quoting separately. `rsync` transfers pass
 `--protect-args` so that even file names travel in the protocol rather than
 through the remote shell.
 
@@ -1137,9 +1162,12 @@ on the owning machine.
 `transfer default kappa:runs` detaches each selected job from the local default
 workspace and imports it on the remote, at the placement it had here unless
 `--destination-placement` puts it elsewhere. `run --workspace kappa:runs` submits the
-generated manager through the remote adapter; the owning workspace's launcher
-then decides how it starts. `--workers` fixes its worker count. `manager run`
-is the advanced spelling for the same operation.
+manager invocation via the remote adapter; the remote invokes
+`httk workflow manager run --workspace runs --detach` on the owning machine.
+That command uses the workspace's `manager.launch`, just as a command run on the
+cluster or through a `machine_names` alias would. `--count` means managers at
+that launch site, and `--workers` fixes the worker count of each manager.
+`manager run` is the advanced spelling for the same operation.
 
 Before a transfer moves state, it checks each job's declared environment against
 the destination workspace settings. Unresolved default-less entries produce a

@@ -249,6 +249,7 @@ WORKSPACE/
 │   │       ├── manager.json
 │   │       └── heartbeat.json
 │   ├── managers.log
+│   ├── batch/                 # launcher-generated batch scripts and logs
 │   └── requests/
 │       ├── tmp/
 │       ├── ready/
@@ -280,6 +281,10 @@ jobs in one workspace may use completely different placement schemes.
 
 The layout includes the transfer state directories used by core-v2, and no
 empty state-kind or placement directories are required.
+
+The `.httk-workspace/batch/` directory is created by a configured manager
+launcher such as the packaged Slurm launcher. It is not remote-adapter state and
+is absent when managers use the built-in process launcher.
 
 `files/`, `data/`, a workdir, and attempt control are created only when
 required. Empty placeholder directories SHOULD NOT be created. Empty placement

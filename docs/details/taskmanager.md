@@ -7,8 +7,8 @@ Every command below is under `httk workflow …`; see
 
 A launcher is to starting managers what a remote is to reaching a machine.
 Managers can use the built-in local `process` launcher or a named bundle such as
-the Slurm launcher; this phase exposes the bundles and their checks while the
-workspace `run` integration remains described by the manager command below.
+the Slurm launcher. The workspace's `manager.launch` setting selects the bundle
+used by `run` and `manager run`.
 
 ## Initialize a workspace
 
@@ -42,31 +42,39 @@ job whose state cannot be read until `workspace fsck --repair` restores it.
 
 ## Running on a remote
 
-The canonical remote flow keeps scheduler settings with the remote workspace.
-*httk₂* must already be set up on the remote (log in there and install it, e.g.
-with `pipx install httk-workflow`); `remote check` verifies that:
+Manager launch is a property of the workspace. On the cluster, install the
+packaged Slurm launcher and configure the workspace that it owns:
+
+```console
+httk workflow launcher add --template slurm --global cluster
+httk workspace init --name runs /scratch/rar/httk/runs
+httk workspace settings set --key manager.launch --value cluster runs
+httk workspace settings set --key slurm.partition --value batch runs
+httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" runs
+httk workflow run --workspace runs --count 4
+```
+
+From a desk, configure an `ssh` remote to reach that machine, then use the same
+workspace operations through `kappa:`:
 
 ```console
 httk workflow remote add --template ssh kappa
 httk workflow remote configure \
     --set host=kappa.example.org --set username=rar \
     --set check_connectivity=yes kappa
-httk workflow remote check kappa
 httk workspace init kappa:/scratch/rar/httk/runs
+httk workspace settings set --key manager.launch --value cluster kappa:runs
 httk workspace settings set --key slurm.partition --value batch kappa:runs
-httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" kappa:runs
-httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
-httk workflow transfer --job JOB-ID default kappa:runs
-httk workflow run --workspace kappa:runs --workers 8
-httk workspace status kappa:runs
+httk workflow run --workspace kappa:runs --count 4
 ```
 
-The remote init command creates and registers `runs` on kappa; `kappa:runs` is
-resolved by kappa at use time. `transfer`
-detaches the selected job from the local default workspace, and `run` invokes
-the manager command through the remote adapter. The owning workspace's launcher
-then starts it. Use `transfer kappa:runs default` after the
-remote job stops, then `httk workflow collect` locally.
+The remote is only transport: it moves files and invokes commands on kappa.
+`run --workspace kappa:runs` invokes `httk workflow manager run --workspace
+runs --count 4 --detach` there, and that command uses the owning workspace's
+launcher. The result is the same as running on the cluster, or addressing the
+same machine through a configured `machine_names` alias. Transfer jobs to the
+workspace as needed and use `transfer kappa:runs default` after they stop, then
+`httk workflow collect` locally.
 
 ## Workspace policy
 
@@ -96,7 +104,7 @@ serialized: the write itself is atomic, but the last writer wins.
 
 Separate from that engine policy, a workspace also holds *application settings*:
 a flat, dotted-name map of small values a runner resolves at run time — the VASP
-command and a pseudopotential library. The manager submission profile is also a
+command and a pseudopotential library. The manager launch profile is also a
 workspace setting, so each workspace can carry its own scheduler requirements.
 
 ```console
@@ -381,6 +389,36 @@ httk workflow run --workers 4 \
   --worker-resource procs 32 --worker-resource mem 128000 \
   --worker-resource matlab_license_slots 2
 ```
+
+`run` and `manager run` launch managers through the workspace's
+`manager.launch` setting. The built-in `process` launcher starts detached local
+processes; a named launcher bundle such as `cluster` starts them according to
+that bundle. `manager.count` is the workspace default for the number of
+managers, and `--count` overrides it at the launch site. `manager.workers` is
+the default number of attempts each manager runs concurrently, and `--workers`
+overrides it per manager. `manager.command` is the command used after an
+environment prelude (default: `httk`).
+
+`--inline` forces one manager in the current process and therefore ignores the
+workspace launcher; it can only be combined with `--count 1`. `--detach` starts
+the managers and returns immediately. A remote workspace always uses this
+detached invocation after the remote adapter has reached its owning machine.
+
+The launcher receives the manager's complete argument vector, workspace path,
+count, and workspace settings. The packaged Slurm launcher writes one mode-0700
+batch script below `.httk-workspace/batch/`, submits it once per manager, and
+returns the Slurm job IDs and script path. One generated script is reused for
+the requested count, and it remains in that directory with the scheduler's
+manager output files for inspection. The directory and scripts are launcher
+output, not remote-adapter state. If submission fails after one or more jobs
+were accepted, the command refuses with text containing `submitted: N` and
+`job_ids: [...]`; cancel those jobs before retrying.
+
+`environment.prelude` runs under `set -e` before the manager. With a prelude,
+the launcher resolves `manager.command` on the resulting `PATH`; without one,
+it preserves the Python interpreter command supplied by the caller. This rule
+lets a module-loaded environment select the intended `httk` while keeping
+direct process launches faithful to the invoking interpreter.
 
 `procs` and `mem` are special: a job that omits them is assumed to need the
 manager's fair share (`capacity // --workers`), so only jobs declaring both

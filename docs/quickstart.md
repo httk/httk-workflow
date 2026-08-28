@@ -170,8 +170,8 @@ marker.
   and without a runner file.
 - {doc}`collecting` — turning finished jobs into stored results.
 - Running on a cluster — add and configure a remote, initialize `R:NAME`, then
-  `transfer --job JOB LOCAL R:NAME` puts jobs there and `run --workspace R:NAME` submits a
-  manager through its scheduler; a very large run spread across many workspaces
+  `transfer --job JOB LOCAL R:NAME` puts jobs there and `run --workspace R:NAME` invokes
+  the manager on its owning machine, where its workspace launcher starts it; a very large run spread across many workspaces
   is a {doc}`campaigns`. See
   {doc}`workflow_cli`.
 - {doc}`taskmanager` and {doc}`workflow_cli` — running managers for real, and the

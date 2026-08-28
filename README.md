@@ -91,8 +91,8 @@ stay serial within their group while the rest of the suite runs in parallel.
   documents become ordinary jobs; see
   [`docs/workflow_languages.md`](docs/workflow_languages.md).
 - **Reaches other machines.** Versioned [remote adapters](docs/adapter_authoring.md)
-  send work to a cluster, start managers there, and fetch results back through
-  crash-recoverable detached transfer.
+  transport files and run commands on a cluster; the workspace's [launcher](docs/launcher_authoring.md)
+  starts its managers, and crash-recoverable detached transfer fetches results back.
 - **Manages projects and identity**: XDG configuration, signed project
   manifests, and workspace policy — see
   [`docs/workflow_cli.md`](docs/workflow_cli.md).

@@ -1,8 +1,8 @@
 # Writing a remote adapter in detail
 
 *For operators and integrators who need to reach a machine the packaged
-`local`, `local-slurm`, and `ssh-slurm` templates do not cover.* This page is the
-normative reference for the adapter contract: the bundle layout, the seven
+`local` and `ssh` templates do not cover.* This page is the
+normative reference for the adapter contract: the six
 operations and their exact JSON request and result documents, how settings and
 credentials reach an adapter, and the rules an implementation must follow. The
 operator-facing description of the same adapters — what each maintained kind
@@ -11,25 +11,18 @@ does, and which command-line options drive it — is in
 
 A *remote adapter* is a versioned directory with one dispatcher executable.
 Everything *httk-workflow* does on another machine — push a job bundle, run a
-command, submit a manager, pull results back — is one *operation*, and every
+command, or pull results back — is one *operation*, and every
 operation runs the bundle's single `adapter` program. The engine never opens an
-ssh connection, never spells out a scheduler command, and never parses anything
-but the one JSON document that program prints.
+ssh connection itself, never starts a manager through a remote, and never
+parses anything but the one JSON document that program prints.
 
-## One executable, seven operations
+## One executable, six operations
 
 There is one executable per bundle, not one per operation. The operation to run
 is named inside the request JSON (`"operation": …`), so a single program serves
-all seven. Earlier releases carried seven wrapper files —
-`configure`, `install`, `invoke`, `push`, `pull`, `start-manager`, `status` —
-but they were byte-identical two-line thin execs that differed only in the
-operation word they passed along. There was no security boundary between them:
-the operation name is already stated, and cross-checked, *inside* the request,
-so which file was executed proved nothing the request did not already carry.
-Collapsing them to one `adapter` removes a maintenance burden and a false
-signal without giving up anything. The operation *names* are unchanged — they
-are {py:data}`httk.workflow.adapters.ADAPTER_OPERATIONS` and the value of the
-request's `operation` member — only the file layout changed.
+all six. The operation names are
+{py:data}`httk.workflow.adapters.ADAPTER_OPERATIONS` and the value of the
+request's `operation` member; a remote adapter does not launch managers.
 
 ## The bundle
 
@@ -101,18 +94,18 @@ refuses a bundle whose `adapter` is missing or not runnable.
 `kind` is *not* interpreted by the loader. It is read only by
 {py:mod}`httk.workflow.adapter_protocol` — the packaged implementation the
 maintained templates execute — which dispatches on it and refuses any value
-outside `local`, `local-slurm`, `ssh-slurm` rather than running the wrong code in
+outside `local` and `ssh` rather than running the wrong code in
 the wrong place. A custom adapter whose `adapter` executes your own program may
 put whatever it likes there; setting a distinctive value is still worth doing,
 because an `adapter` accidentally repointed at the packaged implementation then
 refuses instead of, say, copying a cluster job into the local filesystem.
 
-`required_binaries` is what makes `local-slurm` unusable on a machine without
-`sbatch`, and it is checked locally, at validation time. Do not list binaries
-that only exist on the far side of a connection: the local `ssh` client is a
-local requirement, the remote `qsub` is not.
+`required_binaries` is checked locally, at validation time. Do not list binaries
+that only exist on the far side of a connection: the local `ssh` and `rsync`
+clients are local requirements, but a program used by a workspace launcher is
+not a remote-adapter requirement.
 
-## The seven operations
+## The six operations
 
 Every operation runs the same `adapter` executable. It is started as
 
@@ -335,63 +328,6 @@ A local copy onto an existing destination is idempotent when both sides carry th
 identical `.httk-transfer/manifest.json`, and an error otherwise, so a resumed
 transfer does not have to know whether the previous attempt finished.
 
-### `start-manager`
-
-Start one or more task managers on the target.
-
-| Member | Type | Meaning |
-| --- | --- | --- |
-| `argv` | array of nonempty strings, required | the manager command, e.g. `["httk", "workflow", "manager", "run", "--workspace", "/scratch/me/runs"]` |
-| `workspace` | string, required | the workspace the managers serve |
-| `count` | positive integer, optional | how many to start, default `1` |
-| `cwd` | string, optional | honoured by process-starting implementations |
-
-The `workspace` member is stated outright by every caller in this package and
-is required for hand-written requests too.
-
-```json
-{"argv": ["httk", "workflow", "manager", "run", "--workspace", "runs"], "count": 2,
- "format": "httk-computer-request", "format_version": 2, "operation": "start-manager",
- "adapter_dir": "/home/me/.config/httk/remotes/my-cluster",
- "remote_settings": {"host": "login.example.org"},
- "workspace": "/scratch/me/runs"}
-```
-
-The maintained protocol names the workspace first. A hand-written request may
-use a path only when it contains a path separator or already names an existing
-workspace directory; registry format and corruption errors are not treated as
-paths.
-
-Batch implementations report the submitted identifiers:
-
-```json
-{"count": 2, "format": "httk-computer-result", "format_version": 2,
- "job_ids": ["1840271", "1840272"], "operation": "start-manager", "ok": true,
- "script": "/scratch/me/runs/.httk-workspace/batch/manager-9c1f….sbatch"}
-```
-
-Process implementations report the process identifiers instead, with `pid`
-naming the first, so a caller that only ever started one manager reads the field
-it always did:
-
-```json
-{"count": 2, "format": "httk-computer-result", "format_version": 2,
- "operation": "start-manager", "ok": true, "pid": 40311, "pids": [40311, 40312]}
-```
-
-An adapter should append the workspace's configured `manager.workers` to `argv` only when the
-request did not already choose one, so that an explicit `--workers` from the
-command line always wins over the workspace's default. It is also expected to
-make the manager's `procs` and `mem` capacities (and `gpus` and `nodes` when
-known) match the real allocation: append `--worker-resource NAME COUNT`
-pairs when the caller did not provide them, or run the manager where
-`SLURM_*` variables describe the allocation. Keep the `manager.workers` rule;
-there is no `manager.resources` setting. Explicit resource pairs are
-per-manager values and must be passed through verbatim. When a local request
-starts multiple managers, split only injected host capacities across `count`
-with quotient-plus-remainder distribution so the aggregate matches the host
-capacity and a remainder is assigned to the first managers.
-
 ## Settings and credentials
 
 `httk workflow remote configure --set KEY=VALUE NAME` splits every assignment
@@ -447,11 +383,9 @@ def _shell_command(argv: Sequence[str], *, cwd: str | None = None) -> str:
     return f"cd {shlex.quote(cwd)} && {quoted}"
 ```
 
-Every remote command string, and the one line of a generated batch script that
-runs the manager, is built by that helper and by nothing else. A generated batch
-script is otherwise a shell program too, so the same rule applies to it: the
-`exec` line is composed by the helper, and directive values are checked for
-control characters rather than quoted into place.
+Every remote command string is built by that helper and by nothing else. A
+manager launcher owns any generated scheduler script and its quoting; see
+{doc}`launcher_authoring` for that separate contract.
 
 `rsync` transfers pass `--protect-args`, so even file names travel inside the
 protocol rather than through the remote shell. When an explicit `files` batch is
@@ -484,157 +418,13 @@ being told what to do next; an operator reading a traceback is not.
 The timeout is `timeout_seconds` from `remote.json`, overridable per call by
 `--adapter-timeout` on the command line. It is enforced by the *caller*, which
 kills the operation; an adapter that may legitimately take minutes — an `rsync`
-of a large campaign — belongs to a bundle whose `timeout_seconds` says so. The
-packaged `ssh-slurm` template uses `300` for exactly this reason, against `60`
-for `local`.
+of a large campaign — belongs to a bundle whose `timeout_seconds` says so.
 
-## A worked example: a PBS cluster
-
-What follows is the *skeleton* of a custom bundle, not a working PBS
-implementation. Everything specific to the site — how `qsub` is spelled, which
-directives the remote wants, whether files travel by `rsync` or by a staging
-service — lives in one Python module of yours, and the bundle is one `adapter`
-dispatcher that calls it.
-
-### The dispatcher
-
-The bundle's `adapter` is one trivial script:
-
-```sh
-#!/bin/sh
-# my-cluster/adapter
-exec python3 -m mysite.httk_pbs "$@"
-```
-
-Make it executable (`chmod +x`); the bundle validator refuses one that is not.
-Nothing else may live in it: keeping it trivial is what makes the "no shell"
-rule cheap to hold, because no request value is ever visible to `sh`.
-
-### The metadata
-
-```json
-{
-  "adapter_version": 2,
-  "format": "httk-computer-adapter",
-  "format_version": 2,
-  "kind": "pbs",
-  "settings": {"host": "login.hpc.example.org"},
-  "required_binaries": ["rsync", "ssh"],
-  "timeout_seconds": 300
-}
-```
-
-### The module
-
-```python
-"""A site PBS adapter for httk-workflow. The bundle's `adapter` executes this module."""
-
-import json
-import shlex
-import subprocess
-import sys
-from collections.abc import Sequence
-from pathlib import Path
-
-OPERATIONS = ("configure", "install", "invoke", "push", "pull", "start-manager", "status")
-
-
-def result(operation: str, **values: object) -> None:
-    print(json.dumps({"format": "httk-computer-result", "format_version": 2,
-                      "operation": operation, "ok": True, **values}, sort_keys=True))
-
-
-def refuse(operation: str, message: str) -> None:
-    print(json.dumps({"error": message, "format": "httk-computer-result",
-                      "format_version": 2, "operation": operation, "ok": False}, sort_keys=True))
-
-
-def shell_command(argv: Sequence[str], *, cwd: str | None = None) -> str:
-    """The one place this module composes a string a shell will parse."""
-
-    quoted = " ".join(shlex.quote(item) for item in argv)
-    return quoted if cwd is None else f"cd {shlex.quote(cwd)} && {quoted}"
-
-
-def ssh(settings: dict, argv: Sequence[str], *, cwd: str | None = None):
-    destination = settings["host"] if "username" not in settings \
-        else f"{settings['username']}@{settings['host']}"
-    return subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "--", destination, shell_command(argv, cwd=cwd)],
-        text=True, capture_output=True, stdin=subprocess.DEVNULL, check=False,
-    )
-
-
-def batch_script(argv: Sequence[str], settings: dict, workspace: str) -> str:
-    lines = ["#!/bin/bash", "#PBS -N httk-manager"]
-    for key, directive in (("account", "-A"), ("partition", "-q")):
-        if key in settings:
-            lines.append(f"#PBS {directive} {settings[key]}")
-        # ... nodes, walltime, and whatever else this site's scheduler needs
-    lines += ["", "set -eu", f"cd {shlex.quote(workspace)}", f"exec {shell_command(argv)}", ""]
-    return "\n".join(lines)
-
-
-def main(argv: list[str] | None = None) -> int:
-    arguments = sys.argv[1:] if argv is None else argv
-    if len(arguments) != 1:
-        print("adapter dispatcher expects one REQUEST.json path", file=sys.stderr)
-        return 2
-    (request_path,) = arguments
-    try:
-        request = json.loads(Path(request_path).read_text(encoding="utf-8"))
-        operation = request.get("operation") if isinstance(request, dict) else None
-        if not isinstance(operation, str) or not operation:
-            raise ValueError("request carries no operation")
-        settings = request.get("remote_settings") or {}
-        if operation == "configure":
-            pending = {**settings, **(request.get("settings") or {})}
-            probe = ssh(pending, ["true"])
-            if probe.returncode != 0:
-                refuse(operation, f"cannot reach {pending.get('host')}: {probe.stderr.strip()}")
-                return 0
-            result(operation, configured=True, connectivity="ok")
-        elif operation == "install":
-            ...   # probe httk (the `remote check` verb); refuse with instructions
-        elif operation in {"invoke", "status"}:
-            cwd = request.get("cwd") if operation == "invoke" else None
-            completed = ssh(settings, request["argv"], cwd=cwd)
-            result(operation, returncode=completed.returncode,
-                   stdout=completed.stdout, stderr=completed.stderr)
-        elif operation in {"push", "pull"}:
-            ...   # rsync --archive --protect-args, honouring `files` and `directory`
-            result(operation, path=request["destination"])
-        elif operation == "start-manager":
-            ...   # write batch_script(...) on the far side, qsub it `count` times
-            result(operation, job_ids=[...], count=request.get("count", 1))
-        else:
-            raise ValueError(f"unsupported adapter operation: {operation}")
-    except (OSError, RuntimeError, ValueError, KeyError, json.JSONDecodeError) as exc:
-        print(f"adapter {operation}: {exc}", file=sys.stderr)
-        return 2
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
-```
-
-### Installing and using it
-
-The bundle is an ordinary directory; put it where the CLI looks and configure a
-remote:
-
-```console
-mkdir -p httk_project/remotes/my-cluster
-cp -a my-cluster/. httk_project/remotes/my-cluster/
-httk workflow remote configure --set username=me my-cluster
-httk workflow remote check my-cluster
-httk workspace init --name runs my-cluster:/scratch/me/runs
-httk workflow manager run --workspace my-cluster:runs --workers 8
-```
-
-Jobs reach the bundle through `transfer SRC DST`; the same adapter operations
-above handle sending, remote execution, and fetching.
+For a PBS site, write a custom adapter that implements these six operations and
+uses `qsub` only when a command is explicitly invoked on that site. The manager
+launch policy belongs to the target workspace's launcher, not to the remote
+adapter. See {doc}`launcher_authoring` for the compact PBS launcher example,
+including its batch directives, script lifecycle, and partial-submission rules.
 
 ## Reading the maintained implementation
 
@@ -643,5 +433,5 @@ The definitive worked example is the shipped one.
 contract in its docstring; {py:mod}`httk.workflow.adapter_runtime` is the
 implementation the `adapter` dispatcher executes. Both names refer to the same
 objects. Read
-`_shell_command`, `_rsync`, and `_batch_script` there before writing any code
+`_shell_command` and `_rsync` there before writing any code
 that composes a command for another machine.

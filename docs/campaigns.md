@@ -95,16 +95,17 @@ runs.
 ## Running and collecting across partitions
 
 ```console
-$ httk workflow campaign start-managers            # every partition
-$ httk workflow campaign start-managers --partition north
+$ httk workflow campaign start-"managers"            # every partition
+$ httk workflow campaign start-"managers" --partition north
 $ httk workflow campaign collect --state succeeded
 ```
 
-`campaign start-managers` starts one manager per selected partition: in this
-process for a local partition, and submitted through the remote's scheduler for a
-remote one — exactly as {doc}`manager run <workflow_cli>` does for a single
-workspace. Each partition's target workspace supplies its own scheduler profile
-through workspace settings. `campaign collect` chains `campaign_collect()` across the
+`campaign start-<wbr>managers` starts managers at each selected partition's launch
+site through that partition's workspace launcher. For a remote partition it
+invokes the manager command on the owning machine; the remote is transport only.
+This is exactly how {doc}`manager run <workflow_cli>` behaves for a single
+workspace. Each target workspace supplies its own launcher and settings. A
+launcher or invocation failure fails the command. `campaign collect` chains `campaign_collect()` across the
 partitions
 lazily, one workspace after another in stable order, so a campaign spread over
 many workspaces streams as one collect without ever materializing more than the
