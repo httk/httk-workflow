@@ -769,8 +769,11 @@ def test_the_gc_command_prints_a_table_and_json(aged: _Fixture, capsys: pytest.C
     assert document["removed"] > 0
     assert "removed_jobs" in {category["name"] for category in document["categories"]}
     assert not aged.old_attempts[0].exists()
-    assert command(["workspace", "gc"], context) == 2
-    capsys.readouterr()
+    # Without a name the command resolves the enclosing workspace: a second
+    # collection from inside it is a clean no-op.
+    assert command(["workspace", "gc", "--json"], context) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document[0]["removed"] == 0
 
 
 def test_a_symlinked_control_is_skipped_by_gc(tmp_path: Path) -> None:

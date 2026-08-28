@@ -966,7 +966,7 @@ def build_workspace_parser(
         description="Collect the garbage one workflow workspace has accumulated",
         handler=handle_workspace_gc,
     )
-    _add_workspace_targets(collect, help_text="the workspace to collect", required=True)
+    _add_workspace_targets(collect, help_text="the workspace to collect")
     collect.add_argument(
         "--dry-run",
         action="store_true",

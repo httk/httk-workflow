@@ -89,7 +89,7 @@ job UUIDs when precise attribution matters.
 | `workspace policy show [--json] [NAME...]` | print workspace policies | |
 | `workspace policy set --key KEY --value VALUE [--json] NAME...` | store one policy member in each workspace | |
 | `workspace fsck [OPTIONS] [NAME...]` | check markers against journal frames; repair modes require names | `--repair`, `--quarantine-unrepairable`, `--json` |
-| `workspace gc [--dry-run] [--json] NAME...` | collect what retention policies allow (remote: over the adapter) | |
+| `workspace gc [--dry-run] [--json] [NAME...]` | collect what retention policies allow (remote: over the adapter) | |
 | `workspace unlock [--force] NAME...` | release maintenance locks | |
 
 `workspace init` creates and registers an explicit workspace. A canonical path may
