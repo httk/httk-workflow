@@ -27,7 +27,7 @@ from httk.workflow.supervision import (
     SourceEvent,
 )
 
-pytestmark = pytest.mark.xdist_group("process-timing")
+pytestmark = [pytest.mark.timing, pytest.mark.xdist_group("process-timing")]
 
 _SLEEPER = """import os, sys, time
 sys.stdout.write(str(os.getpid()) + "\\n")

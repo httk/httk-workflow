@@ -13,6 +13,7 @@ import time
 import uuid
 from pathlib import Path
 
+import pytest
 from httk.core.cli import CLIContext
 
 from conftest import register_ws
@@ -246,6 +247,7 @@ def test_timeout_advice_names_the_mismatch() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timing
 def test_why_reports_a_foreign_host_persistent_writer_as_blocked(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "ws")
     payload, job_id = _payload(tmp_path / "src", _SLEEP_RUNNER, tag="persistent")
@@ -298,6 +300,7 @@ def test_why_reports_a_foreign_host_persistent_writer_as_blocked(tmp_path: Path)
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timing
 def test_join_grace_expires_across_two_manager_instances(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "ws")
     payload, job_id = _payload(tmp_path / "src", _GHOST_JOIN_RUNNER, tag="ghost", initial_step="branch")
@@ -456,6 +459,7 @@ def test_an_unparseable_committing_outcome_carries_the_assembly_remedy(tmp_path:
     assert "assembled in place" in failure["message"]
 
 
+@pytest.mark.timing
 def test_corrupt_committing_job_idles_promptly_and_is_reported(tmp_path: Path) -> None:
     # Regression: a committing job with an unreadable definition is not this
     # manager's work. It must not count as actionable — otherwise the run burns

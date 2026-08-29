@@ -373,6 +373,7 @@ def test_gather_refuses_a_join_over_no_children(tmp_path: Path) -> None:
     assert not (control / "outcome.ready").exists()
 
 
+@pytest.mark.timing
 def test_any_terminal_wakes_for_a_failed_child(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     runner = _JOIN_EXTENSION_RUNNER.replace("@SRC@", _SRC).replace("@MODE@", "failed")
@@ -388,6 +389,7 @@ def test_any_terminal_wakes_for_a_failed_child(tmp_path: Path) -> None:
     assert kinds & {"ready", "running"}
 
 
+@pytest.mark.timing
 def test_gather_rejoins_children_from_an_earlier_activation(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     runner = _JOIN_EXTENSION_RUNNER.replace("@SRC@", _SRC).replace("@MODE@", "rejoin")
@@ -402,6 +404,7 @@ def test_gather_rejoins_children_from_an_earlier_activation(tmp_path: Path) -> N
     assert {item["label"] for item in events[1]["children"]} == {"a-child", "c-child"}
 
 
+@pytest.mark.timing
 def test_gather_rejoins_an_already_terminal_child_without_new_children(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     runner = _JOIN_EXTENSION_RUNNER.replace("@SRC@", _SRC).replace("@MODE@", "terminal_rejoin")
@@ -533,6 +536,7 @@ raise SystemExit(run.main())
 """
 
 
+@pytest.mark.timing
 def test_dependency_failure_diagnosis_names_the_failed_child(tmp_path: Path) -> None:
     from httk.workflow.introspection import explain_job
 
@@ -553,6 +557,7 @@ def test_dependency_failure_diagnosis_names_the_failed_child(tmp_path: Path) -> 
     assert "[child.broken]" in children[0].detail
 
 
+@pytest.mark.timing
 def test_unresolvable_join_child_fails_instead_of_waiting_forever(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _GHOST_JOIN_RUNNER, initial_step="branch")
@@ -568,6 +573,7 @@ def test_unresolvable_join_child_fails_instead_of_waiting_forever(tmp_path: Path
     assert ghost_id in state["failure"]["message"]
 
 
+@pytest.mark.timing
 def test_unresolvable_join_child_is_tolerated_within_the_grace(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", _GHOST_JOIN_RUNNER, initial_step="branch")

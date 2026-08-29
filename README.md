@@ -56,19 +56,21 @@ Python Workflow Definition documents need no extra at all.
 
 ## Running tests
 
-The everyday regression gate is the normal profile: `make test` (or
-`PYTHONPATH=src python -m pytest -q`).  Pytest-xdist runs it in parallel and the
-default marker selection omits only full-depth `extended` parameter cases.
+The everyday regression gate is the normal profile: `make test`. It runs a
+parallel pass (`PYTHONPATH=src python -m pytest -q -m "not timing"`) followed by
+a serial pass (`PYTHONPATH=src python -m pytest -q -m timing -n 0`). The default
+marker selection omits only full-depth `extended` parameter cases.
 Profiled tests keep one test body and reduce their input scale in normal mode;
 they still exercise every property with representative inputs.
 
 Run `make test-extended` at phase ends and in CI to select every parameter case
-at its current full depth.  The underlying knob is
-`HTTK_TEST_PROFILE=normal|extended`; an explicit extended invocation is
-`HTTK_TEST_PROFILE=extended PYTHONPATH=src python -m pytest -q -m ""`.
-`make ci` uses the same extended profile with fast-fail enabled.
-Tests whose process timing must remain comparable use xdist load groups, so they
-stay serial within their group while the rest of the suite runs in parallel.
+at its current full depth; it uses the same two passes with
+`HTTK_TEST_PROFILE=extended`. The underlying knob is
+`HTTK_TEST_PROFILE=normal|extended`; an explicit extended parallel invocation
+is `HTTK_TEST_PROFILE=extended PYTHONPATH=src python -m pytest -q -m "not timing"`,
+followed by the serial timing command above. `make ci` uses the same extended
+profile with fast-fail enabled. Tests whose process timing must remain
+comparable use the `timing` marker and run serially after the parallel pass.
 
 ## What it does
 

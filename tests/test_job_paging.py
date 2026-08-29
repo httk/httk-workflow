@@ -17,7 +17,7 @@ from httk.workflow.models import STATE_KINDS, marker_basename
 from httk.workflow.projects import initialize_project
 from httk.workflow.workflow_cli import command
 
-pytestmark = pytest.mark.xdist_group("concurrency-timing")
+pytestmark = [pytest.mark.timing, pytest.mark.xdist_group("concurrency-timing")]
 
 
 def _marker(

@@ -166,6 +166,7 @@ def _manager_directory(workspace: Workspace, writer_id: str, *, live: bool, days
     return manager_dir
 
 
+@pytest.mark.timing
 def test_succeeded_attempt_control_waits_for_lease_grace_while_runner_lingers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

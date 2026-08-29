@@ -131,6 +131,7 @@ def test_postprocess_script_validates_selection_and_source(tmp_path: Path) -> No
         run_postprocess_script(provider, "report", replace(record, workdir_path=None))
 
 
+@pytest.mark.timing
 def test_postprocess_script_wraps_timeout(tmp_path: Path) -> None:
     package, provider, _workspace, _job, record = _finished(tmp_path)
     script = package / "scripts" / "report.sh"

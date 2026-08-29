@@ -68,6 +68,7 @@ def test_an_attempt_reads_its_context_and_publishes_one_outcome(tmp_path: Path) 
         attempt.succeed()
 
 
+@pytest.mark.timing
 def test_run_command_uses_argv_and_times_out_process_group(tmp_path: Path) -> None:
     sentinel = tmp_path / "not-created"
     literal = f"value;touch {sentinel}"

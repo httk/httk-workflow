@@ -858,6 +858,7 @@ def test_a_payload_bash_runner_advances_commits_data_and_succeeds(tmp_path: Path
     assert "the data of the previous step is committed" in runlog
 
 
+@pytest.mark.timing
 def test_supervisor_forwards_unbounded_output_live_and_preserves_interleaving(tmp_path: Path) -> None:
     gate = tmp_path / "release"
     logs = tmp_path / "logs"

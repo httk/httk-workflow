@@ -265,6 +265,7 @@ def test_the_journal_rotates_at_the_configured_segment_size(tmp_path: Path) -> N
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timing
 def test_the_visibility_schedule_spends_exactly_the_configured_deadline() -> None:
     schedule = util_module.visibility_schedule(60.0)
     assert schedule[:3] == (0.01, 0.02, 0.04)
@@ -275,6 +276,7 @@ def test_the_visibility_schedule_spends_exactly_the_configured_deadline() -> Non
     assert sum(util_module.visibility_schedule(0.0)) == 0.0
 
 
+@pytest.mark.timing
 def test_a_state_read_retries_until_the_configured_deadline(tmp_path: Path, monkeypatch) -> None:
     """The old fixed budget of seven probes was ~0.63s; policy now decides."""
 
@@ -293,6 +295,7 @@ def test_a_state_read_retries_until_the_configured_deadline(tmp_path: Path, monk
     assert len(slept) > 7
 
 
+@pytest.mark.timing
 def test_a_short_visibility_deadline_is_honored_in_real_time(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace", policy={"visibility_deadline_seconds": 0.75})
     payload, _ = _payload(tmp_path)

@@ -514,6 +514,7 @@ def test_environment_resolution_distinguishes_json_number_and_boolean(
     assert (second.payload / "logs" / "runlog.jsonl").is_file()
 
 
+@pytest.mark.timing
 def test_manager_waits_for_deferred_environment_log_before_commit(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload = tmp_path / "payload"
@@ -561,6 +562,7 @@ raise SystemExit(run.main())
     assert "parameters are in job.json; environment resolved as" in runlog
 
 
+@pytest.mark.timing
 def test_peer_manager_defers_a_live_environment_log_writer(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload = tmp_path / "payload"
@@ -635,6 +637,7 @@ raise SystemExit(run.main())
     ).read_text(encoding="utf-8")
 
 
+@pytest.mark.timing
 def test_environment_log_grace_starts_when_outcome_is_published(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload = tmp_path / "payload"

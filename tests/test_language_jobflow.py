@@ -340,6 +340,7 @@ def test_jobflow_linear_maker_runs_through_task_manager(tmp_path: Path, monkeypa
     assert collected.record.provenance["activations"]
 
 
+@pytest.mark.timing
 def test_jobflow_parallel_diamond_runs_branches_concurrently(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     marker_dir = tmp_path / "parallel"
     monkeypatch.setenv("JOBFLOW_PARALLEL_MARKER", str(marker_dir))
@@ -539,6 +540,7 @@ class Maker:
     assert degraded.missing_collector is not None
 
 
+@pytest.mark.timing
 def test_jobflow_resumes_after_a_manager_session_ends(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     flag = tmp_path / "resume.flag"
     started = tmp_path / "resume.started"

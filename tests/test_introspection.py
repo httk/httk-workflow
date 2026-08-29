@@ -767,6 +767,7 @@ def test_why_reports_a_running_job_owned_by_a_live_manager(tmp_path: Path) -> No
     )
 
 
+@pytest.mark.timing
 def test_why_reports_an_expired_lease_as_recoverable(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER)

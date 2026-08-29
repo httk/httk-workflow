@@ -177,6 +177,7 @@ def test_unpreparable_attempt_fails_only_its_own_job(tmp_path: Path) -> None:
     assert finished is not None and finished.kind == "succeeded"
 
 
+@pytest.mark.timing
 def test_serve_drains_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     ws = register_ws(None, workspace.root)

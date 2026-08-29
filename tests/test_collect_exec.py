@@ -235,6 +235,7 @@ def test_stderr_line_boundary_excludes_newline(tmp_path: Path) -> None:
     assert resolved == {} and "stderr line exceeded" in failures[0]
 
 
+@pytest.mark.timing
 def test_descendant_holding_pipes_does_not_hang_collection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(collecting_module, "DEFAULT_COLLECT_TIMEOUT", 0.2)
     hook = _hook(

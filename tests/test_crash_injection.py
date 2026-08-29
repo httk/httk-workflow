@@ -470,6 +470,7 @@ _EXPECTED_CHAIN = [
     _INTERRUPTIONS,
     ids=lambda item: item.name,
 )
+@pytest.mark.timing
 def test_a_fresh_manager_completes_an_interrupted_commit_exactly_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -535,6 +536,7 @@ def test_a_fresh_manager_completes_an_interrupted_commit_exactly_once(
     assert workspace.check().ok
 
 
+@pytest.mark.timing
 def test_a_commit_resumes_after_its_registered_child_has_already_started(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -608,6 +610,7 @@ def test_a_commit_resumes_after_its_registered_child_has_already_started(
 
 
 @pytest.mark.slow
+@pytest.mark.timing
 def test_a_sigkilled_manager_process_leaves_a_job_a_fresh_manager_finishes(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     Workspace.initialize(root)
@@ -759,6 +762,7 @@ def test_an_outcome_commit_whose_rename_happened_but_reported_failure_is_won(
     assert workspace.check().ok
 
 
+@pytest.mark.timing
 def test_a_cancellation_fence_whose_rename_happened_but_reported_failure_is_won(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -917,6 +921,7 @@ def _blind_to_destination(monkeypatch: pytest.MonkeyPatch, *, kind: str, job_key
     return probes
 
 
+@pytest.mark.timing
 def test_a_transition_concludes_correctly_once_a_late_destination_becomes_visible(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -943,6 +948,7 @@ def test_a_transition_concludes_correctly_once_a_late_destination_becomes_visibl
     assert workspace.check().ok
 
 
+@pytest.mark.timing
 def test_a_destination_invisible_past_the_deadline_is_contained_by_the_tick(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -164,6 +164,9 @@ addopts = "-n 16 --dist loadgroup -m 'not extended'"
 markers = [
   "slow: drives real processes and waits on them; deselect with -m 'not slow'",
   "extended: full-depth test case; selected only by the extended test profile",
+  # Timing-sensitive tests belong in the serial `-m timing -n 0` pass; if a
+  # timing-sensitive test is missed, it remains in the parallel pass.
+  "timing: asserts or depends on wall-clock timing; run serially after the parallel pass",
   "xdist_group(name): schedule related timing-sensitive tests on one worker",
 ]
 

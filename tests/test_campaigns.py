@@ -28,7 +28,7 @@ from httk.workflow.projects import initialize_project
 from httk.workflow.registry import register_workspace
 from httk.workflow.workflow_cli import command
 
-pytestmark = pytest.mark.xdist_group("campaign-manager-timing")
+pytestmark = [pytest.mark.timing, pytest.mark.xdist_group("campaign-manager-timing")]
 
 _SUCCEED = """#!/usr/bin/env python3
 from httk.workflow import Runner

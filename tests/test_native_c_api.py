@@ -519,6 +519,7 @@ def _compile_source(tmp_path: Path, source: str, name: str) -> Path:
     return tmp_path / name
 
 
+@pytest.mark.timing
 def test_ignoring_sigchld_does_not_spin_and_still_publishes(tmp_path: Path) -> None:
     binary = _compile_source(tmp_path, _SIGCHLD_RUNNER, "sigchld")
     attempt = _attempt(tmp_path, step="go")
@@ -538,6 +539,7 @@ def test_ignoring_sigchld_does_not_spin_and_still_publishes(tmp_path: Path) -> N
     assert attempt.outcome()["action"] == "succeed"
 
 
+@pytest.mark.timing
 def test_a_signal_storm_mid_verb_does_not_corrupt_dispatch(tmp_path: Path) -> None:
     binary = _compile_source(tmp_path, _SIGUSR1_RUNNER, "usr1")
     attempt = _attempt(tmp_path, step="go")

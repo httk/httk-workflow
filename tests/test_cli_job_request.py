@@ -437,6 +437,7 @@ def test_wait_returns_zero_when_manager_pauses_jobs(tmp_path: Path, capsys, monk
     assert "paused" in capsys.readouterr().out
 
 
+@pytest.mark.timing
 def test_wait_reports_terminal_state_and_exits_one(tmp_path: Path, capsys) -> None:
     workspace, workspace_name = _new_workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", "finished")

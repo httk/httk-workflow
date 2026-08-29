@@ -69,16 +69,20 @@ typecheck:
 	$(PYTHON) -m mypy
 
 test:
-	HTTK_TEST_PROFILE=normal PYTHONPATH=src $(PYTHON) -m pytest -q
+	HTTK_TEST_PROFILE=normal PYTHONPATH=src $(PYTHON) -m pytest -q -m "not timing"
+	HTTK_TEST_PROFILE=normal PYTHONPATH=src $(PYTHON) -m pytest -q -m timing -n 0
 
 test-extended:
-	HTTK_TEST_PROFILE=extended PYTHONPATH=src $(PYTHON) -m pytest -q -m ""
+	HTTK_TEST_PROFILE=extended PYTHONPATH=src $(PYTHON) -m pytest -q -m "not timing"
+	HTTK_TEST_PROFILE=extended PYTHONPATH=src $(PYTHON) -m pytest -q -m timing -n 0
 
 test_fastfail:
-	HTTK_TEST_PROFILE=normal PYTHONPATH=src $(PYTHON) -m pytest -q -x
+	HTTK_TEST_PROFILE=normal PYTHONPATH=src $(PYTHON) -m pytest -q -m "not timing" -x
+	HTTK_TEST_PROFILE=normal PYTHONPATH=src $(PYTHON) -m pytest -q -m timing -n 0 -x
 
 test-extended-fastfail:
-	HTTK_TEST_PROFILE=extended PYTHONPATH=src $(PYTHON) -m pytest -q -m "" -x
+	HTTK_TEST_PROFILE=extended PYTHONPATH=src $(PYTHON) -m pytest -q -m "not timing" -x
+	HTTK_TEST_PROFILE=extended PYTHONPATH=src $(PYTHON) -m pytest -q -m timing -n 0 -x
 
 check: format-check typecheck typecheck_pyright test
 

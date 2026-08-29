@@ -4,6 +4,8 @@ import time
 import uuid
 from pathlib import Path
 
+import pytest
+
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.errors import TransitionLostError
 from httk.workflow.journal import JournalWriter, read_record
@@ -134,6 +136,7 @@ def test_submit_and_run_multistep_persistent_job(tmp_path: Path) -> None:
     assert (run / "steps.txt").read_text(encoding="utf-8").splitlines() == ["prepare", "collect"]
 
 
+@pytest.mark.timing
 def test_new_manager_replays_published_outcome(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(
@@ -163,6 +166,7 @@ def test_new_manager_replays_published_outcome(tmp_path: Path) -> None:
     assert finished is not None and finished.kind == "succeeded"
 
 
+@pytest.mark.timing
 def test_lost_running_transition_does_not_execute_runner(tmp_path: Path, monkeypatch) -> None:
     runner = """#!/usr/bin/env python3
 from pathlib import Path

@@ -28,7 +28,7 @@ from httk.workflow.journal import JournalWriter, read_record
 from httk.workflow.manager import RunningAttempt
 from httk.workflow.models import CARRIED_STATE_MEMBERS, Marker, StateFrame
 
-pytestmark = pytest.mark.xdist_group("heartbeat-timing")
+pytestmark = [pytest.mark.timing, pytest.mark.xdist_group("heartbeat-timing")]
 
 _SUCCEED_RUNNER = """#!/usr/bin/env python3
 import json
