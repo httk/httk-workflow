@@ -19,7 +19,7 @@ from ._common import (
     _group,
     _leaf,
     _resolve_binding,
-    _run_remote_workspace,
+    remote_workspace_output,
 )
 
 _WORKER_RESOURCE_HELP = "advertise COUNT units of resource NAME to the scheduler (repeatable; procs and mem are shared fairly among --workers)"
@@ -740,9 +740,25 @@ def launch_workspace_managers(root: Path, arguments: argparse.Namespace, context
 def _submit_remote_manager(binding: WorkspaceBinding, arguments: argparse.Namespace, context: CLIContext) -> int:
     """Invoke the manager command on the far side of a remote binding."""
 
+    status, stdout, stderr = submit_remote_manager_result(binding, arguments, context)
+    if stdout:
+        sys.stdout.write(stdout if stdout.endswith("\n") else stdout + "\n")
+    if stderr:
+        sys.stderr.write(stderr)
+    return status
+
+
+def submit_remote_manager_result(
+    binding: WorkspaceBinding, arguments: argparse.Namespace, context: CLIContext
+) -> tuple[int, str, str]:
+    """Invoke a remote manager command without writing to process streams."""
+
     name = binding.name.split(":", 1)[1]
-    return _run_remote_workspace(
-        binding, context, _remote_manager_argv(arguments, name), timeout=arguments.adapter_timeout
+    return remote_workspace_output(
+        binding,
+        context,
+        _remote_manager_argv(arguments, name),
+        timeout=arguments.adapter_timeout,
     )
 
 

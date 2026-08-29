@@ -846,6 +846,8 @@ class Workspace:
         self,
         job_id: str,
         *,
+        marker: Marker | None = None,
+        waiting_parent_map: Mapping[str, set[str]] | None = None,
         destination_workspace_id: str,
         destination_remote: str | None = None,
         destination_placement: str | PurePosixPath | None = None,
@@ -854,6 +856,8 @@ class Workspace:
         """Seal one quiescent job as a detached transfer bundle.
 
         :param job_id: Identify the job to detach.
+        :param marker: An already resolved source marker, when available.
+        :param waiting_parent_map: Reuse a precomputed waiting-parent map.
         :param destination_workspace_id: Identify the destination workspace.
         :param destination_remote: Name the destination remote, when applicable.
         :param destination_placement: Choose the destination placement.
@@ -866,6 +870,8 @@ class Workspace:
         return detach_job(
             self,
             job_id,
+            marker=marker,
+            waiting_parent_map=waiting_parent_map,
             destination_workspace_id=destination_workspace_id,
             destination_remote=destination_remote,
             destination_placement=destination_placement,

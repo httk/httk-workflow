@@ -9,19 +9,24 @@ import time
 import uuid
 
 from ..adapters import (
+    REMOTE_JOB_LIST_COMMAND,
+    REMOTE_JOB_LOG_COMMAND,
     REMOTE_JOB_PUBLISH_REQUESTS_COMMAND,
     REMOTE_JOB_REQUEST_ENVELOPES_COMMAND,
+    REMOTE_JOB_SHOW_COMMAND,
+    REMOTE_JOB_WHY_COMMAND,
     resolve_remote,
 )
 from ..configuration import OperatorIdentity, identity_seed, resolve_operator_identity, sign_document, verify_document
 from ..introspection import (
     JobSelectorResolver,
+    count_markers,
     read_managers,
     resolve_job,
     resolve_job_selectors,
     selector_uses_remote_path,
 )
-from ..models import TERMINAL_KINDS, Marker, ensure_step_known, parse_job_key
+from ..models import STATE_KINDS, TERMINAL_KINDS, Marker, canonical_uuid, ensure_step_known, parse_job_key
 from ._common import *
 from ._common import (
     _ERRORS,
@@ -33,6 +38,7 @@ from ._common import (
     _load_inputs,
     _local_root,
     _pairs,
+    _remote_workspace_read,
     _resolve_binding,
     _run_adapter,
     _sanitize_tag,
@@ -560,7 +566,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     if arguments.timeout is not None and arguments.timeout < 0:
         raise ValueError("--timeout must not be negative")
     identity = resolve_operator_identity(arguments.operator)
-    _ensure_identity_key(identity)
+    ensure_identity_key(identity)
 
     binding, root = _resolve_binding(arguments, context)
     if root is None:
@@ -568,17 +574,30 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         for selector in arguments.job_id:
             if selector_uses_remote_path(context.cwd, selector):
                 raise ValueError("path selectors are resolved on this machine; give job ids for a remote workspace")
-        return _request_remote_job(binding, context, arguments, identity)
+        status, stdout, stderr = request_remote_job_result(binding, context, arguments, identity)
+        if stdout:
+            sys.stdout.write(stdout)
+        if stderr:
+            sys.stderr.write(stderr)
+        if status and not stdout:
+            raise RuntimeError(
+                f"remote request envelope build failed (exit {status}); see the relayed remote error above"
+            )
+        return status
 
     workspace = Workspace(root, durable=_durable(arguments))
-    envelopes = _build_request_envelopes(workspace, arguments, identity.label, cwd=context.cwd)
-    published: list[tuple[str, Marker, Path]] = []
-    for job_id, marker, request in envelopes:
-        document = dict(request) if identity.seed_path is None else sign_document(request, seed_path=identity.seed_path)
-        if identity.seed_path is not None and not verify_document(document).valid:
-            raise ValueError(f"local signature verification failed for job {job_id}")
-        path = workspace.publish_request(document)
-        published.append((job_id, marker, path))
+    markers = resolve_job_selectors(workspace, context.cwd, arguments.job_id)
+    published = publish_job_requests(
+        workspace,
+        markers,
+        action=arguments.action,
+        reason=arguments.reason,
+        operator=identity.label,
+        priority=arguments.priority,
+        step=arguments.step,
+        force=bool(arguments.force),
+        identity=identity,
+    )
     return _complete_job_requests(workspace, published, wait=arguments.wait, timeout=arguments.timeout)
 
 
@@ -597,36 +616,115 @@ def _build_request_envelopes(
         if resolve_paths
         else [resolve_job(workspace, selector) for selector in arguments.job_id]
     )
-    resolved: list[tuple[str, Marker]] = []
     for marker in markers:
         if arguments.action == "override_step" and arguments.step is not None:
             _prevalidate_override_step(workspace, marker, arguments.step, force=bool(arguments.force))
-        resolved.append((marker.job_id, marker))
+    return [
+        (
+            marker.job_id,
+            marker,
+            _request_document(
+                marker,
+                action=arguments.action,
+                reason=arguments.reason,
+                operator=operator,
+                priority=arguments.priority,
+                step=arguments.step,
+                force=bool(arguments.force),
+            ),
+        )
+        for marker in markers
+    ]
 
-    envelopes: list[tuple[str, Marker, dict[str, object]]] = []
-    for job_id, marker in resolved:
-        request: dict[str, object] = {
-            "format": "httk-workflow-request",
-            "format_version": 2,
-            "request_id": str(uuid.uuid4()),
-            "job_id": marker.job_id,
-            "job_key": marker.job_key,
-            "placement": marker.placement.as_posix(),
-            "expected_generation": marker.generation,
-            "expected_record_ref": marker.record_ref,
-            "action": arguments.action,
-            "operator": operator,
-            "reason": arguments.reason,
-            "created_at": utc_now(),
-        }
-        if arguments.priority is not None:
-            request["priority"] = arguments.priority
-        if arguments.step is not None:
-            request["step"] = arguments.step
-        if arguments.force:
-            request["force"] = True
-        envelopes.append((job_id, marker, request))
-    return envelopes
+
+def _request_document(
+    marker: Marker,
+    *,
+    action: str,
+    reason: str,
+    operator: str,
+    priority: int | None = None,
+    step: str | None = None,
+    force: bool = False,
+) -> dict[str, object]:
+    """Build one request document from an already resolved marker."""
+
+    request: dict[str, object] = {
+        "format": "httk-workflow-request",
+        "format_version": 2,
+        "request_id": str(uuid.uuid4()),
+        "job_id": marker.job_id,
+        "job_key": marker.job_key,
+        "placement": marker.placement.as_posix(),
+        "expected_generation": marker.generation,
+        "expected_record_ref": marker.record_ref,
+        "action": action,
+        "operator": operator,
+        "reason": reason,
+        "created_at": utc_now(),
+    }
+    if priority is not None:
+        request["priority"] = priority
+    if step is not None:
+        request["step"] = step
+    if force:
+        request["force"] = True
+    return request
+
+
+def publish_job_requests(
+    workspace: Workspace,
+    markers: Sequence[Marker],
+    *,
+    action: str,
+    reason: str,
+    operator: str | None = None,
+    priority: int | None = None,
+    step: str | None = None,
+    force: bool = False,
+    identity: OperatorIdentity | None = None,
+) -> list[tuple[str, Marker, Path]]:
+    """Build and publish requests for already resolved markers.
+
+    :param workspace: Workspace receiving the requests.
+    :param markers: Known current markers; no selector scan is performed.
+    :param action: Request action.
+    :param reason: Operator explanation.
+    :param operator: Operator label, defaulting to the configured identity.
+    :param priority: Optional priority request value.
+    :param step: Optional override step.
+    :param force: Whether to accept an override hazard.
+    :param identity: Resolved identity used for optional signing.
+    :return: Published request paths paired with their target markers.
+    """
+
+    if action not in _REQUEST_ACTIONS:
+        raise ValueError(f"unknown job request action: {action}")
+    selected_identity = identity or resolve_operator_identity(None)
+    ensure_identity_key(selected_identity)
+    label = operator or selected_identity.label
+    published: list[tuple[str, Marker, Path]] = []
+    for marker in markers:
+        if action == "override_step" and step is not None:
+            _prevalidate_override_step(workspace, marker, step, force=force)
+        request = _request_document(
+            marker,
+            action=action,
+            reason=reason,
+            operator=label,
+            priority=priority,
+            step=step,
+            force=force,
+        )
+        document = (
+            dict(request)
+            if selected_identity.seed_path is None
+            else sign_document(request, seed_path=selected_identity.seed_path)
+        )
+        if selected_identity.seed_path is not None and not verify_document(document).valid:
+            raise ValueError(f"local signature verification failed for job {marker.job_id}")
+        published.append((marker.job_id, marker, workspace.publish_request(document)))
+    return published
 
 
 _REQUEST_ACTIONS = frozenset(("continue", "override_step", "cancel", "set_priority", "pause"))
@@ -796,7 +894,7 @@ def _validate_remote_envelopes(
             raise ValueError(f"request envelope {index} does not match requested selector {selector!r}")
 
 
-def _ensure_identity_key(identity: OperatorIdentity) -> None:
+def ensure_identity_key(identity: OperatorIdentity) -> None:
     """Refuse a configured identity whose seed file is absent or unreadable.
 
     :param identity: The identity selected for signing.
@@ -850,6 +948,22 @@ def _request_remote_job(
     arguments: argparse.Namespace,
     identity: OperatorIdentity,
 ) -> int:
+    """Build, sign, publish, and print a remote request result."""
+
+    status, stdout, stderr = request_remote_job_result(binding, context, arguments, identity)
+    if stdout:
+        sys.stdout.write(stdout)
+    if stderr:
+        sys.stderr.write(stderr)
+    return status
+
+
+def request_remote_job_result(
+    binding: WorkspaceBinding,
+    context: CLIContext,
+    arguments: argparse.Namespace,
+    identity: OperatorIdentity,
+) -> tuple[int, str, str]:
     """Build remotely, sign locally, and publish requests remotely."""
 
     target = resolve_remote(binding.remote, project=context.cwd)
@@ -876,13 +990,8 @@ def _request_remote_job(
         timeout=arguments.adapter_timeout,
     )
     stderr = str(result.get("stderr", ""))
-    if stderr:
-        sys.stderr.write(stderr)
     if result.get("returncode") != 0:
-        raise RuntimeError(
-            f"remote request envelope build failed (exit {result.get('returncode')}); "
-            "see the relayed remote error above"
-        )
+        return int(result.get("returncode", 1) or 1), "", stderr
     try:
         document = json.loads(str(result.get("stdout", "")))
         if document.get("format") != "httk-workflow-request-envelopes" or document.get("format_version") != 1:
@@ -920,13 +1029,11 @@ def _request_remote_job(
         {"argv": publish_argv},
         timeout=arguments.adapter_timeout,
     )
-    stdout = str(published.get("stdout", ""))
-    if stdout:
-        sys.stdout.write(stdout)
-    stderr = str(published.get("stderr", ""))
-    if stderr:
-        sys.stderr.write(stderr)
-    return int(published.get("returncode", 0) or 0)
+    return (
+        int(published.get("returncode", 0) or 0),
+        str(published.get("stdout", "")),
+        stderr + str(published.get("stderr", "")),
+    )
 
 
 def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -1111,13 +1218,68 @@ def _find_quarantined_request(workspace: Workspace, request_name: str) -> str | 
     return None
 
 
+def _validate_remote_job_ids(jobs: list[str], action: str) -> None:
+    """Require canonical job UUIDs for a remote detail read."""
+
+    for job in jobs:
+        try:
+            canonical_uuid(job, "JOB")
+        except (WorkflowError, ValueError) as exc:
+            raise ValueError(
+                f"remote job {action} requires canonical job ids; keys and prefixes are not accepted: {job!r}"
+            ) from exc
+
+
 def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     """List the jobs of one workspace as a cheap table."""
 
-    workspace = Workspace(_local_root(arguments, context, action="list its jobs"), mutable=False)
-    rows = list_jobs(workspace, kinds=arguments.kind, placement=arguments.placement)
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        tail: list[str] = []
+        for kind in arguments.kind or []:
+            tail.extend(("--kind", kind))
+        if arguments.placement is not None:
+            tail.extend(("--placement", arguments.placement))
+        if arguments.after is not None:
+            tail.extend(("--after", arguments.after))
+        if arguments.limit is not None:
+            tail.extend(("--limit", str(arguments.limit)))
+        if arguments.tag_contains is not None:
+            tail.extend(("--tag-contains", arguments.tag_contains))
+        tail.append("--workspace")
+        return _remote_workspace_read(
+            binding,
+            context,
+            REMOTE_JOB_LIST_COMMAND,
+            arguments,
+            flags=("--json", "--counts"),
+            tail=tail,
+            unwrap_json_array=False,
+        )
+    workspace = Workspace(root, mutable=False)
+    page = list_jobs(
+        workspace,
+        kinds=arguments.kind,
+        placement_prefix=arguments.placement,
+        after=arguments.after,
+        limit=arguments.limit,
+        tag_contains=arguments.tag_contains,
+    )
+    rows = page.jobs
     if arguments.json:
-        print(json.dumps({"format": JOB_LIST_FORMAT, "format_version": 2, "jobs": rows}, indent=2))
+        document: dict[str, object] = {
+            "format": JOB_LIST_FORMAT,
+            "format_version": 2,
+            "jobs": rows,
+            "next_after": page.next_after,
+        }
+        if arguments.counts:
+            selected = set(arguments.kind or STATE_KINDS)
+            document["counts"] = {
+                kind: count_markers(workspace, kind, arguments.placement) for kind in STATE_KINDS if kind in selected
+            }
+        print(json.dumps(document, indent=2))
         return 0
     print(render_rows(rows))
     return 0
@@ -1126,7 +1288,24 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
 def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Describe jobs completely from their authoritative state."""
 
-    workspace = Workspace(_local_root(arguments, context, action="show its jobs"), mutable=False)
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        _validate_remote_job_ids(arguments.jobs, "show")
+        tail = [*arguments.jobs]
+        if arguments.no_children:
+            tail.append("--no-children")
+        tail.append("--workspace")
+        return _remote_workspace_read(
+            binding,
+            context,
+            REMOTE_JOB_SHOW_COMMAND,
+            arguments,
+            flags=("--json",),
+            tail=tail,
+            unwrap_json_array=False,
+        )
+    workspace = Workspace(root, mutable=False)
     resolver = JobSelectorResolver(workspace, context.cwd)
     reports: list[dict[str, object]] = []
     failed = False
@@ -1134,7 +1313,7 @@ def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
         try:
             markers = resolver.resolve_one(job)
             for marker in markers:
-                report = describe_job(workspace, marker)
+                report = describe_job(workspace, marker, include_children=not arguments.no_children)
                 reports.append(report)
                 if not arguments.json:
                     print(f"{job}:")
@@ -1153,7 +1332,25 @@ def handle_job_log(arguments: argparse.Namespace, context: CLIContext) -> int:
 
     if arguments.limit is not None and arguments.limit < 1:
         raise ValueError("--limit must be positive")
-    workspace = Workspace(_local_root(arguments, context, action="read its job log"), mutable=False)
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        _validate_remote_job_ids(arguments.jobs, "log")
+        tail: list[str] = []
+        if arguments.limit is not None:
+            tail.extend(("--limit", str(arguments.limit)))
+        tail.extend(arguments.jobs)
+        tail.append("--workspace")
+        return _remote_workspace_read(
+            binding,
+            context,
+            REMOTE_JOB_LOG_COMMAND,
+            arguments,
+            flags=("--json",),
+            tail=tail,
+            unwrap_json_array=False,
+        )
+    workspace = Workspace(root, mutable=False)
     resolver = JobSelectorResolver(workspace, context.cwd)
     reports: list[dict[str, object]] = []
     failed = False
@@ -1178,7 +1375,20 @@ def handle_job_log(arguments: argparse.Namespace, context: CLIContext) -> int:
 def handle_job_why(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Explain why jobs are, or are not, making progress."""
 
-    workspace = Workspace(_local_root(arguments, context, action="explain its jobs"), mutable=False)
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        _validate_remote_job_ids(arguments.jobs, "why")
+        return _remote_workspace_read(
+            binding,
+            context,
+            REMOTE_JOB_WHY_COMMAND,
+            arguments,
+            flags=("--json",),
+            tail=(*arguments.jobs, "--workspace"),
+            unwrap_json_array=False,
+        )
+    workspace = Workspace(root, mutable=False)
     resolver = JobSelectorResolver(workspace, context.cwd)
     diagnoses: list[dict[str, object]] = []
     failed = False
@@ -1426,9 +1636,19 @@ def build_job_parser(
     listing.add_argument(
         "--placement",
         metavar="PLACEMENT",
-        help="list only jobs at or below this placement",
+        help="prune the listing to this placement prefix",
     )
+    listing.add_argument(
+        "--limit",
+        type=int,
+        metavar="COUNT",
+        help="return at most this many jobs",
+    )
+    listing.add_argument("--after", metavar="CURSOR", help="resume after a job-list cursor")
+    listing.add_argument("--tag-contains", metavar="TEXT", help="list only jobs whose tag contains TEXT")
+    listing.add_argument("--counts", action="store_true", help="include full marker counts in JSON output")
     listing.add_argument("--json", action="store_true", help="print the rows as one JSON document")
+    _add_adapter_timeout(listing)
 
     show = _leaf(
         group,
@@ -1438,7 +1658,13 @@ def build_job_parser(
         handler=handle_job_show,
     )
     _add_job_selector(show)
+    show.add_argument(
+        "--no-children",
+        action="store_true",
+        help="omit per-child observations for waiting jobs",
+    )
     show.add_argument("--json", action="store_true", help="print the description as one JSON document")
+    _add_adapter_timeout(show)
 
     log = _leaf(
         group,
@@ -1455,6 +1681,7 @@ def build_job_parser(
         help="read at most this many frames, newest first",
     )
     log.add_argument("--json", action="store_true", help="print the frames as one JSON document")
+    _add_adapter_timeout(log)
 
     why = _leaf(
         group,
@@ -1465,6 +1692,7 @@ def build_job_parser(
     )
     _add_job_selector(why)
     why.add_argument("--json", action="store_true", help="print the diagnosis as one JSON document")
+    _add_adapter_timeout(why)
 
     debug = _leaf(
         group,

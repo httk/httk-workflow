@@ -282,9 +282,10 @@ def _all_markers(workspace: Workspace) -> list[Marker]:
     return list(workspace.scan_markers(STATE_KINDS))
 
 
-def _unresolved_join_reference(workspace: Workspace, marker: Marker) -> bool:
-    if marker.kind == "waiting":
-        return True
+def _waiting_parent_map(workspace: Workspace) -> dict[str, set[str]]:
+    """Map child job ids to waiting parents from one bounded scan."""
+
+    parents: dict[str, set[str]] = {}
     for waiting in workspace.scan_markers(("waiting",)):
         state = workspace.read_state(waiting)
         join = state.get("join")
@@ -294,13 +295,33 @@ def _unresolved_join_reference(workspace: Workspace, marker: Marker) -> bool:
         if not isinstance(children, list):
             continue
         for child in children:
-            if (
-                isinstance(child, Mapping)
-                and child.get("workspace_id") == workspace.workspace_id
-                and child.get("job_id") == marker.job_id
-            ):
-                return True
-    return False
+            if not isinstance(child, Mapping):
+                continue
+            if child.get("workspace_id") != workspace.workspace_id:
+                continue
+            child_id = child.get("job_id")
+            if isinstance(child_id, str):
+                parents.setdefault(child_id, set()).add(waiting.job_id)
+    return parents
+
+
+def _unresolved_join_reference(
+    workspace: Workspace,
+    marker: Marker,
+    waiting_parent_map: Mapping[str, set[str]] | None = None,
+) -> bool:
+    """Return whether *marker* is a child of an unresolved waiting join.
+
+    The parent check intentionally scans only the ``waiting`` state subtree;
+    it never enumerates all state kinds. Its cost is therefore bounded by the
+    number of waiting markers, even when the workspace has a much larger job
+    population.
+    """
+
+    if marker.kind == "waiting":
+        return True
+    parents = waiting_parent_map if waiting_parent_map is not None else _waiting_parent_map(workspace)
+    return marker.job_id in parents
 
 
 def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str, Any]) -> Path:
@@ -355,6 +376,8 @@ def detach_job(
     workspace: Workspace,
     job_id: str,
     *,
+    marker: Marker | None = None,
+    waiting_parent_map: Mapping[str, set[str]] | None = None,
     destination_workspace_id: str,
     destination_remote: str | None = None,
     destination_placement: str | PurePosixPath | None = None,
@@ -364,6 +387,8 @@ def detach_job(
 
     :param workspace: Provide the source workspace.
     :param job_id: Identify the job to detach.
+    :param marker: An already resolved source marker; avoids scanning all states.
+    :param waiting_parent_map: Precomputed child-to-parent map for this transfer batch.
     :param destination_workspace_id: Identify the destination workspace.
     :param destination_remote: Preserve the destination's remote identifier.
     :param destination_placement: Override the destination placement.
@@ -380,10 +405,13 @@ def detach_job(
         if ledger.get("destination_workspace_id") != destination_id:
             raise WorkspaceCorruptionError("transfer UUID was reused for a different destination")
         return Path(str(ledger["bundle"]))
-    matches = [marker for marker in _all_markers(workspace) if marker.job_id == job_id]
-    if len(matches) != 1:
-        raise ValueError(f"job must have exactly one source marker: {job_id}")
-    marker = matches[0]
+    if marker is None:
+        matches = [candidate for candidate in _all_markers(workspace) if candidate.job_id == job_id]
+        if len(matches) != 1:
+            raise ValueError(f"job must have exactly one source marker: {job_id}")
+        marker = matches[0]
+    elif marker.job_id != job_id:
+        raise ValueError(f"known source marker does not identify job: {job_id}")
     if marker.kind == "transferring":
         state = workspace.read_state(marker)
         if state.get("transfer_id") != identifier or state.get("destination_workspace_id") != destination_id:
@@ -391,7 +419,7 @@ def detach_job(
         return _seal_transferring(workspace, marker, state)
     if marker.kind not in QUIESCENT_KINDS:
         raise ValueError(f"job is not quiescent and cannot transfer: {marker.kind}")
-    if _unresolved_join_reference(workspace, marker):
+    if _unresolved_join_reference(workspace, marker, waiting_parent_map):
         raise ValueError("job participates in an unresolved join and cannot transfer")
     target_placement = normalize_placement(destination_placement or marker.placement)
     prior_state = workspace.read_state(marker)
@@ -755,6 +783,8 @@ def select_transfer_jobs(
     job_ids: Iterable[str] | None = None,
     destination_remote: str | None = None,
     include_transferring: bool = False,
+    known_markers: Sequence[Marker] | None = None,
+    waiting_parent_map: Mapping[str, set[str]] | None = None,
 ) -> list[TransferCandidate]:
     """Select sealed and live jobs without changing transfer state.
 
@@ -765,6 +795,8 @@ def select_transfer_jobs(
     :param job_ids: Restrict selection to explicit job ids when supplied.
     :param destination_remote: Restrict sealed ledgers to one remote name.
     :param include_transferring: Include live interrupted-transfer markers for advisory checks.
+    :param known_markers: Use these already-resolved live markers instead of scanning the workspace.
+    :param waiting_parent_map: Reuse one waiting-parent map across a transfer batch.
     :return: Candidates in the same placement/key order as :func:`offer_transfers`.
     :raises ValueError: If the destination id or requested states are invalid.
     """
@@ -781,6 +813,7 @@ def select_transfer_jobs(
     selected_ids = None if job_ids is None else set(job_ids)
     candidates: list[TransferCandidate] = []
     offered_jobs: set[str] = set()
+    parent_map = waiting_parent_map if waiting_parent_map is not None else _waiting_parent_map(workspace)
     for ledger in _ledgers(workspace):
         if ledger.get("status") != "sealed" or ledger.get("destination_workspace_id") != destination_id:
             continue
@@ -847,7 +880,8 @@ def select_transfer_jobs(
             )
         )
         offered_jobs.add(str(ledger["job_id"]))
-    for marker in list(workspace.scan_markers(kinds)):
+    marker_source = workspace.scan_markers(kinds) if known_markers is None else known_markers
+    for marker in marker_source:
         if selected_ids is not None and marker.job_id not in selected_ids:
             continue
         prior_kind = marker.kind
@@ -862,7 +896,7 @@ def select_transfer_jobs(
             prior_kind = str(state["prior_kind"])
         if prefix is not None and marker.placement.parts[: len(prefix)] != prefix:
             continue
-        if marker.job_id in offered_jobs or _unresolved_join_reference(workspace, marker):
+        if marker.job_id in offered_jobs or _unresolved_join_reference(workspace, marker, parent_map):
             continue
         try:
             job = workspace.load_job(marker)
@@ -895,6 +929,7 @@ def _offer_selection_errors(
     destination_workspace_id: str,
     states: Sequence[str],
     placement: str | PurePosixPath | None,
+    waiting_parent_map: Mapping[str, set[str]] | None = None,
 ) -> dict[str, str]:
     """Explain explicit ids that did not produce an offer candidate."""
 
@@ -914,7 +949,7 @@ def _offer_selection_errors(
                 reasons[job_id] = f"filtered by state (state: {marker.kind})"
             elif prefix is not None and marker.placement.parts[: len(prefix)] != prefix:
                 reasons[job_id] = "filtered by placement"
-            elif _unresolved_join_reference(workspace, marker):
+            elif _unresolved_join_reference(workspace, marker, waiting_parent_map):
                 reasons[job_id] = "blocked by an unresolved join"
             else:
                 reasons[job_id] = "not eligible for offering"
@@ -977,6 +1012,7 @@ def offer_transfers(
     destination_id = canonical_uuid(destination_workspace_id, "destination_workspace_id")
     kinds = tuple(dict.fromkeys(states))
     requested_ids = None if job_ids is None else set(job_ids)
+    waiting_parent_map = _waiting_parent_map(workspace)
     if requested_ids is not None:
         # Validate and preflight before recovery can seal an interrupted job.
         select_transfer_jobs(
@@ -984,6 +1020,7 @@ def offer_transfers(
             destination_workspace_id=destination_id,
             states=kinds,
             job_ids=(),
+            waiting_parent_map=waiting_parent_map,
         )
         precheck_candidates = select_transfer_jobs(
             workspace,
@@ -992,6 +1029,7 @@ def offer_transfers(
             placement=placement,
             job_ids=requested_ids,
             include_transferring=True,
+            waiting_parent_map=waiting_parent_map,
         )
         errors = _offer_selection_errors(
             workspace,
@@ -1000,6 +1038,7 @@ def offer_transfers(
             destination_workspace_id=destination_id,
             states=kinds,
             placement=placement,
+            waiting_parent_map=waiting_parent_map,
         )
         if errors:
             details = "; ".join(f"{job_id}: {reason}" for job_id, reason in sorted(errors.items()))
@@ -1013,6 +1052,7 @@ def offer_transfers(
         states=kinds,
         placement=placement,
         job_ids=requested_ids,
+        waiting_parent_map=waiting_parent_map,
     )
     if requested_ids is not None:
         errors = _offer_selection_errors(
@@ -1022,6 +1062,7 @@ def offer_transfers(
             destination_workspace_id=destination_id,
             states=kinds,
             placement=placement,
+            waiting_parent_map=waiting_parent_map,
         )
         if errors:
             details = "; ".join(f"{job_id}: {reason}" for job_id, reason in sorted(errors.items()))
@@ -1034,7 +1075,13 @@ def offer_transfers(
             continue
         try:
             assert candidate.marker is not None
-            bundle = detach_job(workspace, candidate.marker.job_id, destination_workspace_id=destination_id)
+            bundle = detach_job(
+                workspace,
+                candidate.marker.job_id,
+                marker=candidate.marker,
+                waiting_parent_map=waiting_parent_map,
+                destination_workspace_id=destination_id,
+            )
         except ValueError as exc:
             if requested_ids is not None:
                 sealing_errors.append(f"{candidate.job_id}: {exc}")

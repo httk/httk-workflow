@@ -3,6 +3,7 @@
 import glob
 import json
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -16,9 +17,10 @@ from ..models import (
     JobDefinition,
     Marker,
     normalize_placement,
+    parse_job_key,
     validate_attempt_control,
 )
-from ..workspace import Workspace
+from ..workspace import MarkerFault, Workspace, _marker_shaped, _safe_is_dir, _scandir_sorted
 
 JOB_HISTORY_FORMAT = "httk-workflow-job-history"
 JOB_LIST_FORMAT = "httk-workflow-job-list"
@@ -26,6 +28,45 @@ _HISTORY_READ_DEADLINE_SECONDS = 0.1
 #: How much of a runlog's tail to read when surfacing its last headline. A
 #: runlog can grow without bound, so the report reads only the final slice.
 _RUNLOG_TAIL_BYTES = 65536
+
+
+@dataclass(frozen=True)
+class JobListPage:
+    """A page of job rows and the cursor needed to request the next page.
+
+    :param jobs: The rows in stable state-kind, placement, and job-key order.
+    :param next_after: The cursor of the last row when more matching rows exist.
+    :param counts: Optional counts carried by a remote page response.
+
+    Enumeration is weakly consistent while managers transition jobs: a job can
+    appear twice or be missed if it changes kind between page requests. Clients
+    should deduplicate pages by ``job_id``. A flat placement directory is read
+    and sorted as one directory listing, so a page over 100,000 markers in one
+    placement legitimately pays that directory's listing/sort cost. When
+    ``tag_contains`` is active with a finite ``limit``, a page may be partial:
+    at most ``max(limit * 100, 10_000)`` markers are examined before the
+    returned cursor resumes the filter scan. With ``limit=None`` the filtered
+    human-table read scans the complete selected stream.
+    """
+
+    jobs: list[dict[str, Any]]
+    next_after: str | None
+    counts: dict[str, int] | None = None
+
+    def __iter__(self):
+        """Iterate over rows, retaining the historical list-like API."""
+
+        return iter(self.jobs)
+
+    def __len__(self) -> int:
+        """Return the number of rows in the page."""
+
+        return len(self.jobs)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        """Return one row by its page index."""
+
+        return self.jobs[index]
 
 
 def read_last_headline(payload: str | Path | None) -> str | None:
@@ -352,19 +393,221 @@ def job_frames(workspace: Workspace, marker: Marker, *, limit: int | None = None
     return frames
 
 
+def _parse_marker_cursor(cursor: str) -> tuple[tuple[str, ...], str]:
+    """Parse the placement and job key in an enumeration cursor."""
+
+    placement_text, separator, job_key = cursor.rpartition("/")
+    if not separator or not placement_text or not job_key:
+        raise ValueError("marker cursor must be '<placement>/<job_key>'")
+    placement = normalize_placement(PurePosixPath(placement_text)).parts
+    parse_job_key(job_key)
+    return placement, job_key
+
+
+def _directory_after_relation(rel: tuple[str, ...], after: tuple[str, ...] | None) -> str:
+    """Classify one placement directory against a placement cursor."""
+
+    if after is None:
+        return "all"
+    if rel == after:
+        return "equal"
+    if len(rel) < len(after) and after[: len(rel)] == rel:
+        return "ancestor"
+    if rel < after:
+        return "skip"
+    return "all"
+
+
+def _iter_ordered_marker_directory(
+    workspace: Workspace,
+    directory: Path,
+    rel: tuple[str, ...],
+    after: tuple[tuple[str, ...], str] | None,
+) -> Iterable[Marker]:
+    """Yield one placement directory, then its child placements, lazily."""
+
+    entries = _scandir_sorted(directory)
+    marker_entries = []
+    child_entries = []
+    for entry in entries:
+        if _safe_is_dir(entry):
+            child_entries.append(entry)
+        elif _marker_shaped(entry.name):
+            try:
+                if entry.is_file(follow_symlinks=False):
+                    marker_entries.append(entry)
+            except OSError:
+                continue
+
+    after_placement = None if after is None else after[0]
+    relation = _directory_after_relation(rel, after_placement)
+    if relation != "skip":
+        seen_job_keys: set[str] = set()
+        for entry in marker_entries:
+            try:
+                marker = Marker.from_path(workspace.control / "state", directory / entry.name)
+            except (WorkflowError, ValueError) as exc:
+                workspace.report_marker_fault(MarkerFault(path=directory / entry.name, reason=str(exc)))
+                continue
+            if marker.job_key in seen_job_keys:
+                workspace.report_marker_fault(
+                    MarkerFault(
+                        path=marker.path,
+                        reason="duplicate current marker for job key; skipping this marker",
+                    )
+                )
+                continue
+            seen_job_keys.add(marker.job_key)
+            if after is not None:
+                if relation in {"ancestor", "skip"}:
+                    continue
+                if relation == "equal" and marker.job_key <= after[1]:
+                    continue
+            yield marker
+
+    for entry in child_entries:
+        child_rel = rel + (entry.name,)
+        if _directory_after_relation(child_rel, after_placement) == "skip":
+            continue
+        yield from _iter_ordered_marker_directory(workspace, directory / entry.name, child_rel, after)
+
+
+def iter_markers(
+    workspace: Workspace,
+    kinds: Iterable[str] | None = None,
+    *,
+    placement_prefix: str | None = None,
+    after: str | None = None,
+) -> Iterable[Marker]:
+    """Yield markers in stable kind, placement, and job-key order.
+
+    Each kind is walked in :data:`STATE_KINDS` order. Within a kind, placements
+    use lexicographic path order and markers at one placement use job-key order.
+    If duplicate current markers share a kind, placement, and job key, the
+    lexically first marker basename is retained; later markers are reported as
+    faults and skipped, so a cursor never compares equal to two rows.
+    A placement prefix starts the walk directly at that state subtree. ``after``
+    is a ``<placement>/<job_key>`` cursor and is exclusive; the walk prunes
+    placement subtrees that cannot contain a later marker.
+
+    :param workspace: Provide the workspace to inspect.
+    :param kinds: Restrict the walk to these state kinds.
+    :param placement_prefix: Restrict the walk to this placement subtree.
+    :param after: Resume strictly after this placement/job-key cursor.
+    :yield: Valid markers in cursor-stable order.
+    """
+
+    requested = set(kinds or STATE_KINDS)
+    selected = tuple(kind for kind in STATE_KINDS if kind in requested)
+    prefix = None if placement_prefix is None else normalize_placement(placement_prefix).parts
+    after_kind: str | None = None
+    after_local = after
+    if after is not None:
+        possible_kind, separator, possible_local = after.partition(":")
+        if separator and possible_kind in STATE_KINDS:
+            after_kind = possible_kind
+            after_local = possible_local
+            if after_kind not in selected:
+                selected_names = ", ".join(selected) or "none"
+                raise ValueError(
+                    f"job list cursor kind {after_kind!r} is not among the selected kinds ({selected_names})"
+                )
+    parsed_after = None if after_local is None else _parse_marker_cursor(after_local)
+    for kind in selected:
+        if after_kind is not None and STATE_KINDS.index(kind) < STATE_KINDS.index(after_kind):
+            continue
+        base = workspace.control / "state" / kind
+        start = base if prefix is None else base.joinpath(*prefix)
+        yield from _iter_ordered_marker_directory(
+            workspace,
+            start,
+            prefix or (),
+            parsed_after if after_kind is None or kind == after_kind else None,
+        )
+
+
+def _count_marker_directory(directory: Path) -> int:
+    """Count marker-shaped regular files below one directory without reading them."""
+
+    count = 0
+    for entry in _scandir_sorted(directory):
+        if _safe_is_dir(entry):
+            count += _count_marker_directory(directory / entry.name)
+        elif _marker_shaped(entry.name):
+            try:
+                count += int(entry.is_file(follow_symlinks=False))
+            except OSError:
+                pass
+    return count
+
+
+def count_markers(workspace: Workspace, kind: str, placement_prefix: str | None = None) -> int:
+    """Count marker-shaped regular files by name, without parsing or reading them.
+
+    :param workspace: Provide the workspace to inspect.
+    :param kind: Select the state kind.
+    :param placement_prefix: Restrict the count to this placement subtree.
+    :return: The number of marker-shaped regular files.
+    """
+
+    if kind not in STATE_KINDS:
+        raise ValueError(f"unknown state kind: {kind}")
+    prefix = () if placement_prefix is None else normalize_placement(placement_prefix).parts
+    return _count_marker_directory((workspace.control / "state" / kind).joinpath(*prefix))
+
+
 def list_jobs(
     workspace: Workspace,
     *,
     kinds: Iterable[str] | None = None,
-    placement: str | None = None,
-) -> list[dict[str, Any]]:
-    """Return one cheap row per job, optionally filtered by kind and placement."""
+    placement_prefix: str | None = None,
+    after: str | None = None,
+    limit: int | None = None,
+    tag_contains: str | None = None,
+) -> JobListPage:
+    """Return one page of cheap rows, reading state only for that page."""
 
-    prefix = None if placement is None else normalize_placement(placement).parts
+    if limit is not None and limit < 1:
+        raise ValueError("--limit must be positive")
+    requested = set(kinds or STATE_KINDS)
+    selected = tuple(kind for kind in STATE_KINDS if kind in requested)
+    after_kind: str | None = None
+    after_local: str | None = None
+    if after is not None:
+        after_kind, separator, after_local = after.partition(":")
+        if not separator or after_kind not in STATE_KINDS or not after_local:
+            raise ValueError("job list cursor must be '<kind>:<placement>/<job_key>'")
+        if after_kind not in selected:
+            selected_names = ", ".join(selected) or "none"
+            raise ValueError(f"job list cursor kind {after_kind!r} is not among the selected kinds ({selected_names})")
+        _parse_marker_cursor(after_local)
     rows: list[dict[str, Any]] = []
-    for marker in workspace.scan_markers(kinds or STATE_KINDS):
-        if prefix is not None and marker.placement.parts[: len(prefix)] != prefix:
-            continue
+    stop_reason: str | None = None
+    examined = 0
+    last_seen: Marker | None = None
+    scan_limit = max(limit * 100, 10_000) if tag_contains is not None and limit is not None else None
+    after_index = None if after_kind is None else STATE_KINDS.index(after_kind)
+
+    def selected_stream() -> Iterable[Marker]:
+        """Yield the selected marker streams as one cursor-ordered stream."""
+
+        for kind in selected:
+            if after_index is not None and STATE_KINDS.index(kind) < after_index:
+                continue
+            local_after = after_local if kind == after_kind else None
+            yield from iter_markers(workspace, (kind,), placement_prefix=placement_prefix, after=local_after)
+
+    stream = iter(selected_stream())
+    for marker in stream:
+        examined += 1
+        last_seen = marker
+        if tag_contains is not None:
+            tag, _ = parse_job_key(marker.job_key)
+            if tag is None or tag_contains not in tag:
+                if scan_limit is not None and examined >= scan_limit:
+                    stop_reason = "scan_budget"
+                    break
+                continue
         state, _ = _state_of(workspace, marker)
         rows.append(
             {
@@ -378,5 +621,31 @@ def list_jobs(
                 "reason": state.get("reason"),
             }
         )
-    rows.sort(key=lambda row: (str(row["placement"]), str(row["job_key"])))
-    return rows
+        if limit is not None and len(rows) >= limit:
+            if scan_limit is not None and examined >= scan_limit:
+                stop_reason = "scan_budget"
+                break
+            for candidate in stream:
+                examined += 1
+                last_seen = candidate
+                if tag_contains is None:
+                    stop_reason = "page_full"
+                    break
+                tag, _ = parse_job_key(candidate.job_key)
+                if tag is not None and tag_contains in tag:
+                    stop_reason = "page_full"
+                    break
+                if scan_limit is not None and examined >= scan_limit:
+                    stop_reason = "scan_budget"
+                    break
+            break
+        if scan_limit is not None and examined >= scan_limit:
+            stop_reason = "scan_budget"
+            break
+    next_after = None
+    if stop_reason == "scan_budget" and last_seen is not None:
+        next_after = f"{last_seen.kind}:{last_seen.placement.as_posix()}/{last_seen.job_key}"
+    elif stop_reason == "page_full" and rows:
+        last = rows[-1]
+        next_after = f"{last['state']}:{last['placement']}/{last['job_key']}"
+    return JobListPage(rows, next_after)

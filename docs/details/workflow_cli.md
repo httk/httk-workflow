@@ -69,6 +69,12 @@ generation pinning makes such duplicates harmless because stale requests
 retire. With prefix or tag selectors, the remote resolves the match; use full
 job UUIDs when precise attribution matters.
 
+### `monitor` — inspect and control workspaces interactively
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `workflow monitor` | open the curses workspace monitor | `--workspace NAME` (repeatable), `--refresh SECONDS`, `--adapter-timeout SECONDS`, `--non-interactive` |
+
 ### `workspace` — the workspace itself, not its jobs
 
 | Command | What it does | Notable options |
@@ -160,10 +166,10 @@ its job or store runner target.
 | `job new [OPTIONS]` | scaffold and submit jobs from a workflow, runner file, package directory, or command template | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, or `--from-command`, `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
 | `job submit [OPTIONS] SOURCE...` | submit prepared payload directories | `--workspace`, `--placement` (required), `--move` |
 | `job request ACTION [OPTIONS] JOB_ID...` | publish one request per job selector (remote: over the adapter) | `--workspace`, optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
-| `job list [OPTIONS]` | list jobs as a cheap table | `--workspace`, `--kind`, `--placement`, `--json` |
-| `job show [OPTIONS] JOB...` | describe jobs from their state | `--workspace`, `--json` |
-| `job log [OPTIONS] JOB...` | print transition histories | `--workspace`, `--limit`, `--json` |
-| `job why [OPTIONS] JOB...` | explain why jobs are not running | `--workspace`, `--json` |
+| `job list [OPTIONS]` | list jobs as a cheap table (remote: over the adapter) | `--workspace`, `--kind`, `--placement` (prefix), `--limit`, `--after`, `--tag-contains`, `--counts`, `--json`, `--adapter-timeout` |
+| `job show [OPTIONS] JOB...` | describe jobs from their state (remote: over the adapter) | `--workspace`, `--no-children`, `--json`, `--adapter-timeout` |
+| `job log [OPTIONS] JOB...` | print transition histories (remote: over the adapter) | `--workspace`, `--limit`, `--json`, `--adapter-timeout` |
+| `job why [OPTIONS] JOB...` | explain why jobs are not running (remote: over the adapter) | `--workspace`, `--json`, `--adapter-timeout` |
 | `job debug [OPTIONS] JOB` | drive one job to a terminal state in front of you | `--workspace`, `--step`, `--placement`, `--follow-children`, `--timeout`, `--log-level` |
 
 When giving more than one `JOB_ID`, name the workspace explicitly.
@@ -666,6 +672,22 @@ path inside the workspace (for example `jobs` or `jobs/silicon*`), and
 each command takes `--json`. `job debug` exits `0` on success, `3` on failure, and
 `4` when the job stopped without finishing. See
 {doc}`taskmanager` for what each command reports.
+
+`job list --json` returns `format`, `format_version`, `jobs`, and `next_after`.
+Each row has the existing `job_key`, `job_id`, `state`, `step`, `placement`,
+`priority`, `generation`, and `reason` members. Use `--limit N` and pass the
+returned cursor to `--after` to page a large workspace; `--tag-contains TEXT`
+filters on the tag portion of the job key. `--counts` adds a `counts` object
+with name-based marker totals by selected state kind; malformed
+marker-shaped names are included, and `fsck` reports them. Counts require a
+full directory walk and are not free. The human table without `--limit`
+materializes all rows. The cursor format is
+`<kind>:<placement>/<job_key>` and `next_after` is null when the page is
+exhausted. Paging is weakly consistent during concurrent transitions: a job
+can appear twice or be missed if it changes kind between pages, so clients
+should deduplicate by `job_id`. Remote `job show`, `job log`, and `job why`
+accept canonical lowercase job UUIDs only; keys and prefixes must be resolved
+locally first.
 
 `httk workflow collect --workspace WORKSPACE` streams one `CollectedJob` summary per finished
 job as JSON lines by default. Use `--raw` to stream `JobRecord` records for a

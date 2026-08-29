@@ -14,10 +14,16 @@ from ..adapters import probe_remote_workspace
 from ..adapters import run_adapter as read_adapter
 from ..errors import ResolutionMiss, WorkflowError
 from ..introspection import JobSelectorResolver
-from ..models import QUIESCENT_KINDS, WORKSPACE_DIRECTORY, JobDefinition, canonical_uuid, parse_job_key
+from ..models import QUIESCENT_KINDS, WORKSPACE_DIRECTORY, JobDefinition, Marker, canonical_uuid, parse_job_key
 from ..packages import read_build_spec
 from ..precheck import environment_findings
-from ..transfers import DEFAULT_OFFER_STATES, TransferCandidate, offer_transfers, select_transfer_jobs
+from ..transfers import (
+    DEFAULT_OFFER_STATES,
+    TransferCandidate,
+    _waiting_parent_map,
+    offer_transfers,
+    select_transfer_jobs,
+)
 from ._common import *
 from ._common import (
     _ERRORS,
@@ -403,6 +409,7 @@ def _environment_advisory(
     *,
     strict: bool,
     candidates: Sequence[TransferCandidate] | None = None,
+    quiet: bool = False,
 ) -> None:
     """Warn about destination environment gaps before transfer state moves."""
 
@@ -412,9 +419,11 @@ def _environment_advisory(
             "transfer continues (use --strict-environment to block)"
         )
         if strict:
-            print(message, file=sys.stderr)
+            if not quiet:
+                print(message, file=sys.stderr)
             raise ValueError("strict environment mode blocked an unreachable destination precheck")
-        print(message, file=sys.stderr)
+        if not quiet:
+            print(message, file=sys.stderr)
         return
     problems: list[str] = []
     selected_candidates = candidates
@@ -469,7 +478,8 @@ def _environment_advisory(
     message = "destination environment unresolved: " + "; ".join(problems)
     if strict:
         raise ValueError(f"strict environment precheck blocked transfer: {message}")
-    print(f"warning: {message}", file=sys.stderr)
+    if not quiet:
+        print(f"warning: {message}", file=sys.stderr)
 
 
 def _resolve_transfer_jobs(workspace: Workspace, cwd: Path, selectors: Sequence[str]) -> list[str]:
@@ -531,6 +541,8 @@ def _send_jobs_to_remote(
     timeout: float | None,
     destination_settings: Mapping[str, object] | None = None,
     strict_environment: bool = False,
+    quiet: bool = False,
+    known_markers: Sequence[Marker] | None = None,
 ) -> list[dict[str, object]]:
     """Detach the named jobs from *source* and import them on a remote.
 
@@ -541,6 +553,7 @@ def _send_jobs_to_remote(
     """
 
     destination_workspace_id, destination_root = _remote_workspace_probe(target, destination_name, timeout=timeout)
+    waiting_parent_map = _waiting_parent_map(source)
     precheck_candidates = select_transfer_jobs(
         source,
         destination_workspace_id=destination_workspace_id,
@@ -548,6 +561,8 @@ def _send_jobs_to_remote(
         job_ids=jobs,
         destination_remote=target.name,
         include_transferring=True,
+        known_markers=known_markers,
+        waiting_parent_map=waiting_parent_map,
     )
     if destination_settings is not None:
         _environment_advisory(
@@ -556,9 +571,11 @@ def _send_jobs_to_remote(
             destination_settings,
             strict=strict_environment,
             candidates=precheck_candidates,
+            quiet=quiet,
         )
     source.recover_transfers()
     acknowledgements: list[dict[str, object]] = []
+    known_by_id = {} if known_markers is None else {marker.job_id: marker for marker in known_markers}
     for job_id in jobs:
         source.recover_transfers()
         candidates: list[tuple[Path, dict[str, object]]] = []
@@ -587,6 +604,8 @@ def _send_jobs_to_remote(
                 raise ValueError("resumed transfer destination placement disagrees with the request")
         bundle = source.detach(
             job_id,
+            marker=known_by_id.get(job_id),
+            waiting_parent_map=waiting_parent_map,
             destination_workspace_id=destination_workspace_id,
             destination_remote=target.name,
             destination_placement=destination_placement,
@@ -616,7 +635,8 @@ def _send_jobs_to_remote(
         )
         if invoked.get("returncode") != 0:
             raise RuntimeError(f"destination import failed: {invoked.get('stderr', '')}")
-        _relay_success_stderr(invoked)
+        if not quiet:
+            _relay_success_stderr(invoked)
         try:
             acknowledgement = json.loads(str(invoked.get("stdout", "")))
         except json.JSONDecodeError as exc:
@@ -753,6 +773,7 @@ def _remote_offer(
     job_ids: Sequence[str] | None = None,
     environment_settings: Mapping[str, object] | None = None,
     strict_environment: bool = False,
+    quiet: bool = False,
 ) -> list[dict[str, object]]:
     """Ask a remote to seal its finished jobs and return the offers it made."""
 
@@ -785,7 +806,8 @@ def _remote_offer(
         diagnostics = offered.get(field)
         if diagnostics and str(diagnostics) not in printed:
             rendered = str(diagnostics)
-            print(rendered, file=sys.stderr, end="" if rendered.endswith("\n") else "\n")
+            if not quiet:
+                print(rendered, file=sys.stderr, end="" if rendered.endswith("\n") else "\n")
             printed.add(rendered)
     try:
         document = json.loads(str(offered.get("stdout", "")))
@@ -862,6 +884,7 @@ def _fetch_jobs_from_remote(
     jobs: Sequence[str] = (),
     destination_settings: Mapping[str, object] | None = None,
     strict_environment: bool = False,
+    quiet: bool = False,
 ) -> tuple[list[dict[str, object]], list[object]]:
     """Bring the jobs that finished on one remote back into *local*.
 
@@ -882,6 +905,7 @@ def _fetch_jobs_from_remote(
         timeout=timeout,
         environment_settings=destination_settings,
         strict_environment=strict_environment,
+        quiet=quiet,
     )
     _require_offers_for_jobs(offers, jobs)
     staging_root = local.control / "transfers" / "incoming"
@@ -899,7 +923,8 @@ def _fetch_jobs_from_remote(
             timeout=timeout,
         )
         acknowledgement = local.import_bundle(str(pulled.get("path", staging)))
-        _print_build_reminder(local, acknowledgement)
+        if not quiet:
+            _print_build_reminder(local, acknowledgement)
         # The payload now lives at its placement in this workspace, so the
         # staged copy is dropped through a rename rather than left to be
         # re-imported by the next fetch.
@@ -921,17 +946,22 @@ def _transfer_local_to_local(
     jobs: Sequence[str],
     *,
     strict_environment: bool = False,
+    quiet: bool = False,
+    known_markers: Sequence[Marker] | None = None,
 ) -> list[dict[str, object]]:
     """Move explicit jobs from one local workspace into another, directly."""
 
     if not jobs:
         raise ValueError("a local-to-local transfer needs at least one --job JOB_ID")
+    waiting_parent_map = _waiting_parent_map(source)
     candidates = select_transfer_jobs(
         source,
         destination_workspace_id=destination.workspace_id,
         states=(*QUIESCENT_KINDS, "transferring"),
         job_ids=jobs,
         include_transferring=True,
+        known_markers=known_markers,
+        waiting_parent_map=waiting_parent_map,
     )
     _environment_advisory(
         source,
@@ -939,18 +969,23 @@ def _transfer_local_to_local(
         destination.read_settings(),
         strict=strict_environment,
         candidates=candidates,
+        quiet=quiet,
     )
     acknowledgements: list[dict[str, object]] = []
+    known_by_id = {} if known_markers is None else {marker.job_id: marker for marker in known_markers}
     for job_id in jobs:
         source.recover_transfers()
         bundle = source.detach(
             job_id,
+            marker=known_by_id.get(job_id),
+            waiting_parent_map=waiting_parent_map,
             destination_workspace_id=destination.workspace_id,
             transfer_id=str(uuid.uuid4()),
         )
         acknowledgement = destination.import_bundle(str(bundle))
         source.acknowledge_transfer(acknowledgement)
-        _print_build_reminder(destination, acknowledgement)
+        if not quiet:
+            _print_build_reminder(destination, acknowledgement)
         acknowledgements.append(acknowledgement)
     return acknowledgements
 
@@ -966,6 +1001,7 @@ def _transfer_remote_to_remote(
     jobs: Sequence[str] = (),
     destination_settings: Mapping[str, object] | None = None,
     strict_environment: bool = False,
+    quiet: bool = False,
 ) -> tuple[list[dict[str, object]], list[object]]:
     """Relay jobs between two remotes through this client (v1 semantics).
 
@@ -996,6 +1032,7 @@ def _transfer_remote_to_remote(
         timeout=timeout,
         environment_settings=destination_settings,
         strict_environment=strict_environment,
+        quiet=quiet,
     )
     _require_offers_for_jobs(offers, jobs)
     acknowledgements: list[dict[str, object]] = []
@@ -1040,7 +1077,8 @@ def _transfer_remote_to_remote(
             )
             if imported.get("returncode") != 0:
                 raise RuntimeError(f"destination import failed: {imported.get('stderr', '')}")
-            _relay_success_stderr(imported)
+            if not quiet:
+                _relay_success_stderr(imported)
             try:
                 acknowledgement = json.loads(str(imported.get("stdout", "")))
             except json.JSONDecodeError as exc:
@@ -1075,7 +1113,18 @@ def _run_transfer_verb(
     arguments: argparse.Namespace,
     context: CLIContext,
 ) -> int:
-    """Run the parsed ``transfer [OPTIONS] SRC DST`` verb."""
+    """Run the transfer operation and print its report."""
+
+    return _report_transfer(arguments, run_transfer_verb_result(arguments, context))
+
+
+def run_transfer_verb_result(
+    arguments: argparse.Namespace,
+    context: CLIContext,
+    quiet: bool = False,
+    known_markers: Sequence[Marker] | None = None,
+) -> Mapping[str, object]:
+    """Run the parsed transfer verb and return its report without formatting."""
 
     source_binding = resolve_workspace(arguments.source, project=context.cwd)
     destination_binding = resolve_workspace(arguments.destination, project=context.cwd)
@@ -1083,10 +1132,10 @@ def _run_transfer_verb(
     destination_local = destination_binding.remote == LOCAL_REMOTE
     timeout = arguments.adapter_timeout
 
-    if source_local:
+    if source_local and known_markers is None:
         assert source_binding.path is not None
         arguments.jobs = _resolve_transfer_jobs(Workspace(source_binding.path), context.cwd, arguments.jobs)
-    else:
+    elif not source_local:
         for selector in arguments.jobs:
             try:
                 canonical_uuid(selector)
@@ -1108,9 +1157,11 @@ def _run_transfer_verb(
                 "transfer continues (use --strict-environment to block)"
             )
             if arguments.strict_environment:
-                print(notice, file=sys.stderr)
+                if not quiet:
+                    print(notice, file=sys.stderr)
                 raise ValueError("strict environment mode blocked an unreachable destination precheck") from exc
-            print(notice, file=sys.stderr)
+            if not quiet:
+                print(notice, file=sys.stderr)
             destination_settings = None
         acknowledgements = _send_jobs_to_remote(
             Workspace(source_binding.path),
@@ -1121,8 +1172,10 @@ def _run_transfer_verb(
             timeout=timeout,
             destination_settings=destination_settings,
             strict_environment=arguments.strict_environment,
+            quiet=quiet,
+            known_markers=known_markers,
         )
-        return _report_transfer(arguments, {"moved": acknowledgements})
+        return {"moved": acknowledgements}
     if destination_local and not source_local:
         assert destination_binding.path is not None
         target = resolve_remote(source_binding.remote, project=context.cwd)
@@ -1136,8 +1189,9 @@ def _run_transfer_verb(
             timeout=timeout,
             destination_settings=Workspace(destination_binding.path, mutable=False).read_settings(),
             strict_environment=arguments.strict_environment,
+            quiet=quiet,
         )
-        return _report_transfer(arguments, {"moved": acknowledgements, "retired": retired})
+        return {"moved": acknowledgements, "retired": retired}
     if source_local and destination_local:
         assert source_binding.path is not None and destination_binding.path is not None
         acknowledgements = _transfer_local_to_local(
@@ -1145,8 +1199,10 @@ def _run_transfer_verb(
             Workspace(destination_binding.path),
             arguments.jobs,
             strict_environment=arguments.strict_environment,
+            quiet=quiet,
+            known_markers=known_markers,
         )
-        return _report_transfer(arguments, {"moved": acknowledgements})
+        return {"moved": acknowledgements}
     destination_target = resolve_remote(destination_binding.remote, project=context.cwd)
     try:
         destination_settings = _remote_workspace_settings(
@@ -1158,9 +1214,11 @@ def _run_transfer_verb(
             "transfer continues (use --strict-environment to block)"
         )
         if arguments.strict_environment:
-            print(notice, file=sys.stderr)
+            if not quiet:
+                print(notice, file=sys.stderr)
             raise ValueError("strict environment mode blocked an unreachable destination precheck") from exc
-        print(notice, file=sys.stderr)
+        if not quiet:
+            print(notice, file=sys.stderr)
         destination_settings = None
     acknowledgements, retired = _transfer_remote_to_remote(
         source_binding,
@@ -1172,8 +1230,9 @@ def _run_transfer_verb(
         timeout=timeout,
         destination_settings=destination_settings,
         strict_environment=arguments.strict_environment,
+        quiet=quiet,
     )
-    return _report_transfer(arguments, {"moved": acknowledgements, "retired": retired})
+    return {"moved": acknowledgements, "retired": retired}
 
 
 def _report_transfer(arguments: argparse.Namespace, report: Mapping[str, object]) -> int:

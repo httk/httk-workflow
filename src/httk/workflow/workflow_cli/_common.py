@@ -558,14 +558,12 @@ def _run_remote_workspace(
     :return: The far-side process exit status.
     """
 
-    target = resolve_remote(binding.remote, project=context.cwd)
-    result = _run_adapter(
-        target.bundle,
-        "invoke",
-        {"argv": list(argv_tail)},
+    returncode, stdout, stderr = remote_workspace_output(
+        binding,
+        context,
+        argv_tail,
         timeout=timeout,
     )
-    stdout = str(result.get("stdout", ""))
     if stdout and unwrap_json_array:
         values = json.loads(stdout)
         if not isinstance(values, list) or len(values) > 1:
@@ -573,10 +571,45 @@ def _run_remote_workspace(
         stdout = json.dumps(values[0] if values else None, indent=2, sort_keys=True)
     if stdout:
         sys.stdout.write(stdout if stdout.endswith("\n") else stdout + "\n")
-    stderr = str(result.get("stderr", ""))
     if stderr:
         sys.stderr.write(stderr)
-    return int(result.get("returncode", 0) or 0)
+    return returncode
+
+
+def remote_workspace_output(
+    binding: WorkspaceBinding,
+    context: CLIContext,
+    argv_tail: Sequence[str],
+    *,
+    timeout: float | None = None,
+) -> tuple[int, str, str]:
+    """Invoke a remote workspace command and return status, stdout, stderr.
+
+    Unlike :func:`_run_remote_workspace`, this variant never prints. It is the
+    returning transport used by consumers such as the monitor, whose worker
+    threads must not write into a curses terminal.
+
+    :param binding: Remote-qualified workspace binding.
+    :param context: CLI context used to resolve the adapter.
+    :param argv_tail: Complete command vector for the remote side.
+    :param timeout: Adapter timeout override.
+    :return: Remote return code, standard output, and standard error.
+    """
+
+    if ":" not in binding.name:
+        raise ValueError(f"remote workspace binding has no remote-qualified name: {binding.name}")
+    target = resolve_remote(binding.remote, project=context.cwd)
+    result = _run_adapter(
+        target.bundle,
+        "invoke",
+        {"argv": list(argv_tail)},
+        timeout=timeout,
+    )
+    return (
+        int(result.get("returncode", 0) or 0),
+        str(result.get("stdout", "")),
+        str(result.get("stderr", "")),
+    )
 
 
 def _remote_workspace_read(
@@ -587,6 +620,7 @@ def _remote_workspace_read(
     *,
     flags: Sequence[str] = (),
     tail: Sequence[str] = (),
+    unwrap_json_array: bool | None = None,
 ) -> int:
     """Dispatch one read-style workspace command to a remote binding.
 
@@ -596,19 +630,60 @@ def _remote_workspace_read(
     all reach a remote the same way.
     """
 
-    if ":" not in binding.name:
-        raise ValueError(f"remote workspace binding has no remote-qualified name: {binding.name}")
     enabled_flags: list[str] = []
     for flag in flags:
         if getattr(arguments, flag.lstrip("-").replace("-", "_"), False):
             enabled_flags.append(flag)
     argv = [*command, *enabled_flags, *tail, binding.name.split(":", 1)[1]]
-    return _run_remote_workspace(
+    returncode, stdout, stderr = remote_workspace_output(
         binding,
         context,
         argv,
         timeout=getattr(arguments, "adapter_timeout", None),
-        unwrap_json_array=getattr(arguments, "json", False),
+    )
+    if stdout and (getattr(arguments, "json", False) if unwrap_json_array is None else unwrap_json_array):
+        values = json.loads(stdout)
+        if not isinstance(values, list) or len(values) > 1:
+            raise ValueError("remote workspace command returned an invalid batch response")
+        stdout = json.dumps(values[0] if values else None, indent=2, sort_keys=True)
+    if stdout:
+        sys.stdout.write(stdout if stdout.endswith("\n") else stdout + "\n")
+    if stderr:
+        sys.stderr.write(stderr)
+    return returncode
+
+
+def remote_workspace_read_output(
+    binding: WorkspaceBinding,
+    context: CLIContext,
+    command: Sequence[str],
+    arguments: argparse.Namespace,
+    *,
+    flags: Sequence[str] = (),
+    tail: Sequence[str] = (),
+    unwrap_json_array: bool | None = None,
+) -> tuple[int, str, str]:
+    """Return one remote read's output without writing to process streams.
+
+    :param binding: Remote-qualified workspace binding.
+    :param context: CLI context used to resolve the adapter.
+    :param command: Pinned remote command vector.
+    :param arguments: Parsed arguments supplying enabled flags and timeout.
+    :param flags: Optional switches copied when true on *arguments*.
+    :param tail: Command arguments before the remote workspace name.
+    :param unwrap_json_array: Retained for API symmetry; output is not decoded.
+    :return: Remote return code, standard output, and standard error.
+    """
+
+    if ":" not in binding.name:
+        raise ValueError(f"remote workspace binding has no remote-qualified name: {binding.name}")
+    enabled_flags = [flag for flag in flags if getattr(arguments, flag.lstrip("-").replace("-", "_"), False)]
+    argv = [*command, *enabled_flags, *tail, binding.name.split(":", 1)[1]]
+    return remote_workspace_output(
+        binding,
+        context,
+        argv,
+        timeout=getattr(arguments, "adapter_timeout", None),
     )
 
 

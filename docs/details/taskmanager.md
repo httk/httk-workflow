@@ -571,10 +571,11 @@ transition that renames or removes a marker underneath the walk is tolerated
 silently, consistent with how a vanished marker becomes a miss rather than a
 fault.
 
-The exhaustive workspace operations — `fsck`, `gc`, `collect`, `status`, and
-`job list` — use the same scandir walker in an exhaustive mode with no cursor
-and no budget, so their semantics are unchanged; only the bounded scheduling
-passes carry the budgets.
+The exhaustive workspace operations — `fsck`, `gc`, `collect`, and `status` —
+use their own exhaustive scans. `job list` uses a separate cursor-stable
+scandir walker, not the manager's fair `MarkerStream`, and its `--placement`
+prefix is pruned before descendants are opened. A cursor whose kind is not
+among the selected `--kind` values is rejected.
 
 **Best-within-window priority.** Claiming ready work scans a single bounded
 window and then claims the best-priority candidates found *within that window*,
@@ -628,6 +629,10 @@ httk job request pause --workspace WORKSPACE \
 httk job request continue --workspace WORKSPACE \
   --reason "inputs repaired" JOB_UUID
 ```
+
+For an interactive view over these same status counts, pages, details, and
+controls, use `httk workflow monitor`; it keeps local reads bounded and also
+shows registered remote workspaces through their adapter.
 
 An `override_step --step X` request is pre-validated on the client: when the
 job's state frame already records the runner's `runner_steps` (written after its
@@ -728,6 +733,12 @@ Run it when a node crashed while writing, when a filesystem was restored from a
 snapshot, or whenever `job show` reports that a state frame is not readable.
 
 ## Inspecting jobs
+
+For large workspaces, inspect jobs a page at a time with `job list --json
+--limit N`; pass its `next_after` value back as `--after` to continue in stable
+order without materializing the whole job set. `--placement` prunes to a
+placement prefix, and `--tag-contains` can narrow the stream before state
+details are read.
 
 Five commands read one job the way a manager reads it — the authoritative marker,
 the journal frame that marker names, and the immutable `job.json` — and none of

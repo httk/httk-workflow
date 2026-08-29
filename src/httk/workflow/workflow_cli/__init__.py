@@ -50,6 +50,7 @@ from ._common import (
     _run_remote_workspace,
     _settings,
     _vasp,
+    remote_workspace_output,
 )
 from ._compat import (
     add_v1_collect_arguments,
@@ -63,6 +64,7 @@ from ._job import (
     add_job_submit_arguments,
     build_job_parser,
     build_runner_parser,
+    ensure_identity_key,
     handle_job_debug,
     handle_job_list,
     handle_job_log,
@@ -73,6 +75,8 @@ from ._job import (
     handle_job_why,
     handle_runner_describe,
     handle_runner_publish,
+    publish_job_requests,
+    request_remote_job_result,
 )
 from ._launcher import (
     build_launcher_parser,
@@ -90,7 +94,10 @@ from ._manager import (
     build_manager_parser,
     build_run_parser,
     handle_manager_run,
+    launch_workspace_managers,
+    submit_remote_manager_result,
 )
+from ._monitor import build_monitor_parser, handle_monitor
 from ._postprocess import build_postprocess_parser, handle_postprocess
 from ._precheck import build_precheck_parser, handle_precheck
 from ._project import (
@@ -137,6 +144,7 @@ from ._transfer import (
     handle_transfer_offer,
     handle_transfer_receive,
     handle_transfer_retire,
+    run_transfer_verb_result,
 )
 from ._workspace import (
     _init_settings,
@@ -195,6 +203,7 @@ def build_parser(
     build_launcher_parser(groups)
     build_transfer_parser(groups)
     build_campaign_parser(groups)
+    build_monitor_parser(groups)
     return parser
 
 

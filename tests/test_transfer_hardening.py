@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import uuid
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from httk.workflow import FormatError, TaskManager, Workspace
 from httk.workflow import transfers as transfers_module
 from httk.workflow._runner_builds import register_build
 from httk.workflow.introspection import resolve_job_selectors
+from httk.workflow.models import Marker
 from httk.workflow.packages import source_tree_digest
 from httk.workflow.registry import WorkspaceBinding
 from httk.workflow.scaffold import BuildSpec, new_job
@@ -435,6 +437,8 @@ def test_explicit_offer_reports_a_late_sealing_failure_and_resumes(
         workspace: Workspace,
         job_id: str,
         *,
+        marker: Marker | None = None,
+        waiting_parent_map: Mapping[str, set[str]] | None = None,
         destination_workspace_id: str,
         destination_remote: str | None = None,
         destination_placement: str | PurePosixPath | None = None,
@@ -445,6 +449,8 @@ def test_explicit_offer_reports_a_late_sealing_failure_and_resumes(
         return real_detach(
             workspace,
             job_id,
+            marker=marker,
+            waiting_parent_map=waiting_parent_map,
             destination_workspace_id=destination_workspace_id,
             destination_remote=destination_remote,
             destination_placement=destination_placement,

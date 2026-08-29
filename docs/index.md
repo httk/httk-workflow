@@ -129,6 +129,7 @@ details/runtime_helpers
 details/taskmanager
 details/workflow_packages
 details/workflow_cli
+details/monitor
 details/adapter_authoring
 details/launcher_authoring
 details/workflow_filesystem_api

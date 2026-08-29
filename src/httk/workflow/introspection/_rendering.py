@@ -27,8 +27,19 @@ from ._reading import (
 JOB_REPORT_FORMAT = "httk-workflow-job-report"
 
 
-def describe_job(workspace: Workspace, marker: Marker) -> dict[str, Any]:
-    """Return the complete machine-readable report of one job."""
+def describe_job(
+    workspace: Workspace,
+    marker: Marker,
+    *,
+    include_children: bool = True,
+) -> dict[str, Any]:
+    """Return the machine-readable report of one job.
+
+    :param workspace: Workspace containing the job.
+    :param marker: Current marker identifying the job.
+    :param include_children: Include per-child observations for waiting joins.
+    :return: The job report mapping.
+    """
 
     state, state_error = _state_of(workspace, marker)
     job, job_error = _job_of(workspace, marker)
@@ -109,11 +120,14 @@ def describe_job(workspace: Workspace, marker: Marker) -> dict[str, Any]:
         }
     if marker.kind == "waiting":
         join = state.get("join")
+        children = []
+        if include_children and isinstance(join, Mapping):
+            children = observe_join(workspace, join)
         report["join"] = {
             "condition": join.get("condition") if isinstance(join, Mapping) else None,
             "count": join.get("count") if isinstance(join, Mapping) else None,
             "next_step": state.get("next_step"),
-            "children": observe_join(workspace, join) if isinstance(join, Mapping) else [],
+            "children": children,
         }
     if marker.kind in {"failed", "cancelled", "paused"}:
         report["error_breadcrumb"] = read_error_breadcrumb(control)

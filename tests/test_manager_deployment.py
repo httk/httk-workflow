@@ -139,8 +139,8 @@ def test_remote_run_forwards_worker_resources(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(_manager, "resolve_remote", lambda *_args, **_kwargs: "target")
     monkeypatch.setattr(
         _manager,
-        "_run_remote_workspace",
-        lambda _binding, _context, argv, **kwargs: seen.update(argv=argv, **kwargs) or 0,
+        "remote_workspace_output",
+        lambda _binding, _context, argv, **kwargs: seen.update(argv=argv, **kwargs) or (0, "", ""),
     )
     assert (
         _manager._submit_remote_manager(WorkspaceBinding("cluster:station", "cluster", None), arguments, context) == 0
