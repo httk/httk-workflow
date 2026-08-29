@@ -592,7 +592,7 @@ prepared payload:
 httk job new --workspace WORKSPACE --workflow vasp-relax --input structure=POSCAR --tag silicon
 httk job new --workspace WORKSPACE --workflow vasp-relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening
 httk job new --from-runner ./my_runner.py --step characterize --parameter sites=8
-httk job new --from-command 'srun --ntasks=10 my_executable {n}' --parameter n=17 --tag n17
+httk job new --from-command 'srun --ntasks=10 my_executable {input}' --file input=input_files/a.dat --tag a
 ```
 
 `--parameter NAME=VALUE` supplies an opaque implementation knob;
@@ -600,10 +600,16 @@ httk job new --from-command 'srun --ntasks=10 my_executable {n}' --parameter n=1
 and `--format LANG` selects the language of a bare document.
 With `--from-command TEMPLATE`, `shlex`-style words are turned into a published
 one-step Bash runner; each `{name}` placeholder must have a matching
-`--parameter NAME=VALUE`, and the generated runner can be edited and passed
-back with `--from-runner`. The template is an argv-only word list: it has no
-shell syntax. A placeholder name must match `[A-Za-z_][A-Za-z0-9_.-]*`; `{{`
-and `}}` emit literal braces, and any other brace text remains literal.
+`--parameter NAME=VALUE` or `--file NAME=PATH`. Parameter placeholders resolve
+through `httk_workflow_parameter` at run time, while file placeholders resolve
+to the staged file below `HTTK_WORKFLOW_JOB_DIR`. The generated runner can be
+edited and passed back with `--from-runner`. The template is an argv-only word
+list: it has no shell syntax. A placeholder name must match
+`[A-Za-z_][A-Za-z0-9_.-]*`; `{{` and `}}` emit literal braces, and any other
+brace text remains literal.
+Runner identity is the digest of the rendered text, so an unused `--file` does
+not change the wrapper. A file name containing `/` is a valid staging
+destination but must be staged under a bare name to use it as a placeholder.
 When a runner is supplied with `--from-runner`, `job new` runs it in describe
 mode to infer its workflow and initial step; it must call
 `httk_workflow_runner WORKFLOW STEP...` before any work.

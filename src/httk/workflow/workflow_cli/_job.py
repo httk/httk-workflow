@@ -27,6 +27,7 @@ from ..introspection import (
     selector_uses_remote_path,
 )
 from ..models import STATE_KINDS, TERMINAL_KINDS, Marker, canonical_uuid, ensure_step_known, parse_job_key
+from ..scaffold import payload_relative
 from ._common import *
 from ._common import (
     _ERRORS,
@@ -215,13 +216,22 @@ def _command_word_parts(word: str) -> list[tuple[str, str]]:
                     parts.append(("parameter", name))
                     index = close + 1
                     continue
+                if "/" in name:
+                    add_literal()
+                    parts.append(("invalid", name))
+                    index = close + 1
+                    continue
         literal.append(word[index])
         index += 1
     add_literal()
     return parts or [("literal", "")]
 
 
-def _command_runner_text(template: str, parameters: Mapping[str, object]) -> str:
+def _command_runner_text(
+    template: str,
+    parameters: Mapping[str, object],
+    files: Mapping[str, object] | None = None,
+) -> str:
     """Render a minimal Bash runner for a command template."""
 
     try:
@@ -232,11 +242,25 @@ def _command_runner_text(template: str, parameters: Mapping[str, object]) -> str
         raise ValueError("--from-command must contain at least one command word")
 
     words = [_command_word_parts(word) for word in argv]
+    file_paths = {name: payload_relative(name).as_posix() for name in (files or {})}
+    invalid_file_names = sorted(
+        {value for parts in words for kind, value in parts if kind == "invalid" and value in file_paths}
+    )
+    if invalid_file_names:
+        name = invalid_file_names[0]
+        raise ValueError(f"`{{{name}}}` is not a valid placeholder name; stage it as a bare name to reference it")
     names = {value for parts in words for kind, value in parts if kind == "parameter"}
-    missing = sorted(names - set(parameters))
+    conflicts = sorted(names & set(parameters) & set(file_paths))
+    if conflicts:
+        joined = ", ".join(f"{{{name}}}" for name in conflicts)
+        raise ValueError(f"--from-command placeholder {joined} is both a --file and a --parameter")
+    missing = sorted(names - set(parameters) - set(file_paths))
     if missing:
         joined = ", ".join(missing)
-        raise ValueError(f"--from-command has placeholder(s) without --parameter: {joined}")
+        raise ValueError(
+            "--from-command has placeholder(s) without --parameter or --file "
+            f"(supply with --parameter NAME=VALUE or --file NAME=PATH): {joined}"
+        )
 
     def render_word(parts: list[tuple[str, str]]) -> str:
         if not any(kind == "parameter" for kind, _ in parts):
@@ -244,7 +268,10 @@ def _command_runner_text(template: str, parameters: Mapping[str, object]) -> str
         pieces: list[str] = ['"']
         for kind, value in parts:
             if kind == "parameter":
-                pieces.append(f"$(httk_workflow_parameter {value})")
+                if value in parameters:
+                    pieces.append(f"$(httk_workflow_parameter {value})")
+                else:
+                    pieces.append(f"$HTTK_WORKFLOW_JOB_DIR/{file_paths[value]}")
             else:
                 pieces.append(value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`"))
         pieces.append('"')
@@ -294,14 +321,26 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
         name: _json_value(text, f"job parameter {name!r}")
         for name, text in _pairs(arguments.parameters, "a job parameter")
     }
-    files: dict[str, str | Path] = {name: Path(text) for name, text in _pairs(arguments.files, "a staged file")}
+    files: dict[str, str | Path] = {}
+    file_destinations: dict[str, str] = {}
+    for name, text in _pairs(arguments.files, "a staged file"):
+        if name in files:
+            raise ValueError(f"--file entries {name!r} and {name!r} use the same name")
+        destination = payload_relative(name).as_posix()
+        previous = file_destinations.get(destination)
+        if previous is not None:
+            raise ValueError(
+                f"--file entries {previous!r} and {name!r} have the same normalized destination {destination!r}"
+            )
+        files[name] = Path(text)
+        file_destinations[destination] = name
     inputs, items, input_tag = _load_inputs(arguments.inputs, arguments.input_from)
     command_source: Path | None = None
     runner_name: str | None = None
     command_tag: str | None = None
     workflow_target: str | os.PathLike[str]
     if arguments.from_command is not None:
-        runner_text = _command_runner_text(arguments.from_command, parameters)
+        runner_text = _command_runner_text(arguments.from_command, parameters, files)
         digest = hashlib.sha256(runner_text.encode("utf-8")).hexdigest()
         descriptor, source_name = tempfile.mkstemp(prefix="httk-command-", suffix=".sh")
         os.close(descriptor)
@@ -1488,7 +1527,9 @@ def build_job_parser(
         metavar="TEMPLATE",
         help=(
             "generate a one-step Bash runner from an argv-only TEMPLATE; "
-            "{name} substitutes a parameter, {{ and }} are literal braces"
+            "{name} substitutes a --parameter or staged --file path, "
+            "{{ and }} are literal braces; runner identity is the rendered-text digest, "
+            "so an unused --file does not change the wrapper"
         ),
     )
     new.add_argument(
@@ -1519,7 +1560,7 @@ def build_job_parser(
         default=[],
         dest="files",
         metavar="NAME=PATH",
-        help="stage PATH in the payload as NAME; a bare NAME lands in files/ (repeatable)",
+        help="stage PATH in the payload as NAME; a NAME=PATH with no / in NAME lands in files/ (repeatable)",
     )
     new.add_argument(
         "--input",

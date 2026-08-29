@@ -139,8 +139,8 @@ The runner is published once for the whole set, and the jobs are submitted as th
 are generated. In Python the same thing streams, which is how a campaign of any
 size is built:
 
-For a command-only sweep, use `job new --from-command` with a parameter placeholder;
-the generated Bash runner is published once and submitted like any other job.
+One `job new --from-command` call creates one job; use a shell loop (or
+`new_jobs`) to make a sweep with parameter or file placeholders.
 
 ```python
 from pathlib import Path

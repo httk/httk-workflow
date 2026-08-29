@@ -900,6 +900,82 @@ def test_command_workflow_is_generated_published_once_and_runs(tmp_path: Path, c
         assert "command-sentinel-17\n" in (payload / "logs" / "stdio.out").read_text(encoding="utf-8")
 
 
+def test_command_file_placeholder_is_staged_and_runs(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-file-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-file")
+    source = tmp_path / "input.dat"
+    source.write_text("file-placeholder-unique-sentinel\n", encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "cat {input}",
+                "--file",
+                f"input={source}",
+                "--json",
+            ],
+            _context(tmp_path),
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)[0]
+    runner_text = workspace.runner_store_path(str(report["runner"]["path"])).read_text(encoding="utf-8")
+    assert '"$HTTK_WORKFLOW_JOB_DIR/files/input"' in runner_text
+    assert (Path(report["payload_path"]) / "files" / "input").read_text(encoding="utf-8") == source.read_text(
+        encoding="utf-8"
+    )
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=120.0)
+    marker = workspace.find_marker_by_id(report["job_id"])
+    assert marker is not None and marker.kind == "succeeded"
+    assert "file-placeholder-unique-sentinel\n" in (Path(report["payload_path"]) / "logs" / "stdio.out").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_command_file_names_control_runner_publication(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-file-runners")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-file-runners")
+    source = tmp_path / "source.dat"
+    source.write_text("source\n", encoding="utf-8")
+
+    def submit(name: str, unused_name: str | None = None) -> dict[str, object]:
+        file_arguments = [f"{name}={source}"]
+        if unused_name is not None:
+            file_arguments.append(f"{unused_name}={source}")
+        file_options = [part for argument in file_arguments for part in ("--file", argument)]
+        assert (
+            command(
+                [
+                    "job",
+                    "new",
+                    "--workspace",
+                    workspace_name,
+                    "--from-command",
+                    "cat {input}" if name == "input" else f"cat {{{name}}}",
+                    *file_options,
+                    "--json",
+                ],
+                _context(tmp_path),
+            )
+            == 0
+        )
+        return json.loads(capsys.readouterr().out)[0]
+
+    first = submit("input")
+    with_unused_file = submit("input", "unused")
+    different_name = submit("other")
+    assert first["runner"] == with_unused_file["runner"]
+    assert first["runner"] != different_name["runner"]
+    assert len(list(workspace.runners.rglob("*.sh"))) == 2
+
+
 def test_command_template_grammar_and_argv_value_fidelity(tmp_path: Path, capsys) -> None:
     rendered = _command_runner_text(
         r'''echo '{"x":1}' '{{n}}' '--n={n}' '{not a parameter}' ''',
@@ -909,6 +985,8 @@ def test_command_template_grammar_and_argv_value_fidelity(tmp_path: Path, capsys
     assert "'{n}'" in rendered
     assert '"--n=$(httk_workflow_parameter n)"' in rendered
     assert "'{not a parameter}'" in rendered
+    file_rendered = _command_runner_text("echo '--in={input}'", {}, {"input": tmp_path / "input.dat"})
+    assert '"--in=$HTTK_WORKFLOW_JOB_DIR/files/input"' in file_rendered
 
     workspace = Workspace.initialize(tmp_path / "command-values")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-values")
@@ -953,7 +1031,32 @@ def test_command_requires_all_placeholders_and_is_mutually_exclusive(tmp_path: P
         )
         == 2
     )
-    assert "missing" in capsys.readouterr().err
+    missing_error = capsys.readouterr().err
+    assert "missing" in missing_error
+    assert "--parameter" in missing_error
+    assert "--file" in missing_error
+
+    source = tmp_path / "conflict.dat"
+    source.write_text("conflict\n", encoding="utf-8")
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "cat {input}",
+                "--parameter",
+                "input=parameter",
+                "--file",
+                f"input={source}",
+            ],
+            _context(tmp_path),
+        )
+        == 2
+    )
+    assert "{input} is both a --file and a --parameter" in capsys.readouterr().err
 
     assert (
         command(
@@ -972,6 +1075,69 @@ def test_command_requires_all_placeholders_and_is_mutually_exclusive(tmp_path: P
         == 2
     )
     assert "not allowed with argument --from-command" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [("input", "files/input"), ("input", " input "), ("input", "input")],
+)
+def test_command_rejects_colliding_file_names(tmp_path: Path, capsys, first: str, second: str) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-file-collisions")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "file-collisions")
+    source = tmp_path / "source.dat"
+    source.write_text("source\n", encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "cat {input}",
+                "--file",
+                f"{first}={source}",
+                "--file",
+                f"{second}={source}",
+            ],
+            _context(tmp_path),
+        )
+        == 2
+    )
+    error = capsys.readouterr().err
+    assert repr(first) in error
+    assert repr(second) in error
+    assert not list(workspace.scan_markers())
+
+
+def test_command_rejects_slash_file_name_as_placeholder(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-file-placeholder")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "slash-placeholder")
+    source = tmp_path / "source.dat"
+    source.write_text("source\n", encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "cat {sub/dir/name}",
+                "--file",
+                f"sub/dir/name={source}",
+            ],
+            _context(tmp_path),
+        )
+        == 2
+    )
+    assert (
+        "`{sub/dir/name}` is not a valid placeholder name; stage it as a bare name to reference it"
+        in capsys.readouterr().err
+    )
+    assert not list(workspace.scan_markers())
 
 
 def test_workflow_rejects_runner_and_package_paths(tmp_path: Path, capsys) -> None:
