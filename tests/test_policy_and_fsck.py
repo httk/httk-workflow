@@ -395,19 +395,39 @@ def test_fsck_reports_always_safe_leftovers_without_failing(tmp_path: Path, caps
     )
 
 
-def test_fsck_reports_missing_non_terminal_payload_without_repairing_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize("kind", ("claimed", "waiting", "paused"))
+def test_fsck_reports_missing_non_terminal_payload_without_repairing_it(kind: str, tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path)
-    workspace.submit(payload, "jobs")
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
-    shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
+    marker = _chain(workspace, workspace.submit(payload, "jobs"), [(kind, {"reason": "test"})])
+    assert marker.job_id == job_id
+    current = workspace.find_marker_by_id(job_id)
+    assert current is not None
+    shutil.rmtree(workspace.payload_path(current.placement, current.job_key))
 
     report = workspace.check(repair=True, quarantine_unrepairable=True)
     (finding,) = report.findings
     assert finding.problem == "payload_missing"
     assert finding.action == "reported"
-    assert marker.path.is_file()
+    assert current.path.is_file()
+
+
+def test_fsck_ignores_missing_submitted_and_ready_payloads(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    markers: list[Marker] = []
+    for kind in ("submitted", "ready"):
+        payload, job_id = _payload(tmp_path / kind)
+        marker = workspace.submit(payload, "jobs")
+        if kind == "ready":
+            marker = _chain(workspace, marker, [("ready", {"reason": "submitted"})])
+        assert marker.job_id == job_id
+        markers.append(marker)
+        shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
+
+    report = workspace.check(repair=True, quarantine_unrepairable=True)
+
+    assert report.findings == ()
+    assert all(marker.path.is_file() for marker in markers)
 
 
 def test_fsck_ignores_missing_terminal_payload(tmp_path: Path) -> None:

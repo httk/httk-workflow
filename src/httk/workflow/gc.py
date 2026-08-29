@@ -17,11 +17,11 @@ is driven by ``policy.retention`` for aged categories: ``journal_days`` and
 means *keep*. A workspace whose operator has said nothing is still tidied of
 things that cannot carry information at all — empty placement
 mirrors, abandoned staging entries, and long-dead request receipts — plus the
-one conditional case: a terminal marker whose payload the operator removed.
+one conditional case: a removable marker whose payload the operator removed.
 
 Everything here is conservative by construction. It never touches the
 quarantine, a sealed transfer bundle, a persistent workdir, a payload beyond
-its aged attempt-control directories, a marker of any job except a terminal
+its aged attempt-control directories, a marker of any job except a removable
 job whose payload directory is absent, a journal segment protected by a current
 marker or non-terminal frame chain, the directory of a manager that is still
 heartbeating, ``runner-builds`` (machine-local rebuildable derived state), or
@@ -70,6 +70,11 @@ TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
 #: reads — or was interrupted, in which case a month is long past the point at
 #: which replaying it against a moved job would be wanted.
 RETIRED_REQUEST_MAXIMUM_AGE_SECONDS = 30 * 24 * 60 * 60
+#: Marker kinds whose absent payload is an operator removal. These markers are
+#: quiescent and unowned by any manager, so no manager can still be acting on a
+#: missing payload; ``ready`` may retain historical attempt identifiers after a
+#: claim is released or retried.
+REMOVABLE_KINDS = TERMINAL_KINDS | {"submitted", "ready"}
 #: Every category a report carries, in the order a collection performs them.
 GC_CATEGORIES = (
     "attempt_control",
@@ -141,7 +146,7 @@ class GcReport:
     :param collected_at: Timestamp at which the report was produced.
     :param retention: Retention settings used for the collection.
     :param categories: Results for each collection category.
-    :param removed_jobs: Job keys whose terminal markers were removed.
+    :param removed_jobs: Job keys whose removable markers were removed.
     :param record_ref: Journal reference for the collection record, if written.
     :param skipped: Categories or reasons skipped during collection.
     :param skipped_foreign: Foreign entries skipped by category.
@@ -668,7 +673,7 @@ class _Collection:
         return parents
 
     def collect_removed_jobs(self) -> None:
-        """Collect terminal markers whose complete payload was removed.
+        """Collect removable markers whose complete payload was removed.
 
         A non-terminal parent keeps a referenced child marker alive until the
         parent is terminal, because the parent may still need to observe that
@@ -689,7 +694,7 @@ class _Collection:
             return
         candidates: list[tuple[Marker, Path]] = []
         for marker in self.markers():
-            if marker.kind not in TERMINAL_KINDS:
+            if marker.kind not in REMOVABLE_KINDS:
                 continue
             payload = self.workspace.payload_path(marker.placement, marker.job_key)
             if not payload.exists():
@@ -706,7 +711,7 @@ class _Collection:
             return
 
         self._markers = list(self.workspace.scan_markers(STATE_KINDS))
-        rescanned = {marker.path: marker for marker in self._markers if marker.kind in TERMINAL_KINDS}
+        rescanned = {marker.path: marker for marker in self._markers if marker.kind in REMOVABLE_KINDS}
         candidates = [
             (
                 rescanned[marker.path],
@@ -1110,7 +1115,8 @@ def collect_garbage(
     the categories that cannot carry information — empty placement mirrors,
     staging entries abandoned for a day, and month-old request leftovers,
     whether claimed by a manager that is gone or explicitly retired — plus
-    ``removed_jobs``, which is collected whatever the policy says.
+    ``removed_jobs``, which collects terminal and quiescent, unowned markers
+    whose payload was removed, whatever the policy says.
 
     With *dry_run* the workspace is not touched at all and the report describes
     what a real run would have removed. *now* overrides the moment every age is

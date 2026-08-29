@@ -185,7 +185,11 @@ def test_the_heartbeat_fires_during_discovery_of_a_large_flat_directory(tmp_path
 
 def test_a_tick_never_opens_the_terminal_kind_directories(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
-    _touch_marker(workspace, "submitted", "project/active")
+    active_key = _touch_marker(workspace, "submitted", "project/active")
+    # Keep the synthetic active marker through the manager's startup
+    # always-safe collection; the scheduling scan itself still needs no
+    # job.json to exercise its directory walk.
+    (workspace.root / "project" / "active" / active_key).mkdir(parents=True)
     for kind in TERMINAL_KINDS:
         for index in range(5):
             _touch_marker(workspace, kind, f"project/done/{index:02d}")
@@ -194,13 +198,14 @@ def test_a_tick_never_opens_the_terminal_kind_directories(tmp_path: Path, monkey
     with TaskManager(workspace, pools=("nothing-runs-here",), heartbeat_interval=600.0) as manager:
         spy.paths.clear()
         manager.tick()
+        tick_paths = tuple(spy.paths)
 
     separator = os.sep
     for kind in TERMINAL_KINDS:
         needle = f"{separator}state{separator}{kind}{separator}"
-        assert not any(needle in path for path in spy.paths), f"a tick opened the {kind} tree"
+        assert not any(needle in path for path in tick_paths), f"a tick opened the {kind} tree"
     # The spy is wired: the tick did open the one active tree it owns work in.
-    assert any(f"{separator}state{separator}submitted{separator}" in path for path in spy.paths)
+    assert any(f"{separator}state{separator}submitted{separator}" in path for path in tick_paths)
 
 
 # ---------------------------------------------------------------------------

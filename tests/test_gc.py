@@ -308,17 +308,92 @@ def test_existing_terminal_payload_is_not_a_removed_job_candidate(tmp_path: Path
     assert payload.is_dir()
 
 
-def test_non_terminal_marker_without_payload_is_not_collected(tmp_path: Path) -> None:
+def test_removed_submitted_and_ready_jobs_are_collected(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    markers: list[Marker] = []
+    for name in ("submitted", "ready"):
+        payload, job_id = _payload(tmp_path / "source", name)
+        marker = workspace.submit(payload, "jobs")
+        if name == "ready":
+            with workspace.open_journal_writer() as writer:
+                marker = workspace.transition(writer, marker, "ready", {"reason": "submitted"})
+        assert marker.job_id == job_id
+        markers.append(marker)
+        shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
+
+    workspace.set_policy({"visibility_deadline_seconds": 0.01})
+    report = workspace.collect_garbage()
+    category = report.category("removed_jobs")
+    assert category.candidates == 2 and category.removed == 2
+    assert report.removed_jobs == tuple(marker.job_key for marker in markers)
+    assert all(not marker.path.exists() for marker in markers)
+
+
+def test_manager_run_idle_collects_removed_submitted_job(tmp_path: Path, monkeypatch) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
     payload, job_id = _payload(tmp_path / "source", "pending")
-    workspace.submit(payload, "jobs")
-    marker = workspace.find_marker_by_id(job_id)
-    assert marker is not None
+    marker = workspace.submit(payload, "jobs")
+    shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
+
+    def stop_after_start(self, *, poll_interval, drain_timeout):
+        assert workspace.find_marker_by_id(job_id) is None
+
+    monkeypatch.setattr(TaskManager, "serve", stop_after_start)
+    context = CLIContext("httk", tmp_path)
+    assert command(["manager", "run", "--workspace", str(workspace.root), "--by-path", "--idle"], context) == 0
+
+
+@pytest.mark.parametrize("kind", ("claimed", "waiting", "paused"))
+def test_non_terminal_marker_without_payload_is_not_collected(kind: str, tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    payload, job_id = _payload(tmp_path / "source", kind)
+    marker = workspace.submit(payload, "jobs")
+    with workspace.open_journal_writer() as writer:
+        marker = workspace.transition(writer, marker, kind, {})
     shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
 
     report = workspace.collect_garbage()
     assert report.category("removed_jobs").candidates == 0
     assert workspace.find_marker_by_id(job_id) is not None
+
+
+def test_ready_marker_claimed_between_selection_and_unlink_is_kept(tmp_path: Path, monkeypatch) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
+    payload, job_id = _payload(tmp_path / "source", "racing")
+    marker = workspace.submit(payload, "jobs")
+    with workspace.open_journal_writer() as writer:
+        marker = workspace.transition(writer, marker, "ready", {"reason": "submitted"})
+    shutil.rmtree(workspace.payload_path(marker.placement, marker.job_key))
+
+    new_ready: Marker | None = None
+
+    def claim_during_visibility_wait(paths, *, deadline_seconds):
+        nonlocal new_ready
+        absent = tuple(paths)
+        with workspace.open_journal_writer() as writer:
+            claimed = workspace.transition(writer, marker, "claimed", {"attempt_id": str(uuid.uuid4())})
+            new_ready = workspace.transition(
+                writer,
+                claimed,
+                "ready",
+                {"attempt_id": str(uuid.uuid4()), "reason": "retry"},
+            )
+        assert not marker.path.exists()
+        assert new_ready.path.is_file()
+        return absent
+
+    monkeypatch.setattr(gc_module, "wait_for_paths", claim_during_visibility_wait)
+    report = workspace.collect_garbage()
+
+    assert report.category("removed_jobs").candidates == 0
+    assert report.removed_jobs == ()
+    current = workspace.find_marker_by_id(job_id)
+    assert current is not None and current.kind == "ready"
+    assert new_ready is not None
+    assert current.generation == new_ready.generation > marker.generation
+    assert current.path == new_ready.path and current.path.is_file()
+    assert current.path != marker.path
+    assert not workspace.payload_path(current.placement, current.job_key).exists()
 
 
 def test_removed_join_child_is_kept_until_its_non_terminal_parent_is_terminal(tmp_path: Path) -> None:

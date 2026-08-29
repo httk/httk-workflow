@@ -565,11 +565,16 @@ path. It MUST NOT create a second marker and later delete the first. Therefore:
 
 Outside the explicitly recoverable `relocating` and `transferring` states, a
 marker without its payload at the mirrored placement is corruption, except for
-the terminal-for-scheduling kinds `succeeded`, `failed`, and `cancelled`. A
-terminal marker without its payload means that an operator removed the finished
-job; garbage collection removes that orphaned marker. A payload directory
-without a marker is unsubmitted temporary/orphan data, not a queued job, unless
-it is a sealed detached bundle containing
+the removable kinds `succeeded`, `failed`, `cancelled`, `submitted`, and
+`ready`. These markers are quiescent and unowned by any manager. A terminal
+marker without its payload means that an operator removed the finished job. A
+`submitted` marker has never been claimed; a `ready` marker may be the result of
+a released or retried claim and retain attempt identifiers, but has no current
+manager owner. Garbage collection removes these orphaned markers. A
+claimed, running, committing, cancelling, waiting, or paused marker may still
+carry scheduling or manager-owned attempt state, so its missing payload remains
+corruption and is not collected. A payload directory without a marker is
+unsubmitted temporary/orphan data, not a queued job, unless it is a sealed detached bundle containing
 `.httk-transfer/manifest.json` and its marker.
 
 ### State-marker rename
@@ -2594,7 +2599,7 @@ collector MUST NOT prune a category whose limit is unlimited. Thus
 `trash_days` default to one day.
 
 These always-safe categories are exempt because the entries in them cannot carry
-information, plus the one conditional case of a terminal marker whose payload
+information, plus the one conditional case of a removable marker whose payload
 the operator removed; they are collected whatever `policy.retention` says.
 Every manager runs these categories after attaching; at clean exit it runs the
 full policy-gated collection. `workspace gc` also collects them:
@@ -2608,8 +2613,9 @@ full policy-gated collection. `workspace gc` also collects them:
 - a request in `.httk-workspace/requests/retired/`, and its `.retirement`
   record, more than 30 days old. A retired request was already decided about
   and is never rescanned, so it is evidence for an operator and nothing else.
-- a terminal marker whose complete payload directory is absent. It is removed
-  as an operator-requested job removal, except when a non-terminal parent's
+- a removable marker (`succeeded`, `failed`, `cancelled`, `submitted`, or
+  `ready`) whose complete payload directory is absent. It is removed as an
+  operator-requested job removal, except when a non-terminal parent's
   current `state.join.children[*].job_id` references that job; an unreadable
   non-terminal state frame skips this category conservatively. The final
   parent/`committing` check is a TOCTOU window of unbounded length in principle

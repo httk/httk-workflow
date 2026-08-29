@@ -22,8 +22,9 @@ from typing import TYPE_CHECKING, Any
 
 from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
 from .errors import WorkflowError
+from .gc import REMOVABLE_KINDS
 from .journal import JournalFrame, JournalWriter, iter_journal_frames, verify_record
-from .models import STATE_KINDS, TERMINAL_KINDS, Marker
+from .models import STATE_KINDS, Marker
 from .workspace import MarkerFault
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
@@ -453,7 +454,7 @@ def _inspect(workspace: "Workspace", marker: Marker) -> tuple[str, str] | None:
         mismatch = _identity_problem(workspace, marker, verification.frame)
         if mismatch is not None:
             return "identity_mismatch", mismatch
-    if marker.kind not in TERMINAL_KINDS | {"relocating", "transferring"}:
+    if marker.kind not in REMOVABLE_KINDS | {"relocating", "transferring"}:
         payload = workspace.payload_path(marker.placement, marker.job_key)
         if wait_for_paths((payload,), deadline_seconds=workspace.visibility_deadline):
             return "payload_missing", f"marker payload directory is absent: {payload}"

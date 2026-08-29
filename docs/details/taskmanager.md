@@ -203,9 +203,10 @@ httk workspace gc WORKSPACE
 
 It is safe to run against a live workspace: a manager that is still
 heartbeating keeps its own directory and every journal segment it wrote, no
-non-terminal marker or payload is touched beyond the aged attempt-control
-directories of terminal jobs; GC may remove a terminal marker whose payload
-the operator removed. Pruning an empty placement mirror that a transition is
+`claimed`, `running`, `committing`, `cancelling`, `waiting`, or `paused` marker
+or payload is touched beyond the aged attempt-control directories of quiescent
+jobs; GC may remove a finished marker or a marker for a job that is quiescent
+and unowned by any manager when its payload was removed. Pruning an empty placement mirror that a transition is
 recreating underneath is an ordinary outcome rather than an error. Every
 segment in a non-terminal job's current frame chain is protected; terminal jobs
 protect only their current segment. A `null` or
@@ -228,11 +229,11 @@ logged rather than allowed to disturb scheduling. Keep the interval long: a
 collection walks the state tree and the journal directory, which is work the
 scheduling passes do not need done often.
 
-To remove a finished (`succeeded`, `failed`, or `cancelled`) job, remove the
-payload directory named by `job show` with `rm -r`, then run
-`httk workspace gc WORKSPACE`, or let a manager started with
-`--gc-interval` perform it. Cancel a non-terminal job first with `job request
-cancel`, and remove children only when their parent is terminal: GC's join
+To remove a finished (`succeeded`, `failed`, or `cancelled`) or a `submitted` or
+`ready` job that is quiescent and unowned by any manager, remove the payload
+directory named by `job show` with `rm -r`, then run `httk workspace gc WORKSPACE`, or let a manager started
+with `--gc-interval` perform it. A job in any other state must be cancelled
+first with `job request cancel`, and remove children only when their parent is terminal: GC's join
 guard is best-effort, not a lock, and a parent that publishes a join during the
 unbounded TOCTOU window before unlinking may observe a missing child and fail
 or stall. This is a scheduling-correctness consequence, not payload data loss.
@@ -699,8 +700,10 @@ verifies and whose job, kind, and generation agree with the marker name. Each
 problem is reported with a stable code: `missing_segment`, `short_read`,
 `checksum_mismatch`, `reference_mismatch`, `identity_mismatch`,
 `unparseable_name`, `payload_missing`, and their siblings. `payload_missing`
-means a non-terminal marker has no payload; it is always reported and is never
-repaired or quarantined. Without `--repair` nothing is written.
+applies to `claimed`, `running`, `committing`, `cancelling`, `waiting`, and
+`paused` markers with no payload; it is always reported and is never repaired
+or quarantined. `submitted` and `ready` markers with no payload are
+collectable instead. Without `--repair` nothing is written.
 The command exits `0` when the workspace is clean or everything found was
 repaired, and `1` when something is left for an operator.
 Fsck also performs a dry-run count of always-safe leftovers and reports the
