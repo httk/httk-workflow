@@ -112,6 +112,9 @@ $ httk job show silicon
 $ httk job why silicon
 ```
 
+The job commands also accept a path inside the workspace, such as `jobs` or
+`jobs/silicon--...`.
+
 Any job UUID, complete `tag--uuid` key, or unique prefix of either names a job.
 `job show` describes it from its authoritative state, and `job why` explains a job
 that is *not* progressing — an unmet capability, a paused job, no manager

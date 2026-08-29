@@ -3,11 +3,12 @@
 import dataclasses
 import json
 import os
+import shutil
 import socket
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from httk.core.cli import CLIContext
@@ -28,6 +29,8 @@ from httk.workflow.introspection import (
     render_frames,
     render_job,
     resolve_job,
+    resolve_job_selector,
+    resolve_job_selectors,
 )
 from httk.workflow.manifests import MAINTENANCE_LOCK_FILE
 from httk.workflow.workflow_cli import command
@@ -408,6 +411,60 @@ def test_log_renders_every_transition_oldest_first(tmp_path: Path, capsys) -> No
     payload_json = json.loads(capsys.readouterr().out)[0]
     assert payload_json["format"] == "httk-workflow-job-history"
     assert [frame["kind"] for frame in payload_json["frames"]] == ["committing", "succeeded"]
+
+
+def test_job_selector_paths_expand_nested_placements_and_deduplicate(tmp_path: Path, capsys) -> None:
+    workspace = _workspace(tmp_path)
+    payload, first_id = _payload(tmp_path / "source-first", _THREE_STEP_RUNNER)
+    workspace.submit(payload, "jobs/silicon")
+    payload, second_id = _payload(tmp_path / "source-second", _THREE_STEP_RUNNER)
+    workspace.submit(payload, "jobs/nested/germanium")
+    payload, third_id = _payload(tmp_path / "source-third", _THREE_STEP_RUNNER)
+    workspace.submit(payload, "other")
+    cwd = workspace.root
+
+    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs/silicon"])] == [first_id]
+    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs"])] == [second_id, first_id]
+    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs/silicon*"])] == [first_id]
+    assert [marker.job_id for marker in resolve_job_selector(workspace, cwd, "jobs/**")] == [second_id, first_id]
+    assert [marker.job_id for marker in resolve_job_selectors(workspace, cwd, ["jobs", "jobs/silicon"])] == [
+        second_id,
+        first_id,
+    ]
+    assert third_id not in {first_id, second_id}
+
+    assert command(["job", "show", "jobs/sil*"], CLIContext("httk", workspace.root)) == 0
+    assert f"job example--{first_id}" in capsys.readouterr().out
+
+
+def test_job_selector_paths_report_outside_or_missing_jobs(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    with pytest.raises(ValueError, match="is not inside workspace"):
+        resolve_job_selectors(workspace, tmp_path, [str(outside)])
+    with pytest.raises(ValueError, match="no path matches 'missing\\*'"):
+        resolve_job_selectors(workspace, workspace.root, ["missing*"])
+
+    orphan = workspace.root / "jobs" / "orphan"
+    orphan.mkdir(parents=True)
+    payload, _ = _payload(tmp_path / "orphan-source", _THREE_STEP_RUNNER)
+    shutil.copy2(payload / "job.json", orphan / "job.json")
+    with pytest.raises(ValueError, match="job directory without a state marker"):
+        resolve_job_selectors(workspace, tmp_path, [str(orphan)])
+    with pytest.raises(ValueError, match="is a file, not a job directory"):
+        resolve_job_selectors(workspace, workspace.root, [str(orphan / "job.json")])
+
+
+def test_existing_path_wins_over_tag_prefix(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER)
+    workspace.submit(payload, "silicon")
+
+    marker = resolve_job_selectors(workspace, workspace.root, ["silicon"])[0]
+    assert marker.job_id == job_id
+    assert marker.placement == PurePosixPath("silicon")
 
 
 def test_log_reports_an_unreadable_frame_and_keeps_what_exists(tmp_path: Path) -> None:
@@ -797,6 +854,18 @@ def test_debug_drives_a_three_step_runner_in_the_foreground(tmp_path: Path) -> N
         assert f"runner is working on {step}" in block
         assert f"diagnostic from {step}" in block
         assert f"step={step}" in text
+
+
+def test_debug_treats_an_in_workspace_job_directory_as_existing_job(tmp_path: Path) -> None:
+    workspace = _workspace(tmp_path)
+    payload, job_id = _payload(tmp_path / "source", _THREE_STEP_RUNNER)
+    marker = workspace.submit(payload, "project/debug-path")
+    target = workspace.payload_path(marker.placement, marker.job_key)
+
+    outcome = debug_job(workspace, str(target), emit=lambda line: None)
+
+    assert outcome.job_id == job_id
+    assert outcome.state == "succeeded"
 
 
 def test_debug_admits_declared_resources_for_every_job_step(tmp_path: Path) -> None:

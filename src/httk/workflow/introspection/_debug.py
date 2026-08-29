@@ -20,6 +20,7 @@ from ._reading import (
     _job_of,
     _state_of,
     resolve_job,
+    resolve_job_selectors,
 )
 
 DEBUG_EXIT_SUCCEEDED = 0
@@ -144,8 +145,21 @@ def debug_job(
     timeout: float = 3600.0,
     poll_interval: float = 0.05,
     emit: Callable[[str], None] | None = None,
+    cwd: Path | None = None,
 ) -> DebugOutcome:
-    """Drive one job to a terminal state in the foreground."""
+    """Drive one job to a terminal state in the foreground.
+
+    :param workspace: Run the job in this workspace.
+    :param target: Identify an existing job or provide a payload directory.
+    :param placement: Place a newly submitted payload here.
+    :param step: Override the initial step of a newly submitted payload.
+    :param follow_children: Drive children of a waiting job too.
+    :param timeout: Stop after this many seconds.
+    :param poll_interval: Delay between foreground observations.
+    :param emit: Write debug lines with this callback.
+    :param cwd: Resolve relative job paths from this directory.
+    :return: The final state and exit status of the debugged job.
+    """
 
     write = emit if emit is not None else _print_line
     lock = read_maintenance_lock(workspace)
@@ -154,29 +168,44 @@ def debug_job(
             f"the workspace maintenance lock held by {lock.describe()} pauses every launch; "
             "release it with 'httk workspace unlock WORKSPACE' first"
         )
+    base = (cwd if cwd is not None else Path.cwd()).resolve()
     source = Path(target).expanduser()
-    if (source / "job.json").is_file():
+    candidate = source if source.is_absolute() else base / source
+    payload_source: Path | None = None
+    marker: Marker | None = None
+    if any(character in target for character in "*?[") or (
+        candidate.exists() and candidate.resolve().is_relative_to(workspace.root.resolve())
+    ):
+        markers = resolve_job_selectors(workspace, base, [target])
+        if len(markers) != 1:
+            raise ValueError("job debug takes one job")
+        marker = markers[0]
+    elif candidate.is_dir() and (candidate / "job.json").is_file():
+        payload_source = candidate
+    if payload_source is not None:
         staged: Path | None = None
         try:
             if step is not None:
-                staged = _stage_payload_with_step(source, step)
+                staged = _stage_payload_with_step(payload_source, step)
                 marker = workspace.submit(staged, placement)
             else:
-                marker = workspace.submit(source, placement)
+                marker = workspace.submit(payload_source, placement)
         finally:
             if staged is not None:
                 shutil.rmtree(staged.parent, ignore_errors=True)
         write(f"[debug] submitted {marker.job_key} at {marker.placement.as_posix()}")
         if step is not None:
             write(f"[debug] initial step overridden to {step}")
-    else:
-        marker = resolve_job(workspace, target)
+    if payload_source is None:
+        if marker is None:
+            marker = resolve_job(workspace, target)
         if step is not None:
             raise ValueError(
                 f"job {marker.job_key} already has a history, so its step cannot be overridden here; "
                 "publish an operator request instead: "
                 "'httk job request override_step --workspace WORKSPACE --step STEP --operator NAME --reason WHY JOB'"
             )
+    assert marker is not None
     final = _drive(
         workspace,
         marker,

@@ -159,7 +159,7 @@ its job or store runner target.
 | --- | --- | --- |
 | `job new [OPTIONS]` | scaffold and submit jobs from a workflow | `--workspace`, `--workflow` or `--workflow-dir` (one required), `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
 | `job submit [OPTIONS] SOURCE...` | submit prepared payload directories | `--workspace`, `--placement` (required), `--move` |
-| `job request ACTION [OPTIONS] JOB_ID...` | publish one request per job ID (remote: over the adapter) | `--workspace`, optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
+| `job request ACTION [OPTIONS] JOB_ID...` | publish one request per job selector (remote: over the adapter) | `--workspace`, optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
 | `job list [OPTIONS]` | list jobs as a cheap table | `--workspace`, `--kind`, `--placement`, `--json` |
 | `job show [OPTIONS] JOB...` | describe jobs from their state | `--workspace`, `--json` |
 | `job log [OPTIONS] JOB...` | print transition histories | `--workspace`, `--limit`, `--json` |
@@ -182,7 +182,12 @@ pause), not specifically this command's published request, may satisfy it.
 Terminal, retired, quarantined, or timed-out requests exit 1. `--timeout
 SECONDS` requires `--wait`; timed-out requests remain published.
 
-`JOB` is a job UUID, a `tag--uuid` job key, or any unique prefix of either.
+`JOB` is a job UUID, a `tag--uuid` job key, any unique prefix of either, or a
+path inside the workspace. A job directory such as `jobs/silicon--UUID` names
+one job; a directory such as `jobs` names every live job below it, including
+nested placements; and a glob such as `jobs/silicon*` expands to matching
+entries. Relative paths are resolved from the command's current working
+directory, and paths must remain inside the selected workspace.
 
 Besides the per-state claim preconditions, `job why` also folds in, where they
 apply: a **runner-allowlist refusal** when a live manager's `runner_modules` or
@@ -474,15 +479,20 @@ which stay in this filesystem follows entirely from where the two are bound:
 
 | Direction | What happens | `--job` |
 | --- | --- | --- |
-| local → remote | each named job is detached, its sealed bundle pushed to the remote, and imported there | honored; required |
-| remote → local | the selected jobs are offered, pulled home, imported, and their sources retired | honored; optional sweep |
-| local → local | each named job is detached from the source and imported into the destination directly, in this filesystem | honored; required |
-| remote → remote | the client relays the selected offers through local staging and pushes them to the destination (v1; a direct source-to-destination path is deferred) | honored; optional sweep |
+| local → remote | each named job is detached, its sealed bundle pushed to the remote, and imported there | UUIDs, prefixes, paths, or globs; required |
+| remote → local | the selected jobs are offered, pulled home, imported, and their sources retired | canonical UUIDs only; optional sweep |
+| local → local | each named job is detached from the source and imported into the destination directly, in this filesystem | UUIDs, prefixes, paths, or globs; required |
+| remote → remote | the client relays the selected offers through local staging and pushes them to the destination (v1; a direct source-to-destination path is deferred) | canonical UUIDs only; optional sweep |
 
 `--state` (repeatable, default `succeeded` and `failed`) chooses which finished
 kinds a sweep moves, `--placement` restricts it to one subtree,
 `--destination-placement` lands the jobs somewhere other than the placement they
 had, and `--adapter-timeout` bounds every adapter operation the move runs.
+For a local source, `--job` accepts a UUID, tag/key prefix, job directory,
+placement directory, or glob such as `jobs/silicon*`; paths and globs are
+resolved from the current working directory and must be inside that source
+workspace. A remote source accepts only canonical job UUIDs, because its
+selectors are resolved on the remote machine.
 When `--job` is supplied, each named job must be eligible before any job is
 sealed; by-id moves accept any quiescent state, while an explicit `--state`
 remains an additional filter. With no `--job`, the sweep remains skip-tolerant
@@ -640,7 +650,8 @@ httk job why --workspace WORKSPACE JOB
 httk job debug --workspace WORKSPACE --follow-children PAYLOAD_OR_JOB
 ```
 
-`JOB` is a job UUID, a `tag--uuid` job key, or any unique prefix of either, and
+`JOB` is a job UUID, a `tag--uuid` job key, any unique prefix of either, or a
+path inside the workspace (for example `jobs` or `jobs/silicon*`), and
 each command takes `--json`. `job debug` exits `0` on success, `3` on failure, and
 `4` when the job stopped without finishing. See
 {doc}`taskmanager` for what each command reports.

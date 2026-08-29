@@ -7,13 +7,14 @@ from collections.abc import Mapping, Sequence
 from contextlib import redirect_stdout
 from copy import copy
 from io import StringIO
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 from .._runner_builds import workspace_build_command
 from ..adapters import probe_remote_workspace
 from ..adapters import run_adapter as read_adapter
 from ..errors import ResolutionMiss, WorkflowError
-from ..models import QUIESCENT_KINDS, WORKSPACE_DIRECTORY, JobDefinition
+from ..introspection import JobSelectorResolver
+from ..models import QUIESCENT_KINDS, WORKSPACE_DIRECTORY, JobDefinition, canonical_uuid, parse_job_key
 from ..packages import read_build_spec
 from ..precheck import environment_findings
 from ..transfers import DEFAULT_OFFER_STATES, TransferCandidate, offer_transfers, select_transfer_jobs
@@ -469,6 +470,32 @@ def _environment_advisory(
     if strict:
         raise ValueError(f"strict environment precheck blocked transfer: {message}")
     print(f"warning: {message}", file=sys.stderr)
+
+
+def _resolve_transfer_jobs(workspace: Workspace, cwd: Path, selectors: Sequence[str]) -> list[str]:
+    """Resolve public transfer selectors, retaining exact IDs for resumptions."""
+
+    resolver = JobSelectorResolver(workspace, cwd)
+    job_ids: list[str] = []
+    seen: set[str] = set()
+    for selector in selectors:
+        try:
+            markers = resolver.resolve_one(selector)
+        except ValueError as exc:
+            if str(exc) != f"no job in {workspace.root} matches {selector!r}":
+                raise
+            try:
+                _, job_id = parse_job_key(selector)
+            except (WorkflowError, ValueError, TypeError):
+                raise exc from None
+            resolved_ids = [job_id]
+        else:
+            resolved_ids = [marker.job_id for marker in markers]
+        for job_id in resolved_ids:
+            if job_id not in seen:
+                seen.add(job_id)
+                job_ids.append(job_id)
+    return job_ids
 
 
 def _remote_workspace_settings(target: Any, name: str, *, timeout: float | None) -> dict[str, object] | None:
@@ -1056,6 +1083,16 @@ def _run_transfer_verb(
     destination_local = destination_binding.remote == LOCAL_REMOTE
     timeout = arguments.adapter_timeout
 
+    if source_local:
+        assert source_binding.path is not None
+        arguments.jobs = _resolve_transfer_jobs(Workspace(source_binding.path), context.cwd, arguments.jobs)
+    else:
+        for selector in arguments.jobs:
+            try:
+                canonical_uuid(selector)
+            except (WorkflowError, ValueError, TypeError):
+                raise ValueError("remote source requires canonical job ids; path and prefix selectors are not allowed")
+
     if source_local and not destination_local:
         assert source_binding.path is not None
         target = resolve_remote(destination_binding.remote, project=context.cwd)
@@ -1213,7 +1250,7 @@ def build_transfer_parser(
         default=[],
         dest="jobs",
         metavar="JOB_ID",
-        help="a job to move (repeatable)",
+        help="a local-source job UUID, unique prefix, or path; remote sources require canonical job IDs (repeatable)",
     )
     transfer.add_argument(
         "--state",

@@ -141,6 +141,23 @@ def test_job_request_accepts_tag_prefix_selector(tmp_path: Path, capsys) -> None
     assert request["job_id"] == job_id
 
 
+def test_job_request_accepts_a_workspace_directory_selector(tmp_path: Path, capsys) -> None:
+    workspace, workspace_name = _new_workspace(tmp_path)
+    job_ids = []
+    for tag, placement in (("first", "jobs/first"), ("second", "jobs/nested/second")):
+        payload, job_id = _payload(tmp_path / "source", tag)
+        workspace.submit(payload, placement)
+        job_ids.append(job_id)
+
+    selector = str(workspace.root / "jobs")
+    assert command(_request_args(workspace_name, selector, action="cancel"), _context(tmp_path)) == 0
+    capsys.readouterr()
+    requests = [
+        json.loads(path.read_text(encoding="utf-8")) for path in (workspace.control / "requests" / "ready").iterdir()
+    ]
+    assert {request["job_id"] for request in requests} == set(job_ids)
+
+
 def test_job_request_uses_default_workspace_with_one_job_id(tmp_path: Path, capsys) -> None:
     workspace = Workspace.default()
     payload, job_id = _payload(tmp_path / "source", "default-workspace")

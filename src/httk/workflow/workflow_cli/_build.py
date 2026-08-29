@@ -12,8 +12,8 @@ from httk.core.cli import CLIContext
 
 from .._runner_builds import register_build
 from ..errors import FormatError
-from ..introspection import resolve_job
-from ..packages import read_build_spec, source_tree_digest
+from ..introspection import JobSelectorResolver
+from ..packages import MANIFEST_NAME, read_build_spec, source_tree_digest
 from ..scaffold import resolve_workflow
 from ..workspace import Workspace
 from ._common import _ERRORS, _add_by_path_argument, _leaf, _local_root
@@ -64,8 +64,43 @@ def _list_builds(workspace: Workspace, *, as_json: bool) -> int:
     return 0
 
 
-def _resolve_target(workspace: Workspace, target: str, *, base: Path) -> tuple[Path, PurePosixPath, BuildSpec, str]:
+def _resolve_job_target(
+    workspace: Workspace,
+    target: str,
+    *,
+    base: Path,
+    resolver: JobSelectorResolver | None = None,
+) -> tuple[Path, PurePosixPath, BuildSpec, str]:
+    """Resolve a job target and return its pinned workspace runner."""
+
+    selected = resolver if resolver is not None else JobSelectorResolver(workspace, base)
+    markers = selected.resolve_one(target)
+    if len(markers) != 1:
+        raise ValueError("workflow build job target must resolve to one job")
+    marker = markers[0]
+    job = workspace.load_job(marker)
+    if job.runner_source != "workspace":
+        raise ValueError(f"job {target} does not reference a workspace workflow package")
+    store_path = workspace.runner_store_path(job.runner_path)
+    spec = read_build_spec(store_path)
+    if spec is None:
+        raise ValueError(f"target {job.runner_path.as_posix()} has no [workflow.build] section")
+    if job.runner_sha256 is None:
+        raise ValueError(f"job {target} has no pinned workspace runner digest")
+    return store_path, job.runner_path, spec, job.runner_sha256
+
+
+def _resolve_target(
+    workspace: Workspace,
+    target: str,
+    *,
+    base: Path,
+    resolver: JobSelectorResolver | None = None,
+) -> tuple[Path, PurePosixPath, BuildSpec, str]:
     raw_path = Path(target).expanduser()
+    candidate = raw_path if raw_path.is_absolute() else base / raw_path
+    if any(character in target for character in "*?["):
+        return _resolve_job_target(workspace, target, base=base, resolver=resolver)
     path_like = (
         raw_path.is_absolute()
         or target in {".", ".."}
@@ -77,32 +112,40 @@ def _resolve_target(workspace: Workspace, target: str, *, base: Path) -> tuple[P
         path = raw_path if raw_path.is_absolute() else base / raw_path
         if not path.is_dir():
             raise ValueError(f"workflow package directory does not exist: {path}")
-        try:
-            spec = read_build_spec(path)
-        except ValueError as exc:
-            raise ValueError(f"target package is malformed: {exc}") from exc
-        if spec is None:
-            raise ValueError(f"target {path} has no [workflow.build] section")
-        resolved = resolve_workflow(path)
-        if resolved.directory is None:
-            raise ValueError(f"target {path} is not a workflow package directory")
-        reference = workspace.publish_runner(path, name=resolved.store_name)
-        store_relative = PurePosixPath(str(reference["path"]))
-        return workspace.runner_store_path(store_relative), store_relative, spec, str(reference["sha256"])
+        if (path / MANIFEST_NAME).is_file():
+            try:
+                spec = read_build_spec(path)
+            except ValueError as exc:
+                raise ValueError(f"target package is malformed: {exc}") from exc
+            if spec is None:
+                raise ValueError(f"target {path} has no [workflow.build] section")
+            resolved = resolve_workflow(path)
+            if resolved.directory is None:
+                raise ValueError(f"target {path} is not a workflow package directory")
+            reference = workspace.publish_runner(path, name=resolved.store_name)
+            store_relative = PurePosixPath(str(reference["path"]))
+            return workspace.runner_store_path(store_relative), store_relative, spec, str(reference["sha256"])
+        if candidate.resolve().is_relative_to(workspace.root.resolve()):
+            return _resolve_job_target(workspace, target, base=base, resolver=resolver)
+        raise ValueError(f"target {path} has no [workflow.build] section")
 
     try:
-        store_path = workspace.runner_store_path(target)
+        store_candidate = workspace.runner_store_path(target)
     except FormatError:
-        store_path = None
-    if store_path is not None and store_path.is_dir():
-        spec = read_build_spec(store_path)
+        store_candidate = None
+    if store_candidate is not None and store_candidate.is_dir():
+        spec = read_build_spec(store_candidate)
         if spec is None:
             raise ValueError(f"target {target} has no [workflow.build] section")
         relative = PurePosixPath(target)
-        return store_path, relative, spec, source_tree_digest(store_path)
+        return store_candidate, relative, spec, source_tree_digest(store_candidate)
 
     try:
-        marker = resolve_job(workspace, target)
+        selected = resolver if resolver is not None else JobSelectorResolver(workspace, base)
+        markers = selected.resolve_one(target)
+        if len(markers) != 1:
+            raise ValueError("workflow build job target must resolve to one job")
+        marker = markers[0]
     except ValueError:
         raise ValueError(f"no workflow package or workspace runner matches {target!r}") from None
     job = workspace.load_job(marker)
@@ -144,13 +187,14 @@ def handle_build(arguments: argparse.Namespace, context: CLIContext) -> int:
         raise ValueError("workflow build requires at least one TARGET unless --list is given")
     results: list[dict[str, object]] = []
     failed = False
+    resolver = JobSelectorResolver(workspace, Path(context.cwd))
     for target in targets:
         try:
             if arguments.store is not None:
                 store_path, store_relative, spec, source_sha256 = _resolve_store_target(workspace, target)
             else:
                 store_path, store_relative, spec, source_sha256 = _resolve_target(
-                    workspace, target, base=Path(context.cwd)
+                    workspace, target, base=Path(context.cwd), resolver=resolver
                 )
             artifacts = register_build(
                 workspace,

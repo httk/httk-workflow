@@ -18,6 +18,7 @@ from httk.workflow._runner_builds import (
 from httk.workflow.errors import RunnerResolutionError
 from httk.workflow.scaffold import BuildSpec, new_job
 from httk.workflow.workflow_cli import command
+from test_workflow_packages import _package
 
 
 def _script(path: Path, body: str) -> Path:
@@ -289,3 +290,40 @@ def test_manager_reports_runner_not_built_then_uses_registered_artifact(tmp_path
     marker = workspace.find_marker_by_id(second.job_id)
     assert marker is not None and marker.kind == "succeeded"
     assert (workspace.payload_path(marker.placement, marker.job_key) / "run" / "used-artifact").read_text() == "yes"
+
+
+def test_workflow_build_prefers_in_workspace_packages_and_resolves_job_globs(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "build-selector")
+    package = _package(
+        workspace.root / "package",
+        '[workflow]\nid = "tests.build.selector"\n[workflow.runner]\nsteps = ["start"]\n'
+        '[workflow.build]\ncommand = "./build.sh"\nartifacts = ["out"]\n',
+    )
+    (package / "build.sh").write_text("#!/bin/sh\nmkdir -p out\nprintf artifact > out/result\n", encoding="utf-8")
+    (package / "build.sh").chmod(0o755)
+
+    assert command(["build", "--workspace", name, str(package)], context) == 0
+    capsys.readouterr()
+    first = new_job(workspace, package, tag="silicon-one")
+    assert command(["build", "--workspace", name, f"{workspace.root}/jobs/silicon-one*"], context) == 0
+    capsys.readouterr()
+    second = new_job(workspace, package, tag="silicon-two")
+    assert first.job_id != second.job_id
+    assert command(["build", "--workspace", name, f"{workspace.root}/jobs/silicon*"], context) == 1
+    assert "one job" in capsys.readouterr().err
+
+
+def test_in_workspace_package_errors_remain_package_specific(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "build-package-errors")
+    malformed = _package(workspace.root / "malformed")
+    (malformed / "httk_workflow.toml").write_text("[workflow\n", encoding="utf-8")
+    buildless = _package(workspace.root / "buildless")
+
+    assert command(["build", "--workspace", name, str(malformed)], context) == 1
+    assert "target package is malformed" in capsys.readouterr().err
+    assert command(["build", "--workspace", name, str(buildless)], context) == 1
+    assert "has no [workflow.build] section" in capsys.readouterr().err

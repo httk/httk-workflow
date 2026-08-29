@@ -18,7 +18,9 @@ from conftest import register_ws
 from httk.workflow import FormatError, TaskManager, Workspace
 from httk.workflow import transfers as transfers_module
 from httk.workflow._runner_builds import register_build
+from httk.workflow.introspection import resolve_job_selectors
 from httk.workflow.packages import source_tree_digest
+from httk.workflow.registry import WorkspaceBinding
 from httk.workflow.scaffold import BuildSpec, new_job
 from httk.workflow.transfers import (
     TRANSFER_DIRECTORY,
@@ -30,6 +32,7 @@ from httk.workflow.transfers import (
 )
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
+from httk.workflow.workflow_cli._transfer import _resolve_transfer_jobs
 from test_native_java_api import _build_example
 
 
@@ -70,6 +73,37 @@ def _pair(tmp_path: Path) -> tuple[Workspace, Workspace]:
     source = Workspace.initialize(tmp_path / "source")
     destination = Workspace.initialize(tmp_path / "destination")
     return source, destination
+
+
+def test_public_transfer_job_prefix_resolves_to_a_canonical_id(tmp_path: Path) -> None:
+    source = Workspace.initialize(tmp_path / "source")
+    payload, job_id = _payload(tmp_path / "payload", tag="silicon")
+    source.submit(payload, "jobs")
+
+    assert _resolve_transfer_jobs(source, tmp_path, ["silicon"]) == [job_id]
+
+
+def test_transfer_fallback_does_not_treat_an_outside_job_key_path_as_an_id(tmp_path: Path) -> None:
+    source = Workspace.initialize(tmp_path / "source")
+    outside = tmp_path / f"tag--{uuid.uuid4()}"
+    outside.mkdir()
+
+    with pytest.raises(ValueError, match="is not inside workspace"):
+        _resolve_transfer_jobs(source, tmp_path, [str(outside)])
+
+
+def test_remote_transfer_requires_canonical_job_ids_before_forwarding(tmp_path: Path, monkeypatch, capsys) -> None:
+    destination = Workspace.initialize(tmp_path / "destination")
+    bindings = {
+        "cluster:source": WorkspaceBinding("cluster:source", "cluster", None),
+        "destination": WorkspaceBinding("destination", "local", str(destination.root)),
+    }
+    monkeypatch.setattr(transfer_cli, "resolve_workspace", lambda name, project: bindings[name])
+    for selector in ("silicon", "jobs/"):
+        assert (
+            command(["transfer", "--job", selector, "cluster:source", "destination"], CLIContext("httk", tmp_path)) == 2
+        )
+        assert "remote source requires canonical job ids" in capsys.readouterr().err
 
 
 def test_resuming_a_transfer_requires_the_destination_remote_to_match(
@@ -345,6 +379,14 @@ def test_a_detach_interrupted_before_sealing_is_completed_by_recovery(
     assert source.find_marker_by_id(job_id) is None
     fenced = [marker for marker in source.scan_markers(("transferring",)) if marker.job_id == job_id]
     assert len(fenced) == 1
+    target = source.payload_path(fenced[0].placement, fenced[0].job_key)
+    relocated = source.control / "state" / "transferring" / "relocated"
+    relocated.mkdir(parents=True)
+    original_path = fenced[0].path
+    original_path.rename(relocated / original_path.name)
+    found = resolve_job_selectors(source, source.root, [str(target)])[0]
+    assert found.job_id == job_id and found.kind == "transferring"
+    (relocated / original_path.name).rename(original_path)
     monkeypatch.undo()
 
     recovered = source.recover_transfers()

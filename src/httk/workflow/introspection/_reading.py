@@ -1,5 +1,6 @@
 """Authoritative job, marker, state, and journal readers."""
 
+import glob
 import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
@@ -86,6 +87,146 @@ def resolve_job(workspace: Workspace, selector: str) -> Marker:
         candidates = ", ".join(sorted(marker.job_key for marker in matches)[:5])
         raise ValueError(f"job selector {selector!r} matches {len(matches)} jobs: {candidates}")
     return matches[0]
+
+
+def selector_is_path(cwd: Path, selector: str) -> bool:
+    """Return whether *selector* must be interpreted as a local path."""
+
+    return any(character in selector for character in "*?[") or (cwd / selector).exists()
+
+
+def selector_uses_remote_path(cwd: Path, selector: str) -> bool:
+    """Return whether a selector cannot be forwarded to a remote workspace."""
+
+    return "/" in selector or selector_is_path(cwd, selector)
+
+
+class JobSelectorResolver:
+    """Resolve job selectors while sharing one marker scan for a batch."""
+
+    def __init__(self, workspace: Workspace, cwd: Path) -> None:
+        self.workspace = workspace
+        self.cwd = cwd.resolve()
+        self._markers: list[Marker] | None = None
+
+    def _all_markers(self) -> list[Marker]:
+        if self._markers is None:
+            self._markers = list(self.workspace.scan_markers(STATE_KINDS))
+        return self._markers
+
+    def _resolve_id(self, selector: str) -> Marker:
+        markers = self._all_markers()
+        exact = [marker for marker in markers if selector in {marker.job_id, marker.job_key}]
+        if len(exact) > 1:
+            raise WorkspaceCorruptionError(f"job {selector} has more than one state marker")
+        if exact:
+            return exact[0]
+        if not selector:
+            raise ValueError("a job selector cannot be empty")
+        matches = [
+            marker for marker in markers if marker.job_id.startswith(selector) or marker.job_key.startswith(selector)
+        ]
+        if not matches:
+            raise ValueError(f"no job in {self.workspace.root} matches {selector!r}")
+        if len(matches) > 1:
+            candidates = ", ".join(sorted(marker.job_key for marker in matches)[:5])
+            raise ValueError(f"job selector {selector!r} matches {len(matches)} jobs: {candidates}")
+        return matches[0]
+
+    def _resolve_job_definition(self, path: Path, display_path: str) -> list[Marker]:
+        job = JobDefinition.from_path(path)
+        matches = [marker for marker in self._all_markers() if marker.job_id == job.id]
+        if len(matches) > 1:
+            raise WorkspaceCorruptionError(f"job {job.id} has more than one state marker")
+        if not matches:
+            raise ValueError(f"{display_path} is a job directory without a state marker (removed job?)")
+        return matches
+
+    def _resolve_path(self, path_name: str) -> list[Marker]:
+        path = Path(path_name)
+        resolved = (path if path.is_absolute() else self.cwd / path).resolve()
+        root = self.workspace.root.resolve()
+        if not resolved.is_relative_to(root):
+            raise ValueError(f"{path_name} is not inside workspace {root}")
+
+        if resolved.is_file():
+            raise ValueError(f"{path_name} is a file, not a job directory")
+        if not resolved.is_dir():
+            raise ValueError(f"{path_name} is not a job directory or placement directory")
+        job_json = resolved / "job.json"
+        if job_json.is_file():
+            return self._resolve_job_definition(job_json, path_name)
+
+        matches = [
+            marker
+            for marker in self._all_markers()
+            if self.workspace.payload_path(marker.placement, marker.job_key).resolve().is_relative_to(resolved)
+        ]
+        if not matches:
+            raise ValueError(f"no jobs below {path_name}")
+        return sorted(
+            matches,
+            key=lambda marker: str(self.workspace.payload_path(marker.placement, marker.job_key).resolve()),
+        )
+
+    def resolve_one(self, selector: str) -> list[Marker]:
+        """Resolve one selector, expanding a glob or returning matching jobs."""
+
+        if any(character in selector for character in "*?["):
+            paths = sorted(glob.glob(selector, root_dir=self.cwd))
+            if not paths:
+                raise ValueError(f"no path matches {selector!r} below {self.cwd}")
+            markers: list[Marker] = []
+            for path in paths:
+                markers.extend(self._resolve_path(path))
+            return self._deduplicate(markers)
+        if (self.cwd / selector).exists():
+            return self._deduplicate(self._resolve_path(selector))
+        return [self._resolve_id(selector)]
+
+    @staticmethod
+    def _deduplicate(markers: Iterable[Marker]) -> list[Marker]:
+        """Remove repeated jobs while retaining their first expansion order."""
+
+        unique: list[Marker] = []
+        seen: set[str] = set()
+        for marker in markers:
+            if marker.job_id not in seen:
+                seen.add(marker.job_id)
+                unique.append(marker)
+        return unique
+
+
+def resolve_job_selector(workspace: Workspace, cwd: Path, selector: str) -> list[Marker]:
+    """Resolve one job selector relative to *cwd*.
+
+    :param workspace: Provide the jobs and their live state markers.
+    :param cwd: Resolve relative path selectors from this directory.
+    :param selector: Name, prefix, path, or glob naming jobs.
+    :return: The live markers named by the selector, in payload-path order for globs.
+    """
+
+    return JobSelectorResolver(workspace, cwd).resolve_one(selector)
+
+
+def resolve_job_selectors(workspace: Workspace, cwd: Path, selectors: Iterable[str]) -> list[Marker]:
+    """Resolve and deduplicate job selectors relative to *cwd*.
+
+    :param workspace: Provide the jobs and their live state markers.
+    :param cwd: Resolve relative path selectors from this directory.
+    :param selectors: Selectors in the order supplied by the operator.
+    :return: Unique live markers preserving selector and expansion order.
+    """
+
+    resolver = JobSelectorResolver(workspace, cwd)
+    resolved: list[Marker] = []
+    seen: set[str] = set()
+    for selector in selectors:
+        for marker in resolver.resolve_one(selector):
+            if marker.job_id not in seen:
+                seen.add(marker.job_id)
+                resolved.append(marker)
+    return resolved
 
 
 def _state_of(workspace: Workspace, marker: Marker) -> tuple[dict[str, Any], str | None]:

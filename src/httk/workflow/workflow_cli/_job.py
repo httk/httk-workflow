@@ -10,7 +10,13 @@ from ..adapters import (
     resolve_remote,
 )
 from ..configuration import OperatorIdentity, identity_seed, resolve_operator_identity, sign_document, verify_document
-from ..introspection import read_managers
+from ..introspection import (
+    JobSelectorResolver,
+    read_managers,
+    resolve_job,
+    resolve_job_selectors,
+    selector_uses_remote_path,
+)
 from ..models import TERMINAL_KINDS, Marker, ensure_step_known, parse_job_key
 from ._common import *
 from ._common import (
@@ -311,7 +317,7 @@ def add_job_request_arguments(parser: argparse.ArgumentParser) -> None:
         "job_id",
         metavar="JOB_ID",
         nargs="+",
-        help="one or more job UUIDs the request is about",
+        help="one or more job UUIDs, unique prefixes, or paths inside the workspace",
     )
     parser.add_argument(
         "--operator",
@@ -401,10 +407,13 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
     binding, root = _resolve_binding(arguments, context)
     if root is None:
         assert binding is not None and ":" in binding.name
+        for selector in arguments.job_id:
+            if selector_uses_remote_path(context.cwd, selector):
+                raise ValueError("path selectors are resolved on this machine; give job ids for a remote workspace")
         return _request_remote_job(binding, context, arguments, identity)
 
     workspace = Workspace(root, durable=_durable(arguments))
-    envelopes = _build_request_envelopes(workspace, arguments, identity.label)
+    envelopes = _build_request_envelopes(workspace, arguments, identity.label, cwd=context.cwd)
     published: list[tuple[str, Marker, Path]] = []
     for job_id, marker, request in envelopes:
         document = dict(request) if identity.seed_path is None else sign_document(request, seed_path=identity.seed_path)
@@ -419,15 +428,22 @@ def _build_request_envelopes(
     workspace: Workspace,
     arguments: argparse.Namespace,
     operator: str,
+    *,
+    cwd: Path,
+    resolve_paths: bool = True,
 ) -> list[tuple[str, Marker, dict[str, object]]]:
     """Resolve jobs and build unsigned operator request envelopes."""
 
+    markers = (
+        resolve_job_selectors(workspace, cwd, arguments.job_id)
+        if resolve_paths
+        else [resolve_job(workspace, selector) for selector in arguments.job_id]
+    )
     resolved: list[tuple[str, Marker]] = []
-    for selector in arguments.job_id:
-        marker = resolve_job(workspace, selector)
+    for marker in markers:
         if arguments.action == "override_step" and arguments.step is not None:
             _prevalidate_override_step(workspace, marker, arguments.step, force=bool(arguments.force))
-        resolved.append((selector, marker))
+        resolved.append((marker.job_id, marker))
 
     envelopes: list[tuple[str, Marker, dict[str, object]]] = []
     for job_id, marker in resolved:
@@ -759,7 +775,7 @@ def handle_job_request_envelopes(arguments: argparse.Namespace, context: CLICont
     """Build unsigned operator request envelopes for the remote protocol."""
 
     workspace = _protocol_workspace(arguments.workspace, context)
-    envelopes = _build_request_envelopes(workspace, arguments, arguments.operator)
+    envelopes = _build_request_envelopes(workspace, arguments, arguments.operator, cwd=context.cwd, resolve_paths=False)
     print(
         json.dumps(
             {
@@ -953,19 +969,22 @@ def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Describe jobs completely from their authoritative state."""
 
     workspace = Workspace(_local_root(arguments, context, action="show its jobs"), mutable=False)
+    resolver = JobSelectorResolver(workspace, context.cwd)
     reports: list[dict[str, object]] = []
     failed = False
     for job in arguments.jobs:
         try:
-            report = describe_job(workspace, resolve_job(workspace, job))
+            markers = resolver.resolve_one(job)
+            for marker in markers:
+                report = describe_job(workspace, marker)
+                reports.append(report)
+                if not arguments.json:
+                    print(f"{job}:")
+                    print(render_job(report))
         except _ERRORS as exc:
             failed = True
             print(f"{job}: {exc}", file=sys.stderr)
             continue
-        reports.append(report)
-        if not arguments.json:
-            print(f"{job}:")
-            print(render_job(report))
     if arguments.json:
         print(json.dumps(reports, indent=2, sort_keys=True))
     return 1 if failed else 0
@@ -977,19 +996,22 @@ def handle_job_log(arguments: argparse.Namespace, context: CLIContext) -> int:
     if arguments.limit is not None and arguments.limit < 1:
         raise ValueError("--limit must be positive")
     workspace = Workspace(_local_root(arguments, context, action="read its job log"), mutable=False)
+    resolver = JobSelectorResolver(workspace, context.cwd)
     reports: list[dict[str, object]] = []
     failed = False
     for job in arguments.jobs:
         try:
-            frames = job_frames(workspace, resolve_job(workspace, job), limit=arguments.limit)
+            markers = resolver.resolve_one(job)
+            for marker in markers:
+                frames = job_frames(workspace, marker, limit=arguments.limit)
+                reports.append({"format": JOB_HISTORY_FORMAT, "format_version": 2, "frames": frames})
+                if not arguments.json:
+                    print(f"{job}:")
+                    print(render_frames(frames))
         except _ERRORS as exc:
             failed = True
             print(f"{job}: {exc}", file=sys.stderr)
             continue
-        reports.append({"format": JOB_HISTORY_FORMAT, "format_version": 2, "frames": frames})
-        if not arguments.json:
-            print(f"{job}:")
-            print(render_frames(frames))
     if arguments.json:
         print(json.dumps(reports, indent=2))
     return 1 if failed else 0
@@ -999,19 +1021,22 @@ def handle_job_why(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Explain why jobs are, or are not, making progress."""
 
     workspace = Workspace(_local_root(arguments, context, action="explain its jobs"), mutable=False)
+    resolver = JobSelectorResolver(workspace, context.cwd)
     diagnoses: list[dict[str, object]] = []
     failed = False
     for job in arguments.jobs:
         try:
-            diagnosis = explain_job(workspace, resolve_job(workspace, job))
+            markers = resolver.resolve_one(job)
+            for marker in markers:
+                diagnosis = explain_job(workspace, marker)
+                diagnoses.append(diagnosis.as_mapping())
+                if not arguments.json:
+                    print(f"{job}:")
+                    print(diagnosis.render())
         except _ERRORS as exc:
             failed = True
             print(f"{job}: {exc}", file=sys.stderr)
             continue
-        diagnoses.append(diagnosis.as_mapping())
-        if not arguments.json:
-            print(f"{job}:")
-            print(diagnosis.render())
     if arguments.json:
         print(json.dumps(diagnoses, indent=2, sort_keys=True))
     return 1 if failed else 0
@@ -1031,6 +1056,7 @@ def handle_job_debug(arguments: argparse.Namespace, context: CLIContext) -> int:
         step=arguments.step,
         follow_children=arguments.follow_children,
         timeout=arguments.timeout,
+        cwd=context.cwd,
     )
     return outcome.exit_code
 
@@ -1039,7 +1065,12 @@ def _add_job_selector(parser: argparse.ArgumentParser) -> None:
     """Add the workspace and job selectors every inspection command shares."""
 
     _add_workspace_option(parser, help_text="the workspace holding the job")
-    parser.add_argument("jobs", metavar="JOB", nargs="+", help="job UUID, job key, or any unique prefix of either")
+    parser.add_argument(
+        "jobs",
+        metavar="JOB",
+        nargs="+",
+        help="job UUID, job key, unique prefix, or a path inside the workspace",
+    )
 
 
 def build_job_parser(
@@ -1275,7 +1306,7 @@ def build_job_parser(
     debug.add_argument(
         "job",
         metavar="JOB",
-        help="a payload directory to submit, or a selector of an existing job",
+        help="a payload directory to submit, or a job UUID, unique prefix, or path inside the workspace",
     )
     debug.add_argument("--step", metavar="STEP", help="initial step of a freshly submitted payload")
     debug.add_argument(

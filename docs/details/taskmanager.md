@@ -739,10 +739,13 @@ httk job log --workspace WORKSPACE --limit 20 JOB
 httk job why --workspace WORKSPACE JOB
 ```
 
-`JOB` is a job UUID, a complete `tag--uuid` job key, or any unique prefix of
-either; an ambiguous prefix is refused with the jobs it matched. Every command
-also accepts `--json` and prints one object: a report, a frame array, a
-diagnosis, or a job array.
+`JOB` is a job UUID, a complete `tag--uuid` job key, any unique prefix of
+either, or a path inside the workspace. A job directory names one job, while a
+placement directory such as `jobs` names every live job below it; globs such as
+`jobs/silicon*` are expanded from the current working directory. Paths must be
+inside the selected workspace. An ambiguous prefix is refused with the jobs it
+matched. Every command also accepts `--json` and prints one object: a report, a
+frame array, a diagnosis, or a job array.
 
 `job show` reports the state kind, placement, priority, generation, job digest,
 runner identity, the budgets of the retry policy against what has been consumed,
