@@ -914,9 +914,9 @@ def test_command_file_placeholder_is_staged_and_runs(tmp_path: Path, capsys) -> 
                 "--workspace",
                 workspace_name,
                 "--from-command",
-                "cat {input}",
+                "cat POSCAR {POSCAR}",
                 "--file",
-                f"input={source}",
+                f"POSCAR={source}",
                 "--json",
             ],
             _context(tmp_path),
@@ -925,8 +925,8 @@ def test_command_file_placeholder_is_staged_and_runs(tmp_path: Path, capsys) -> 
     )
     report = json.loads(capsys.readouterr().out)[0]
     runner_text = workspace.runner_store_path(str(report["runner"]["path"])).read_text(encoding="utf-8")
-    assert '"$HTTK_WORKFLOW_JOB_DIR/files/input"' in runner_text
-    assert (Path(report["payload_path"]) / "files" / "input").read_text(encoding="utf-8") == source.read_text(
+    assert '"$HTTK_WORKFLOW_JOB_DIR/files/POSCAR"' in runner_text
+    assert (Path(report["payload_path"]) / "files" / "POSCAR").read_text(encoding="utf-8") == source.read_text(
         encoding="utf-8"
     )
 
@@ -934,9 +934,124 @@ def test_command_file_placeholder_is_staged_and_runs(tmp_path: Path, capsys) -> 
         manager.run_until_idle(timeout=120.0)
     marker = workspace.find_marker_by_id(report["job_id"])
     assert marker is not None and marker.kind == "succeeded"
-    assert "file-placeholder-unique-sentinel\n" in (Path(report["payload_path"]) / "logs" / "stdio.out").read_text(
-        encoding="utf-8"
+    output = (Path(report["payload_path"]) / "logs" / "stdio.out").read_text(encoding="utf-8")
+    assert output.count("file-placeholder-unique-sentinel\n") == 2
+
+
+def test_command_file_is_staged_into_workdir_and_preserves_existing_file(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-cwd-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-cwd")
+    source = tmp_path / "POSCAR"
+    source.write_text("payload-sentinel\n", encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "cat POSCAR",
+                "--file",
+                f"POSCAR={source}",
+                "--json",
+            ],
+            _context(tmp_path),
+        )
+        == 0
     )
+    report = json.loads(capsys.readouterr().out)[0]
+    runner_text = workspace.runner_store_path(str(report["runner"]["path"])).read_text(encoding="utf-8")
+    assert '    [ -e POSCAR ] || [ -L POSCAR ] || cp -p -- "$HTTK_WORKFLOW_JOB_DIR"/files/POSCAR POSCAR' in runner_text
+
+    run = Path(report["payload_path"]) / "run"
+    run.mkdir()
+    (run / "POSCAR").write_text("pre-existing-sentinel\n", encoding="utf-8")
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=120.0)
+
+    marker = workspace.find_marker_by_id(report["job_id"])
+    assert marker is not None and marker.kind == "succeeded"
+    output = (Path(report["payload_path"]) / "logs" / "stdio.out").read_text(encoding="utf-8")
+    assert "pre-existing-sentinel\n" in output
+    assert "payload-sentinel\n" not in output
+
+
+def test_command_file_preserves_a_dangling_workdir_symlink(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-symlink-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-symlink")
+    source = tmp_path / "POSCAR"
+    source.write_text("payload-sentinel\n", encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "true",
+                "--file",
+                f"POSCAR={source}",
+                "--json",
+            ],
+            _context(tmp_path),
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)[0]
+    run = Path(report["payload_path"]) / "run"
+    run.mkdir()
+    link = run / "POSCAR"
+    link.symlink_to("missing-POSCAR")
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=120.0)
+
+    marker = workspace.find_marker_by_id(report["job_id"])
+    assert marker is not None and marker.kind == "succeeded"
+    assert link.is_symlink()
+    assert link.readlink() == Path("missing-POSCAR")
+
+
+def test_command_file_names_are_shell_safe_when_staged(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-shell-safe-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-shell-safe")
+    source = tmp_path / "source.dat"
+    source.write_text("payload-sentinel\n", encoding="utf-8")
+    names = ["$(touch INJECTED)", "`touch BACKTICK`", 'quote"name', "-leading"]
+
+    arguments = [
+        "job",
+        "new",
+        "--workspace",
+        workspace_name,
+        "--from-command",
+        "true",
+    ]
+    for name in names:
+        arguments.append(f"--file={name}={source}")
+    arguments.append("--json")
+
+    assert command(arguments, _context(tmp_path)) == 0
+    report = json.loads(capsys.readouterr().out)[0]
+    runner_text = workspace.runner_store_path(str(report["runner"]["path"])).read_text(encoding="utf-8")
+    assert '"$HTTK_WORKFLOW_JOB_DIR"/\'files/$(touch INJECTED)\'' in runner_text
+    assert '"$HTTK_WORKFLOW_JOB_DIR"/\'files/`touch BACKTICK`\'' in runner_text
+    assert '"$HTTK_WORKFLOW_JOB_DIR"/\'files/quote"name\'' in runner_text
+    assert 'cp -p -- "$HTTK_WORKFLOW_JOB_DIR"/files/-leading -leading' in runner_text
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=120.0)
+    marker = workspace.find_marker_by_id(report["job_id"])
+    assert marker is not None and marker.kind == "succeeded"
+    run = Path(report["payload_path"]) / "run"
+    assert not (run / "INJECTED").exists()
+    assert not (run / "BACKTICK").exists()
+    for name in names:
+        assert (run / name).read_text(encoding="utf-8") == "payload-sentinel\n"
 
 
 def test_command_file_names_control_runner_publication(tmp_path: Path, capsys) -> None:
@@ -971,9 +1086,9 @@ def test_command_file_names_control_runner_publication(tmp_path: Path, capsys) -
     first = submit("input")
     with_unused_file = submit("input", "unused")
     different_name = submit("other")
-    assert first["runner"] == with_unused_file["runner"]
+    assert first["runner"] != with_unused_file["runner"]
     assert first["runner"] != different_name["runner"]
-    assert len(list(workspace.runners.rglob("*.sh"))) == 2
+    assert len(list(workspace.runners.rglob("*.sh"))) == 3
 
 
 def test_command_template_grammar_and_argv_value_fidelity(tmp_path: Path, capsys) -> None:
@@ -1137,6 +1252,34 @@ def test_command_rejects_slash_file_name_as_placeholder(tmp_path: Path, capsys) 
         "`{sub/dir/name}` is not a valid placeholder name; stage it as a bare name to reference it"
         in capsys.readouterr().err
     )
+    assert not list(workspace.scan_markers())
+
+
+def test_command_rejects_file_inputs_with_the_same_workdir_basename(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-basename-collisions")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "basename-collisions")
+    source = tmp_path / "source.dat"
+    source.write_text("source\n", encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "cat POSCAR",
+                "--file",
+                f"POSCAR={source}",
+                "--file",
+                f"sub/POSCAR={source}",
+            ],
+            _context(tmp_path),
+        )
+        == 2
+    )
+    assert "--file inputs POSCAR and sub/POSCAR would both stage as POSCAR in the workdir" in capsys.readouterr().err
     assert not list(workspace.scan_markers())
 
 

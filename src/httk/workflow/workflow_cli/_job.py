@@ -7,6 +7,7 @@ import shlex
 import tempfile
 import time
 import uuid
+from pathlib import PurePosixPath
 
 from ..adapters import (
     REMOTE_JOB_LIST_COMMAND,
@@ -262,6 +263,27 @@ def _command_runner_text(
             f"(supply with --parameter NAME=VALUE or --file NAME=PATH): {joined}"
         )
 
+    staged_files = sorted(
+        (
+            staged_path,
+            name,
+            PurePosixPath(staged_path).name,
+        )
+        for name, staged_path in file_paths.items()
+    )
+    staged_basenames: dict[str, str] = {}
+    for staged_path, name, basename in staged_files:
+        previous = staged_basenames.get(basename)
+        if previous is not None:
+            raise ValueError(f"--file inputs {previous} and {name} would both stage as {basename} in the workdir")
+        staged_basenames[basename] = name
+
+    staging_lines = "".join(
+        f'    [ -e {shlex.quote(basename)} ] || [ -L {shlex.quote(basename)} ] || '
+        f'cp -p -- "$HTTK_WORKFLOW_JOB_DIR"/{shlex.quote(staged_path)} {shlex.quote(basename)}\n'
+        for staged_path, _, basename in staged_files
+    )
+
     def render_word(parts: list[tuple[str, str]]) -> str:
         if not any(kind == "parameter" for kind, _ in parts):
             return shlex.quote("".join(value for _, value in parts))
@@ -286,6 +308,7 @@ def _command_runner_text(
         "httk_workflow_runner command run\n"
         "\n"
         "step_run() {\n"
+        f"{staging_lines}"
         f"    httk_workflow_run -- {command_line}\n"
         "    httk_workflow_succeed\n"
         "}\n"
@@ -1528,8 +1551,8 @@ def build_job_parser(
         help=(
             "generate a one-step Bash runner from an argv-only TEMPLATE; "
             "{name} substitutes a --parameter or staged --file path, "
-            "{{ and }} are literal braces; runner identity is the rendered-text digest, "
-            "so an unused --file does not change the wrapper"
+            "{{ and }} are literal braces; runner identity is the rendered-text digest "
+            "including sorted workdir staging lines"
         ),
     )
     new.add_argument(
