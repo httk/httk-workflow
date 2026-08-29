@@ -170,6 +170,12 @@ and touches nothing on disk. `httk_workflow_main --describe` does the same. The
 step set is also recorded in the job's state frame as `runner_steps`, from the
 first outcome the job publishes.
 
+`job new --from-runner FILE` executes FILE in this describe mode to infer its
+workflow and initial step. The file must call `httk_workflow_runner WORKFLOW
+STEP...` before any work, including before `httk_workflow_main`; a file that
+never registers fails deterministically with the file name and that missing-call
+message.
+
 ### Returning, not exiting
 
 The outcome functions **return**; they do not exit. `httk_workflow_main` owns the
@@ -431,7 +437,11 @@ instead:
 `httk_workflow_run [--timeout S] [--grace S] [--report FILE] [--stdout FILE]
 [--stderr FILE] [--checker SPEC.json] -- ARGV...` runs an argv array under
 supervision and terminates its whole process group on timeout. The versioned JSON
-report it writes is authoritative.
+report it writes is authoritative. Without explicit `--stdout` or `--stderr`,
+the program's output is forwarded live, in arrival order, to the inherited
+stdout or stderr while only bounded tails are retained in the report. Explicit
+output paths remain authoritative instead of being duplicated to the inherited
+streams.
 
 A checker spec has format `httk-workflow-checker-spec`, format version 2, an
 `argv` string array, and optional `required` and `sources` fields. Each source

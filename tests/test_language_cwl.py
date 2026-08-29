@@ -317,7 +317,7 @@ def test_cli_job_new_accepts_a_bare_cwl_document(package: Path, workspace: Works
     name = register_ws(CLIContext("httk", tmp_path), workspace.root, "bare-cwl")
     assert (
         command(
-            ["job", "new", "--workspace", name, "--workflow", str(package / "echo.cwl"), "--input", "message=hello"],
+            ["job", "new", "--workspace", name, "--from-runner", str(package / "echo.cwl"), "--input", "message=hello"],
             CLIContext("httk", tmp_path),
         )
         == 0

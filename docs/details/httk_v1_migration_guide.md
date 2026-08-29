@@ -811,8 +811,8 @@ package-hook collection; re-scaffold them.
 Submit a one-shot job or a structure campaign:
 
 ```console
-httk job new --workspace WS --workflow ./silicon-relax \
-  --format httk-v1 --input-from structure structures/*.cif --parameter encut=520
+httk job new --workspace WS --workflow-dir ./silicon-relax \
+  --input-from structure structures/*.cif --parameter encut=520
 httk workflow run --workspace WS --pool vasp
 httk workflow collect --workspace WS
 ```

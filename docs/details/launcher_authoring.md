@@ -126,7 +126,8 @@ manager `count`, the workspace `settings` mapping, and the bundle's
 `launcher_settings` mapping; for the maintained Slurm kind, bundle settings
 take precedence over workspace settings for keys the kind consumes. Settings are not copied
 into the bundle: `slurm.account`, `slurm.partition`, `slurm.time_limit`,
-`slurm.nodes`, `slurm.cpus_per_task`, and `slurm.reservation` are scheduler
+`slurm.nodes`, `slurm.cpus_per_task`, `slurm.ntasks`,
+`slurm.ntasks_per_node`, `slurm.mem`, `slurm.gres`, and `slurm.reservation` are scheduler
 settings; `manager.workers` belongs to the manager command; and
 `environment.prelude` is shell setup such as module loads. A launcher may use
 other settings, but should keep its interpretation explicit.

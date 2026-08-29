@@ -7,7 +7,7 @@
 #
 #     httk project init --name campaign .
 #     httk job new \
-#         --workflow examples/defect_campaign.sh --step characterize \
+#         --from-runner examples/defect_campaign.sh --step characterize \
 #         --parameter sites=3 --parameter diverging=1 --tag campaign
 #     httk workflow run
 #

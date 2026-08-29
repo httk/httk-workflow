@@ -22,6 +22,23 @@ _httk_workflow_steps=()
 _httk_workflow_step_name=
 _httk_workflow_trace_file=
 
+# Describe mode must distinguish a runner that never registered itself from a
+# runner that merely printed something other than its JSON description. Install
+# this immediately when the API is sourced; registration removes it before it
+# exits with the description.
+_httk_workflow_describe_exit() {
+    local code=$?
+    trap - EXIT
+    if [ -z "${HTTK_WORKFLOW_RUNNER_WORKFLOW:-}" ]; then
+        printf 'httk-workflow: runner exited without calling httk_workflow_runner (exit %s)\n' "$code" >&2
+    fi
+    exit "$code"
+}
+
+if [ "${HTTK_WORKFLOW_DESCRIBE:-}" = 1 ]; then
+    trap '_httk_workflow_describe_exit' EXIT
+fi
+
 _httk_workflow_bridge() {
     if [ -z "${HTTK_WORKFLOW_PYTHON:-}" ]; then
         printf 'httk-workflow: HTTK_WORKFLOW_PYTHON is not set by the workflow manager\n' >&2
@@ -30,24 +47,29 @@ _httk_workflow_bridge() {
     "$HTTK_WORKFLOW_PYTHON" -m httk.workflow._shell_bridge "$@"
 }
 
-# The machine-readable description of this runner, byte for byte what a Python
-# runner prints for the same workflow and step set. It is produced here, in the
-# shell, so describing a runner needs no interpreter and touches nothing.
+# The machine-readable description of this runner. It is produced here, in the
+# shell, so describing a runner needs no interpreter and touches nothing. The
+# scaffold can opt into registration order when selecting an initial step.
 _httk_workflow_describe() {
     local item first=1
     printf '{"format": "httk-workflow-runner-description", "format_version": 2, "steps": ['
     if [ "${#_httk_workflow_steps[@]}" -gt 0 ]; then
-        while IFS= read -r item; do
-            if [ -z "$item" ]; then
-                continue
-            fi
+        local steps=()
+        if [ "${HTTK_WORKFLOW_PRESERVE_STEP_ORDER:-}" = 1 ]; then
+            steps=("${_httk_workflow_steps[@]}")
+        else
+            while IFS= read -r item; do
+                steps+=("$item")
+            done < <(printf '%s\n' "${_httk_workflow_steps[@]}" | LC_ALL=C sort)
+        fi
+        for item in "${steps[@]}"; do
             if [ "$first" -eq 1 ]; then
                 first=0
             else
                 printf ', '
             fi
             printf '"%s"' "$item"
-        done < <(printf '%s\n' "${_httk_workflow_steps[@]}" | LC_ALL=C sort)
+        done
     fi
     printf '], "workflow": "%s"}\n' "${HTTK_WORKFLOW_RUNNER_WORKFLOW:-}"
 }
@@ -66,6 +88,9 @@ _httk_workflow_has_step() {
 # complete before any step runs, which is what lets every step name a step
 # publishes be checked against the steps that really exist.
 httk_workflow_runner() {
+    if [ "${HTTK_WORKFLOW_DESCRIBE:-}" = 1 ]; then
+        trap - EXIT
+    fi
     if [ "$#" -lt 2 ]; then
         printf 'httk-workflow: httk_workflow_runner needs a workflow name and at least one step name\n' >&2
         return 2
@@ -172,6 +197,11 @@ httk_workflow_main() {
     local argument
     for argument in "$@"; do
         if [ "$argument" = "--describe" ]; then
+            if [ -z "${HTTK_WORKFLOW_RUNNER_WORKFLOW:-}" ]; then
+                printf 'httk-workflow: call httk_workflow_runner WORKFLOW STEP... before describe mode\n' >&2
+                return 2
+            fi
+            _httk_workflow_check_registration || return 2
             _httk_workflow_describe
             return 0
         fi

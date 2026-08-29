@@ -21,6 +21,10 @@ BATCH_DIRECTIVES = (
     ("slurm.time_limit", "--time"),
     ("slurm.nodes", "--nodes"),
     ("slurm.cpus_per_task", "--cpus-per-task"),
+    ("slurm.ntasks", "--ntasks"),
+    ("slurm.ntasks_per_node", "--ntasks-per-node"),
+    ("slurm.mem", "--mem"),
+    ("slurm.gres", "--gres"),
     ("slurm.reservation", "--reservation"),
 )
 SUPPORTED_KINDS = ("slurm",)

@@ -173,6 +173,10 @@ def test_slurm_launcher_start_spools_scripts(tmp_path: Path, remote: Remote) -> 
         "slurm.time_limit": "04:00:00",
         "slurm.nodes": "2",
         "slurm.cpus_per_task": "16",
+        "slurm.ntasks": "32",
+        "slurm.ntasks_per_node": "16",
+        "slurm.mem": "64G",
+        "slurm.gres": "gpu:a100:2",
         "slurm.reservation": "special",
         "environment.prelude": "module load python",
     }
@@ -192,6 +196,10 @@ def test_slurm_launcher_start_spools_scripts(tmp_path: Path, remote: Remote) -> 
         "--time=04:00:00",
         "--nodes=2",
         "--cpus-per-task=16",
+        "--ntasks=32",
+        "--ntasks-per-node=16",
+        "--mem=64G",
+        "--gres=gpu:a100:2",
         "--reservation=special",
     ):
         assert f"#SBATCH {directive}" in script

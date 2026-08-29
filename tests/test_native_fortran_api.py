@@ -270,7 +270,7 @@ def test_describe_is_byte_identical_to_the_bash_sdk(tmp_path: Path) -> None:
         assert invocation.returncode == 0, invocation.stderr
         assert invocation.stdout == bash.stdout
 
-    # And the scaffolder that resolves `job new --workflow ./relax` reads it back.
+    # And the scaffolder that resolves `job new --from-runner ./relax` reads it back.
     described = describe_runner(binary)
     assert described == {"workflow": workflow, "steps": sorted(order)}
 

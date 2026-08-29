@@ -192,6 +192,20 @@ def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path,
     assert len(list(workspaces["south"].scan_markers())) == 2
 
 
+def test_campaign_cli_rejects_path_workflows_with_a_job_new_hint(tmp_path: Path, capsys) -> None:
+    root, _ = _campaign_project(tmp_path, "hash")
+    assert (
+        command(
+            ["campaign", "submit", "--workflow", "./runner.py", "--key", "silicon"],
+            CLIContext("httk", root),
+        )
+        == 2
+    )
+    error = capsys.readouterr().err
+    assert "workflow names only" in error
+    assert "job new" in error
+
+
 def test_children_stay_in_their_parents_workspace(tmp_path: Path) -> None:
     """A dynamically spawned child is scaffolded into its parent's workspace, so a
     campaign never has to re-route a subtree — the whole tree stays in the

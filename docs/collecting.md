@@ -290,8 +290,9 @@ records a file descriptor and sha256. Jobflow reads `jobflow-outputs.json`.
 A package with a custom hook records `workflow_collect = "package"`.
 Provider-less collection of that job degrades with a registration hint; it
 does not silently run the language default. httk-v1 has no default at all and
-degrades with a message to declare `[workflow.collect]`, whether it was
-submitted as a package or as a bare directory with `--format httk-v1`. The
+degrades with a message to declare `[workflow.collect]` when submitted as a
+manifest package. A bare v1 directory is not submitted by the `job new` CLI;
+use `--workflow-dir` with a manifest or `remote import-v1`. The
 `allow_job_collector` pinned-tree fallback is attempted only after this
 language fallback, and only with a matching digest and manifest. Any
 collector failure degrades that job and does not stop the sweep.

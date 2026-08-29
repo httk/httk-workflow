@@ -157,7 +157,7 @@ its job or store runner target.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `job new [OPTIONS]` | scaffold and submit jobs from a workflow | `--workspace`, `--workflow` or `--workflow-dir` (one required), `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
+| `job new [OPTIONS]` | scaffold and submit jobs from a workflow, runner file, package directory, or command template | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, or `--from-command`, `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
 | `job submit [OPTIONS] SOURCE...` | submit prepared payload directories | `--workspace`, `--placement` (required), `--move` |
 | `job request ACTION [OPTIONS] JOB_ID...` | publish one request per job selector (remote: over the adapter) | `--workspace`, optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
 | `job list [OPTIONS]` | list jobs as a cheap table | `--workspace`, `--kind`, `--placement`, `--json` |
@@ -198,7 +198,7 @@ activations at step 'X'; K after unclean exits` — summarizing the journal; a
 threshold without progressing; and any **pending** operator request still in
 `requests/ready`, or the reason recorded for the most recent **retired** one.
 
-Language documents use `job new --workflow DOCUMENT`; see
+Language documents use `job new --from-runner DOCUMENT`; see
 {doc}`/workflow_languages` for PWD, CWL, jobflow, and httk-v1 details.
 
 ### `collect` — the finished jobs, as summaries
@@ -573,22 +573,34 @@ partition map, stored in the project, that spreads a very large body of work
 across many workspaces without a new scheduler. Each partition names one
 registered workspace, roots are assigned to partitions by policy, and spawned
 children always inherit their parent's workspace. See {doc}`/campaigns`.
+`campaign submit --workflow` accepts a workflow name or alias only; use
+`job new --from-runner` or `job new --from-command` for a file or command.
 
 ## Creating jobs
 
-`job new` scaffolds and submits jobs from a workflow — a registered workflow id,
-alias, runner file, package directory, or bare language document — and needs no
+`job new` scaffolds and submits jobs from a registered or packaged workflow name,
+a runner file, a package directory, or a bare language document — and needs no
 prepared payload:
 
 ```console
 httk job new --workspace WORKSPACE --workflow vasp-relax --input structure=POSCAR --tag silicon
 httk job new --workspace WORKSPACE --workflow vasp-relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening
-httk job new --workspace WORKSPACE --workflow ./my_runner.py --step characterize --parameter sites=8
+httk job new --from-runner ./my_runner.py --step characterize --parameter sites=8
+httk job new --from-command 'srun --ntasks=10 my_executable {n}' --parameter n=17 --tag n17
 ```
 
 `--parameter NAME=VALUE` supplies an opaque implementation knob;
 `--environment NAME=VALUE` overrides one declared workflow environment entry;
-and `--format LANG` selects the language of a bare document or directory.
+and `--format LANG` selects the language of a bare document.
+With `--from-command TEMPLATE`, `shlex`-style words are turned into a published
+one-step Bash runner; each `{name}` placeholder must have a matching
+`--parameter NAME=VALUE`, and the generated runner can be edited and passed
+back with `--from-runner`. The template is an argv-only word list: it has no
+shell syntax. A placeholder name must match `[A-Za-z_][A-Za-z0-9_.-]*`; `{{`
+and `}}` emit literal braces, and any other brace text remains literal.
+When a runner is supplied with `--from-runner`, `job new` runs it in describe
+mode to infer its workflow and initial step; it must call
+`httk_workflow_runner WORKFLOW STEP...` before any work.
 `--input-from
 NAME SOURCE...` loads a file or the readable files in a directory, realizes the
 declared payload destination, and creates one job per file for a batch. A
@@ -612,19 +624,18 @@ file is published into the workspace runner store and pinned by digest unless
 
 ## Running language documents
 
-Run a PWD, CWL, or jobflow document directly with `job new --workflow DOCUMENT`;
-the document or template directory is resolved as a language realization:
+Run a PWD, CWL, or jobflow document directly with `job new --from-runner DOCUMENT`;
+the document is resolved as a language realization:
 
 ```console
-httk job new --workspace WS --workflow flow.cwl --input message=echo
-httk job new --workspace WS --workflow workflow.json --parameter pwd_module_path='["."]'
-httk job new --workspace WS --workflow maker.json
-httk job new --workspace WS --workflow ./v1-template --format httk-v1 --parameter encut=520
+httk job new --workspace WS --from-runner flow.cwl --input message=echo
+httk job new --workspace WS --from-runner workflow.json --parameter pwd_module_path='["."]'
+httk job new --workspace WS --from-runner maker.json
 ```
 
 The same `--format` option accepts `cwl`, `pwd`, `jobflow`, and `httk-v1` for
-bare inputs. A bare v1 directory requires `--format httk-v1`; manifest packages
-and registered ids reject the option because their language is already known.
+bare document inputs. Manifest packages and registered ids reject the option
+because their language is already known.
 
 See {doc}`/workflow_languages` for package manifests, bare-document rules,
 the supported CWL subset, PWD security, jobflow Makers, and language collection.
@@ -1061,7 +1072,8 @@ the workspace path explicitly before transferring jobs.
 `port`, `username`, `vasp_command`, and `vasp_pseudo_library`
 in the shareable `remote.json`. Scheduler profile values are workspace
 settings: use `slurm.account`, `slurm.partition`, `slurm.time_limit`,
-`slurm.nodes`, `slurm.cpus_per_task`, `slurm.reservation`, and
+`slurm.nodes`, `slurm.cpus_per_task`, `slurm.ntasks`,
+`slurm.ntasks_per_node`, `slurm.mem`, `slurm.gres`, `slurm.reservation`, and
 `manager.workers`; those scheduler names are refused as remote settings. Other
 non-persistable keys are stored in
 the remote's `credentials.json` with mode `0600` beside it, which project

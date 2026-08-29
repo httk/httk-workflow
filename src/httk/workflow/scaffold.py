@@ -50,6 +50,7 @@ import logging
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -315,7 +316,7 @@ def registered_workflows() -> tuple[str, ...]:
 
 #: File suffixes that make an argument path-shaped: a runner file or a language
 #: document, versus a dotted registered id like ``domain.family.step``.
-_RUNNER_SUFFIXES = frozenset({".py", ".cwl", ".json", ".yaml", ".yml"})
+_RUNNER_SUFFIXES = frozenset({".py", ".sh", ".bash", ".cwl", ".json", ".yaml", ".yml"})
 
 
 def registered_workflow_labels() -> tuple[str, ...]:
@@ -663,7 +664,7 @@ class InstantiateContext:
             self.tag = tag
 
 
-def describe_runner(runner: str | os.PathLike[str]) -> dict[str, object]:
+def describe_runner(runner: str | os.PathLike[str], *, preserve_registration_order: bool = False) -> dict[str, object]:
     """Return the self-description one runner file prints, by running it.
 
     Every native runner — Python or Bash — answers ``HTTK_WORKFLOW_DESCRIBE=1``
@@ -672,6 +673,7 @@ def describe_runner(runner: str | os.PathLike[str]) -> dict[str, object]:
     scaffolded without being told what it implements.
 
     :param runner: Locate the runner file to describe.
+    :param preserve_registration_order: Retain the native Bash registration order.
     :return: The validated runner description.
     :raises ValueError: If the runner is missing, cannot run, or emits an invalid description.
     """
@@ -685,6 +687,8 @@ def describe_runner(runner: str | os.PathLike[str]) -> dict[str, object]:
         raise ValueError(f"a runner workflow must be an existing file: {path}")
     environment = dict(os.environ)
     environment[_DESCRIBE_VARIABLE] = "1"
+    if preserve_registration_order:
+        environment["HTTK_WORKFLOW_PRESERVE_STEP_ORDER"] = "1"
     shell = Path(__file__).with_name("shell")
     environment["HTTK_WORKFLOW_BASH_API"] = str(shell / "httk-workflow.sh")
     environment["HTTK_WORKFLOW_PERL_API"] = str(Path(__file__).with_name("native") / "perl")
@@ -700,6 +704,8 @@ def describe_runner(runner: str | os.PathLike[str]) -> dict[str, object]:
         "HTTK_WORKFLOW_WORKSPACE_DIR",
         "HTTK_WORKFLOW_DATA_DIR",
         "HTTK_WORKFLOW_STEP",
+        "HTTK_WORKFLOW_RUNNER_WORKFLOW",
+        "HTTK_WORKFLOW_RUNNER_STEPS",
         "HTTK_WORKFLOW_RUNNER_ROOT",
         "HTTK_WORKFLOW_RUNNER_ARTIFACTS",
     ):
@@ -715,13 +721,31 @@ def describe_runner(runner: str | os.PathLike[str]) -> dict[str, object]:
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ValueError(f"cannot describe the runner {path}: {exc}") from exc
+    detail = (completed.stderr or completed.stdout).strip().splitlines()
+    missing_registration = next(
+        (
+            line
+            for line in (completed.stderr + completed.stdout).splitlines()
+            if "runner exited without calling httk_workflow_runner" in line
+        ),
+        None,
+    )
+    if missing_registration is not None:
+        raise ValueError(
+            f"the runner {path} exited without calling httk_workflow_runner WORKFLOW STEP...: {missing_registration}"
+        )
     if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip().splitlines()
+        if any("call httk_workflow_runner" in line for line in detail):
+            raise ValueError(
+                f"the runner {path} must call httk_workflow_runner WORKFLOW STEP... before any work: {detail[-1]}"
+            )
         raise ValueError(
             f"the runner {path} refused to describe itself (exit {completed.returncode})"
             + (f": {detail[-1]}" if detail else "")
         )
-    return _parse_description(completed.stdout, path)
+    if not completed.stdout.strip():
+        raise ValueError(f"the runner {path} must call httk_workflow_runner WORKFLOW STEP... before describe mode")
+    return _parse_description(completed.stdout, path, preserve_registration_order=preserve_registration_order)
 
 
 def _describe_command(path: Path) -> list[str]:
@@ -738,13 +762,40 @@ def _describe_command(path: Path) -> list[str]:
         return [sys.executable, str(path)]
     if path.suffix in {".sh", ".bash"}:
         return ["bash", str(path)]
+    if _has_bash_shebang(path):
+        return ["bash", str(path)]
     raise ValueError(
         f"the runner {path} is not executable and its suffix names no interpreter; "
         "make it executable, or give it a .py or .sh suffix"
     )
 
 
-def _parse_description(text: str, path: Path) -> dict[str, object]:
+def _has_bash_shebang(path: Path) -> bool:
+    """Return whether *path* has a Bash interpreter shebang."""
+
+    try:
+        first_line = path.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, UnicodeError, IndexError):
+        return False
+    if not first_line.startswith("#!"):
+        return False
+    try:
+        interpreter = shlex.split(first_line[2:])
+    except ValueError:
+        return False
+    if not interpreter:
+        return False
+    if Path(interpreter[0]).name == "bash":
+        return True
+    if Path(interpreter[0]).name != "env":
+        return False
+    command = interpreter[1:]
+    if command[:1] == ["-S"]:
+        command = command[1:]
+    return bool(command) and Path(command[0]).name == "bash"
+
+
+def _parse_description(text: str, path: Path, *, preserve_registration_order: bool = False) -> dict[str, object]:
     """Validate the description one runner printed."""
 
     try:
@@ -766,7 +817,10 @@ def _parse_description(text: str, path: Path) -> dict[str, object]:
         raise ValueError(f"the runner {path} described instantiate that is not a boolean")
     if any(destination is None for destination in inputs.values()) and not instantiate:
         raise ValueError(f"the runner {path} has hook-consumed inputs and requires an instantiate hook")
-    result: dict[str, object] = {"workflow": described["workflow"], "steps": [str(step) for step in steps]}
+    ordered_steps = [str(step) for step in steps]
+    if not preserve_registration_order:
+        ordered_steps.sort()
+    result: dict[str, object] = {"workflow": described["workflow"], "steps": ordered_steps}
     if "inputs" in described:
         result["inputs"] = inputs
     if "instantiate" in described:
@@ -983,7 +1037,10 @@ def resolve_workflow(
                     _input_metadata=input_metadata,
                 )
             elif path.is_file():
-                described = describe_runner(path)
+                described = describe_runner(
+                    path,
+                    preserve_registration_order=path.suffix in {".sh", ".bash"} or _has_bash_shebang(path),
+                )
                 steps = tuple(cast(list[str], described["steps"]))
                 resolved = ResolvedWorkflow(
                     source=path.resolve(),
@@ -1021,6 +1078,8 @@ def _initial_step(path: Path, steps: tuple[str, ...], requested: str | None) -> 
 
     if requested is not None:
         return ensure_step_known(requested, steps, f"the runner {path}")
+    if (_has_bash_shebang(path) or path.suffix in {".sh", ".bash"}) and steps:
+        return steps[0]
     if "start" in steps:
         return "start"
     if len(steps) == 1:
@@ -1114,6 +1173,7 @@ def new_job(
     step: str | None = None,
     format: str | None = None,
     workflow_id: str | None = None,
+    runner_name: str | PurePosixPath | None = None,
     name: str | None = None,
 ) -> ScaffoldedJob:
     """Scaffold, submit, and describe one job of *workflow*.
@@ -1148,13 +1208,21 @@ def new_job(
     :param step: Override the workflow's initial step.
     :param format: Force a language for a bare workflow document or directory.
     :param workflow_id: Override the workflow id in the job definition.
+    :param runner_name: Override the workspace runner-store name when publishing.
     :param name: Set the job's display name.
     :return: The submitted job description.
     :raises ValueError: If workflow, inputs, placement, or job settings are invalid.
     """
 
     prepared = _prepare(
-        workspace, workflow, publish=publish, step=step, workflow_id=workflow_id, data_mode=data_mode, format=format
+        workspace,
+        workflow,
+        publish=publish,
+        step=step,
+        workflow_id=workflow_id,
+        data_mode=data_mode,
+        format=format,
+        runner_name=runner_name,
     )
     return _submit(
         workspace,
@@ -1189,6 +1257,7 @@ def new_jobs(
     step: str | None = None,
     format: str | None = None,
     workflow_id: str | None = None,
+    runner_name: str | PurePosixPath | None = None,
     name: str | None = None,
 ) -> Iterator[ScaffoldedJob]:
     """Scaffold and submit one job per member of *items*, lazily.
@@ -1221,6 +1290,7 @@ def new_jobs(
     :param step: Override the workflow's initial step.
     :param format: Force a language for a bare workflow document or directory.
     :param workflow_id: Override the workflow id in each job definition.
+    :param runner_name: Override the workspace runner-store name when publishing.
     :param name: Set the shared display name.
     :return: An iterator yielding each submitted job description.
     :yield: Each submitted job description.
@@ -1237,7 +1307,14 @@ def new_jobs(
     """
 
     prepared = _prepare(
-        workspace, workflow, publish=publish, step=step, workflow_id=workflow_id, data_mode=data_mode, format=format
+        workspace,
+        workflow,
+        publish=publish,
+        step=step,
+        workflow_id=workflow_id,
+        data_mode=data_mode,
+        format=format,
+        runner_name=runner_name,
     )
     for item in items:
         yield _submit(
@@ -1264,6 +1341,7 @@ def _prepare(
     workflow_id: str | None,
     data_mode: DataMode | None,
     format: str | None,
+    runner_name: str | PurePosixPath | None,
 ) -> _Prepared:
     """Resolve one workflow and make its runner referenceable, exactly once.
 
@@ -1315,6 +1393,8 @@ def _prepare(
             finalize=scaffolded.finalize,
         )
     if publish == "installed":
+        if runner_name is not None:
+            raise ValueError("runner_name requires publish='workspace'")
         if resolved.directory is not None:
             raise ValueError(
                 "publish='installed' is not supported for a directory workflow; publish it into the workspace"
@@ -1329,7 +1409,7 @@ def _prepare(
         reference = _packaged_runner_reference(provider)
     else:
         try:
-            reference = workspace.publish_runner(resolved.source, name=resolved.store_name)
+            reference = workspace.publish_runner(resolved.source, name=runner_name or resolved.store_name)
         except FileExistsError as exc:
             if resolved.directory is None:
                 raise

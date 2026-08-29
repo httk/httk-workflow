@@ -27,7 +27,7 @@ characterization — the point is the campaign, not the physics):
 
     httk project init --name campaign .
     httk job new \\
-        --workflow examples/defect_campaign.py --step characterize \\
+        --from-runner examples/defect_campaign.py --step characterize \\
         --parameter sites=3 --parameter diverging=1 --tag campaign
     httk workflow run
     httk job list

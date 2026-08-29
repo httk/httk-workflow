@@ -8,20 +8,26 @@ many short-lived bridge processes, and separating an absent answer from a refuse
 call in its exit status.
 """
 
+import io
 import json
 import os
 import subprocess
 import sys
+import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from httk.workflow import (
     TaskManager,
     Workspace,
 )
 from httk.workflow.protocol import JobSpec, ReplayableWorkdirBatch, prepare_job_payload
+from httk.workflow.supervision import ProcessSupervisor
 
 _SHELL = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "shell" / "httk-workflow.sh"
 
@@ -257,6 +263,22 @@ def test_describe_mode_prints_the_step_set_before_any_step_runs(tmp_path: Path) 
     # untouched even though its context was right there in the environment.
     assert not (fixture.workdir / "ran.txt").exists()
     assert not (fixture.control / "outcome.ready").exists()
+
+
+@pytest.mark.parametrize("ending", ["exit 0", "exit 7"])
+def test_describe_mode_reports_a_runner_that_never_registers(ending: str) -> None:
+    environment = os.environ.copy()
+    environment.update({"HTTK_WORKFLOW_BASH_API": str(_SHELL), "HTTK_WORKFLOW_DESCRIBE": "1"})
+    completed = subprocess.run(
+        ["bash", "-c", 'source "$1"; echo banner; ' + ending, "runner.sh", str(_SHELL)],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == (0 if ending == "exit 0" else 7)
+    assert completed.stdout.strip() == "banner"
+    assert "runner exited without calling httk_workflow_runner" in completed.stderr
 
 
 def test_an_unknown_step_names_the_registered_steps(tmp_path: Path) -> None:
@@ -834,3 +856,69 @@ def test_a_payload_bash_runner_advances_commits_data_and_succeeds(tmp_path: Path
     assert marker.priority == 700
     runlog = (root / "logs" / "runlog.jsonl").read_text(encoding="utf-8")
     assert "the data of the previous step is committed" in runlog
+
+
+def test_supervisor_forwards_unbounded_output_live_and_preserves_interleaving(tmp_path: Path) -> None:
+    gate = tmp_path / "release"
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    stdio = logs / "stdio.out"
+    reports: list = []
+    program = """
+import pathlib
+import sys
+import time
+
+print("LIVE-SENTINEL", flush=True)
+gate = pathlib.Path(sys.argv[1])
+while not gate.exists():
+    time.sleep(.01)
+for i in range(350000):
+    sys.stdout.write(f"unique-{i:08d}-payload\\n")
+sys.stdout.flush()
+"""
+    with stdio.open("wb", buffering=0) as sink:
+        thread = threading.Thread(
+            target=lambda: reports.append(
+                ProcessSupervisor().run(
+                    [sys.executable, "-c", program, str(gate)],
+                    stdout_sink=sink,
+                    capture_limit=1024,
+                )
+            )
+        )
+        thread.start()
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and b"LIVE-SENTINEL\n" not in stdio.read_bytes():
+                time.sleep(0.01)
+            assert b"LIVE-SENTINEL\n" in stdio.read_bytes()
+            assert thread.is_alive()
+        finally:
+            gate.touch()
+            thread.join(timeout=30)
+    assert not thread.is_alive()
+    report = reports[0]
+    output = stdio.read_bytes().decode()
+    assert report.stdout_truncated
+    assert len(output.encode()) > 5 * 1024 * 1024
+    assert output.splitlines() == ["LIVE-SENTINEL"] + [f"unique-{i:08d}-payload" for i in range(350000)]
+
+    interleaved = io.BytesIO()
+    report = ProcessSupervisor().run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys, time; "
+                "[(sys.stdout.write(f'out-{i}\\n'), sys.stdout.flush(), time.sleep(.002), "
+                "sys.stderr.write(f'err-{i}\\n'), sys.stderr.flush(), time.sleep(.002)) for i in range(20)]"
+            ),
+        ],
+        stdout_sink=interleaved,
+        stderr_sink=interleaved,
+    )
+    assert report.returncode == 0
+    assert interleaved.getvalue().decode().splitlines() == [
+        item for i in range(20) for item in (f"out-{i}", f"err-{i}")
+    ]

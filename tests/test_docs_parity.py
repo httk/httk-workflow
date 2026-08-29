@@ -45,6 +45,7 @@ _UNDOCUMENTED_SHELL = frozenset(
         "_httk_workflow_bridge",
         "_httk_workflow_check_registration",
         "_httk_workflow_describe",
+        "_httk_workflow_describe_exit",
         "_httk_workflow_has_step",
         "_httk_workflow_step_exit",
         "_httk_workflow_trace",

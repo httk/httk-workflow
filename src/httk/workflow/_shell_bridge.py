@@ -728,6 +728,8 @@ def _run(arguments: argparse.Namespace) -> int:
         termination_grace=arguments.grace,
         stdout_path=arguments.stdout,
         stderr_path=arguments.stderr,
+        stdout_sink=None if arguments.stdout is not None else sys.stdout.buffer,
+        stderr_sink=None if arguments.stderr is not None else sys.stderr.buffer,
     )
     report.write(arguments.report)
     if report.timed_out:

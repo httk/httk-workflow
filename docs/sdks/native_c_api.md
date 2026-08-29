@@ -241,7 +241,7 @@ and stages the file:
 ```console
 httk project init --name relax-c .
 httk workspace init --name default .
-httk job new --workflow ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
+httk job new --from-runner ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
 httk workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
 httk workflow run
 httk workflow collect

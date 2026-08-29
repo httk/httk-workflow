@@ -119,18 +119,9 @@ the declaration default.
 
 ## Explicit one-offs with `--format`
 
-Bare documents and directories are not packages. Use the generic format switch
-when the path does not carry its language:
-
-```console
-httk job new --workspace WORKSPACE --workflow ./old-task \
-  --format httk-v1 --parameter encut=520
-```
-
-The same `--format LANG` mechanism selects bare `cwl`, `pwd`, and `jobflow`
-documents. A bare v1 directory requires `--format httk-v1`; it is not
-auto-matched. `--format` is refused for a manifest package or registered
-workflow id, whose language comes from its manifest or registration.
+A bare v1 directory is not a `job new` CLI source. Add a workflow manifest and
+submit it with `--workflow-dir`, or import the legacy machine setup with
+`remote import-v1`; there is no bare-directory `--format` mode in this CLI.
 
 ## Finished-tree harvest
 

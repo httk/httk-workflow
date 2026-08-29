@@ -114,7 +114,8 @@ httk workspace settings show WORKSPACE
 
 For a Slurm manager, set its launcher profile in the target workspace as well:
 `slurm.account`, `slurm.partition`, `slurm.time_limit`, `slurm.nodes`,
-`slurm.cpus_per_task`, and `slurm.reservation` become batch directives, while
+`slurm.cpus_per_task`, `slurm.ntasks`, `slurm.ntasks_per_node`, `slurm.mem`,
+`slurm.gres`, and `slurm.reservation` become batch directives, while
 `manager.workers` supplies the default worker count. The workspace launcher
 reads these values when it composes the batch script.
 

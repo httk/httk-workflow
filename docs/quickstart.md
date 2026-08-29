@@ -139,6 +139,9 @@ The runner is published once for the whole set, and the jobs are submitted as th
 are generated. In Python the same thing streams, which is how a campaign of any
 size is built:
 
+For a command-only sweep, use `job new --from-command` with a parameter placeholder;
+the generated Bash runner is published once and submitted like any other job.
+
 ```python
 from pathlib import Path
 
@@ -175,7 +178,7 @@ See {doc}`remotes` for SSH setup, transfers, and the `local` adapter.
 
 - {doc}`vasp_runners` — what the packaged VASP runners do, every job input and parameter they
   read, and the failure codes they publish.
-- {doc}`runtime_helpers` — authoring a runner of your own. `job new --workflow
+- {doc}`runtime_helpers` — authoring a runner of your own. `job new --from-runner
   ./my_runner.py --step characterize` scaffolds jobs for it exactly as for a
   packaged one; the file is published into the workspace and pinned by digest.
   Two complete campaign runners are in `examples/defect_campaign.py` and
@@ -185,7 +188,7 @@ See {doc}`remotes` for SSH setup, transfers, and the `local` adapter.
 - {doc}`sdks/native_bash_api` — the same runner protocol from Bash.
 - {doc}`workflow_languages` — a Python Workflow Definition, CWL workflow,
   jobflow Maker document, or explicitly selected httk-v1 template becomes one
-  job with `httk job new --workflow DOCUMENT`, without being rewritten
+  job with `httk job new --from-runner DOCUMENT`, without being rewritten
   and without a runner file.
 - {doc}`collecting` — turning finished jobs into stored results.
 - Running on a cluster — add and configure a remote, initialize `R:NAME`, then

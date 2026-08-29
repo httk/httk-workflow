@@ -10,6 +10,7 @@ thread-safe, but it must return quickly: it delays the whole event stream.
 import json
 import logging
 import os
+import selectors
 import signal
 import stat
 import subprocess
@@ -61,6 +62,7 @@ _JOIN_TIMEOUT = 5.0
 _CHECKER_TIMEOUT = 2.0
 _KILL_WAIT = 5.0
 _MAXIMUM_REAP_WAIT = 10.0
+_OUTPUT_CHUNK_SIZE = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -526,6 +528,8 @@ class ProcessSupervisor:
         termination_grace: float = 10.0,
         stdout_path: str | os.PathLike[str] | None = None,
         stderr_path: str | os.PathLike[str] | None = None,
+        stdout_sink: IO[bytes] | None = None,
+        stderr_sink: IO[bytes] | None = None,
         tick_interval: float = DEFAULT_TICK_INTERVAL,
         follow_interval: float = DEFAULT_FOLLOW_INTERVAL,
         capture_limit: int = DEFAULT_CAPTURE_LIMIT,
@@ -541,6 +545,8 @@ class ProcessSupervisor:
         :param termination_grace: Wait this long after requesting termination.
         :param stdout_path: Write stdout to this authoritative file.
         :param stderr_path: Write stderr to this authoritative file.
+        :param stdout_sink: Forward stdout chunks to this sink as they arrive.
+        :param stderr_sink: Forward stderr chunks to this sink as they arrive.
         :param tick_interval: Set the interval between tick events.
         :param follow_interval: Set the interval between followed-file polls.
         :param capture_limit: Bound retained output without an output file.
@@ -575,6 +581,7 @@ class ProcessSupervisor:
         checkers: list[_Checker] = []
         threads: list[threading.Thread] = []
         output_handles: list[IO[bytes] | None] = [None, None]
+        sink_lock = threading.Lock()
         previous_handlers: dict[int, Any] = {}
         received_signal: list[int] = []
         process: subprocess.Popen[bytes] | None = None
@@ -606,18 +613,54 @@ class ProcessSupervisor:
                 for checker in checkers:
                     checker.send(event)
 
-        def read_stream(source: str, stream: IO[bytes], capture: _Capture, output: IO[bytes] | None) -> None:
-            try:
-                while line := stream.readline():
-                    capture.add(line)
-                    if output is not None:
-                        output.write(line)
-                        output.flush()
+        def read_streams(streams: Sequence[tuple[str, IO[bytes], _Capture, IO[bytes] | None]]) -> None:
+            selector = selectors.DefaultSelector()
+            pending = {stream.fileno(): b"" for _, stream, _, _ in streams}
+            metadata = {
+                stream.fileno(): (source, stream, capture, output) for source, stream, capture, output in streams
+            }
+
+            def emit_lines(source: str, fd: int) -> None:
+                remainder = pending[fd]
+                while b"\n" in remainder:
+                    line, remainder = remainder.split(b"\n", 1)
                     dispatch(SourceEvent("line", source, line.decode("utf-8", errors="replace").rstrip("\r\n")))
+                pending[fd] = remainder
+
+            try:
+                for _, stream, _, _ in streams:
+                    selector.register(stream, selectors.EVENT_READ)
+                while selector.get_map():
+                    for key, _ in selector.select():
+                        fd = key.fd
+                        source, _, capture, output = metadata[fd]
+                        try:
+                            chunk = os.read(fd, _OUTPUT_CHUNK_SIZE)
+                        except OSError:
+                            chunk = b""
+                        if not chunk:
+                            selector.unregister(fd)
+                            if pending[fd]:
+                                dispatch(
+                                    SourceEvent(
+                                        "line",
+                                        source,
+                                        pending[fd].decode("utf-8", errors="replace").rstrip("\r\n"),
+                                    )
+                                )
+                            dispatch(SourceEvent("source-eof", source))
+                            continue
+                        capture.add(chunk)
+                        if output is not None:
+                            with sink_lock:
+                                output.write(chunk)
+                                output.flush()
+                        pending[fd] += chunk
+                        emit_lines(source, fd)
             except (OSError, ValueError):
-                _LOGGER.debug("reading %s stopped early", source, exc_info=True)
+                _LOGGER.debug("reading supervised streams stopped early", exc_info=True)
             finally:
-                dispatch(SourceEvent("source-eof", source))
+                selector.close()
 
         def drain(handle: IO[bytes], name: str) -> bool:
             seen = False
@@ -708,15 +751,13 @@ class ProcessSupervisor:
             assert process.stdout is not None and process.stderr is not None
             threads.append(
                 threading.Thread(
-                    target=read_stream,
-                    args=("stdout", process.stdout, captures[0], output_handles[0]),
-                    daemon=True,
-                )
-            )
-            threads.append(
-                threading.Thread(
-                    target=read_stream,
-                    args=("stderr", process.stderr, captures[1], output_handles[1]),
+                    target=read_streams,
+                    args=(
+                        (
+                            ("stdout", process.stdout, captures[0], output_handles[0] or stdout_sink),
+                            ("stderr", process.stderr, captures[1], output_handles[1] or stderr_sink),
+                        ),
+                    ),
                     daemon=True,
                 )
             )

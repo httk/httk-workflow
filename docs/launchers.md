@@ -59,6 +59,10 @@ available workspace settings are:
 | `slurm.time_limit` | Slurm time limit directive. |
 | `slurm.nodes` | Number of Slurm nodes. |
 | `slurm.cpus_per_task` | CPUs per Slurm task. |
+| `slurm.ntasks` | Number of Slurm tasks. |
+| `slurm.ntasks_per_node` | Slurm tasks per node. |
+| `slurm.mem` | Slurm memory allocation. |
+| `slurm.gres` | Slurm generic resource request. |
 | `slurm.reservation` | Slurm reservation. |
 | `environment.prelude` | Shell setup run before the manager, such as a module load or environment activation. |
 
@@ -66,6 +70,11 @@ The `slurm.*` values become batch directives. `environment.prelude` runs
 before the manager under `set -e`; with a prelude, `manager.command` is looked
 up on the resulting `PATH`. Without a prelude, the launcher preserves the
 Python interpreter that started the command.
+
+For MPI programs, `slurm.ntasks` requests the total number of processes and
+`slurm.ntasks_per_node` controls their placement per node; `slurm.cpus_per_task`
+instead requests the CPU cores allocated to each process. Set the task count
+for MPI ranks and use `cpus_per_task` when each rank needs multiple cores.
 
 For a debugging pass, run exactly one manager in the current process:
 

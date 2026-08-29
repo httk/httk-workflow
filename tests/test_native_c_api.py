@@ -224,7 +224,7 @@ def test_describe_is_byte_identical_to_the_bash_sdk(tmp_path: Path) -> None:
         assert invocation.returncode == 0, invocation.stderr
         assert invocation.stdout == bash.stdout
 
-    # And the scaffolder that resolves `job new --workflow ./relax` reads it back.
+    # And the scaffolder that resolves `job new --from-runner ./relax` reads it back.
     described = describe_runner(binary)
     assert described == {"workflow": workflow, "steps": sorted(order)}
 
@@ -389,7 +389,7 @@ def _job_new(ws: str, workflow: str, poscar: Path, context: CLIContext) -> int:
         "new",
         "--workspace",
         ws,
-        "--workflow",
+        "--from-runner",
         workflow,
         "--step",
         "prepare",
@@ -414,7 +414,7 @@ def _assert_relax_succeeded(workspace: Workspace) -> None:
 
 
 def test_the_cli_scaffolds_and_runs_the_relax_binary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """An absolute `--workflow` path scaffolds, describes by running, and submits."""
+    """An absolute `--from-runner` path scaffolds, describes by running, and submits."""
 
     workspace, context, ws, poscar = _cli_relax_context(tmp_path)
     assert _job_new(ws, str(tmp_path / "relax"), poscar, context) == 0, capsys.readouterr().err
@@ -424,7 +424,7 @@ def test_the_cli_scaffolds_and_runs_the_relax_binary(tmp_path: Path, capsys: pyt
 def test_the_cli_scaffolds_from_a_relative_runner_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The documented `--workflow ./relax` flow: a relative path must not PATH-exec."""
+    """The documented `--from-runner ./relax` flow: a relative path must not PATH-exec."""
 
     workspace, context, ws, poscar = _cli_relax_context(tmp_path)
     # From the runner's own directory, `./relax` normalizes to bare `relax`; only
@@ -437,7 +437,7 @@ def test_the_cli_scaffolds_from_a_relative_runner_path(
 def test_a_bare_runner_name_resolves_to_the_cwd_file_not_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`--workflow relax` (no ./, file present in cwd) runs the cwd file, never a PATH exec.
+    """`--from-runner relax` runs the cwd file, never a PATH exec.
 
     The compiled `relax` exists only in the cwd, never on PATH, so a successful
     describe-and-run proves the resolve() in describe_runner turned the bare name

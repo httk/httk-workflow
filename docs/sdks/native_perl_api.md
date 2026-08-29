@@ -115,7 +115,7 @@ cd examples/relax_perl
 perl relax.pl --describe
 httk project init --name relax-perl .
 httk workspace init --name default .
-httk job new --workflow ./relax.pl --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
+httk job new --from-runner ./relax.pl --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
 httk workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
 httk workflow run
 httk workflow collect

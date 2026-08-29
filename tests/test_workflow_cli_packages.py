@@ -282,7 +282,7 @@ def test_job_new_batch_reports_partial_progress_before_failing(tmp_path: Path, c
     assert "of 2 jobs before failing" in capsys.readouterr().err
 
 
-def test_job_new_accepts_a_package_path_and_rejects_workflow_selection_errors(tmp_path: Path, capsys) -> None:
+def test_job_new_accepts_a_package_directory_and_rejects_workflow_selection_errors(tmp_path: Path, capsys) -> None:
     context = _context(tmp_path)
     workspace = _workspace(tmp_path, context)
     package = _cli_package(tmp_path / "package")
@@ -296,7 +296,7 @@ def test_job_new_accepts_a_package_path_and_rejects_workflow_selection_errors(tm
                 "new",
                 "--workspace",
                 workspace,
-                "--workflow",
+                "--workflow-dir",
                 str(package),
                 "--input",
                 f"structure={structure}",
@@ -307,14 +307,17 @@ def test_job_new_accepts_a_package_path_and_rejects_workflow_selection_errors(tm
     )
     assert (
         command(
-            ["job", "new", "--workspace", workspace, "--workflow", str(package), "--workflow-dir", str(package)],
+            ["job", "new", "--workspace", workspace, "--workflow", "vasp-relax", "--workflow-dir", str(package)],
             context,
         )
         == 2
     )
     assert "not allowed with argument" in capsys.readouterr().err
     assert command(["job", "new", "--workspace", workspace], context) == 2
-    assert "one of the arguments --workflow --workflow-dir is required" in capsys.readouterr().err
+    assert (
+        "one of the arguments --workflow --workflow-dir --from-runner --from-command is required"
+        in capsys.readouterr().err
+    )
 
     empty = tmp_path / "not-a-package"
     empty.mkdir()

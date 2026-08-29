@@ -10,10 +10,10 @@ workflow machinery.
 
 | Language | Bare document or package form | Installed runner |
 | --- | --- | --- |
-| CWL | `job new --workspace WS --workflow flow.cwl` | `pkg:httk.workflow.languages.cwl/cwl_runner.py` |
-| PWD | `job new --workspace WS --workflow graph.json` | `pkg:httk.workflow.languages.pwd/pwd_runner.py` |
-| jobflow | `job new --workspace WS --workflow maker.json`, or a package with `language = "jobflow"` | `pkg:httk.workflow.languages.jobflow/jobflow_runner.py` |
-| httk-v1 | a bare task directory with `--format httk-v1`, or a package with `language = "httk-v1"` | `pkg:httk.workflow.languages.httk_v1/v1_runner.py` through the ordinary `path` runner |
+| CWL | `job new --workspace WS --from-runner flow.cwl` | `pkg:httk.workflow.languages.cwl/cwl_runner.py` |
+| PWD | `job new --workspace WS --from-runner graph.json` | `pkg:httk.workflow.languages.pwd/pwd_runner.py` |
+| jobflow | `job new --workspace WS --from-runner maker.json`, or a package with `language = "jobflow"` | `pkg:httk.workflow.languages.jobflow/jobflow_runner.py` |
+| httk-v1 | a package with `language = "httk-v1"` | `pkg:httk.workflow.languages.httk_v1/v1_runner.py` through the ordinary `path` runner |
 
 The CWL realization needs `httk-workflow[cwl]` when the document is prepared.
 The normalized plan is carried by the job, so the machine executing the job
@@ -218,23 +218,20 @@ and legacy runtime behavior.
 
 ## Bare documents and one-shot jobs
 
-`job new` recognizes a bare CWL document, a PWD `.json` graph, a jobflow Maker
-`.json` document, or a bare v1 template directory when its format is explicit:
+`job new` recognizes a bare CWL document, a PWD `.json` graph, or a jobflow
+Maker `.json` document:
 
 ```console
-httk job new --workspace WS --workflow flow.cwl --input message=echo
-httk job new --workspace WS --workflow workflow.json \
+httk job new --workspace WS --from-runner flow.cwl --input message=echo
+httk job new --workspace WS --from-runner workflow.json \
   --parameter pwd_module_path='["."]'
-httk job new --workspace WS --workflow maker.json
-httk job new --workspace WS --workflow ./v1-template --format httk-v1 \
-  --parameter structure=structures/si.cif
+httk job new --workspace WS --from-runner maker.json
 ```
 
-Use the generic `--format LANG` option for any bare document or directory when
-matching by path is not appropriate. `cwl`, `pwd`, and `jobflow` select their
-corresponding bare document readers; `httk-v1` requires a directory and is
-never auto-matched. A manifest package directory and a registered workflow id
-reject `--format` because their language is already declared.
+Use the generic `--format LANG` option for any bare document when matching by
+path is not appropriate. `cwl`, `pwd`, and `jobflow` select their corresponding
+bare document readers. A manifest package directory and a registered workflow
+id reject `--format` because their language is already declared.
 
 The resolver synthesizes an anonymous workflow with id `<language>.<stem>`.
 Document input ports become hook-consumed inputs; document outputs become

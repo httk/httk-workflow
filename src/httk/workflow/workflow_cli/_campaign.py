@@ -47,6 +47,21 @@ def handle_campaign_show(arguments: argparse.Namespace, context: CLIContext) -> 
 def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Assign one root job to a partition and submit it into that workspace."""
 
+    workflow = arguments.workflow
+    from ..scaffold import resolve_workflow
+
+    try:
+        resolved = resolve_workflow(workflow)
+    except ValueError as exc:
+        raise ValueError(
+            "campaign submit accepts registered or packaged workflow names only; "
+            "use job new --from-runner FILE, --workflow-dir DIR, or --from-command TEMPLATE"
+        ) from exc
+    if resolved.registration_id is None:
+        raise ValueError(
+            "campaign submit accepts registered or packaged workflow names only; "
+            "use job new --from-runner FILE, --workflow-dir DIR, or --from-command TEMPLATE"
+        )
     parameters = {
         name: _json_value(text, f"job parameter {name!r}")
         for name, text in _pairs(arguments.parameters, "a job parameter")
@@ -66,12 +81,10 @@ def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -
         for item in items:
             item["tag"] = arguments.tag or item.get("tag")
         jobs = campaign_submit_many(
-            arguments.workflow, items, key=arguments.key, index=arguments.index, project=context.cwd, **shared
+            workflow, items, key=arguments.key, index=arguments.index, project=context.cwd, **shared
         )
     else:
-        jobs = [
-            campaign_submit(arguments.workflow, key=arguments.key, index=arguments.index, project=context.cwd, **shared)
-        ]
+        jobs = [campaign_submit(workflow, key=arguments.key, index=arguments.index, project=context.cwd, **shared)]
     if arguments.json:
         print(json.dumps([job.as_mapping() for job in jobs] if len(jobs) > 1 else jobs[0].as_mapping(), indent=2))
         return 0
@@ -234,7 +247,7 @@ def build_campaign_parser(
         "--workflow",
         metavar="WORKFLOW",
         required=True,
-        help="the workflow id, alias, or path of a runner file to scaffold",
+        help="the registered workflow id or alias to scaffold (names only; use job new for files or commands)",
     )
     submit.add_argument(
         "--key",

@@ -31,7 +31,7 @@ def relax(a):
 raise SystemExit(run.main())
 ```
 
-`job new --workflow ./relax.py` publishes and digest-pins it; the same surface
+`job new --from-runner ./relax.py` publishes and digest-pins it; the same surface
 exists in Bash, C, Fortran, Rust, Perl, Ada, C++, and Java ({doc}`sdks/index`),
 and the normative operation table is {doc}`sdks/sdk_parity`.
 
