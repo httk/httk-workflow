@@ -104,10 +104,10 @@ Seals nest downward, so they are written bottom-up and removed top-down.
 # Seal: jobs, then the workspace, then the project.
 httk job seal <JOB>...
 httk workspace seal          # or: httk workspace seal --force  (seals unsealed jobs first)
-httk workflow project seal
+httk project seal
 
 # Unseal: project first, which frees the workspaces, which free the jobs.
-httk workflow project unseal
+httk project unseal
 httk workspace unseal
 httk job unseal <JOB>...
 ```

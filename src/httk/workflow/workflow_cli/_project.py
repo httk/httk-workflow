@@ -514,25 +514,25 @@ def add_project_manifest_verify_arguments(parser: argparse.ArgumentParser) -> No
     )
 
 
-def build_project_parser(
+def project_extension(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
-    context: CLIContext,
 ) -> None:
-    """Declare the ``project`` group: the directory a campaign lives in."""
+    """Mount httk-workflow's project verbs onto the core ``httk project`` command.
 
-    _, group = _group(
-        subparsers,
-        "project",
-        summary="check, sign, and seal a project directory",
-        description=(
-            "Check, sign, and seal one httk project directory. Creating, describing, and importing "
-            "projects is the core command: httk project init | show | import-v1"
-        ),
-    )
+    Registered through ``register_cli_extension("project", ...)``, this adds
+    ``doctor``, ``manifest create|verify``, ``seal``, and ``unseal`` beside the
+    core-owned ``init | show | import-v1 | export | verify-export`` leaves. The
+    handlers honour core's ``(argparse.Namespace, CLIContext) -> int`` contract
+    (workflow shares :class:`httk.core.cli.CLIContext`, so ``context.cwd`` and
+    ``context.program`` mean the same thing) and route every operator error
+    through :func:`_batch`, so a :class:`~httk.workflow.errors.WorkflowError`
+    (``SealError`` and ``SealedError`` among them, which core's error dispatch
+    does not catch) surfaces as a clean message rather than a traceback.
+    """
 
     add_project_doctor_arguments(
         _leaf(
-            group,
+            subparsers,
             "doctor",
             summary="check, and optionally repair, this project",
             description="Check one project for the conditions that quietly break it later",
@@ -541,7 +541,7 @@ def build_project_parser(
     )
 
     _, manifest_actions = _group(
-        group,
+        subparsers,
         "manifest",
         summary="create and verify the signed project manifest",
         description="Create and verify the deterministic signed manifest of one project",
@@ -566,7 +566,7 @@ def build_project_parser(
     )
 
     seal = _leaf(
-        group,
+        subparsers,
         "seal",
         summary="seal the project and every workspace it holds",
         description="Seal a project's loose files and the seal digest of every nested workspace under one signed seal",
@@ -585,7 +585,7 @@ def build_project_parser(
     )
 
     unseal = _leaf(
-        group,
+        subparsers,
         "unseal",
         summary="remove the project's seal",
         description="Remove the project's seal, which frees its workspaces and jobs to be unsealed in turn",

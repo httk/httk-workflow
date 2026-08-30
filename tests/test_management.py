@@ -49,7 +49,7 @@ def _payload(root: Path) -> tuple[Path, str]:
 
 def test_all_command_groups_have_help(tmp_path: Path, capsys) -> None:
     context = CLIContext("httk", tmp_path)
-    for group in ("workspace", "runner", "job", "manager", "config", "project", "remote", "transfer"):
+    for group in ("workspace", "runner", "job", "manager", "config", "remote", "transfer"):
         assert command([group, "--help"], context) == 0
     assert command(["v1", "collect", "--help"], context) == 0
     assert "usage:" in capsys.readouterr().out

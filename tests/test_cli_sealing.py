@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from httk.core.cli import CLIContext
 from httk.core.crypto import ed25519_generate_seed
+from httk.core.project.cli import command as project_command
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.configuration import ensure_identity_key
@@ -161,7 +162,7 @@ def test_project_seal_then_verify_ok_and_tamper_fails(tmp_path: Path, capsys) ->
 
     assert command(["workspace", "seal", "--force"], _context(project_root)) == 0
     capsys.readouterr()
-    assert command(["project", "seal"], _context(project_root)) == 0
+    assert project_command(["seal"], _context(project_root)) == 0
     assert "\tsealed\t" in capsys.readouterr().out
     assert is_project_sealed(project_root)
 
@@ -182,7 +183,7 @@ def test_project_seal_then_verify_ok_and_tamper_fails(tmp_path: Path, capsys) ->
 def test_seal_verify_json_shape(tmp_path: Path, capsys) -> None:
     project_root, _workspace, _job_id = _setup(tmp_path)
     assert command(["workspace", "seal", "--force"], _context(project_root)) == 0
-    assert command(["project", "seal"], _context(project_root)) == 0
+    assert project_command(["seal"], _context(project_root)) == 0
     capsys.readouterr()
 
     assert command(["seal", "verify", "--json"], _context(project_root)) == 0

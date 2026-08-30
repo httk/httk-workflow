@@ -45,7 +45,6 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "manager": ("run",),
     "v1": ("collect",),
     "config": ("init", "show", "set", "unset", "import-v1"),
-    "project": ("doctor", "manifest", "seal", "unseal"),
     "remote": ("list", "add", "configure", "check", "import-v1", "show", "remove"),
     "campaign": ("init", "show", "submit", "collect", "start-managers"),
     "seal": ("verify",),
@@ -159,10 +158,12 @@ def test_an_unknown_action_under_a_known_group_names_that_group(tmp_path: Path, 
     assert "'fsck'" in captured and "'remote'" not in captured
 
 
-def test_an_unknown_action_under_a_nested_group_names_that_nested_group(tmp_path: Path, capsys) -> None:
-    assert command(["project", "manifest", "sign"], _context(tmp_path)) == 2
+def test_an_unknown_action_under_a_nested_group_names_that_nested_group(capsys) -> None:
+    # `project manifest` moved to the core `httk project` command, mounted there
+    # by httk-workflow; a mistyped action still names the nested group it is under.
+    assert main(["project", "manifest", "sign"]) == 2
     captured = capsys.readouterr().err
-    assert "httk workflow project manifest" in captured and "invalid choice: 'sign'" in captured
+    assert "httk project manifest" in captured and "invalid choice: 'sign'" in captured
 
 
 def test_an_unknown_group_names_the_tree(tmp_path: Path, capsys) -> None:
@@ -190,6 +191,15 @@ def test_core_dispatches_the_standalone_groups(tmp_path: Path, monkeypatch, caps
     assert main(["job", "list"]) == 0
 
 
+def test_workflow_project_verbs_are_mounted_on_the_core_project_command(capsys) -> None:
+    # doctor/manifest/seal/unseal live under the core `httk project` command,
+    # mounted there by httk-workflow via register_cli_extension.
+    assert main(["project", "--help"]) == 0
+    printed = capsys.readouterr().out
+    for verb in ("doctor", "manifest", "seal", "unseal"):
+        assert verb in printed
+
+
 # ---------------------------------------------------------------------------
 # Removed spellings and canonical scope options
 # ---------------------------------------------------------------------------
@@ -200,8 +210,6 @@ def test_the_superseded_option_spellings_are_removed(tmp_path: Path) -> None:
 
     # But --set on `remote configure` is, and stays, KEY=VALUE settings.
     assert parser.parse_args(["remote", "configure", "--set", "host=a", "cluster"]).set == ["host=a"]
-    with pytest.raises(SystemExit):
-        parser.parse_args(["project", "init", "--default-queue", "batch"])
 
     with pytest.raises(SystemExit):
         parser.parse_args(["remote", "check", "--timeout", "5", "c"])

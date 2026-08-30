@@ -108,7 +108,6 @@ from ._project import (
     add_project_manifest_create_arguments,
     add_project_manifest_verify_arguments,
     build_config_parser,
-    build_project_parser,
     handle_config_import_v1,
     handle_config_init,
     handle_config_set,
@@ -119,6 +118,7 @@ from ._project import (
     handle_project_manifest_verify,
     handle_project_seal,
     handle_project_unseal,
+    project_extension,
 )
 from ._seal import build_seal_parser, handle_seal_verify
 from ._transfer import (
@@ -205,7 +205,6 @@ def build_parser(
     build_manager_parser(groups)
     build_v1_parser(groups)
     build_config_parser(groups)
-    build_project_parser(groups, context)
     build_remote_parser(groups)
     build_launcher_parser(groups)
     build_transfer_parser(groups)

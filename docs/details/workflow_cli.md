@@ -35,7 +35,7 @@ httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-"managers"
 httk workflow v1         collect
 httk workflow config     init | show | set | unset | import-v1
-httk workflow project    doctor | manifest create | manifest verify | seal | unseal   (init | show | import-v1 are core `httk project`)
+httk project             doctor | manifest create | manifest verify | seal | unseal   (httk-workflow mounts these beside core init | show | import-v1)
 httk workflow remote     list | add | configure | check | import-v1 | show | remove
 httk workflow transfer   [OPTIONS] SRC DST      (plus the protocol spellings: receive | offer | retire)
 ```
@@ -448,9 +448,11 @@ warning names how many such tasks a harvest saw.
 
 The project *anchor* — the `httk_project` directory, discovery, keys, and pins —
 belongs to *httk-core*, which owns the umbrella `httk project` command, including
-its `init`, `show`, and `import-v1` leaves. *httk-workflow* adds only the
+its `init`, `show`, and `import-v1` leaves. *httk-workflow* mounts the
 workflow-aware verbs — those that read or write workspace and manifest state —
-under `httk workflow project`. Create a project with `httk project init PATH`,
+onto that same `httk project` command through the extension registry, so they
+appear beside the core leaves as `httk project doctor | manifest | seal |
+unseal`. Create a project with `httk project init PATH`,
 then give it a workspace with `httk workspace init PATH`; describe it with
 `httk project show` and `httk workspace status`.
 
@@ -799,8 +801,8 @@ The project *anchor* is owned by *httk-core*, which provides the umbrella
 `httk project` command and its `init`, `show`, and `import-v1` leaves. Create the
 anchor with `httk project init PATH` and give it a workspace with
 `httk workspace init PATH`. The workflow-aware verbs — `doctor`, `manifest`,
-`seal`, and `unseal` — are provided by *httk-workflow* under
-`httk workflow project`.
+`seal`, and `unseal` — are mounted by *httk-workflow* onto the core
+`httk project` command.
 
 `config set` accepts only the keys the configuration actually has — including
 `machine_names`, `name`, and `email` — and names them when it refuses another, so a typo cannot become a
@@ -819,14 +821,14 @@ working directory's parent chain.
 ```console
 httk project show
 httk project show --json
-httk workflow project doctor
-httk workflow project doctor --repair .
+httk project doctor
+httk project doctor --repair .
 ```
 
 `httk project show` (core) reports the project's metadata and keys. `project
 doctor` adds the workflow-aware view — the recorded workspace default and its job
 counts, the maintenance lock, and a manifest check — and repairs what it safely
-can; `httk workspace status` and `httk workflow project manifest verify` report
+can; `httk workspace status` and `httk project manifest verify` report
 the live workspace and manifest state directly.
 
 `project doctor` checks the conditions that quietly break a project later — a
@@ -841,9 +843,9 @@ know about rather than something to fail a script on.
 ## Signed manifests
 
 ```console
-httk workflow project manifest create .
-httk workflow project manifest verify
-httk workflow project manifest verify --trusted-key keys/collaborator.pub
+httk project manifest create .
+httk project manifest verify
+httk project manifest verify --trusted-key keys/collaborator.pub
 ```
 
 The *httk₂* manifest is deterministic canonical JSON-lines compressed with bzip2.

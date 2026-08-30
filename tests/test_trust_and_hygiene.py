@@ -13,6 +13,7 @@ from typing import Any, cast
 import pytest
 from httk.core.cli import CLIContext
 from httk.core.crypto import ed25519_generate_seed, ed25519_public_key, ed25519_sign
+from httk.core.project.cli import command as project_command
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
@@ -150,7 +151,7 @@ def test_fresh_project_manifest_is_valid_and_trusted(tmp_path: Path, monkeypatch
     assert verification.public_key == read_project(project)["public_key"]
     assert key_fingerprint(str(verification.public_key)) in verification.reason
 
-    assert command(["project", "manifest", "verify", str(project)], CLIContext("httk", project)) == 0
+    assert project_command(["manifest", "verify", str(project)], CLIContext("httk", project)) == 0
     printed = capsys.readouterr().out
     assert printed.splitlines()[0] == "valid"
     assert VALID_TRUSTED in printed
@@ -191,13 +192,13 @@ def test_resigning_with_a_fresh_key_is_valid_but_not_trusted(tmp_path: Path, mon
     assert "not among this project's trusted keys" in verification.reason
 
     context = CLIContext("httk", project)
-    assert command(["project", "manifest", "verify", str(project)], context) == 1
+    assert project_command(["manifest", "verify", str(project)], context) == 1
     assert VALID_UNKNOWN_KEY in capsys.readouterr().out
 
     # Naming the key explicitly is the one-off way to accept it.
     public = project / PROJECT_DIRECTORY / "keys" / "project.pub"
-    assert command(["project", "manifest", "verify", "--trusted-key", str(public), str(project)], context) == 0
-    assert command(["project", "manifest", "verify", "--trusted-key", forged_key, str(project)], context) == 0
+    assert project_command(["manifest", "verify", "--trusted-key", str(public), str(project)], context) == 0
+    assert project_command(["manifest", "verify", "--trusted-key", forged_key, str(project)], context) == 0
     assert verify_manifest(project, trusted_keys=[forged_key]).verdict == VALID_TRUSTED
 
 
@@ -211,7 +212,7 @@ def test_tampered_tree_is_invalid(tmp_path: Path, monkeypatch, capsys) -> None:
     assert not verification.valid and verification.exit_code == 1
     assert "does not match" in verification.reason
 
-    assert command(["project", "manifest", "verify", str(project)], CLIContext("httk", project)) == 1
+    assert project_command(["manifest", "verify", str(project)], CLIContext("httk", project)) == 1
     assert capsys.readouterr().out.splitlines()[0] == "invalid"
 
 
@@ -672,11 +673,11 @@ def test_project_doctor_is_reachable_from_the_command_line(
     context = CLIContext("httk", project)
 
     # A project with no manifest yet is a warning, and a warning is not a failure.
-    assert command(["project", "doctor"], context) == 0
+    assert project_command(["doctor"], context) == 0
     report = capsys.readouterr().out
     assert "manifest" in report and "problem(s)" in report
 
-    assert command(["project", "doctor", "--repair", "--json", str(project)], context) == 0
+    assert project_command(["doctor", "--repair", "--json", str(project)], context) == 0
     repaired = _fields(json.loads(capsys.readouterr().out)[0])
     assert repaired["format"] == "httk-project-doctor" and repaired["repair"] is True
 
