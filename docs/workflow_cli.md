@@ -4,16 +4,17 @@
 `httk workflow …` — where every group and command answers `--help`:
 
 ```text
-httk workspace           init | list | default | status | managers | workflows | settings | fsck | gc | ...
-httk job                 new | submit | request | list | show | log | why | debug
+httk workspace           init | list | default | status | managers | workflows | settings | fsck | gc | seal | unseal | ...
+httk job                 new | submit | request | delete | seal | unseal | list | show | log | why | debug
 httk workflow runner     publish | describe
 httk workflow build      (compiled packages: build and register binaries)
 httk workflow list | describe | precheck | collect | postprocess
+httk workflow seal       verify
 httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-"managers"
 httk workflow remote     list | add | configure | check | show | remove
 httk workflow transfer   [OPTIONS] SRC DST
-httk workflow config | project | v1
+httk workflow config | project | v1        (project also: seal | unseal)
 ```
 
 {doc}`quickstart` walks the everyday sequence; {doc}`taskmanager` explains the

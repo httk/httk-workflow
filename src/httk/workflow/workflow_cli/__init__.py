@@ -71,8 +71,10 @@ from ._job import (
     handle_job_log,
     handle_job_new,
     handle_job_request,
+    handle_job_seal,
     handle_job_show,
     handle_job_submit,
+    handle_job_unseal,
     handle_job_why,
     handle_runner_describe,
     handle_runner_publish,
@@ -118,8 +120,11 @@ from ._project import (
     handle_project_init,
     handle_project_manifest_create,
     handle_project_manifest_verify,
+    handle_project_seal,
     handle_project_show,
+    handle_project_unseal,
 )
+from ._seal import build_seal_parser, handle_seal_verify
 from ._transfer import (
     _add_adapter_timeout,
     _dispatch_transfer_protocol,
@@ -162,11 +167,13 @@ from ._workspace import (
     handle_workspace_list,
     handle_workspace_policy_set,
     handle_workspace_policy_show,
+    handle_workspace_seal,
     handle_workspace_settings_set,
     handle_workspace_settings_show,
     handle_workspace_settings_unset,
     handle_workspace_status,
     handle_workspace_unlock,
+    handle_workspace_unseal,
     handle_workspace_workflows,
 )
 
@@ -193,6 +200,7 @@ def build_parser(
         build_job_parser(groups, program=f"{context.program} job")
     build_describe_parser(groups)
     build_list_parser(groups)
+    build_seal_parser(groups)
     build_collect_parser(groups)
     build_build_parser(groups)
     build_postprocess_parser(groups)

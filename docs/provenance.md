@@ -85,4 +85,10 @@ the exact published package. See {doc}`workflow_packages`.
 
 VASP runners will adopt this declaration in future work.
 
+Provenance records where a result came from; a **seal** proves it has not
+changed since. A manager seals each job as it succeeds, signing its payload's
+file hashes, and workspaces and projects can be sealed on top to pin whole trees
+under one signature that travels with a transfer. When integrity, not just
+origin, matters, see {doc}`sealing`.
+
 Built-in VASP result collection is documented in {doc}`collecting`.

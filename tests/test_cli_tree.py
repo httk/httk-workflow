@@ -37,15 +37,18 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "fsck",
         "gc",
         "unlock",
+        "seal",
+        "unseal",
     ),
     "runner": ("publish", "describe"),
-    "job": ("new", "submit", "request", "delete", "list", "show", "log", "why", "debug"),
+    "job": ("new", "submit", "request", "delete", "seal", "unseal", "list", "show", "log", "why", "debug"),
     "manager": ("run",),
     "v1": ("collect",),
     "config": ("init", "show", "set", "unset", "import-v1"),
-    "project": ("init", "import-v1", "show", "doctor", "manifest"),
+    "project": ("init", "import-v1", "show", "doctor", "manifest", "seal", "unseal"),
     "remote": ("list", "add", "configure", "check", "import-v1", "show", "remove"),
     "campaign": ("init", "show", "submit", "collect", "start-managers"),
+    "seal": ("verify",),
 }
 
 #: Superseded group spellings that were removed: ``tasks`` was the transfer

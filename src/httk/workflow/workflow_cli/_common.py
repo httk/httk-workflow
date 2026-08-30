@@ -318,6 +318,31 @@ def _required(
     return result
 
 
+def confirm(prompt: str, *, force: bool) -> bool:
+    """Ask for confirmation on a terminal, or refuse without one.
+
+    This is the one destructive-action gate every ``remove``/``unseal`` leaf
+    shares. ``--force`` answers yes without asking; without a terminal and
+    without ``--force`` the action is refused with a hint rather than blocking on
+    an unanswerable prompt. It calls the builtin :func:`input` so a test that
+    patches it still drives the prompt.
+
+    :param prompt: The question to ask, without the ``[y/N]`` suffix.
+    :param force: Whether ``--force`` was given, which answers yes unconditionally.
+    :return: Whether the action was confirmed.
+    """
+
+    if force:
+        return True
+    if not sys.stdin.isatty():
+        print("this operation without a terminal requires --force", file=sys.stderr)
+        return False
+    if input(f"{prompt} [y/N] ").strip().lower() in {"y", "yes"}:
+        return True
+    print("not removed")
+    return False
+
+
 def _json_value(text: str, label: str) -> object:
     """Return the JSON value one command-line argument denotes.
 

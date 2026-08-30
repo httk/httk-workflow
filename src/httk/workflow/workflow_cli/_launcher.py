@@ -19,7 +19,7 @@ from ..launchers import (
     remove_launcher,
     resolve_launcher,
 )
-from ._common import _group, _leaf, _required, _settings
+from ._common import _group, _leaf, _required, _settings, confirm
 
 
 def _launcher_batch(
@@ -142,13 +142,8 @@ def handle_launcher_remove(arguments: Namespace, context: CLIContext) -> int:
 
     if isinstance(arguments.name, list):
         return _launcher_batch(arguments, context, handle_launcher_remove, json_output=True)
-    if not arguments.force:
-        if not sys.stdin.isatty():
-            raise ValueError(f"removing the launcher {arguments.name!r} without a terminal requires --force")
-        answer = input(f"remove the launcher {arguments.name!r} and everything configured in it? [y/N]: ")
-        if answer.strip().lower() not in {"y", "yes"}:
-            print("not removed")
-            return 1
+    if not confirm(f"remove the launcher {arguments.name!r} and everything configured in it?", force=arguments.force):
+        return 1
     print(json.dumps(remove_launcher(arguments.name, project=context.cwd), indent=2, sort_keys=True))
     return 0
 

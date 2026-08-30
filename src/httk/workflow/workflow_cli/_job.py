@@ -28,9 +28,26 @@ from ..introspection import (
     resolve_job_selectors,
     selector_uses_remote_path,
 )
-from ..models import STATE_KINDS, TERMINAL_KINDS, Marker, canonical_uuid, ensure_step_known, parse_job_key
+from ..models import (
+    QUIESCENT_KINDS,
+    STATE_KINDS,
+    TERMINAL_KINDS,
+    Marker,
+    canonical_uuid,
+    ensure_step_known,
+    parse_job_key,
+)
 from ..removal import RemovalReport, remove_jobs
 from ..scaffold import payload_relative
+from ..seals import (
+    SealKeys,
+    is_job_sealed,
+    job_seal_path,
+    read_seal,
+    resolve_seal_keys,
+    seal_job,
+    unseal_job,
+)
 from ._common import *
 from ._common import (
     _ERRORS,
@@ -1397,18 +1414,11 @@ def _print_removal_report(report: RemovalReport) -> int:
 
 
 def _confirm_job_delete(rows: Sequence[tuple[str, str]]) -> bool:
-    """Confirm a deletion on the local terminal, or refuse non-interactively."""
+    """List the jobs to delete, then confirm on the terminal or refuse without one."""
 
-    if not sys.stdin.isatty():
-        print("job delete without a terminal requires --force", file=sys.stderr)
-        return False
     for job_key, kind in rows:
         print(f"{job_key}\t{kind}")
-    answer = input(f"Delete {len(rows)} jobs? [y/N] ")
-    if answer.strip().lower() in {"y", "yes"}:
-        return True
-    print("not removed")
-    return False
+    return confirm(f"Delete {len(rows)} jobs?", force=False)
 
 
 def _remote_delete_rows(
@@ -1498,6 +1508,68 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
     return _print_removal_report(remove_jobs(workspace, markers, force=bool(arguments.force)))
 
 
+def _resolve_job_seal_keys(workspace: Workspace, keys_arg: str | None) -> SealKeys:
+    """Resolve the signing keys ``job seal``/``workspace seal`` should use.
+
+    ``--keys`` overrides the workspace's ``seal.keys`` setting for this call; the
+    setting itself defaults to signing with both the project and identity keys.
+    """
+
+    setting = keys_arg or str(workspace.read_settings().get("seal.keys", "project,identity"))
+    refs = [ref.strip() for ref in setting.split(",") if ref.strip()]
+    return resolve_seal_keys(refs, root=workspace.root)
+
+
+def _seal_roles(workspace: Workspace, job_key: str) -> str:
+    """Return the comma-joined signer roles recorded in one job's seal."""
+
+    seal = read_seal(job_seal_path(workspace, job_key))
+    return ",".join(str(signature.get("role")) for signature in seal.signatures)
+
+
+def handle_job_seal(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Seal the payloads of selected quiescent jobs so tampering becomes visible."""
+
+    workspace = Workspace(_local_root(arguments, context, action="seal jobs in it"))
+    markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+    resolved = _resolve_job_seal_keys(workspace, arguments.keys)
+    failed = False
+    for marker in markers:
+        if marker.kind not in QUIESCENT_KINDS:
+            failed = True
+            print(f"{marker.job_id}: refusing to seal a {marker.kind} job; it is not quiescent", file=sys.stderr)
+            continue
+        try:
+            seal_job(workspace, marker, keys=resolved)
+        except _ERRORS as exc:
+            failed = True
+            print(f"{marker.job_id}: {exc}", file=sys.stderr)
+            continue
+        print(f"{marker.job_id}\tsealed\t{_seal_roles(workspace, marker.job_key)}")
+    if resolved.missing_roles:
+        print(f"warning: no key resolved for seal role(s): {', '.join(resolved.missing_roles)}", file=sys.stderr)
+    return 1 if failed else 0
+
+
+def handle_job_unseal(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove the seals of selected jobs, after confirmation."""
+
+    workspace = Workspace(_local_root(arguments, context, action="unseal jobs in it"))
+    markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+    if not confirm(f"Unseal {len(markers)} job(s)?", force=arguments.force):
+        return 1
+    failed = False
+    for marker in markers:
+        try:
+            unseal_job(workspace, marker)
+        except _ERRORS as exc:
+            failed = True
+            print(f"{marker.job_id}: {exc}", file=sys.stderr)
+            continue
+        print(f"{marker.job_id}\tunsealed")
+    return 1 if failed else 0
+
+
 def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Describe jobs completely from their authoritative state."""
 
@@ -1527,10 +1599,16 @@ def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
             markers = resolver.resolve_one(job)
             for marker in markers:
                 report = describe_job(workspace, marker, include_children=not arguments.no_children)
+                sealed = is_job_sealed(workspace, marker.job_key)
+                report["sealed"] = sealed
+                roles = _seal_roles(workspace, marker.job_key) if sealed else ""
+                if sealed:
+                    report["seal_roles"] = roles.split(",")
                 reports.append(report)
                 if not arguments.json:
                     print(f"{job}:")
                     print(render_job(report))
+                    print(f"sealed: yes ({roles})" if sealed else "sealed: no")
         except _ERRORS as exc:
             failed = True
             print(f"{job}: {exc}", file=sys.stderr)
@@ -1884,6 +1962,30 @@ def build_job_parser(
     delete.add_argument("--force", action="store_true", help="skip confirmation and the join-child safety guard")
     delete.add_argument("--confirmed", action="store_true", help=argparse.SUPPRESS)
     _add_adapter_timeout(delete)
+
+    seal = _leaf(
+        group,
+        "seal",
+        summary="sign a job's payload so tampering becomes detectable",
+        description="Seal the payloads of selected quiescent jobs with a signed record of their file hashes",
+        handler=handle_job_seal,
+    )
+    _add_job_selector(seal)
+    seal.add_argument(
+        "--keys",
+        metavar="REFS",
+        help="comma-separated seal-key refs to sign with (default: the workspace seal.keys setting)",
+    )
+
+    unseal = _leaf(
+        group,
+        "unseal",
+        summary="remove the seals of selected jobs",
+        description="Remove the seals of selected jobs; refused while the enclosing workspace is sealed",
+        handler=handle_job_unseal,
+    )
+    _add_job_selector(unseal)
+    unseal.add_argument("--force", action="store_true", help="skip the confirmation prompt")
 
     show = _leaf(
         group,

@@ -14,6 +14,16 @@ from ..models import DEFAULT_LEASE_SECONDS, WORKSPACE_DIRECTORY
 from ..packages import load_workflow_package
 from ..projects import read_project_section, require_project, write_project_section
 from ..registry import _update_workspace_path, valid_workspace_name
+from ..seals import (
+    is_workspace_sealed,
+    read_seal,
+    resolve_seal_keys,
+    seal_job,
+    seal_workspace,
+    unseal_workspace,
+    unsealed_jobs,
+    workspace_seal_path,
+)
 from ._common import *
 from ._common import (
     _ERRORS,
@@ -203,6 +213,7 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
                     "workspace_format_version": workspace.format["format_version"],
                     "core_profile": workspace.format["core_profile"],
                     "extensions": sorted(workspace.extensions),
+                    "sealed": is_workspace_sealed(workspace),
                     "counts": counts,
                     "jobs": rows,
                 },
@@ -213,6 +224,7 @@ def handle_workspace_status(arguments: argparse.Namespace, context: CLIContext) 
     print(f"workspace {workspace.workspace_id}")
     for kind in sorted(counts):
         print(f"{kind:12s} {counts[kind]}")
+    print(f"sealed: {'yes' if is_workspace_sealed(workspace) else 'no'}")
     return 0
 
 
@@ -293,6 +305,55 @@ def handle_workspace_workflows(arguments: argparse.Namespace, context: CLIContex
     for row in rows:
         summary = row["error"] or row["summary"] or "-"
         print(f"{row['path']}\t{row['kind']}\t{row['workflow'] or '-'}\t{summary}")
+    return 0
+
+
+def handle_workspace_seal(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Seal a workspace by recording the seal digest of every job it holds.
+
+    Every job must already be sealed. ``--force`` seals the still-unsealed jobs
+    first — any quiescent kind, not just succeeded ones — and then the workspace;
+    without it, the unsealed jobs are listed and the command refuses.
+    """
+
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_seal)
+    workspace = Workspace(_local_root(arguments, context, action="seal it"))
+    setting = arguments.keys or str(workspace.read_settings().get("seal.keys", "project,identity"))
+    refs = [ref.strip() for ref in setting.split(",") if ref.strip()]
+    resolved = None
+    with workspace_maintenance_guard(workspace):
+        unsealed = unsealed_jobs(workspace)
+        if unsealed and not arguments.force:
+            for marker in unsealed:
+                print(f"{marker.job_id}\t{marker.kind}", file=sys.stderr)
+            return 1
+        resolved = resolve_seal_keys(refs, root=workspace.root)
+        for marker in unsealed:
+            seal_job(workspace, marker, keys=resolved)
+        seal_workspace(workspace, keys=resolved)
+    seal = read_seal(workspace_seal_path(workspace))
+    roles = ",".join(str(signature.get("role")) for signature in seal.signatures)
+    print(f"{workspace.root}\tsealed\t{roles}")
+    if resolved.missing_roles:
+        print(f"warning: no key resolved for seal role(s): {', '.join(resolved.missing_roles)}", file=sys.stderr)
+    return 0
+
+
+def handle_workspace_unseal(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove a workspace's seal, after confirmation.
+
+    Refused while the enclosing project is still sealed, so a project seal that
+    commits to this workspace can never be left dangling.
+    """
+
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_unseal)
+    workspace = Workspace(_local_root(arguments, context, action="unseal it"))
+    if not confirm(f"Unseal the workspace {workspace.workspace_id}?", force=arguments.force):
+        return 1
+    unseal_workspace(workspace)
+    print(f"{workspace.root}\tunsealed")
     return 0
 
 
@@ -1062,3 +1123,32 @@ def build_workspace_parser(
         action="store_true",
         help="also remove a lock whose holder is still alive",
     )
+
+    seal = _leaf(
+        group,
+        "seal",
+        summary="seal a workspace and the jobs it holds",
+        description="Record the seal digest of every job in a workspace under one signed workspace seal",
+        handler=handle_workspace_seal,
+    )
+    _add_workspace_targets(seal, help_text="the workspace to seal")
+    seal.add_argument(
+        "--force",
+        action="store_true",
+        help="seal every still-unsealed job first, rather than refusing",
+    )
+    seal.add_argument(
+        "--keys",
+        metavar="REFS",
+        help="comma-separated seal-key refs to sign with (default: the workspace seal.keys setting)",
+    )
+
+    unseal = _leaf(
+        group,
+        "unseal",
+        summary="remove a workspace's seal",
+        description="Remove a workspace's seal; refused while the enclosing project is sealed",
+        handler=handle_workspace_unseal,
+    )
+    _add_workspace_targets(unseal, help_text="the workspace to unseal")
+    unseal.add_argument("--force", action="store_true", help="skip the confirmation prompt")

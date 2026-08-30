@@ -1,7 +1,7 @@
 """Configuration, project, and umbrella-project command groups."""
 
 import sys
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from copy import copy
 from io import StringIO
 
@@ -13,6 +13,10 @@ from ..configuration import (
     identity_public_key,
     write_config,
 )
+from ..manifests import workspace_maintenance_guard
+from ..models import WORKSPACE_DIRECTORY
+from ..projects import PROJECT_DIRECTORY, require_project
+from ..seals import project_seal_path, read_seal, resolve_seal_keys, seal_project, unseal_project
 from ._common import *
 from ._common import (
     _ERRORS,
@@ -497,6 +501,52 @@ def handle_project_manifest_verify(arguments: argparse.Namespace, context: CLICo
     return verification.exit_code
 
 
+def handle_project_seal(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Seal a project: its loose files, and the seal digest of every workspace.
+
+    Every workspace at or below the project must already be sealed;
+    :func:`seal_project` refuses otherwise. When the project root is itself a
+    workspace, the maintenance guard fences it exactly as ``manifest create`` does.
+    """
+
+    if isinstance(arguments.project, list):
+        return _batch(arguments, context, handle_project_seal, "project", "project")
+    root = require_project(arguments.project or context.cwd)
+    resolved = None
+    if arguments.keys:
+        refs = [ref.strip() for ref in arguments.keys.split(",") if ref.strip()]
+        resolved = resolve_seal_keys(refs, root=root)
+    workspace = (
+        Workspace(root)
+        if (root / PROJECT_DIRECTORY).is_dir() and (root / WORKSPACE_DIRECTORY / "format.json").is_file()
+        else None
+    )
+    guard = workspace_maintenance_guard(workspace) if workspace is not None else nullcontext()
+    with guard:
+        seal_project(root, keys=resolved)
+    seal = read_seal(project_seal_path(root))
+    roles = ",".join(str(signature.get("role")) for signature in seal.signatures)
+    print(f"{root}\tsealed\t{roles}")
+    return 0
+
+
+def handle_project_unseal(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove a project's seal, after confirmation.
+
+    Unsealing runs top down: the project seal is removed here, which then frees
+    each workspace to be unsealed, which frees each job.
+    """
+
+    if isinstance(arguments.project, list):
+        return _batch(arguments, context, handle_project_unseal, "project", "project")
+    root = require_project(arguments.project or context.cwd)
+    if not confirm(f"Unseal the project at {root}?", force=arguments.force):
+        return 1
+    unseal_project(root)
+    print(f"{root}\tunsealed")
+    return 0
+
+
 def add_project_doctor_arguments(parser: argparse.ArgumentParser) -> None:
     """Declare :command:`project doctor`, shared with ``httk project doctor``."""
 
@@ -667,3 +717,37 @@ def build_project_parser(
             handler=handle_project_manifest_verify,
         )
     )
+
+    seal = _leaf(
+        group,
+        "seal",
+        summary="seal the project and every workspace it holds",
+        description="Seal a project's loose files and the seal digest of every nested workspace under one signed seal",
+        handler=handle_project_seal,
+    )
+    seal.add_argument(
+        "project",
+        metavar="PROJECT",
+        nargs="*",
+        help="the project to seal (default: the nearest one)",
+    )
+    seal.add_argument(
+        "--keys",
+        metavar="REFS",
+        help="comma-separated seal-key refs to sign with (default: the project's seal_keys member)",
+    )
+
+    unseal = _leaf(
+        group,
+        "unseal",
+        summary="remove the project's seal",
+        description="Remove the project's seal, which frees its workspaces and jobs to be unsealed in turn",
+        handler=handle_project_unseal,
+    )
+    unseal.add_argument(
+        "project",
+        metavar="PROJECT",
+        nargs="*",
+        help="the project to unseal (default: the nearest one)",
+    )
+    unseal.add_argument("--force", action="store_true", help="skip the confirmation prompt")

@@ -257,13 +257,8 @@ def handle_remote_remove(arguments: argparse.Namespace, context: CLIContext) -> 
 
     if isinstance(arguments.name, list):
         return _remote_batch(arguments, context, handle_remote_remove, "name", json_output=True)
-    if not arguments.force:
-        if not sys.stdin.isatty():
-            raise ValueError(f"removing the remote {arguments.name!r} without a terminal requires --force")
-        answer = input(f"remove the remote {arguments.name!r} and everything configured in it? [y/N]: ")
-        if answer.strip().lower() not in {"y", "yes"}:
-            print("not removed")
-            return 1
+    if not confirm(f"remove the remote {arguments.name!r} and everything configured in it?", force=arguments.force):
+        return 1
     print(json.dumps(remove_remote(arguments.name, project=context.cwd), indent=2, sort_keys=True))
     return 0
 
