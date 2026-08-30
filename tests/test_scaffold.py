@@ -938,6 +938,304 @@ def test_command_file_placeholder_is_staged_and_runs(tmp_path: Path, capsys) -> 
     assert output.count("file-placeholder-unique-sentinel\n") == 2
 
 
+def test_command_files_directory_is_staged_warns_and_resolves_placeholders(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-files-directory-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-directory")
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    for name in ("INCAR", "KPOINTS", "POSCAR"):
+        (inputs / name).write_text(f"{name}-directory-sentinel\n", encoding="utf-8")
+    (inputs / "subdirectory").mkdir()
+    (inputs / "file-link").symlink_to(inputs / "INCAR")
+    (inputs / "directory-link").symlink_to(inputs / "subdirectory", target_is_directory=True)
+    (inputs / "broken-link").symlink_to(inputs / "missing")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "cat INCAR KPOINTS POSCAR {POSCAR}",
+                "--files",
+                str(inputs),
+                "--json",
+            ],
+            _context(tmp_path),
+        )
+        == 0
+    )
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)[0]
+    payload = Path(report["payload_path"])
+    assert {path.name for path in (payload / "files").iterdir()} == {
+        "INCAR",
+        "KPOINTS",
+        "POSCAR",
+        "file-link",
+    }
+    assert f"skipped 3 non-file entries in {inputs}: broken-link, directory-link, subdirectory" in captured.err
+
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=120.0)
+    marker = workspace.find_marker_by_id(report["job_id"])
+    assert marker is not None and marker.kind == "succeeded"
+    output = (payload / "logs" / "stdio.out").read_text(encoding="utf-8")
+    for name in ("INCAR", "KPOINTS", "POSCAR"):
+        assert output.count(f"{name}-directory-sentinel\n") == (2 if name == "POSCAR" else 1)
+
+
+def test_command_files_directory_stages_special_basenames(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-files-special-names-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-special-names")
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    for name in (".hidden", "job.json", "with=equals"):
+        (inputs / name).write_text(f"{name}\n", encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "true",
+                "--files",
+                str(inputs),
+                "--json",
+            ],
+            _context(tmp_path),
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)[0]
+    payload = Path(report["payload_path"])
+    for name in (".hidden", "job.json", "with=equals"):
+        assert (payload / "files" / name).read_text(encoding="utf-8") == f"{name}\n"
+
+
+def test_command_files_directory_works_with_workflow_dir_and_from_runner(tmp_path: Path, capsys) -> None:
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    (inputs / "workflow-input").write_text("workflow\n", encoding="utf-8")
+
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "httk_workflow.toml").write_text(
+        '[workflow]\nid = "tests.files.package"\ndescription = "file staging test"\n\n'
+        '[workflow.runner]\nsteps = ["start"]\n',
+        encoding="utf-8",
+    )
+    (package / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (package / "run").chmod(0o755)
+    runner = tmp_path / "runner.sh"
+    runner.write_text(
+        "#!/usr/bin/env bash\n"
+        'source "$HTTK_WORKFLOW_BASH_API"\n'
+        "httk_workflow_runner files.runner start\n"
+        "step_start() { httk_workflow_succeed; }\n"
+        "httk_workflow_main\n",
+        encoding="utf-8",
+    )
+    runner.chmod(0o755)
+    workspace = Workspace.initialize(tmp_path / "command-files-forms-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-forms")
+
+    reports = []
+    for source_option, source in (("--workflow-dir", package), ("--from-runner", runner)):
+        assert (
+            command(
+                [
+                    "job",
+                    "new",
+                    "--workspace",
+                    workspace_name,
+                    source_option,
+                    str(source),
+                    "--files",
+                    str(inputs),
+                    "--json",
+                ],
+                _context(tmp_path),
+            )
+            == 0
+        )
+        reports.append(json.loads(capsys.readouterr().out)[0])
+
+    for report in reports:
+        assert (Path(report["payload_path"]) / "files" / "workflow-input").read_text(encoding="utf-8") == "workflow\n"
+
+
+def test_command_files_directories_can_be_repeated(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-files-directories-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-directories")
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "one").write_text("one\n", encoding="utf-8")
+    (second / "two").write_text("two\n", encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "true",
+                "--files",
+                str(first),
+                "--files",
+                str(second),
+                "--json",
+            ],
+            _context(tmp_path),
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)[0]
+    payload = Path(report["payload_path"])
+    assert (payload / "files" / "one").read_text(encoding="utf-8") == "one\n"
+    assert (payload / "files" / "two").read_text(encoding="utf-8") == "two\n"
+
+
+def test_command_files_directories_collide_with_each_other(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-files-directory-collision-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-directory-collision")
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "same").write_text("first\n", encoding="utf-8")
+    (second / "same").write_text("second\n", encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "true",
+                "--files",
+                str(first),
+                "--files",
+                str(second),
+            ],
+            _context(tmp_path),
+        )
+        == 2
+    )
+    error = capsys.readouterr().err
+    assert "use the same name" in error
+    assert str(first / "same") in error
+    assert str(second / "same") in error
+
+
+def test_command_files_directory_collides_with_file(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-files-collision-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-collision")
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    directory_source = inputs / "POSCAR"
+    directory_source.write_text("directory\n", encoding="utf-8")
+    explicit_source = tmp_path / "explicit-POSCAR"
+    explicit_source.write_text("explicit\n", encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "true",
+                "--file",
+                f"POSCAR={explicit_source}",
+                "--files",
+                str(inputs),
+            ],
+            _context(tmp_path),
+        )
+        == 2
+    )
+    error = capsys.readouterr().err
+    assert "use the same name" in error
+    assert str(explicit_source) in error
+    assert str(directory_source) in error
+    assert not list(workspace.scan_markers())
+
+
+@pytest.mark.parametrize("directory_kind", ["missing", "empty"])
+def test_command_files_directory_requires_regular_files(tmp_path: Path, capsys, directory_kind: str) -> None:
+    workspace = Workspace.initialize(tmp_path / f"command-files-{directory_kind}-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, f"command-files-{directory_kind}")
+    directory = tmp_path / directory_kind
+    if directory_kind == "empty":
+        directory.mkdir()
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "true",
+                "--files",
+                str(directory),
+            ],
+            _context(tmp_path),
+        )
+        == 2
+    )
+    error = capsys.readouterr().err
+    if directory_kind == "empty":
+        assert f"no regular files in {directory}" in error
+    else:
+        assert f"--files directory does not exist or is not a directory: {directory}" in error
+
+
+def test_command_files_directory_rejects_whitespace_edge_basenames(tmp_path: Path, capsys) -> None:
+    workspace = Workspace.initialize(tmp_path / "command-files-whitespace-workspace")
+    workspace_name = register_ws(_context(tmp_path), workspace.root, "command-files-whitespace")
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    entry = inputs / " POSCAR "
+    entry.write_text("whitespace\n", encoding="utf-8")
+
+    assert (
+        command(
+            [
+                "job",
+                "new",
+                "--workspace",
+                workspace_name,
+                "--from-command",
+                "true",
+                "--files",
+                str(inputs),
+            ],
+            _context(tmp_path),
+        )
+        == 2
+    )
+    error = capsys.readouterr().err
+    assert f"--files {inputs} entry ' POSCAR '" in error
+    assert "staging normalization" in error
+
+
 def test_command_file_is_staged_into_workdir_and_preserves_existing_file(tmp_path: Path, capsys) -> None:
     workspace = Workspace.initialize(tmp_path / "command-cwd-workspace")
     workspace_name = register_ws(_context(tmp_path), workspace.root, "command-cwd")

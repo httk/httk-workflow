@@ -328,6 +328,43 @@ def _command_default_tag(parameters: Mapping[str, object]) -> str | None:
     return _sanitize_tag(f"{name}{value}")
 
 
+def _expand_file_directories(
+    file_arguments: Sequence[str], directories: Sequence[str], context: CLIContext
+) -> list[tuple[str, str]]:
+    """Expand ``--files`` directories into ``--file``-style arguments."""
+
+    expanded = _pairs(file_arguments, "a staged file")
+    for directory_text in directories:
+        directory = Path(directory_text).expanduser()
+        if not directory.is_dir():
+            raise ValueError(f"--files directory does not exist or is not a directory: {directory_text}")
+        children = sorted(directory.iterdir(), key=lambda path: path.name)
+        regular_files: list[Path] = []
+        skipped: list[str] = []
+        for child in children:
+            if child.is_file():
+                if child.name.strip() != child.name or not child.name.strip():
+                    raise ValueError(
+                        f"--files {directory_text} entry {child.name!r} changes under staging normalization"
+                    )
+                regular_files.append(child)
+            else:
+                skipped.append(child.name)
+        if skipped:
+            shown = ", ".join(skipped[:5])
+            if len(skipped) > 5:
+                shown += ", …"
+            print(
+                f"{context.program} workflow: warning: skipped {len(skipped)} non-file entries "
+                f"in {directory_text}: {shown}",
+                file=sys.stderr,
+            )
+        if not regular_files:
+            raise ValueError(f"no regular files in {directory_text}")
+        expanded.extend((child.name, str(child)) for child in regular_files)
+    return expanded
+
+
 def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Scaffold and submit one job or an input-source batch."""
 
@@ -346,18 +383,24 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
         name: _json_value(text, f"job parameter {name!r}")
         for name, text in _pairs(arguments.parameters, "a job parameter")
     }
+    file_arguments = _expand_file_directories(arguments.files, arguments.file_directories, context)
     files: dict[str, str | Path] = {}
     file_destinations: dict[str, str] = {}
-    for name, text in _pairs(arguments.files, "a staged file"):
+    file_sources: dict[str, str] = {}
+    for name, text in file_arguments:
         if name in files:
-            raise ValueError(f"--file entries {name!r} and {name!r} use the same name")
+            raise ValueError(
+                f"--file entries {name!r} and {name!r} use the same name (sources: {file_sources[name]!r} and {text!r})"
+            )
         destination = payload_relative(name).as_posix()
         previous = file_destinations.get(destination)
         if previous is not None:
             raise ValueError(
-                f"--file entries {previous!r} and {name!r} have the same normalized destination {destination!r}"
+                f"--file entries {previous!r} and {name!r} have the same normalized destination {destination!r} "
+                f"(sources: {file_sources[previous]!r} and {text!r})"
             )
         files[name] = Path(text)
+        file_sources[name] = text
         file_destinations[destination] = name
     inputs, items, input_tag = _load_inputs(arguments.inputs, arguments.input_from)
     command_source: Path | None = None
@@ -1701,6 +1744,14 @@ def build_job_parser(
         dest="files",
         metavar="NAME=PATH",
         help="stage PATH in the payload as NAME; a NAME=PATH with no / in NAME lands in files/ (repeatable)",
+    )
+    new.add_argument(
+        "--files",
+        action="append",
+        default=[],
+        dest="file_directories",
+        metavar="DIR",
+        help="stage every regular file directly in DIR under its own name (repeatable; subdirectories are skipped)",
     )
     new.add_argument(
         "--input",

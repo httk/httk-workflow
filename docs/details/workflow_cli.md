@@ -163,7 +163,7 @@ its job or store runner target.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `job new [OPTIONS]` | scaffold and submit jobs from a workflow, runner file, package directory, or command template | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, or `--from-command`, `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
+| `job new [OPTIONS]` | scaffold and submit jobs from a workflow, runner file, package directory, or command template | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, or `--from-command`, `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--files`, `--tag`, `--placement`, `--json` |
 | `job submit [OPTIONS] SOURCE...` | submit prepared payload directories | `--workspace`, `--placement` (required), `--move` |
 | `job request ACTION [OPTIONS] JOB_ID...` | publish one request per job selector (remote: over the adapter) | `--workspace`, optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
 | `job delete [--force] JOB...` | remove selected job payloads and state markers (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
@@ -606,6 +606,19 @@ through `httk_workflow_parameter` at run time, while file placeholders resolve
 to the staged file below `HTTK_WORKFLOW_JOB_DIR`. Each `--file` input is also
 copied into the job workdir under its basename before the command runs, so it
 can be read there by name as well; existing workdir entries are never replaced.
+`--files DIR` expands every regular file directly inside DIR, sorted by
+basename, into the same staging and placeholder behavior as `--file` for every
+job-creation form (`--workflow`, `--workflow-dir`, `--from-runner`, and
+`--from-command`). Symlinks to regular files are followed and staged;
+subdirectories, symlinks to directories, broken symlinks, and other non-file
+entries are skipped with one stderr warning naming up to five entries (plus
+`…`); a DIR with no regular files errors with `no regular files in DIR`. For
+example:
+
+```console
+httk job new --from-command 'srun --ntasks=10 --cpus-per-task=1 vasp_std' --files inputs/si --tag si
+```
+
 The copy in the payload remains the immutable original, and `{name}` still
 resolves to its absolute staged path. The generated runner can be edited and
 passed back with `--from-runner`. The template is an argv-only word list: it has no shell syntax. A placeholder name must match
