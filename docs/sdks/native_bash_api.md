@@ -341,6 +341,40 @@ inherited, because a synthesized child has no payload to copy it into: publish i
 with `httk workflow runner publish` and name it with `--runner ws:PATH@SHA256`, or
 prepare a payload directory and spawn that with `--payload`.
 
+### Calling another workflow
+
+`httk_workflow_call LABEL WORKFLOW ...` spawns a *different* registered workflow
+as a child job and prints its job key. Where `httk_workflow_spawn` runs a step of
+this same runner (or a payload you prepared yourself), `call` scaffolds a
+complete child payload for `WORKFLOW` — resolved exactly as `httk workflow job
+new` resolves it: a registered id or alias (`vasp-relax`), a runner file of your
+own, a workflow package directory, or a bare language document. Its `--file` and
+`--input` arguments are staged into the child payload and its `job.json` is
+written, so the child runs that workflow's own runner. Wait for it with
+`httk_workflow_gather` and read it back with `httk_workflow_children`, exactly as
+for a spawned child. A registered packaged workflow is referenced through the
+reserved `pkg:` form and copies nothing; a runner file of your own is published
+into the workspace runner store, which is content-addressed and idempotent. The
+child's job tag defaults to the label, just as with `spawn`.
+
+| Option | Meaning |
+| --- | --- |
+| `--file NAME=PATH` | stage `PATH` into the child payload as `NAME` (a bare name lands under `files/`) |
+| `--input NAME=VALUE`, `--input NAME=@FILE.json` | one of the called workflow's declared inputs |
+| `--parameter NAME=VALUE`, `--parameter NAME=@FILE.json` | one member of the child's `parameters` object |
+| `--environment NAME=VALUE` | override one of the called workflow's declared environment values |
+| `--tag TAG`, `--name NAME` | what the child is called; the tag defaults to `LABEL` |
+| `--placement PATH` | where the child is created; the placement of this job by default |
+| `--priority N` | the child's scheduling priority |
+| `--workdir-mode persistent\|isolated` | the child's workdir mode |
+| `--data-mode none\|transactional` | override the called workflow's data mode |
+| `--step STEP` | override the called workflow's initial step |
+| `--workflow-id ID` | override the workflow id written into the child's `job.json` |
+
+Calling needs the workspace root reachable from where the step runs, the same
+condition `httk_workflow_children` needs. See {doc}`../composing_workflows` for
+the full model, a worked example, and how results move between calls.
+
 ### Gathering them
 
 `httk_workflow_gather STEP` joins exactly the children spawned on this attempt —

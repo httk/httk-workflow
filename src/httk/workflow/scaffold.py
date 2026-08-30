@@ -75,6 +75,7 @@ from .models import (
     ATTEMPTS_DIRECTORY,
     JOB_STATE_DIRECTORY,
     LOGS_DIRECTORY,
+    JobDefinition,
     ensure_step_known,
     normalize_placement,
     validate_parameters,
@@ -106,6 +107,7 @@ __all__ = [
     "registered_workflow_labels",
     "registered_workflows",
     "resolve_workflow",
+    "scaffold_job",
     "structure_files",
     "structure_tag",
     "workflow_provider",
@@ -1193,6 +1195,12 @@ def new_job(
     copies nothing. It is ignored for language workflows, whose realization
     chooses the runner itself.
 
+    :func:`scaffold_job` is the same operation stopped one step short of
+    submission: it builds the payload into a directory you name and returns its
+    :class:`~httk.workflow.protocol.JobDefinition` without registering a state
+    marker, which is how :meth:`httk.workflow.Attempt.call` builds a child job of
+    a registered workflow from inside a running step.
+
     :param workspace: Provide the workspace receiving the job.
     :param workflow: Select the workflow or runner file.
     :param inputs: Supply declared workflow inputs.
@@ -1550,6 +1558,287 @@ def _declared_inputs(workflow: ResolvedWorkflow) -> dict[str, dict[str, object]]
     }
 
 
+def scaffold_job(
+    workspace: Workspace,
+    workflow: str | os.PathLike[str],
+    destination: str | os.PathLike[str],
+    *,
+    inputs: Mapping[str, object] | None = None,
+    files: Mapping[str, str | os.PathLike[str]] | None = None,
+    parameters: Mapping[str, object] | None = None,
+    environment: Mapping[str, object] | None = None,
+    tag: str | None = None,
+    priority: int | None = None,
+    workdir_mode: WorkdirMode = "persistent",
+    data_mode: DataMode | None = None,
+    publish: PublishMode = "workspace",
+    step: str | None = None,
+    format: str | None = None,
+    workflow_id: str | None = None,
+    runner_name: str | PurePosixPath | None = None,
+    name: str | None = None,
+) -> JobDefinition:
+    """Build one job payload of *workflow* into *destination*, without submitting it.
+
+    This is :func:`new_job` stopped one step short of submission: it resolves the
+    workflow, publishes or references its runner, stages *files* and *inputs*,
+    validates *parameters* and *environment*, runs any instantiate hook, and
+    writes ``job.json`` — but into *destination* rather than into the workspace,
+    and it registers no state marker. *destination* must already exist and be an
+    empty directory. The result is a prepared payload directory, which is exactly
+    what :meth:`httk.workflow.Attempt.spawn` accepts, so a running step can build
+    a child job of any registered workflow and spawn it; :meth:`httk.workflow.Attempt.call`
+    does exactly that.
+
+    Every argument other than *destination* means what it does for
+    :func:`new_job`, minus *placement*: a prepared payload has no placement of its
+    own until something submits or spawns it.
+
+    :param workspace: Provide the workspace whose runner store receives a published runner.
+    :param workflow: Select the workflow or runner file.
+    :param destination: Locate the empty directory to build the payload into.
+    :param inputs: Supply declared workflow inputs.
+    :param files: Map payload names to files to stage.
+    :param parameters: Supply opaque job parameters.
+    :param environment: Supply overrides for declared workflow environment values.
+    :param tag: Set the job tag.
+    :param priority: Set the scheduling priority.
+    :param workdir_mode: Select the job workdir mode.
+    :param data_mode: Override the workflow data mode.
+    :param publish: Select workspace publication or installed reference.
+    :param step: Override the workflow's initial step.
+    :param format: Force a language for a bare workflow document or directory.
+    :param workflow_id: Override the workflow id in the job definition.
+    :param runner_name: Override the workspace runner-store name when publishing.
+    :param name: Set the job's display name.
+    :return: The written job definition.
+    :raises ValueError: If the destination is not an empty directory, or workflow, inputs, or job settings are invalid.
+    """
+
+    target = Path(destination)
+    if not target.is_dir():
+        raise ValueError(f"a scaffold_job destination must be an existing directory: {target}")
+    if any(target.iterdir()):
+        raise ValueError(f"a scaffold_job destination must be an empty directory: {target}")
+    prepared = _prepare(
+        workspace,
+        workflow,
+        publish=publish,
+        step=step,
+        workflow_id=workflow_id,
+        data_mode=data_mode,
+        format=format,
+        runner_name=runner_name,
+    )
+    return _build_payload(
+        workspace,
+        prepared,
+        target,
+        inputs=inputs,
+        files=files,
+        parameters=parameters,
+        environment=environment,
+        tag=tag,
+        priority=priority,
+        workdir_mode=workdir_mode,
+        name=name,
+    )
+
+
+def _build_payload(
+    workspace: Workspace,
+    prepared: _Prepared,
+    destination: Path,
+    *,
+    inputs: Mapping[str, object] | None,
+    files: Mapping[str, str | os.PathLike[str]] | None,
+    parameters: Mapping[str, object] | None,
+    environment: Mapping[str, object] | None,
+    tag: str | None,
+    priority: int | None,
+    workdir_mode: WorkdirMode,
+    name: str | None,
+) -> JobDefinition:
+    """Stage one job payload into *destination* and write its ``job.json``.
+
+    This is the shared body of :func:`new_job`/:func:`new_jobs` (through
+    :func:`_submit`) and :func:`scaffold_job`: everything between a resolved
+    workflow and a written ``job.json``, with no workspace submission of its own.
+    *destination* is an existing empty directory the caller owns.
+    """
+
+    workflow = prepared.workflow
+    caller_tag = tag
+    user_files = dict(files or {})
+    prepared_members: dict[str, str] = {}
+    for member in (*prepared.documents, *prepared.files):
+        relative = payload_relative(member).as_posix()
+        if relative in prepared_members:
+            raise ValueError(f"prepared member {member!r} collides with {prepared_members[relative]!r}")
+        prepared_members[relative] = member
+    for member in user_files:
+        relative = payload_relative(member).as_posix()
+        if relative in prepared_members:
+            raise ValueError(f"prepared member {prepared_members[relative]!r} collides with user file {member!r}")
+    _stage_files(destination, user_files)
+    for member, text in prepared.documents.items():
+        document_path = destination.joinpath(*payload_relative(member).parts)
+        document_path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(text, bytes):
+            document_path.write_bytes(text)
+        else:
+            document_path.write_text(text, encoding="utf-8")
+    _stage_files(destination, prepared.files)
+    supplied_inputs = dict(inputs or {})
+    _stage_inputs(
+        destination,
+        workflow,
+        supplied_inputs,
+        instantiate=prepared.instantiate is not None or prepared.instantiate_exec is not None,
+    )
+    supplied_parameters = dict(parameters or {})
+    supplied_environment = dict(environment or {})
+    declared_environment = workflow.environment
+    unknown_environment = sorted(set(supplied_environment) - set(declared_environment))
+    if unknown_environment:
+        declared_names = ", ".join(sorted(declared_environment)) or "none"
+        raise ValueError(
+            f"workflow environment name {unknown_environment[0]!r} is not declared; declared names: {declared_names}"
+        )
+    if supplied_environment:
+        from .packages import _matches_input_type
+
+        for environment_name, value in supplied_environment.items():
+            environment_type = declared_environment[environment_name].get("type")
+            if isinstance(environment_type, str) and not _matches_input_type(value, environment_type):
+                raise ValueError(f"workflow environment {environment_name!r} does not match type {environment_type!r}")
+    reserved_parameters = set(prepared.parameters) | set(prepared.reserved_parameters)
+    collisions = sorted(set(supplied_parameters) & reserved_parameters)
+    if collisions:
+        raise ValueError(f"user parameter collides with reserved language parameter {collisions[0]!r}")
+    job_parameters = {**supplied_parameters, **prepared.parameters}
+    declared_parameters = workflow.parameters
+    if declared_parameters:
+        from .packages import _matches_input_type
+
+        # A workflow that declares a name the language realization reserves
+        # would smuggle its default straight into the reserved wiring, so the
+        # collision is refused here — before any default is applied — exactly
+        # as a supplied value colliding with a reserved name is refused above.
+        reserved_declared = sorted(set(declared_parameters) & reserved_parameters)
+        if reserved_declared:
+            raise ValueError(
+                f"workflow declares parameter {reserved_declared[0]!r}, which collides with a reserved "
+                f"{workflow.language or 'runner'} parameter; rename the declared parameter"
+            )
+        # A declared type is enforced, exactly like the environment channel;
+        # an undeclared name only warns, because parameters are deliberately
+        # open, and a declared default fills in for a name nobody supplied.
+        for parameter_name, value in supplied_parameters.items():
+            if parameter_name not in declared_parameters:
+                continue
+            parameter_type = declared_parameters[parameter_name].get("type")
+            if isinstance(parameter_type, str) and not _matches_input_type(value, parameter_type):
+                raise ValueError(
+                    f"workflow parameter {parameter_name!r} does not match type {parameter_type!r}; "
+                    f"got {type(value).__name__}. Supply a matching value — note that a command-line "
+                    f"NAME=VALUE parses VALUE as JSON when it can, so quote a literal string as "
+                    f'NAME=\'"text"\''
+                )
+        declared_names = ", ".join(sorted(declared_parameters))
+        logger = context_logger(_LOGGER, workflow.workflow_id)
+        for parameter_name in sorted(set(supplied_parameters) - set(declared_parameters)):
+            logger.warning(
+                "job parameter %r is not declared by this workflow; declared: %s",
+                parameter_name,
+                declared_names,
+            )
+        for parameter_name, metadata in declared_parameters.items():
+            if "default" in metadata and parameter_name not in job_parameters:
+                job_parameters[parameter_name] = metadata["default"]
+    if prepared.instantiate_exec is not None:
+        hook_inputs = _serialize_executable_inputs(destination, workflow, supplied_inputs)
+        hook_parameters, hook_tag = _run_executable_instantiate(
+            prepared.instantiate_exec,
+            destination,
+            workflow.workflow_id,
+            tag,
+            job_parameters,
+            hook_inputs,
+            workspace.root,
+        )
+        job_parameters = {**job_parameters, **hook_parameters}
+        if caller_tag is None and hook_tag is not None:
+            tag = hook_tag
+    elif prepared.instantiate is not None:
+        context = InstantiateContext(
+            payload=destination,
+            inputs=MappingProxyType(supplied_inputs),
+            parameters=job_parameters,
+            tag=tag,
+        )
+        prepared.instantiate(context)
+        job_parameters = context.parameters
+        tag = caller_tag if caller_tag is not None else context.tag
+    declared_input_metadata = _declared_inputs(workflow)
+    # A language workflow satisfies its own inputs — a document value, a
+    # maker default, a supplied override — so the generic required check is
+    # scoped to packaged and directory-hook workflows, whose destinations
+    # this scaffold stages itself.
+    if workflow.language is None:
+        for input_name, metadata in declared_input_metadata.items():
+            if not metadata["required"]:
+                continue
+            input_destination = workflow.inputs.get(input_name)
+            if input_destination is None:
+                satisfied = input_name in supplied_inputs
+            else:
+                satisfied = destination.joinpath(*payload_relative(str(input_destination)).parts).exists()
+            if not satisfied:
+                declared_names = ", ".join(workflow.inputs) or "none"
+                raise ValueError(
+                    f"workflow input {input_name!r} is required and was not supplied; declared inputs: {declared_names}"
+                )
+    declared_member: dict[str, object] = {}
+    if declared_parameters:
+        declared_member["parameters"] = {name: dict(metadata) for name, metadata in declared_parameters.items()}
+    if declared_input_metadata:
+        declared_member["inputs"] = declared_input_metadata
+    spec = JobSpec(
+        name=name or f"{workflow.workflow_id}: {tag or 'job'}",
+        workflow=workflow.workflow_id,
+        runner_executor=prepared.runner_executor,
+        runner_path=prepared.runner_path,
+        runner_source=prepared.runner_source,
+        runner_sha256=prepared.runner_sha256,
+        initial_step=workflow.initial_step,
+        tag=tag,
+        workdir_mode=workdir_mode,
+        workdir_path=prepared.workdir_path if prepared.workdir_path is not None else "run",
+        data_mode=prepared.data_mode,
+        priority=500 if priority is None else priority,
+        required_capabilities=tuple(sorted(set(prepared.required_capabilities))),
+        resources=workflow.resources,
+        step_resources=workflow.step_resources,
+        parameters=validate_parameters(job_parameters),
+        environment=(
+            {
+                "declared": {name: dict(metadata) for name, metadata in declared_environment.items()},
+                "overrides": supplied_environment,
+            }
+            if declared_environment
+            else {}
+        ),
+        declarations=workflow.declarations,
+        declared=declared_member,
+    )
+    if prepared.finalize is not None:
+        spec = prepared.finalize(spec)
+        if not isinstance(spec, JobSpec):
+            raise ValueError("language finalize hook must return a JobSpec")
+    return prepare_job_payload(destination, spec)
+
+
 def _submit(
     workspace: Workspace,
     prepared: _Prepared,
@@ -1566,186 +1855,26 @@ def _submit(
 ) -> ScaffoldedJob:
     """Build one payload below the workspace and publish it as a submitted job."""
 
-    workflow = prepared.workflow
     normalized = normalize_placement(placement)
     # The payload is built inside the workspace's own scratch directory, so
     # submitting it is a rename on one filesystem rather than a copy, whatever
     # the size of the files it stages.
     staging = workspace.control / "tmp" / f"scaffold.{uuid.uuid4()}"
-    caller_tag = tag
     try:
         staging.mkdir(parents=True, exist_ok=False)
-        user_files = dict(files or {})
-        prepared_members: dict[str, str] = {}
-        for member in (*prepared.documents, *prepared.files):
-            relative = payload_relative(member).as_posix()
-            if relative in prepared_members:
-                raise ValueError(f"prepared member {member!r} collides with {prepared_members[relative]!r}")
-            prepared_members[relative] = member
-        for member in user_files:
-            relative = payload_relative(member).as_posix()
-            if relative in prepared_members:
-                raise ValueError(f"prepared member {prepared_members[relative]!r} collides with user file {member!r}")
-        _stage_files(staging, user_files)
-        for member, text in prepared.documents.items():
-            destination = staging.joinpath(*payload_relative(member).parts)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if isinstance(text, bytes):
-                destination.write_bytes(text)
-            else:
-                destination.write_text(text, encoding="utf-8")
-        _stage_files(staging, prepared.files)
-        supplied_inputs = dict(inputs or {})
-        _stage_inputs(
+        job = _build_payload(
+            workspace,
+            prepared,
             staging,
-            workflow,
-            supplied_inputs,
-            instantiate=prepared.instantiate is not None or prepared.instantiate_exec is not None,
-        )
-        supplied_parameters = dict(parameters or {})
-        supplied_environment = dict(environment or {})
-        declared_environment = workflow.environment
-        unknown_environment = sorted(set(supplied_environment) - set(declared_environment))
-        if unknown_environment:
-            declared_names = ", ".join(sorted(declared_environment)) or "none"
-            raise ValueError(
-                f"workflow environment name {unknown_environment[0]!r} is not declared; declared names: {declared_names}"
-            )
-        if supplied_environment:
-            from .packages import _matches_input_type
-
-            for environment_name, value in supplied_environment.items():
-                environment_type = declared_environment[environment_name].get("type")
-                if isinstance(environment_type, str) and not _matches_input_type(value, environment_type):
-                    raise ValueError(
-                        f"workflow environment {environment_name!r} does not match type {environment_type!r}"
-                    )
-        reserved_parameters = set(prepared.parameters) | set(prepared.reserved_parameters)
-        collisions = sorted(set(supplied_parameters) & reserved_parameters)
-        if collisions:
-            raise ValueError(f"user parameter collides with reserved language parameter {collisions[0]!r}")
-        job_parameters = {**supplied_parameters, **prepared.parameters}
-        declared_parameters = workflow.parameters
-        if declared_parameters:
-            from .packages import _matches_input_type
-
-            # A workflow that declares a name the language realization reserves
-            # would smuggle its default straight into the reserved wiring, so the
-            # collision is refused here — before any default is applied — exactly
-            # as a supplied value colliding with a reserved name is refused above.
-            reserved_declared = sorted(set(declared_parameters) & reserved_parameters)
-            if reserved_declared:
-                raise ValueError(
-                    f"workflow declares parameter {reserved_declared[0]!r}, which collides with a reserved "
-                    f"{workflow.language or 'runner'} parameter; rename the declared parameter"
-                )
-            # A declared type is enforced, exactly like the environment channel;
-            # an undeclared name only warns, because parameters are deliberately
-            # open, and a declared default fills in for a name nobody supplied.
-            for parameter_name, value in supplied_parameters.items():
-                if parameter_name not in declared_parameters:
-                    continue
-                parameter_type = declared_parameters[parameter_name].get("type")
-                if isinstance(parameter_type, str) and not _matches_input_type(value, parameter_type):
-                    raise ValueError(
-                        f"workflow parameter {parameter_name!r} does not match type {parameter_type!r}; "
-                        f"got {type(value).__name__}. Supply a matching value — note that a command-line "
-                        f"NAME=VALUE parses VALUE as JSON when it can, so quote a literal string as "
-                        f'NAME=\'"text"\''
-                    )
-            declared_names = ", ".join(sorted(declared_parameters))
-            logger = context_logger(_LOGGER, workflow.workflow_id)
-            for parameter_name in sorted(set(supplied_parameters) - set(declared_parameters)):
-                logger.warning(
-                    "job parameter %r is not declared by this workflow; declared: %s",
-                    parameter_name,
-                    declared_names,
-                )
-            for parameter_name, metadata in declared_parameters.items():
-                if "default" in metadata and parameter_name not in job_parameters:
-                    job_parameters[parameter_name] = metadata["default"]
-        if prepared.instantiate_exec is not None:
-            hook_inputs = _serialize_executable_inputs(staging, workflow, supplied_inputs)
-            hook_parameters, hook_tag = _run_executable_instantiate(
-                prepared.instantiate_exec,
-                staging,
-                workflow.workflow_id,
-                tag,
-                job_parameters,
-                hook_inputs,
-                workspace.root,
-            )
-            job_parameters = {**job_parameters, **hook_parameters}
-            if caller_tag is None and hook_tag is not None:
-                tag = hook_tag
-        elif prepared.instantiate is not None:
-            context = InstantiateContext(
-                payload=staging,
-                inputs=MappingProxyType(supplied_inputs),
-                parameters=job_parameters,
-                tag=tag,
-            )
-            prepared.instantiate(context)
-            job_parameters = context.parameters
-            tag = caller_tag if caller_tag is not None else context.tag
-        declared_input_metadata = _declared_inputs(workflow)
-        # A language workflow satisfies its own inputs — a document value, a
-        # maker default, a supplied override — so the generic required check is
-        # scoped to packaged and directory-hook workflows, whose destinations
-        # this scaffold stages itself.
-        if workflow.language is None:
-            for input_name, metadata in declared_input_metadata.items():
-                if not metadata["required"]:
-                    continue
-                input_destination = workflow.inputs.get(input_name)
-                if input_destination is None:
-                    satisfied = input_name in supplied_inputs
-                else:
-                    satisfied = staging.joinpath(*payload_relative(str(input_destination)).parts).exists()
-                if not satisfied:
-                    declared_names = ", ".join(workflow.inputs) or "none"
-                    raise ValueError(
-                        f"workflow input {input_name!r} is required and was not supplied; "
-                        f"declared inputs: {declared_names}"
-                    )
-        declared_member: dict[str, object] = {}
-        if declared_parameters:
-            declared_member["parameters"] = {name: dict(metadata) for name, metadata in declared_parameters.items()}
-        if declared_input_metadata:
-            declared_member["inputs"] = declared_input_metadata
-        spec = JobSpec(
-            name=name or f"{workflow.workflow_id}: {tag or 'job'}",
-            workflow=workflow.workflow_id,
-            runner_executor=prepared.runner_executor,
-            runner_path=prepared.runner_path,
-            runner_source=prepared.runner_source,
-            runner_sha256=prepared.runner_sha256,
-            initial_step=workflow.initial_step,
+            inputs=inputs,
+            files=files,
+            parameters=parameters,
+            environment=environment,
             tag=tag,
+            priority=priority,
             workdir_mode=workdir_mode,
-            workdir_path=prepared.workdir_path if prepared.workdir_path is not None else "run",
-            data_mode=prepared.data_mode,
-            priority=500 if priority is None else priority,
-            required_capabilities=tuple(sorted(set(prepared.required_capabilities))),
-            resources=workflow.resources,
-            step_resources=workflow.step_resources,
-            parameters=validate_parameters(job_parameters),
-            environment=(
-                {
-                    "declared": {name: dict(metadata) for name, metadata in declared_environment.items()},
-                    "overrides": supplied_environment,
-                }
-                if declared_environment
-                else {}
-            ),
-            declarations=workflow.declarations,
-            declared=declared_member,
+            name=name,
         )
-        if prepared.finalize is not None:
-            spec = prepared.finalize(spec)
-            if not isinstance(spec, JobSpec):
-                raise ValueError("language finalize hook must return a JobSpec")
-        job = prepare_job_payload(staging, spec)
         marker = workspace.submit(staging, normalized, move=True)
     finally:
         shutil.rmtree(staging, ignore_errors=True)

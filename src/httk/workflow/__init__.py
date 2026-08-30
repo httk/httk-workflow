@@ -34,7 +34,7 @@ from .errors import (
 )
 from .manager import NotIdleError, TaskManager, WorkCensus
 from .runtime_builders import JobState
-from .scaffold import ScaffoldedJob, new_job, new_jobs
+from .scaffold import ScaffoldedJob, new_job, new_jobs, scaffold_job
 from .sdk import (
     Attempt,
     ChildrenView,
@@ -77,4 +77,5 @@ __all__ = [
     "job_records",
     "new_job",
     "new_jobs",
+    "scaffold_job",
 ]

@@ -577,6 +577,61 @@ def test_a_step_prepares_a_payload_and_spawns_the_directory(tmp_path: Path) -> N
     assert child["id"] == prepared["id"] and child["parameters"] == {"encut": 520}
 
 
+_CALL_SUB_RUNNER = """#!/usr/bin/env python3
+import sys
+
+sys.path.insert(0, "{src}")
+
+from httk.workflow import Runner
+
+run = Runner("tests.sub")
+
+
+@run.step
+def run_sub(a):
+    a.succeed()
+
+
+raise SystemExit(run.main())
+"""
+
+
+def test_call_scaffolds_another_workflow_and_registers_it_as_a_child(tmp_path: Path) -> None:
+    Workspace.initialize(tmp_path / "workspace")
+    src = str(Path(__file__).parents[1] / "src")
+    sub = tmp_path / "sub_runner.py"
+    sub.write_text(_CALL_SUB_RUNNER.format(src=src), encoding="utf-8")
+    sub.chmod(0o755)
+    input_file = tmp_path / "input.txt"
+    input_file.write_text("staged-by-call\n", encoding="utf-8")
+    fixture = _fixture(tmp_path, step="start")
+    source = _runner(
+        "start",
+        "finish",
+        body=f"""step_start() {{
+    httk_workflow_call sub "{sub}" --file "input.txt={input_file}"
+    httk_workflow_gather finish
+}}
+step_finish() {{ httk_workflow_succeed; }}""",
+    )
+
+    completed = fixture.run(source)
+    assert completed.returncode == 0, completed.stderr
+    ready = fixture.control / "outcome.ready"
+    spawn = json.loads((ready / "children" / "spawn.json").read_text(encoding="utf-8"))
+    assert [entry["label"] for entry in spawn["children"]] == ["sub"]
+    job_key = spawn["children"][0]["job_key"]
+    assert completed.stdout.split("\n")[0] == job_key
+    child_dir = ready / "children" / "jobs" / job_key
+    child = json.loads((child_dir / "job.json").read_text(encoding="utf-8"))
+    # The child runs the *other* workflow's own runner, from a runner file the
+    # call published into the workspace store, with the staged file in its payload.
+    assert child["workflow"] == "tests.sub"
+    assert child["runner"]["source"] == "workspace"
+    assert (child_dir / "files" / "input.txt").read_text(encoding="utf-8") == "staged-by-call\n"
+    assert fixture.outcome()["join"]["condition"] == "all_succeeded"
+
+
 def test_a_step_name_that_is_not_registered_is_refused_at_the_call(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, step="relax")
     completed = fixture.run(

@@ -189,6 +189,22 @@ def _parser() -> argparse.ArgumentParser:
     spawn.add_argument("--max-total-attempts", type=int)
     spawn.add_argument("--max-activations", type=int)
 
+    call = commands.add_parser("call")
+    call.add_argument("label")
+    call.add_argument("workflow")
+    call.add_argument("--file", action="append", default=[], dest="files")
+    call.add_argument("--input", action="append", default=[], dest="inputs")
+    call.add_argument("--parameter", action="append", default=[], dest="parameters")
+    call.add_argument("--environment", action="append", default=[], dest="environment")
+    call.add_argument("--tag")
+    call.add_argument("--name")
+    call.add_argument("--placement")
+    call.add_argument("--priority", type=int)
+    call.add_argument("--workdir-mode", choices=("persistent", "isolated"), default="persistent")
+    call.add_argument("--data-mode", choices=("none", "transactional"))
+    call.add_argument("--step")
+    call.add_argument("--workflow-id", dest="workflow_id")
+
     children = commands.add_parser("children")
     selection = children.add_mutually_exclusive_group()
     selection.add_argument("--all", dest="selection", action="store_const", const="all")
@@ -560,6 +576,43 @@ def _child_spec(arguments: argparse.Namespace) -> ChildSpec:
     )
 
 
+def _file_map(values: Sequence[str], name: str) -> dict[str, str]:
+    """Parse ``NAME=PATH`` file arguments into a name-to-path mapping.
+
+    A staged file value is a filesystem path used verbatim, never a JSON value,
+    so a path that happens to parse as JSON is still the path the author wrote.
+    """
+
+    result: dict[str, str] = {}
+    for item in values:
+        key, separator, text = item.partition("=")
+        if not separator or not key:
+            raise _Refused(f"{name} must be spelled NAME=PATH, not {item!r}")
+        result[key] = text
+    return result
+
+
+def _call(arguments: argparse.Namespace) -> None:
+    attempt = _publishing()
+    reference = attempt.call(
+        arguments.workflow,
+        label=arguments.label,
+        inputs=_assignments(arguments.inputs, "a workflow input"),
+        files=_file_map(arguments.files, "a staged file"),
+        parameters=_assignments(arguments.parameters, "a child parameter"),
+        environment=_assignments(arguments.environment, "a workflow environment value"),
+        tag=arguments.tag,
+        placement=arguments.placement,
+        priority=arguments.priority,
+        workdir_mode=cast(Literal["persistent", "isolated"], arguments.workdir_mode),
+        data_mode=cast("Literal['none', 'transactional'] | None", arguments.data_mode),
+        step=arguments.step,
+        workflow_id=arguments.workflow_id,
+        name=arguments.name,
+    )
+    print(reference.job_key)
+
+
 def _spawn(arguments: argparse.Namespace) -> None:
     attempt = _publishing()
     if arguments.payload:
@@ -857,6 +910,8 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
         _seal(attempt)
     elif command == "spawn":
         _spawn(arguments)
+    elif command == "call":
+        _call(arguments)
     elif command == "children":
         _children(arguments)
     elif command == "child":

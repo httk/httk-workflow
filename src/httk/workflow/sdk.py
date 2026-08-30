@@ -36,6 +36,7 @@ import shutil
 import sys
 import time
 import traceback
+import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -96,6 +97,9 @@ type StepHandler = Callable[["Attempt"], object]
 type InstantiateHandler = Callable[[Any], object]
 type RunnerSource = Literal["payload", "workspace", "installed"]
 type EnvironmentSource = Literal["override", "environment-variable", "workspace-setting", "default"]
+# Mirrors scaffold's aliases; a cross-module import renders as an unresolvable autoapi target.
+type WorkdirMode = Literal["persistent", "isolated"]
+type DataMode = Literal["none", "transactional"]
 
 
 class _Missing:
@@ -975,6 +979,100 @@ class Attempt:
         spec = child._job_spec(self.job, entry_label)
         reference = self._require_draft().add_child_job(spec.as_mapping(), target, label=entry_label)
         _LOGGER.debug("spawned %s at step %s as %s", reference.job_key, child.step, entry_label)
+        return reference
+
+    def call(
+        self,
+        workflow: str | os.PathLike[str],
+        *,
+        label: str,
+        inputs: Mapping[str, object] | None = None,
+        files: Mapping[str, str | os.PathLike[str]] | None = None,
+        parameters: Mapping[str, object] | None = None,
+        environment: Mapping[str, object] | None = None,
+        tag: str | None = None,
+        placement: str | PurePosixPath | None = None,
+        priority: int | None = None,
+        workdir_mode: WorkdirMode = "persistent",
+        data_mode: DataMode | None = None,
+        step: str | None = None,
+        workflow_id: str | None = None,
+        name: str | None = None,
+    ) -> ChildReference:
+        """Spawn another registered workflow as a child job under *label*.
+
+        This is :func:`~httk.workflow.scaffold.new_job` from inside a running
+        step: *workflow* is resolved exactly as ``new_job`` resolves it — a
+        registered id or alias, the path of a runner file of your own, a workflow
+        package directory, or a bare language document — its runner is made
+        referenceable, and a complete child payload is scaffolded (its *files*
+        and *inputs* staged, its ``job.json`` written) and registered as a child
+        of this attempt's outcome. Wait for it with :meth:`gather`, which resumes
+        this job when the child is terminal, and read it back through
+        :attr:`children`.
+
+        A registered packaged workflow is referenced through the reserved
+        ``pkg:`` form, so nothing is copied into the workspace runner store; a
+        runner file of your own is published into that store instead, which is
+        content-addressed and idempotent — spawning the same runner twice
+        publishes nothing the second time. Both need the workspace root reachable
+        from where this step runs, exactly as :attr:`children` does.
+
+        :param workflow: Select the workflow, runner file, package, or document to call.
+        :param label: The unique label used to gather and observe the child later.
+        :param inputs: Supply the called workflow's declared inputs.
+        :param files: Map payload names to files to stage for the child.
+        :param parameters: Supply opaque parameters for the child job.
+        :param environment: Supply overrides for the child's declared environment values.
+        :param tag: Set the child job tag, defaulting to *label* when omitted.
+        :param placement: The workspace placement for the child, or this attempt's placement when omitted.
+        :param priority: Set the child scheduling priority.
+        :param workdir_mode: Select the child workdir mode.
+        :param data_mode: Override the called workflow's data mode.
+        :param step: Override the called workflow's initial step.
+        :param workflow_id: Override the workflow id in the child job definition.
+        :param name: Set the child job's display name.
+        :return: The reference to the registered child.
+        :raises ValueError: If the workflow, label, inputs, or job settings are invalid.
+        """
+
+        self._reject_published()
+        validate_label(label, "child label")
+        # Resolving here decides only how the runner is referenced: a packaged
+        # workflow is pinned through ``pkg:`` and copies nothing, a runner file of
+        # your own is published into the workspace store.
+        from .scaffold import resolve_workflow, scaffold_job
+        from .workspace import Workspace
+
+        resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode)
+        publish: Literal["workspace", "installed"] = "installed" if resolved.packaged is not None else "workspace"
+        staging = self.control / f"call.{uuid.uuid4()}"
+        staging.mkdir(parents=True, exist_ok=False)
+        try:
+            scaffold_job(
+                Workspace(self.workspace, durable=self.context.durable),
+                workflow,
+                staging,
+                inputs=inputs,
+                files=files,
+                parameters=parameters,
+                environment=environment,
+                tag=tag if tag is not None else label,
+                priority=priority,
+                workdir_mode=workdir_mode,
+                data_mode=data_mode,
+                publish=publish,
+                step=step,
+                workflow_id=workflow_id,
+                name=name,
+            )
+            # spawn copies the payload tree into the draft at registration time
+            # (OutcomeDraft._register_child), so the staging directory is
+            # disposable the moment spawn returns.
+            reference = self.spawn(staging, label=label, placement=placement)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        _LOGGER.debug("called workflow %s as %s (%s)", resolved.workflow_id, label, reference.job_key)
         return reference
 
     def advance(

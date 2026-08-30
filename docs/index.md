@@ -52,6 +52,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`taskmanager` — workspaces, submission, managers, inspection, repair
 - {doc}`workflow_cli` — the whole `httk workflow` tree: projects, config, remotes, and launchers
 - {doc}`campaigns` — partitioning a very large campaign across many workspaces
+- {doc}`composing_workflows` — a workflow that calls other workflows as child jobs
 - {doc}`benchmarks` — measured local scale snapshot and benchmark methodology
 - {doc}`collecting` — reading finished jobs back out as records and collected outputs
 - {doc}`remotes` — reaching a machine with a packaged or custom remote adapter
@@ -112,6 +113,7 @@ workflow_languages
 taskmanager
 workflow_cli
 campaigns
+composing_workflows
 benchmarks
 remotes
 launchers

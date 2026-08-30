@@ -321,6 +321,10 @@ httk_workflow_spawn() {
     _httk_workflow_bridge spawn "$@"
 }
 
+httk_workflow_call() {
+    _httk_workflow_bridge call "$@"
+}
+
 httk_workflow_children() {
     _httk_workflow_bridge children "$@"
 }

@@ -288,6 +288,34 @@ a.spawn(a.workdir / "child", label="prepared", placement="project/children")
 
 `placement` defaults to the placement of the spawning job.
 
+### Calling another workflow
+
+`a.call(workflow, label=..., files=..., ...)` spawns a *different* registered
+workflow as a child job. Where `spawn` runs a step of this same runner, `call`
+scaffolds a complete child payload for `workflow` — resolved exactly as
+`new_job` resolves it (a registered id or alias like `"vasp-relax"`, a runner
+file of your own, a package directory, or a language document) — stages its
+`files` and `inputs`, and registers it as a child, so the child runs that
+workflow's own runner:
+
+```python
+a.call("vasp-relax", label="relax", files={"POSCAR": path})
+a.gather("after_relax", on_impossible="triage")
+```
+
+```python
+@run.step
+def after_relax(a):
+    relaxed = a.children["relax"].data      # the child's committed data
+    ...
+```
+
+A packaged workflow is referenced through `pkg:` and copies nothing; a runner
+file of your own is published into the workspace runner store (content-addressed,
+idempotent). Calling needs the workspace root reachable from the step, the same
+condition `a.children` needs. See {doc}`../composing_workflows` for the full
+model, a worked example, failure semantics, and how results move between calls.
+
 ### Gathering them
 
 `a.gather(step)` joins the children spawned on this attempt and can add children
