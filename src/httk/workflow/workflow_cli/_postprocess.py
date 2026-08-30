@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from typing import Any
 
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, job_records
+from ..errors import WorkflowError
+from ..introspection import resolve_job_selectors
 from ..packages import load_workflow_package
 from ..postprocessing import (
     DEFAULT_POSTPROCESS_TIMEOUT,
@@ -75,11 +78,35 @@ def handle_postprocess(arguments: argparse.Namespace, context: Any) -> int:
         resolved = load_workflow_package(arguments.workflow_dir, register=False)
     output_root = postprocess_root(workspace, arguments.output_dir)
     failed = False
-    for record in job_records(
-        workspace,
-        states=arguments.state or DEFAULT_COLLECT_STATES,
-        placement=arguments.placement,
-    ):
+
+    wanted: set[str] | None = None
+    if arguments.jobs:
+        if arguments.state or arguments.placement:
+            print("job selectors cannot be combined with --state or --placement", file=sys.stderr)
+            return 2
+        try:
+            markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+        except (WorkflowError, ValueError) as exc:
+            print(f"{exc}", file=sys.stderr)
+            return 1
+        wanted = set()
+        for marker in markers:
+            if marker.kind not in COLLECTABLE_KINDS:
+                failed = True
+                print(f"{marker.job_key}\t{arguments.script}\tERROR\tjob is {marker.kind}; not a postprocessable state")
+                continue
+            wanted.add(marker.job_id)
+        states: tuple[str, ...] = COLLECTABLE_KINDS
+        placement = None
+    else:
+        states = tuple(arguments.state or DEFAULT_COLLECT_STATES)
+        placement = arguments.placement
+
+    for record in job_records(workspace, states=states, placement=placement):
+        if wanted is not None:
+            if record.job_id not in wanted:
+                continue
+            wanted.discard(record.job_id)
         try:
             selected: Any = resolved
             if selected is None:
@@ -108,6 +135,10 @@ def handle_postprocess(arguments: argparse.Namespace, context: Any) -> int:
                 if tail:
                     line = f"{line}\t{tail}"
             print(line)
+    if wanted:
+        failed = True
+        for job_id in sorted(wanted):
+            print(f"{job_id}\t{arguments.script}\tERROR\tno collectable record for this job", file=sys.stderr)
     return 1 if failed else 0
 
 
@@ -148,6 +179,13 @@ def build_postprocess_parser(subparsers: argparse._SubParsersAction[argparse.Arg
         help=f"script timeout (default: {DEFAULT_POSTPROCESS_TIMEOUT:g})",
     )
     parser.add_argument("--json", action="store_true", help="emit one JSON object per job")
+    parser.add_argument(
+        "jobs",
+        nargs="*",
+        metavar="JOB",
+        help="postprocess only these jobs (UUID, key, unique prefix, or a path inside the "
+        "workspace); mutually exclusive with --state/--placement",
+    )
 
 
 __all__ = ["build_postprocess_parser", "handle_postprocess"]

@@ -355,3 +355,20 @@ def test_project_seal_excludes_a_configured_postprocess_dir(tmp_path: Path) -> N
     out.mkdir(parents=True)
     (out / "chart.svg").write_text("<svg/>\n", encoding="utf-8")
     assert verify_tree(project).ok
+
+
+def test_detach_refuses_a_sealed_workspace(tmp_path: Path) -> None:
+    ensure_identity_key()
+    source, destination = _pair(tmp_path)
+    marker = source.submit(_payload(tmp_path / "src-payload")[0], "jobs")
+    seal_job(source, marker)
+    seal_workspace(source)
+
+    # allow_sealed carries a job's own seal through a transfer, but a sealed
+    # workspace still refuses: detaching would break the workspace seal.
+    from httk.workflow.transfers import detach_job
+
+    with pytest.raises(SealedError, match="workspace"):
+        detach_job(source, marker.job_id, destination_workspace_id=destination.workspace_id)
+    current = source.find_marker_by_id(marker.job_id)
+    assert current is not None and current.kind == marker.kind

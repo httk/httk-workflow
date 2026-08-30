@@ -245,11 +245,12 @@ unreadable `job.json`; unfulfilled roles alone keep the exit at `0`. See
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| postprocess [OPTIONS] | run one declared script for each selected collected job | --workspace WS, --script NAME (required), --workflow-dir PKG, --state, --placement, --output-dir DIR, --timeout, --json |
+| postprocess [OPTIONS] [JOB...] | run one declared script for each selected collected job | --workspace WS, --script NAME (required), --workflow-dir PKG, --state, --placement, --output-dir DIR, --timeout, --json |
 
 ~~~console
 httk workflow postprocess --workspace WS --script relaxation-report
 httk workflow postprocess --workspace WS --script report --workflow-dir ./my-workflow --json
+httk workflow postprocess --script relaxation-plot <job-id>
 ~~~
 
 Output is written outside the job payload, under an output root that is
@@ -258,6 +259,10 @@ setting when set, or --output-dir DIR for one invocation (a relative value
 resolves against the workspace root); the per-job directory below it is
 <root>/<placement>/<job_key>/<NAME>/. A sealed job can be postprocessed
 because its seal covers only the payload.
+
+An optional JOB selector (UUID, key, unique prefix, or a workspace path, the
+same forms job seal and job delete accept) postprocesses exactly those
+quiescent jobs and cannot be combined with --state or --placement.
 
 With --json, each result is one JSON object in the
 httk-workflow-postprocess wire format, version 2, with workspace_id, job_id,

@@ -102,7 +102,9 @@ published OUTCAR and wrote
 `postprocess/<placement>/<job_key>/relaxation-plot/relaxation_energies.svg`
 under the workspace root. Postprocess output never lands in the payload, so a
 finished job can be sealed and still be postprocessed; change the root with the
-`postprocess.directory` setting or `--output-dir`.
+`postprocess.directory` setting or `--output-dir`. To postprocess one job
+instead of every succeeded job, pass its id:
+`httk workflow postprocess --script relaxation-plot <job-id>`.
 
 ## Looking at a job
 

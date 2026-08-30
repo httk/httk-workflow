@@ -1492,8 +1492,9 @@ class Workspace:
         :raises httk.workflow.errors.WorkspaceUnavailableError: If the marker move cannot be resolved.
         """
 
-        if not allow_sealed:
-            self._require_unsealed(marker.job_key)
+        # allow_sealed bypasses only the job-level seal (the transfer paths carry
+        # the seal with the payload); a sealed workspace or project always refuses.
+        self._require_unsealed(None if allow_sealed else marker.job_key)
         next_priority = marker.priority if priority is None else priority
         generation = marker.generation + 1
         if generation > (1 << 64) - 1:
