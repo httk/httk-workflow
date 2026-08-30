@@ -8,7 +8,14 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
-from ..scaffold import ResolvedWorkflow, describe_runner, resolve_workflow, workflow_provider
+from ..packages import installed_plugin_workflow_owners, installed_plugin_workflows
+from ..scaffold import (
+    ResolvedWorkflow,
+    describe_runner,
+    registered_workflows,
+    resolve_workflow,
+    workflow_provider,
+)
 from ._common import _leaf
 
 WORKFLOW_DESCRIPTION_FORMAT = "httk-workflow-workflow-description"
@@ -280,6 +287,71 @@ def handle_workflow_describe(arguments: argparse.Namespace, context: Any) -> int
     if arguments.json:
         print(json.dumps(descriptions, indent=2, sort_keys=True))
     return 1 if failed else 0
+
+
+def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
+    """List the registered and installed-plugin workflows, ids only.
+
+    The listing is the same union ``--workflow`` resolves against: the workflows
+    ``register_workflow`` added in this process, followed by the workflows
+    installed plugins bundle. A workflow reached only by explicit path
+    (``--workflow-dir`` or ``--from-runner``) is not registered, so it cannot be
+    listed here; ``describe PATH`` reports one such workflow directly.
+
+    :param arguments: The parsed ``list`` arguments.
+    :param context: The invocation context (unused; symmetry with other leaves).
+    :return: The process exit status, always zero.
+    """
+
+    plugin_providers = installed_plugin_workflows()
+    owners = installed_plugin_workflow_owners()
+    rows: list[dict[str, object]] = []
+    for workflow_id in registered_workflows():
+        provider = workflow_provider(workflow_id)
+        # A plugin-sourced id resolves to the very provider the plugin discovery
+        # holds; an in-process registration of the same id shadows it, so an
+        # identity check — not mere membership — decides the source.
+        is_plugin = provider is not None and provider is plugin_providers.get(workflow_id)
+        owner = owners.get(workflow_id) if is_plugin else None
+        rows.append(
+            {
+                "workflow": workflow_id,
+                "alias": provider.alias if provider is not None else None,
+                "source": {"kind": "plugin" if is_plugin else "registered", "plugin": owner},
+                "summary": (provider.summary or None) if provider is not None else None,
+            }
+        )
+    if arguments.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+    if not rows:
+        print("no workflows registered")
+        return 0
+    for row in rows:
+        source = row["source"]
+        assert isinstance(source, dict)
+        source_text = f"plugin {source['plugin']}" if source["kind"] == "plugin" else "registered"
+        print(f"{row['workflow']}\t{row['alias'] or '-'}\t{source_text}\t{row['summary'] or '-'}")
+    return 0
+
+
+def build_list_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Declare the top-level ``list`` workflow command."""
+
+    listing = _leaf(
+        subparsers,
+        "list",
+        summary="list the registered and installed-plugin workflows",
+        description=(
+            "List the workflows a job can select by name with --workflow: those registered in this "
+            "process, then those installed plugins bundle. A workflow reached only by explicit path "
+            "(--workflow-dir or --from-runner) is not registered and is not listed here"
+        ),
+        handler=handle_workflow_list,
+    )
+    listing.add_argument("--json", action="store_true", help="print the workflows as one JSON array")
 
 
 def build_describe_parser(

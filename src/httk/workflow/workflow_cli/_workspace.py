@@ -11,6 +11,7 @@ from ..configuration import machine_names
 from ..introspection import read_managers
 from ..manifests import read_maintenance_lock, workspace_maintenance_guard
 from ..models import DEFAULT_LEASE_SECONDS, WORKSPACE_DIRECTORY
+from ..packages import load_workflow_package
 from ..projects import read_project_section, require_project, write_project_section
 from ..registry import _update_workspace_path, valid_workspace_name
 from ._common import *
@@ -24,6 +25,7 @@ from ._common import (
     _leaf,
     _local_root,
     _pairs,
+    _published_runner_entries,
     _remote_workspace_read,
     _resolve_binding,
     _run_adapter,
@@ -242,6 +244,55 @@ def handle_workspace_managers(arguments: argparse.Namespace, context: CLIContext
             f"executors={','.join(sorted(manager.executors)) or '-'}\t"
             f"runner-modules={','.join(manager.runner_modules) or '-'}"
         )
+    return 0
+
+
+def handle_workspace_workflows(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """List the runners a workspace publishes, with each tree's workflow identity.
+
+    A directory package's workflow id, alias, and summary come from loading its
+    manifest with ``register=False`` — the runner is never executed. A file
+    runner can only be described by running it, which this read never does, so it
+    reports no identity. A manifest that fails to load leaves the listing intact:
+    the id column is ``-`` and the error text takes the summary column.
+    """
+
+    if isinstance(arguments.workspace, list):
+        return _workspace_batch(arguments, context, handle_workspace_workflows)
+    workspace = Workspace(_local_root(arguments, context, action="list its runners"), mutable=False)
+    store = workspace.runners
+    entries = list(_published_runner_entries(store)) if store.is_dir() else []
+    rows: list[dict[str, object]] = []
+    for path in entries:
+        is_tree = path.is_dir()
+        row: dict[str, object] = {
+            "path": path.relative_to(store).as_posix(),
+            "kind": "tree" if is_tree else "file",
+            "sha256": tree_digest(path) if is_tree else sha256_file(path),
+            "workflow": None,
+            "alias": None,
+            "summary": None,
+            "error": None,
+        }
+        if is_tree:
+            try:
+                provider = load_workflow_package(path, register=False)
+            except _ERRORS as exc:
+                row["error"] = str(exc)
+            else:
+                row["workflow"] = provider.workflow_id
+                row["alias"] = provider.alias
+                row["summary"] = provider.summary or None
+        rows.append(row)
+    if arguments.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+        return 0
+    if not rows:
+        print("no runners published in this workspace")
+        return 0
+    for row in rows:
+        summary = row["error"] or row["summary"] or "-"
+        print(f"{row['path']}\t{row['kind']}\t{row['workflow'] or '-'}\t{summary}")
     return 0
 
 
@@ -770,6 +821,16 @@ def build_workspace_parser(
     )
     _add_workspace_targets(managers, help_text="the workspace whose managers to list")
     managers.add_argument("--json", action="store_true", help="print the managers as one JSON array")
+
+    workflows = _leaf(
+        group,
+        "workflows",
+        summary="list the runners this workspace publishes",
+        description="List the runners in a workspace's runner store, with each directory package's workflow identity",
+        handler=handle_workspace_workflows,
+    )
+    _add_workspace_targets(workflows, help_text="the workspace whose runners to list")
+    workflows.add_argument("--json", action="store_true", help="print the runners as one JSON array")
 
     _, policy_actions = _group(
         group,

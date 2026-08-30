@@ -42,6 +42,7 @@ from ._common import (
     _load_inputs,
     _local_root,
     _pairs,
+    _published_runner_entries,
     _remote_workspace_read,
     _resolve_binding,
     _run_adapter,
@@ -91,23 +92,13 @@ def handle_runner_describe(arguments: argparse.Namespace, context: CLIContext) -
     workspace = Workspace(_local_root(arguments, context, action="read its runners"), mutable=False)
     store = workspace.runners
 
-    def published_entries(directory: Path) -> Iterator[Path]:
-        for path in sorted(directory.iterdir()):
-            if path.is_file():
-                yield path
-            elif path.is_dir():
-                if (path / RUNNER_TREE_ENTRY).is_file():
-                    yield path
-                else:
-                    yield from published_entries(path)
-
     names = arguments.names
     references: list[dict[str, object]] = []
     failed = False
     for name in names or [None]:
         try:
             if name is None:
-                found = list(published_entries(store)) if store.is_dir() else []
+                found = list(_published_runner_entries(store)) if store.is_dir() else []
             else:
                 target = workspace.runner_store_path(name)
                 if not target.is_file() and not target.is_dir():

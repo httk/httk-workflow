@@ -50,9 +50,9 @@ registrations; the manager passes registered build artifacts through
 The build semantics are unchanged.
 
 An installed *httk₂* plugin may bundle workflow packages. Resolution checks
-in-process registrations first, then installed plugins; workflow listings label
-plugin entries with their owning plugin, while `workflow describe` reports a
-plugin entry as `source: installed-package`.
+in-process registrations first, then installed plugins; `httk workflow list`
+labels plugin entries with their owning plugin, while `workflow describe`
+reports a plugin entry as `source: installed-package`.
 
 The full guide, {doc}`details/workflow_packages`, is the manifest reference:
 every table and key, hook envelopes, output declarations and provenance,

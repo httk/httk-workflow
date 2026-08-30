@@ -636,3 +636,47 @@ def test_runner_describe_reports_every_published_reference(tmp_path: Path, capsy
     assert json.loads(capsys.readouterr().out) == [{**tree, "kind": "tree", "inferred": True}]
     assert workflow_command(["runner", "describe", "--workspace", ws, "absent.py"], context) == 1
     assert "no such workspace runner" in capsys.readouterr().err
+
+
+def test_workspace_workflows_lists_runners_with_package_identity(tmp_path: Path, capsys) -> None:
+    from test_workflow_packages import _package
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    ws = register_ws(context, workspace.root)
+
+    # An empty store lists nothing, and says so, without failing.
+    assert workflow_command(["workspace", "workflows", ws], context) == 0
+    assert capsys.readouterr().out == "no runners published in this workspace\n"
+
+    workspace.publish_runner(_package(tmp_path / "pkg"), name="pkg/relax")
+    workspace.publish_runner(_runner_file(tmp_path / "source"), name="plain.py")
+    # A tree publishes (its build manifest is valid TOML) but has no [workflow]
+    # section, so loading its package fails: it is still listed, its id column is
+    # '-', and the load error takes the summary column.
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (broken / "run").chmod(0o755)
+    (broken / "httk_workflow.toml").write_text("[other]\nx = 1\n", encoding="utf-8")
+    workspace.publish_runner(broken, name="broken")
+
+    assert workflow_command(["workspace", "workflows", ws], context) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "pkg/relax\ttree\ttests.package\tA package for tests." in lines
+    assert "plain.py\tfile\t-\t-" in lines
+    broken_line = next(line for line in lines if line.startswith("broken\t"))
+    assert broken_line.startswith("broken\ttree\t-\t") and broken_line != "broken\ttree\t-\t-"
+
+    assert workflow_command(["workspace", "workflows", ws, "--json"], context) == 0
+    rows = json.loads(capsys.readouterr().out)[0]
+    by_path = {row["path"]: row for row in rows}
+    assert by_path["pkg/relax"]["kind"] == "tree"
+    assert by_path["pkg/relax"]["workflow"] == "tests.package"
+    assert by_path["pkg/relax"]["alias"] == "test-package"
+    assert by_path["pkg/relax"]["summary"] == "A package for tests."
+    assert by_path["pkg/relax"]["error"] is None
+    assert by_path["pkg/relax"]["sha256"] == tree_digest(workspace.runners / "pkg" / "relax")
+    assert by_path["plain.py"]["kind"] == "file"
+    assert by_path["plain.py"]["workflow"] is None and by_path["plain.py"]["error"] is None
+    assert by_path["broken"]["workflow"] is None and by_path["broken"]["error"]

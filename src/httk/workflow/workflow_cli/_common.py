@@ -707,3 +707,24 @@ def _add_adapter_timeout(parser: argparse.ArgumentParser) -> None:
         metavar="SECONDS",
         help="bound every adapter operation this command runs (default: the remote's timeout_seconds)",
     )
+
+
+def _published_runner_entries(directory: Path) -> Iterator[Path]:
+    """Yield each runner a workspace store publishes: a file, or one tree.
+
+    A subdirectory that holds the tree entry point is one directory runner; any
+    other subdirectory is a namespace descended into. This is the single walk
+    both ``runner describe`` and ``workspace workflows`` list the store by.
+
+    :param directory: The store root, or a namespace within it, to walk.
+    :yield: Each published file runner and directory tree, name-sorted.
+    """
+
+    for path in sorted(directory.iterdir()):
+        if path.is_file():
+            yield path
+        elif path.is_dir():
+            if (path / RUNNER_TREE_ENTRY).is_file():
+                yield path
+            else:
+                yield from _published_runner_entries(path)

@@ -57,7 +57,7 @@ from ._compat import (
     build_v1_parser,
     handle_v1_collect,
 )
-from ._describe import build_describe_parser, handle_workflow_describe
+from ._describe import build_describe_parser, build_list_parser, handle_workflow_describe, handle_workflow_list
 from ._job import (
     _add_job_selector,
     add_job_request_arguments,
@@ -167,6 +167,7 @@ from ._workspace import (
     handle_workspace_settings_unset,
     handle_workspace_status,
     handle_workspace_unlock,
+    handle_workspace_workflows,
 )
 
 
@@ -191,6 +192,7 @@ def build_parser(
     if include_workspace_job:
         build_job_parser(groups, program=f"{context.program} job")
     build_describe_parser(groups)
+    build_list_parser(groups)
     build_collect_parser(groups)
     build_build_parser(groups)
     build_postprocess_parser(groups)

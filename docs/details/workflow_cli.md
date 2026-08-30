@@ -20,10 +20,11 @@ in.
 ## The complete tree
 
 ```text
-httk workspace          init | list | default | move | forget | delete | status | managers | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock
+httk workspace          init | list | default | move | forget | delete | status | managers | workflows | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock
 httk workflow runner     publish | describe
 httk workflow build      [--workspace WORKSPACE] TARGET...
 httk job                 new | submit | request | delete | list | show | log | why | debug
+httk workflow list       [--json]
 httk workflow describe   TARGET [--json]
 httk workflow precheck   [--workspace WORKSPACE] [--placement P] [--json]
 httk workflow collect
@@ -87,6 +88,7 @@ job UUIDs when precise attribution matters.
 | `workspace delete --force NAME...` | destroy workspaces and deregister them | |
 | `workspace status [--json] [NAME...]` | summarize authoritative markers (remote: over the adapter) | |
 | `workspace managers [--json] [NAME...]` | list managers serving workspaces, live or stale | |
+| `workspace workflows [--json] [NAME...]` | list the runners a workspace publishes, with each directory package's workflow identity | |
 | `workspace settings show [--key KEY] [--json] [NAME...]` | print application settings, or one selected key | |
 | `workspace settings set --key KEY --value VALUE [NAME...]` | store one application setting in each workspace | |
 | `workspace settings unset --key KEY [NAME...]` | remove one application setting from each workspace | |
@@ -244,6 +246,20 @@ job_key<TAB>script<TAB>returncode<TAB>output_dir; errors use ERROR in the
 return-code field. The command exits 0 only when every selected script ran
 and returned 0; any resolution error or nonzero script return exits 1.
 
+### `list` — the workflows a name can select
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `list` | list the workflows `job new --workflow NAME` can resolve: those registered in this process, then those installed plugins bundle | `--json` |
+
+Each text line is `WORKFLOW_ID`, alias (or `-`), source (`registered` or `plugin
+OWNER`), and summary (or `-`); `--json` reports the same as an array of objects.
+A workflow reached only by explicit path — `--workflow-dir DIR` or `--from-runner
+FILE` — is not registered, so it is not listed here; use `describe PATH` to
+report one such workflow directly. To list the runners one workspace has
+*published*, rather than the workflows a name resolves to, use `workspace
+workflows`.
+
 ### `describe` — inspect a workflow without publishing it
 
 | Command | What it does | Notable options |
@@ -262,9 +278,9 @@ Directory package authoring, manifest validation, publication, and hook trust
 tiers are documented in {doc}`workflow_packages`.
 
 Installed-plugin workflow names are included in the registered-workflow
-listings. Listing and unknown-workflow hint entries carry `[plugin PLUGIN_NAME]`
-for their owner; `describe` resolves a plugin name and reports its source as
-`installed-package`.
+listings — `httk workflow list`, and the `--workflow` help and unknown-workflow
+hint entries, which carry `[plugin PLUGIN_NAME]` for their owner; `describe`
+resolves a plugin name and reports its source as `installed-package`.
 
 ### `precheck` — readiness before an attempt
 
