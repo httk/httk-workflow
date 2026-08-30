@@ -66,6 +66,7 @@ from ._job import (
     build_runner_parser,
     ensure_identity_key,
     handle_job_debug,
+    handle_job_delete,
     handle_job_list,
     handle_job_log,
     handle_job_new,

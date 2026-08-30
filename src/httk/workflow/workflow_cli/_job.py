@@ -10,6 +10,7 @@ import uuid
 from pathlib import PurePosixPath
 
 from ..adapters import (
+    REMOTE_JOB_DELETE_COMMAND,
     REMOTE_JOB_LIST_COMMAND,
     REMOTE_JOB_LOG_COMMAND,
     REMOTE_JOB_PUBLISH_REQUESTS_COMMAND,
@@ -28,6 +29,7 @@ from ..introspection import (
     selector_uses_remote_path,
 )
 from ..models import STATE_KINDS, TERMINAL_KINDS, Marker, canonical_uuid, ensure_step_known, parse_job_key
+from ..removal import RemovalReport, remove_jobs
 from ..scaffold import payload_relative
 from ._common import *
 from ._common import (
@@ -1347,6 +1349,121 @@ def handle_job_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     return 0
 
 
+def _print_removal_report(report: RemovalReport) -> int:
+    """Print job removal outcomes and return their aggregate exit status."""
+
+    for outcome in report.outcomes:
+        if outcome.removed:
+            print(f"{outcome.job_key}\t{outcome.kind}\tremoved")
+        else:
+            reason = f"\t{outcome.reason}" if outcome.reason else ""
+            print(f"{outcome.job_key}\t{outcome.kind}\trefused{reason}")
+    print(f"removed {report.removed_count} of {len(report.outcomes)} job(s)")
+    return 1 if report.refused else 0
+
+
+def _confirm_job_delete(rows: Sequence[tuple[str, str]]) -> bool:
+    """Confirm a deletion on the local terminal, or refuse non-interactively."""
+
+    if not sys.stdin.isatty():
+        print("job delete without a terminal requires --force", file=sys.stderr)
+        return False
+    for job_key, kind in rows:
+        print(f"{job_key}\t{kind}")
+    answer = input(f"Delete {len(rows)} jobs? [y/N] ")
+    if answer.strip().lower() in {"y", "yes"}:
+        return True
+    print("not removed")
+    return False
+
+
+def _remote_delete_rows(
+    binding: WorkspaceBinding,
+    context: CLIContext,
+    arguments: argparse.Namespace,
+) -> tuple[int, list[tuple[str, str]]]:
+    """Read authoritative remote job keys and states before confirmation."""
+
+    remote_name = binding.name.split(":", 1)[1]
+    argv = [*REMOTE_JOB_SHOW_COMMAND, "--json", "--no-children", *arguments.jobs, "--workspace", remote_name]
+    status, stdout, stderr = remote_workspace_output(
+        binding,
+        context,
+        argv,
+        timeout=arguments.adapter_timeout,
+    )
+    if status:
+        if stderr:
+            sys.stderr.write(stderr)
+        return 1, []
+    try:
+        reports = json.loads(stdout)
+        if not isinstance(reports, list):
+            raise ValueError
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("remote job show returned an invalid JSON document") from exc
+    by_id = {
+        str(report["job_id"]): report
+        for report in reports
+        if isinstance(report, Mapping) and isinstance(report.get("job_id"), str)
+    }
+    missing = [job_id for job_id in arguments.jobs if job_id not in by_id]
+    if missing:
+        for job_id in missing:
+            print(f"remote job {job_id}: not found", file=sys.stderr)
+        return 1, []
+    rows: list[tuple[str, str]] = []
+    for job_id in arguments.jobs:
+        report = by_id[job_id]
+        job_key = report.get("job_key")
+        state = report.get("state")
+        if not isinstance(job_key, str) or not isinstance(state, str):
+            raise ValueError(f"remote job show returned an incomplete report for {job_id}")
+        rows.append((job_key, state))
+    return 0, rows
+
+
+def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Remove selected job payloads and their state markers."""
+
+    binding, root = _resolve_binding(arguments, context)
+    if root is None:
+        assert binding is not None
+        _validate_remote_job_ids(arguments.jobs, "delete")
+        if not arguments.force and not sys.stdin.isatty():
+            print("job delete without a terminal requires --force", file=sys.stderr)
+            return 1
+        status, rows = _remote_delete_rows(binding, context, arguments)
+        if status:
+            return status
+        if not arguments.force and not _confirm_job_delete(rows):
+            return 1
+        remote_name = binding.name.split(":", 1)[1]
+        option = "--force" if arguments.force else "--confirmed"
+        argv = [*REMOTE_JOB_DELETE_COMMAND, option, *arguments.jobs, "--workspace", remote_name]
+        status, stdout, stderr = remote_workspace_output(
+            binding,
+            context,
+            argv,
+            timeout=arguments.adapter_timeout,
+        )
+        if stdout:
+            sys.stdout.write(stdout)
+        if stderr:
+            sys.stderr.write(stderr)
+        return status
+
+    workspace = Workspace(root)
+    markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
+    if (
+        not arguments.force
+        and not getattr(arguments, "confirmed", False)
+        and not _confirm_job_delete([(marker.job_key, marker.kind) for marker in markers])
+    ):
+        return 1
+    return _print_removal_report(remove_jobs(workspace, markers, force=bool(arguments.force)))
+
+
 def handle_job_show(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Describe jobs completely from their authoritative state."""
 
@@ -1713,6 +1830,18 @@ def build_job_parser(
     listing.add_argument("--counts", action="store_true", help="include full marker counts in JSON output")
     listing.add_argument("--json", action="store_true", help="print the rows as one JSON document")
     _add_adapter_timeout(listing)
+
+    delete = _leaf(
+        group,
+        "delete",
+        summary="remove job payloads and state markers",
+        description="Remove selected removable job payloads and their state markers",
+        handler=handle_job_delete,
+    )
+    _add_job_selector(delete)
+    delete.add_argument("--force", action="store_true", help="skip confirmation and the join-child safety guard")
+    delete.add_argument("--confirmed", action="store_true", help=argparse.SUPPRESS)
+    _add_adapter_timeout(delete)
 
     show = _leaf(
         group,

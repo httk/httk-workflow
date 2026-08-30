@@ -32,7 +32,6 @@ is exactly as consistent as it was before.
 
 import logging
 import os
-import stat
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -40,7 +39,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ._manager_joins import children as join_children
 from ._util import read_json, timestamp_seconds, utc_now, wait_for_paths
 from .errors import FormatError, WorkflowError
 from .journal import JournalWriter, iter_record_chain, parse_record_ref
@@ -51,6 +49,7 @@ from .models import (
     TERMINAL_KINDS,
     Marker,
 )
+from .removal import REMOVABLE_KINDS, _is_real_directory, join_child_parents
 
 if TYPE_CHECKING:  # pragma: no cover - imported for typing only
     from .workspace import Workspace
@@ -70,11 +69,6 @@ TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
 #: reads — or was interrupted, in which case a month is long past the point at
 #: which replaying it against a moved job would be wanted.
 RETIRED_REQUEST_MAXIMUM_AGE_SECONDS = 30 * 24 * 60 * 60
-#: Marker kinds whose absent payload is an operator removal. These markers are
-#: quiescent and unowned by any manager, so no manager can still be acting on a
-#: missing payload; ``ready`` may retain historical attempt identifiers after a
-#: claim is released or retried.
-REMOVABLE_KINDS = TERMINAL_KINDS | {"submitted", "ready"}
 #: Every category a report carries, in the order a collection performs them.
 GC_CATEGORIES = (
     "attempt_control",
@@ -377,15 +371,6 @@ def _iterdir(path: Path) -> list[Path]:
         return []
 
 
-def _is_real_directory(path: Path) -> bool:
-    """Return whether *path* is an actual directory, without following links."""
-
-    try:
-        return stat.S_ISDIR(path.lstat().st_mode)
-    except OSError:
-        return False
-
-
 def _marker_record_ref(name: str) -> str | None:
     """Return the record reference encoded in one marker basename."""
 
@@ -650,26 +635,11 @@ class _Collection:
             ``None`` when a non-terminal marker's current state is unreadable.
         """
 
-        parents: dict[str, set[str]] = {}
-        for marker in self.markers():
-            if marker.kind in TERMINAL_KINDS:
-                continue
-            try:
-                state = self.workspace.read_state(marker)
-                join = state.get("join")
-                if join is None:
-                    continue
-                if not isinstance(join, Mapping):
-                    raise WorkflowError("state.join is not an object")
-                references = join_children(join)
-                for reference in references:
-                    child_id = reference.get("job_id") if isinstance(reference, Mapping) else None
-                    if not isinstance(child_id, str):
-                        raise WorkflowError("state.join.children contains an invalid child reference")
-                    parents.setdefault(child_id, set()).add(marker.job_key)
-            except (WorkflowError, OSError, TypeError, ValueError) as exc:
-                self._skip("removed_jobs", f"cannot load non-terminal marker state {marker.job_key}: {exc}")
-                return None
+        markers = [marker for marker in self.markers() if marker.kind not in TERMINAL_KINDS]
+        parents, error = join_child_parents(self.workspace, markers)
+        if error is not None:
+            self._skip("removed_jobs", error)
+            return None
         return parents
 
     def collect_removed_jobs(self) -> None:

@@ -1,13 +1,11 @@
 """Asynchronous-friendly monitor actions backed by workflow CLI helpers."""
 
-import os
-import shutil
 from argparse import Namespace
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from ..configuration import resolve_operator_identity
-from ..models import TERMINAL_KINDS
+from ..removal import remove_jobs
 from ..workflow_cli import (
     ensure_identity_key,
     launch_workspace_managers,
@@ -162,33 +160,18 @@ def transfer(view: WorkspaceView, job_ids: Sequence[str], destination: str) -> s
 
 
 def remove(view: WorkspaceView, job_ids: Sequence[str]) -> str:
-    """Remove selected terminal payloads and their markers.
-
-    This explicit operator action intentionally skips the parent-join guard
-    applied by garbage collection; callers should remove children only after
-    their non-terminal parents are terminal.
-    """
+    """Remove selected removable payloads and their markers."""
 
     if view.remote:
         raise ValueError("removing remote payloads is not supported by the monitor")
     if not job_ids:
         raise ValueError("select at least one job")
     workspace = _mutable_workspace(view)
-    markers = [(job_id, view.marker_for(job_id)) for job_id in job_ids]
-    non_terminal = [(job_id, marker.kind) for job_id, marker in markers if marker.kind not in TERMINAL_KINDS]
-    if non_terminal:
-        job_id, kind = non_terminal[0]
-        raise ValueError(f"job {job_id} is {kind}, not terminal; no jobs were removed")
-    removed = 0
-    for _job_id, marker in markers:
-        if marker.kind not in TERMINAL_KINDS:
-            raise ValueError(f"job {_job_id} is {marker.kind}, not terminal")
-        payload = workspace.payload_path(marker.placement, marker.job_key)
-        if payload.exists():
-            shutil.rmtree(payload)
-            removed += 1
-        os.unlink(marker.path)
-    return f"removed {removed} job payload(s)"
+    report = remove_jobs(workspace, [view.marker_for(job_id) for job_id in job_ids], force=False)
+    if report.refused:
+        reason = report.refused[0].reason or "removal refused"
+        raise ValueError(f"removed {report.removed_count} of {len(report.outcomes)} job(s); {reason}")
+    return f"removed {report.removed_count} job payload(s)"
 
 
 class Actions:
@@ -213,7 +196,7 @@ class Actions:
         return transfer(self.view, job_ids, destination)
 
     def remove(self, job_ids: Sequence[str]) -> str:
-        """Remove selected terminal jobs."""
+        """Remove selected removable jobs."""
 
         return remove(self.view, job_ids)
 

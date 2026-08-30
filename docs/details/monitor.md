@@ -21,7 +21,7 @@ filters by kind, placement prefix, or tag substring (enter space-separated
 diagnosis; `l` loads full history; `t`
 follows `logs/stdio.out`; `c`, `P`, and `C` request cancel, pause, and
 continue; `m` starts managers; `x` transfers selected jobs; `D` removes
-terminal payloads after confirmation; `r` refreshes; `?` shows help; and `q`
+removable jobs after confirmation; `r` refreshes; `?` shows help; and `q`
 quits. Prompts and worker errors appear in the status line.
 
 `--refresh` accepts finite values from 0.5 through 3600 seconds.
@@ -57,9 +57,8 @@ the page and filtered counts in one adapter invocation; show, why, and log are
 separate one-invocation reads when explicitly requested.
 
 Removal is local-only and targeted: it preflights every selected marker as
-terminal, then removes that payload and marker. It intentionally skips the
-parent-join guard applied by garbage collection, so use it only for an
-explicitly selected terminal job.
+removable, applies the same parent-join guard as garbage collection, then
+removes that marker and payload. Use `httk job delete` for remote removal.
 
 The command requires an interactive terminal. On platforms without the stdlib
 `curses` module, it exits with a clear diagnostic; `--non-interactive` is an

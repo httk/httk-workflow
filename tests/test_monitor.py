@@ -477,7 +477,7 @@ def test_monitor_remove_confirmation_captures_only_highlighted_id(
     app.executor.shutdown(wait=False, cancel_futures=True)
 
 
-def test_monitor_remove_decline_and_nonterminal_refusal_use_real_key_branch(
+def test_monitor_remove_decline_and_nonremovable_refusal_use_real_key_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Declining D dispatches nothing, and a live row is refused before confirmation."""
@@ -518,7 +518,7 @@ def test_monitor_remove_decline_and_nonterminal_refusal_use_real_key_branch(
     app.state.rows = [{"job_id": "live", "state": "running"}]
     assert app.run() == 0
     assert app.state.confirmation is None
-    assert "not terminal" in app.state.status
+    assert "not removable" in app.state.status
 
 
 def test_monitor_action_completion_invalidates_originating_view_after_switch(
@@ -628,14 +628,8 @@ def test_monitor_remove_mixed_batch_preflights_without_mutation(
     live = SimpleNamespace(kind="running", placement=SimpleNamespace(), job_key="live", path=Path("l"))
     monkeypatch.setattr(view, "marker_for", lambda job_id: terminal if job_id == "terminal" else live)
     monkeypatch.setattr(monitor_actions, "_mutable_workspace", lambda _view: SimpleNamespace())
-    removed: list[str] = []
-    unlinked: list[Path] = []
-    monkeypatch.setattr(monitor_actions.shutil, "rmtree", lambda path: removed.append(str(path)))
-    monkeypatch.setattr(monitor_actions.os, "unlink", lambda path: unlinked.append(path))
-    with pytest.raises(ValueError, match="no jobs were removed"):
+    with pytest.raises(ValueError, match=r"removed 0 of 2 job\(s\)"):
         monitor_actions.remove(view, ["terminal", "live"])
-    assert removed == []
-    assert unlinked == []
 
 
 def test_monitor_requires_a_tty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

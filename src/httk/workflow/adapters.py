@@ -31,6 +31,7 @@ __all__ = [
     "CREDENTIALS_FILE",
     "METADATA_FILE",
     "PERSISTABLE_REMOTE_SETTINGS",
+    "REMOTE_JOB_DELETE_COMMAND",
     "REMOTE_JOB_LIST_COMMAND",
     "REMOTE_JOB_LOG_COMMAND",
     "REMOTE_JOB_PUBLISH_REQUESTS_COMMAND",
@@ -147,6 +148,7 @@ REMOTE_MANAGER_COMMAND = ("httk", "workflow", "manager", "run")
 REMOTE_JOB_REQUEST_ENVELOPES_COMMAND = ("httk", "job", "request-envelopes")
 REMOTE_JOB_PUBLISH_REQUESTS_COMMAND = ("httk", "job", "publish-requests")
 REMOTE_JOB_LIST_COMMAND = ("httk", "job", "list")
+REMOTE_JOB_DELETE_COMMAND = ("httk", "job", "delete")
 REMOTE_JOB_SHOW_COMMAND = ("httk", "job", "show")
 REMOTE_JOB_LOG_COMMAND = ("httk", "job", "log")
 REMOTE_JOB_WHY_COMMAND = ("httk", "job", "why")

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..models import STATE_KINDS
+from ..removal import REMOVABLE_KINDS
 from .actions import Actions
 from .data import WorkspaceView
 
@@ -218,7 +219,7 @@ def handle_key(state: MonitorState, key: str) -> MonitorState:
         state.status = "transfer prompt: destination workspace"
     elif key == "D":
         state.confirmation = "remove"
-        state.status = "remove prompt: confirm terminal job removal"
+        state.status = "remove prompt: confirm job removal"
     elif key == "KEY_RESIZE":
         state.status = "resized"
     elif key == "?":
@@ -586,12 +587,12 @@ class MonitorApp:
                     row = self.state.selected_row
                     if self.state.view.remote:
                         self.state.status = "remove unavailable (remote)"
-                    elif row is not None and row.get("state") not in {"succeeded", "failed", "cancelled"}:
-                        self.state.status = "remove refused: selected job is not terminal"
+                    elif row is not None and row.get("state") not in REMOVABLE_KINDS:
+                        self.state.status = "remove refused: selected job is not removable"
                     else:
                         self._pending_remove_ids = self._selected_ids()
                         self.state.confirmation = "remove"
-                        self.state.status = "remove selected terminal payload? [y/N]"
+                        self.state.status = "remove selected job? [y/N]"
                 elif normalized == "r":
                     self.state.view.refresh()
                     self.state.detail = None

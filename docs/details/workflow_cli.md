@@ -23,7 +23,7 @@ in.
 httk workspace          init | list | default | move | forget | delete | status | managers | settings show | settings set | settings unset | workflow-prelude show | workflow-prelude set | workflow-prelude unset | policy show | policy set | fsck | gc | unlock
 httk workflow runner     publish | describe
 httk workflow build      [--workspace WORKSPACE] TARGET...
-httk job                 new | submit | request | list | show | log | why | debug
+httk job                 new | submit | request | delete | list | show | log | why | debug
 httk workflow describe   TARGET [--json]
 httk workflow precheck   [--workspace WORKSPACE] [--placement P] [--json]
 httk workflow collect
@@ -166,6 +166,7 @@ its job or store runner target.
 | `job new [OPTIONS]` | scaffold and submit jobs from a workflow, runner file, package directory, or command template | `--workspace`, exactly one of `--workflow`, `--workflow-dir`, `--from-runner`, or `--from-command`, `--parameter`, `--environment`, `--format`, `--input`, `--input-from`, `--file`, `--tag`, `--placement`, `--json` |
 | `job submit [OPTIONS] SOURCE...` | submit prepared payload directories | `--workspace`, `--placement` (required), `--move` |
 | `job request ACTION [OPTIONS] JOB_ID...` | publish one request per job selector (remote: over the adapter) | `--workspace`, optional `--operator` (configured short name or literal `Name <email>`; default identity when omitted), required `--reason`, `--priority`, `--step`, `--force`, `--wait`, `--timeout`, `--adapter-timeout` |
+| `job delete [--force] JOB...` | remove selected job payloads and state markers (remote: over the adapter) | `--workspace`, `--force`, `--adapter-timeout` |
 | `job list [OPTIONS]` | list jobs as a cheap table (remote: over the adapter) | `--workspace`, `--kind`, `--placement` (prefix), `--limit`, `--after`, `--tag-contains`, `--counts`, `--json`, `--adapter-timeout` |
 | `job show [OPTIONS] JOB...` | describe jobs from their state (remote: over the adapter) | `--workspace`, `--no-children`, `--json`, `--adapter-timeout` |
 | `job log [OPTIONS] JOB...` | print transition histories (remote: over the adapter) | `--workspace`, `--limit`, `--json`, `--adapter-timeout` |
@@ -1049,17 +1050,20 @@ httk workspace policy set --key retention.journal_days --value null WORKSPACE  #
 | `tmp_entries` | always safe | staging entries older than 24 hours |
 | `retired_requests` | always safe | requests claimed over 30 days ago by a manager now gone, and requests retired over 30 days ago with their `.retirement` records |
 
-To remove a finished (`succeeded`, `failed`, or `cancelled`) or a `submitted` or
-`ready` job that is quiescent and unowned by any manager, remove its payload
-directory with `rm -r` (use the path from `job show`), then run `httk workspace gc WORKSPACE`, or wait for a
-manager started with `--gc-interval`; GC clears the orphaned state entry. A job
-in any other state must be cancelled first with `job request cancel`. Remove children only when their
-parent is terminal: GC's join guard is best-effort, not a lock, and a parent
-that publishes a join during the unbounded TOCTOU window before unlinking may
-observe a missing child and fail or stall. This is a scheduling-correctness
-consequence, not payload data loss. For a `claimed`, `running`, `committing`,
-`cancelling`, `waiting`, or `paused` marker whose payload is absent, `fsck`
-reports `payload_missing`; `submitted` and `ready` are collectable instead.
+To remove a finished (`succeeded`, `failed`, or `cancelled`), `submitted`, or
+`ready` job cleanly, use `httk job delete JOB...`. It removes both the payload
+directory and state marker, confirms on a terminal, and protects join children
+referenced by non-terminal parents unless `--force` is given; `--force` skips
+both confirmation and the join-parent guard. The manual `rm -r` plus GC or
+manager cleanup remains fine for finished jobs. For queued `ready` or
+`submitted` jobs, prefer `job delete`, because removing the directory first
+can race a manager claiming the job at that instant. A job in any other state
+must be cancelled first with `job request cancel`.
+
+Containment checks are static: a concurrent replacement of a placement
+ancestor by the workspace's own owner is outside the threat model, as it is
+for `attempts/` and `logs/`. The hidden `--confirmed` option is a protocol flag
+like `--by-path`, not part of the user interface.
 
 The collector never touches the quarantine, a sealed transfer bundle, a
 persistent workdir, a payload beyond its aged attempt-control directories, a

@@ -38,7 +38,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "unlock",
     ),
     "runner": ("publish", "describe"),
-    "job": ("new", "submit", "request", "list", "show", "log", "why", "debug"),
+    "job": ("new", "submit", "request", "delete", "list", "show", "log", "why", "debug"),
     "manager": ("run",),
     "v1": ("collect",),
     "config": ("init", "show", "set", "unset", "import-v1"),

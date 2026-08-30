@@ -229,14 +229,15 @@ logged rather than allowed to disturb scheduling. Keep the interval long: a
 collection walks the state tree and the journal directory, which is work the
 scheduling passes do not need done often.
 
-To remove a finished (`succeeded`, `failed`, or `cancelled`) or a `submitted` or
-`ready` job that is quiescent and unowned by any manager, remove the payload
-directory named by `job show` with `rm -r`, then run `httk workspace gc WORKSPACE`, or let a manager started
-with `--gc-interval` perform it. A job in any other state must be cancelled
-first with `job request cancel`, and remove children only when their parent is terminal: GC's join
-guard is best-effort, not a lock, and a parent that publishes a join during the
-unbounded TOCTOU window before unlinking may observe a missing child and fail
-or stall. This is a scheduling-correctness consequence, not payload data loss.
+To remove a finished (`succeeded`, `failed`, or `cancelled`), `submitted`, or
+`ready` job cleanly, use `httk job delete JOB...`. It removes the payload and
+marker together, confirms on a terminal, and refuses a child referenced by a
+non-terminal join parent unless `--force` is given; `--force` skips both the
+confirmation and that join-parent guard. The manual `rm -r` plus GC/manager
+alternative is fine for finished jobs. For queued `ready` or `submitted`
+jobs, prefer `job delete`: removing the directory first can race a manager
+claiming the job at that instant. A job in any other state must be cancelled
+first with `job request cancel`.
 
 ## Filesystem visibility
 
