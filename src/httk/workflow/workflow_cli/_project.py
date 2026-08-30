@@ -20,7 +20,6 @@ from ..seals import default_project_keys, project_seal_path, read_seal, seal_pro
 from ._common import *
 from ._common import (
     _ERRORS,
-    _field,
     _group,
     _leaf,
     _required,
@@ -357,95 +356,6 @@ def build_config_parser(
 # ---------------------------------------------------------------------------
 
 
-def handle_project_init(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Create one project directory, its key, and its workspace."""
-
-    if isinstance(arguments.path, list):
-        if arguments.name and len(arguments.path) != 1:
-            raise ValueError("project init --name requires exactly one PATH")
-        return _batch(arguments, context, handle_project_init, "path", "project", json_output=True)
-    default_name = Path(arguments.path).resolve().name
-    name = arguments.name or default_name
-    result = initialize_project(
-        arguments.path,
-        name=name,
-        description=arguments.description,
-        manifest_exclusions=arguments.exclude,
-    )
-    print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
-
-
-def handle_project_import_v1(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Read a legacy ``ht.project`` into an *httk₂* project."""
-
-    if isinstance(arguments.path, list):
-        if (arguments.name or arguments.source) and len(arguments.path) != 1:
-            raise ValueError("project import-v1 --source and --name require exactly one PATH")
-        return _batch(arguments, context, handle_project_import_v1, "path", "project", json_output=True)
-    print(
-        json.dumps(
-            import_v1_project(arguments.path, source=arguments.source, name=arguments.name),
-            indent=2,
-            sort_keys=True,
-        )
-    )
-    return 0
-
-
-def _render_project(description: dict[str, Any]) -> str:
-    """Render one project description as readable lines."""
-
-    project = description.get("project", {})
-    keys = description.get("keys", {})
-    workspace = description.get("workspace", {})
-    manifest = description.get("manifest", {})
-    public = keys.get("public_key") or {}
-    default = workspace.get("default")
-    workspace_text = workspace.get("workspace_id") or ("present" if workspace.get("present") else "-")
-    if isinstance(default, dict) and isinstance(default.get("name"), str):
-        workspace_text = (
-            f"{workspace_text}; default {default['name']} ({'resolves' if default.get('resolves') else 'missing'})"
-        )
-    lines = [
-        _field("root", description.get("root")),
-        _field("name", project.get("name") or "-"),
-        _field("project_id", project.get("project_id") or "-"),
-        _field("key_pinned", "yes" if keys.get("pinned") else "no"),
-        _field("key_fingerprint", public.get("fingerprint") or "-"),
-        _field("trusted_keys", len(keys.get("trusted_keys", []))),
-        _field(
-            "workspace",
-            workspace_text,
-        ),
-        _field("jobs", workspace.get("jobs", 0)),
-        _field(
-            "manifest",
-            f"{manifest.get('verdict') or 'none'}: {manifest.get('reason') or '-'}",
-        ),
-        _field("remotes", ", ".join(description.get("remotes", [])) or "-"),
-    ]
-    lock = workspace.get("maintenance_lock")
-    if isinstance(lock, dict):
-        lines.append(
-            _field(
-                "maintenance_lock",
-                f"{lock.get('holder')} ({'stale' if lock.get('stale') else 'live'})",
-            )
-        )
-    return "\n".join(lines)
-
-
-def handle_project_show(arguments: argparse.Namespace, context: CLIContext) -> int:
-    """Describe one project: its metadata, its keys, its workspace, its manifest."""
-
-    if isinstance(arguments.path, list):
-        return _batch(arguments, context, handle_project_show, "path", "project")
-    description = describe_project(arguments.path or context.cwd, verify=not arguments.no_verify)
-    print(json.dumps(description, indent=2, sort_keys=True) if arguments.json else _render_project(description))
-    return 0
-
-
 def handle_project_doctor(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Check one project for the conditions that quietly break it later."""
 
@@ -613,73 +523,12 @@ def build_project_parser(
     _, group = _group(
         subparsers,
         "project",
-        summary="create, describe, check, and sign a project directory",
-        description="Create, describe, check, and sign one httk project directory",
+        summary="check, sign, and seal a project directory",
+        description=(
+            "Check, sign, and seal one httk project directory. Creating, describing, and importing "
+            "projects is the core command: httk project init | show | import-v1"
+        ),
     )
-
-    initialize = _leaf(
-        group,
-        "init",
-        summary="create a project, its key, and its workspace",
-        description="Create one project directory with its identity key and execution workspace",
-        handler=handle_project_init,
-    )
-    initialize.add_argument(
-        "path",
-        metavar="PATH",
-        nargs="+",
-        help="the directory to make a project",
-    )
-    initialize.add_argument("--name", metavar="NAME", help="the project name (default: the directory name)")
-    initialize.add_argument("--description", metavar="TEXT", default="", help="a one-line description")
-    initialize.add_argument(
-        "--exclude",
-        action="append",
-        default=[],
-        metavar="PATTERN",
-        help="exclude paths matching this glob from signed manifests (repeatable)",
-    )
-    initialize.add_argument(
-        "--non-interactive",
-        action="store_true",
-        help="never prompt; refuse a missing value",
-    )
-
-    imported = _leaf(
-        group,
-        "import-v1",
-        summary="read a legacy ht.project into a project",
-        description="Read a legacy httk v1 ht.project directory into an httk project",
-        handler=handle_project_import_v1,
-    )
-    imported.add_argument(
-        "path",
-        metavar="PATH",
-        nargs="+",
-        help="the directory to make a project",
-    )
-    imported.add_argument("--source", metavar="SOURCE", help="the legacy ht.project directory to read")
-    imported.add_argument("--name", metavar="NAME", help="the project name (default: the legacy one)")
-
-    show = _leaf(
-        group,
-        "show",
-        summary="describe this project, its keys, and its workspace",
-        description="Describe one project: its metadata, its keys, its workspace, and its manifest",
-        handler=handle_project_show,
-    )
-    show.add_argument(
-        "path",
-        metavar="PATH",
-        nargs="*",
-        help="the project to describe (default: the nearest project of the working directory)",
-    )
-    show.add_argument(
-        "--no-verify",
-        action="store_true",
-        help="do not walk the tree to classify the manifest, which is much cheaper on a large project",
-    )
-    show.add_argument("--json", action="store_true", help="print the description as one JSON document")
 
     add_project_doctor_arguments(
         _leaf(

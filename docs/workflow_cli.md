@@ -14,7 +14,8 @@ httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-"managers"
 httk workflow remote     list | add | configure | check | show | remove
 httk workflow transfer   [OPTIONS] SRC DST
-httk workflow config | project | v1        (project also: seal | unseal)
+httk workflow project   doctor | manifest | seal | unseal   (init | show | import-v1 are core `httk project`)
+httk workflow config | v1
 ```
 
 {doc}`quickstart` walks the everyday sequence; {doc}`taskmanager` explains the

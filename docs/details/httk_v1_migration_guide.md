@@ -108,7 +108,7 @@ httk workflow config import-v1
 Create *httk₂* project metadata from a local `ht.project` without modifying it:
 
 ```console
-httk workflow project import-v1 --source ./ht.project .
+httk project import-v1 --source ./ht.project .
 ```
 
 This imports safe metadata and public identities. It does not import private

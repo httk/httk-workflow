@@ -72,13 +72,6 @@ def test_config_is_xdg_isolated_and_private_key_is_0600(tmp_path: Path, monkeypa
     assert not (tmp_path / ".httk").exists()
 
 
-def test_noninteractive_project_init_uses_directory_name(tmp_path: Path) -> None:
-    context = CLIContext("httk", tmp_path)
-    project = tmp_path / "project"
-    assert command(["project", "init", "--non-interactive", str(project)], context) == 0
-    assert json.loads((project / "httk_project" / "project.json").read_text(encoding="utf-8"))["name"] == "project"
-
-
 def test_manifest_determinism_special_names_exclusions_and_tampering(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="manifest-test", manifest_exclusions=("ignored*",))

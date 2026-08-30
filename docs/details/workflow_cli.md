@@ -35,7 +35,7 @@ httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-"managers"
 httk workflow v1         collect
 httk workflow config     init | show | set | unset | import-v1
-httk workflow project    init | import-v1 | show | doctor | manifest create | manifest verify | seal | unseal
+httk workflow project    doctor | manifest create | manifest verify | seal | unseal   (init | show | import-v1 are core `httk project`)
 httk workflow remote     list | add | configure | check | import-v1 | show | remove
 httk workflow transfer   [OPTIONS] SRC DST      (plus the protocol spellings: receive | offer | retire)
 ```
@@ -447,21 +447,16 @@ warning names how many such tasks a harvest saw.
 ### `project` — the directory a campaign lives in
 
 The project *anchor* — the `httk_project` directory, discovery, keys, and pins —
-belongs to *httk-core*, which owns the umbrella `httk project` command.
-*httk-workflow* keeps its workflow-aware project commands under
-`httk workflow project`; the core umbrella owns only the anchor commands.
-
-The anchor's own leaves — `httk project init` and `httk project show` — are
-provided by *httk-core*. `httk project init` creates only the anchor, whereas
-`httk workflow project init` creates the project anchor; initialize a workspace
-separately with `workspace init PATH`:
+belongs to *httk-core*, which owns the umbrella `httk project` command, including
+its `init`, `show`, and `import-v1` leaves. *httk-workflow* adds only the
+workflow-aware verbs — those that read or write workspace and manifest state —
+under `httk workflow project`. Create a project with `httk project init PATH`,
+then give it a workspace with `httk workspace init PATH`; describe it with
+`httk project show` and `httk workspace status`.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `project init [OPTIONS] PATH...` | create projects and their keys | `--name` (one path only), `--description`, `--exclude`, `--non-interactive` |
-| `project import-v1 [OPTIONS] PATH...` | read legacy `ht.project` trees without creating workspaces | `--source` and `--name` (one path only) |
-| `project show [OPTIONS] [PATH...]` | describe projects, their keys, workspace defaults, and manifests | `--no-verify`, `--json` |
-| `project doctor [OPTIONS] [PATH...]` | check projects; `--repair` requires explicit paths | `--repair`, `--json` |
+| `project doctor [OPTIONS] [PATH...]` | check projects, reporting workspace and manifest state; `--repair` requires explicit paths | `--repair`, `--json` |
 | `project manifest create [--manifest PATH] PROJECT...` | write signed manifests | |
 | `project manifest verify [OPTIONS] [PROJECT...]` | verify manifests against their trees | `--manifest` (one project only), `--trusted-key` |
 | `project seal [--keys REFS] [PROJECT...]` | seal a project's loose files and every nested workspace's seal digest | `--keys` overrides the project's `seal_keys` member |
@@ -797,15 +792,15 @@ overrides. Legacy `~/.httk` data is read only through `config import-v1`; its
 httk workflow config init --name "A User" --email user@example.org
 httk workflow config set name "Another User"
 httk workflow config unset email
-httk workflow project init --name example .
+httk project init --name example .
 ```
 
 The project *anchor* is owned by *httk-core*, which provides the umbrella
-`httk project` command. `httk project init` creates the anchor alone;
-`httk workflow project init` creates the project anchor; initialize a workspace
-separately with `workspace init PATH`. The manifest, doctor, and workflow-aware `show` commands are
-provided by
-*httk-workflow* under `httk workflow project`.
+`httk project` command and its `init`, `show`, and `import-v1` leaves. Create the
+anchor with `httk project init PATH` and give it a workspace with
+`httk workspace init PATH`. The workflow-aware verbs — `doctor`, `manifest`,
+`seal`, and `unseal` — are provided by *httk-workflow* under
+`httk workflow project`.
 
 `config set` accepts only the keys the configuration actually has — including
 `machine_names`, `name`, and `email` — and names them when it refuses another, so a typo cannot become a
@@ -822,16 +817,17 @@ working directory's parent chain.
 ### Describing and checking a project
 
 ```console
-httk workflow project show
-httk workflow project show --json
+httk project show
+httk project show --json
 httk workflow project doctor
 httk workflow project doctor --repair .
 ```
 
-`project show` reports the project's metadata, workspace default and job counts,
-whether it pins a key and which, and what its manifest currently verifies as;
-`--no-verify` skips the tree walk that last part needs; by design, this makes the
-command cheap when verification is not required.
+`httk project show` (core) reports the project's metadata and keys. `project
+doctor` adds the workflow-aware view — the recorded workspace default and its job
+counts, the maintenance lock, and a manifest check — and repairs what it safely
+can; `httk workspace status` and `httk workflow project manifest verify` report
+the live workspace and manifest state directly.
 
 `project doctor` checks the conditions that quietly break a project later — a
 stale maintenance lock, an unpinned key, staging leftovers, a legacy identity,
@@ -880,7 +876,7 @@ directory nobody meant to touch — the digests are exact. Across a copy that
 travelled without the seed, and against a *replaced* tree signed by a different
 key, the signature is the check that catches it. That is why verification
 compares the signing key with a **trust anchor that did not come from the
-manifest**: the key pinned in `project.json` at `httk workflow project init`,
+manifest**: the key pinned in `project.json` at `httk project init`,
 plus any key named with `--trusted-key`. Reading the key out of the manifest
 header and checking the manifest against itself would always say *valid*.
 
@@ -898,7 +894,7 @@ refused by name however well it verifies internally.
 
 ### Pinning and adopting keys
 
-A project created by `project init` pins its own key at creation, so its
+A project created by `httk project init` pins its own key at creation, so its
 manifests verify as `valid_trusted` immediately. A project made before pinning
 existed has no `public_key` in `project.json`, so every manifest of it verifies
 as `valid_unknown_key` until somebody decides which key to trust. That decision
@@ -913,7 +909,7 @@ trust_project_key("/path/to/project", "ed25519:…")  # adopt somebody else's ke
 
 `pin_project_key` adopts the key that is in the tree *right now* — do it only on
 a tree you have reason to believe is the one you left. `trust_project_key` adds
-a further anchor to `project.json`'s `trusted_keys`; `project import-v1` fills
+a further anchor to `project.json`'s `trusted_keys`; `httk project import-v1` fills
 that list with the legacy identities of an imported *httk* v1 project, so its
 old `ht.project/manifest.bz2` verifies as trusted too. `--trusted-key` accepts
 either an `ed25519:BASE64` value or the path of a `*.pub` file and is the

@@ -663,22 +663,13 @@ def test_written_configuration_keeps_its_format_members(tmp_path: Path, monkeypa
 # ---------------------------------------------------------------------------
 
 
-def test_project_show_and_doctor_are_reachable_from_the_command_line(
+def test_project_doctor_is_reachable_from_the_command_line(
     tmp_path: Path,
     monkeypatch,
     capsys,
 ) -> None:
     project = _project(tmp_path, monkeypatch, name="described-cli")
     context = CLIContext("httk", project)
-
-    assert command(["project", "show", "--json"], context) == 0
-    description = _fields(json.loads(capsys.readouterr().out)[0])
-    assert description["format"] == "httk-project-description"
-    assert description["project"]["name"] == "described-cli"
-
-    assert command(["project", "show"], context) == 0
-    rendered = capsys.readouterr().out
-    assert "described-cli" in rendered and "key_pinned" in rendered
 
     # A project with no manifest yet is a warning, and a warning is not a failure.
     assert command(["project", "doctor"], context) == 0
@@ -707,9 +698,6 @@ def test_detached_project_manifests_and_reports_its_recorded_workspace(tmp_path:
     report = _fields(project_doctor(project))
     assert report["workspace"]["default"] == {"name": "runs", "resolves": True}
     assert _by_check(report)["workspace_default"]["status"] == "ok"
-    context = CLIContext("httk", project)
-    assert command(["project", "show", "--json"], context) == 0
-    assert json.loads(capsys.readouterr().out)[0]["workspace"]["default"]["name"] == "runs"
 
 
 def test_remote_show_and_remove_are_reachable_from_the_command_line(

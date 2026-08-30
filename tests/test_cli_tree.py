@@ -45,7 +45,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
     "manager": ("run",),
     "v1": ("collect",),
     "config": ("init", "show", "set", "unset", "import-v1"),
-    "project": ("init", "import-v1", "show", "doctor", "manifest", "seal", "unseal"),
+    "project": ("doctor", "manifest", "seal", "unseal"),
     "remote": ("list", "add", "configure", "check", "import-v1", "show", "remove"),
     "campaign": ("init", "show", "submit", "collect", "start-managers"),
     "seal": ("verify",),
