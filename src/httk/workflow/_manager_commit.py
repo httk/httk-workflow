@@ -211,6 +211,32 @@ def _retain_deferred_pause_process(state: StateFrame, progress: StateFrame) -> S
     return StateFrame.replace(progress, process=state.members["process"])
 
 
+def _auto_seal_succeeded(manager: Any, destination: Marker) -> None:
+    """Seal a just-succeeded job's payload, unless the workspace opts out.
+
+    Sealing is a convenience, never part of the job's success: a missing signing
+    key, an existing conflicting seal, or any filesystem error is logged and
+    swallowed so a job that ran cleanly always stays succeeded.
+    """
+
+    workspace = manager.workspace
+    raw = workspace.read_settings().get("seal.succeeded", True)
+    if str(raw).strip().lower() in {"false", "0", "no", "off"}:
+        return
+    from . import seals
+    from .errors import SealedError, SealError
+
+    try:
+        seals.seal_job(workspace, destination)
+    except (SealError, SealedError, OSError, ValueError) as exc:
+        _LOGGER.warning(
+            "could not seal succeeded job %s: %s",
+            destination.job_key,
+            exc,
+            extra={"event": "job_seal_failed", "job_key": destination.job_key, "reason": str(exc)},
+        )
+
+
 def process_committing(manager: Any, marker: Marker) -> None:
     """Apply a validated committing outcome through the manager's effects."""
 
@@ -304,6 +330,7 @@ def process_committing(manager: Any, marker: Marker) -> None:
             marker, "succeeded", StateFrame.replace(progress, reason="succeeded"), priority=next_priority
         )
         _remove_committed_attempt_control(manager, marker, state, destination)
+        _auto_seal_succeeded(manager, destination)
     elif action == "fail":
         try:
             failure_value = validate_failure(outcome.get("failure"))

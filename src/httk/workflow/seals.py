@@ -315,7 +315,11 @@ def resolve_seal_keys(refs: Sequence[str], *, root: Path) -> SealKeys:
         seed = _seed_for_ref(ref, root)
         if seed is None:
             missing.append(role)
-            _LOGGER.warning(
+            # Skipping one recoverable ref while others still sign is not itself a
+            # problem: resolving no key at all raises below, and the caller gets
+            # the skipped roles in ``missing_roles``. Logged at info so auto-seal
+            # of a projectless workspace does not warn on every succeeded job.
+            _LOGGER.info(
                 "seal key %r is unavailable and will not sign", ref, extra={"event": "seal_key_unavailable", "ref": ref}
             )
             continue

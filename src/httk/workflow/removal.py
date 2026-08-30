@@ -181,7 +181,10 @@ def _remove_one(workspace: "Workspace", marker: Marker) -> RemovalOutcome:
 def _remove_jobs(workspace: "Workspace", markers: "Sequence[Marker]", *, force: bool) -> RemovalReport:
     """Implement :func:`remove_jobs` with the explicit parent-guard switch."""
 
+    from .seals import is_job_sealed
+
     selected = tuple(markers)
+    workspace._require_unsealed()
     invalid = tuple(marker for marker in selected if marker.kind not in REMOVABLE_KINDS)
     if invalid:
         first = invalid[0]
@@ -193,6 +196,24 @@ def _remove_jobs(workspace: "Workspace", markers: "Sequence[Marker]", *, force: 
                     marker.kind,
                     False,
                     reason if marker in invalid else f"batch preflight refused: {reason}",
+                )
+                for marker in selected
+            )
+        )
+
+    sealed = tuple(marker for marker in selected if is_job_sealed(workspace, marker.job_key))
+    if sealed:
+        first_sealed = sealed[0]
+        sealed_reason = f"job {first_sealed.job_key} is sealed; unseal it first"
+        return RemovalReport(
+            tuple(
+                RemovalOutcome(
+                    marker.job_key,
+                    marker.kind,
+                    False,
+                    f"job {marker.job_key} is sealed; unseal it first"
+                    if marker in sealed
+                    else f"batch preflight refused: {sealed_reason}",
                 )
                 for marker in selected
             )

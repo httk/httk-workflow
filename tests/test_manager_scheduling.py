@@ -24,6 +24,7 @@ import httk.workflow.manager as manager_module
 from conftest import TestProfile as _TestProfile
 from httk.workflow import TaskManager, Workspace, _manager_requests
 from httk.workflow._logging import reset_logging
+from httk.workflow.configuration import ensure_identity_key
 from httk.workflow.journal import JournalWriter, read_record
 from httk.workflow.manager import RunningAttempt
 from httk.workflow.models import CARRIED_STATE_MEMBERS, Marker, StateFrame
@@ -1603,6 +1604,9 @@ def test_a_normal_run_never_reports_an_orphaned_attempt(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # A real deployment has a signing key from ``config init``, so auto-sealing a
+    # succeeded job stays quiet; a keyless workspace would warn on every job.
+    ensure_identity_key()
     workspace = Workspace.initialize(tmp_path / "workspace")
     for index in range(3):
         payload, _ = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag=f"clean-{index}")

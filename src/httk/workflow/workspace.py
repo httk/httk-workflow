@@ -25,6 +25,7 @@ from ._util import (
 )
 from .errors import (
     FormatError,
+    SealedError,
     TransitionLostError,
     UnsupportedExtensionError,
     WorkflowError,
@@ -333,10 +334,17 @@ class Workspace:
         :return: The initialized workspace.
         :raises httk.workflow.errors.FormatError: If the filesystem cannot satisfy the workspace profile.
         :raises httk.workflow.errors.UnsupportedExtensionError: If an extension is not supported.
+        :raises httk.workflow.errors.SealedError: If the enclosing project is sealed.
         """
+
+        from .projects import discover_project
+        from .seals import is_project_sealed
 
         initial_policy = WorkspacePolicy.from_mapping({} if policy is None else policy)
         root_path = Path(root).resolve()
+        project = discover_project(root_path)
+        if project is not None and is_project_sealed(project):
+            raise SealedError(f"project at {project} is sealed; cannot initialize a workspace under it")
         root_path.mkdir(parents=True, exist_ok=True)
         extension_set = frozenset(extensions)
         unsupported = extension_set - SUPPORTED_EXTENSIONS
@@ -432,6 +440,28 @@ class Workspace:
 
         return self._policy.visibility_deadline_seconds
 
+    def _require_unsealed(self, job_key: str | None = None) -> None:
+        """Refuse a mutation when the workspace, its project, or a job is sealed.
+
+        Seals are enforced at the write funnels rather than at attach, so a
+        sealed tree stays fully readable and every maintenance operation keeps
+        working; only the operations that would change sealed bytes are refused.
+
+        :param job_key: When given, also refuse if that job carries a seal.
+        :raises httk.workflow.errors.SealedError: If a covering level is sealed.
+        """
+
+        from .projects import discover_project
+        from .seals import is_job_sealed, is_project_sealed, is_workspace_sealed
+
+        if is_workspace_sealed(self):
+            raise SealedError(f"workspace {self.workspace_id} is sealed; unseal it first")
+        project = discover_project(self.root)
+        if project is not None and is_project_sealed(project):
+            raise SealedError(f"project at {project} is sealed; unseal it first")
+        if job_key is not None and is_job_sealed(self, job_key):
+            raise SealedError(f"job {job_key} is sealed; unseal it first")
+
     def set_policy(self, changes: Mapping[str, object]) -> WorkspacePolicy:
         """Validate *changes*, merge them into the stored policy, and publish it.
 
@@ -442,8 +472,10 @@ class Workspace:
 
         :param changes: Supply policy values to validate and merge.
         :return: The resulting workspace policy.
+        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
+        self._require_unsealed()
         stored = read_json(self.control / "format.json")
         merged = WorkspacePolicy.from_mapping(stored.get("policy", {})).updated(changes)
         stored["policy"] = merged.as_mapping()
@@ -501,8 +533,10 @@ class Workspace:
         :param value: Supply the setting value.
         :return: The resulting application settings.
         :raises ValueError: If the setting name or value is invalid, or its environment name collides.
+        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
+        self._require_unsealed()
         _validate_setting_key(key)
         _validate_setting_value(key, value)
         stored = read_json(self.control / "format.json")
@@ -716,8 +750,10 @@ class Workspace:
         :return: The published runner reference.
         :raises FileExistsError: If a different runner already has the target name.
         :raises httk.workflow.errors.FormatError: If the source, target name, or entry type is invalid.
+        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
+        self._require_unsealed()
         source_path = Path(source).expanduser()
         if source_path.is_symlink():
             raise FormatError(f"a published runner must be a regular file or directory: {source_path}")
@@ -1437,6 +1473,7 @@ class Workspace:
         updates: Mapping[str, object],
         *,
         priority: int | None = None,
+        allow_sealed: bool = False,
     ) -> Marker:
         """Append a state frame and atomically move *marker* to it.
 
@@ -1445,13 +1482,18 @@ class Workspace:
         :param kind: Select the next state kind.
         :param updates: Add state members to the new frame.
         :param priority: Override the marker priority when supplied.
+        :param allow_sealed: Move a sealed job anyway, for the transfer paths whose
+            seal travels with the payload rather than being changed underneath it.
         :return: The marker after the transition.
         :raises ValueError: If the next state kind is unknown.
+        :raises httk.workflow.errors.SealedError: If the job, workspace, or project is sealed.
         :raises httk.workflow.errors.WorkspaceCorruptionError: If the state generation is exhausted.
         :raises httk.workflow.errors.TransitionLostError: If another actor moved the marker first.
         :raises httk.workflow.errors.WorkspaceUnavailableError: If the marker move cannot be resolved.
         """
 
+        if not allow_sealed:
+            self._require_unsealed(marker.job_key)
         next_priority = marker.priority if priority is None else priority
         generation = marker.generation + 1
         if generation > (1 << 64) - 1:
@@ -1613,8 +1655,10 @@ class Workspace:
         :return: The submitted job marker.
         :raises FileExistsError: If the target payload already exists.
         :raises httk.workflow.workspace.WorkspaceOperationError: If a move crosses filesystems.
+        :raises httk.workflow.errors.SealedError: If the workspace or its project is sealed.
         """
 
+        self._require_unsealed()
         source_path = Path(source).resolve()
         job = JobDefinition.from_path(source_path / "job.json")
         normalized_placement = normalize_placement(placement)

@@ -304,7 +304,9 @@ def test_reserved_setting_exports_are_warned_about(tmp_path: Path, monkeypatch: 
     from httk.workflow import manager as manager_module
 
     warnings: list[str] = []
-    monkeypatch.setattr(manager_module._LOGGER, "warning", lambda message, *args: warnings.append(message % args))
+    monkeypatch.setattr(
+        manager_module._LOGGER, "warning", lambda message, *args, **kwargs: warnings.append(message % args)
+    )
     _manager_environment(tmp_path, {"workflow.secret": "reserved"}, ("HTTK_WORKFLOW_SECRET",))
     assert "setting workflow.secret shadows the reserved HTTK_WORKFLOW_ namespace; not exported" in warnings
 
