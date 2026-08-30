@@ -14,7 +14,7 @@ from typing import Any
 from ..configuration import identity_key_paths
 from ..manifests import resolve_trusted_keys
 from ..projects import discover_project, read_public_key_file
-from ..seals import verify_tree
+from ..seals import VALID_TRUSTED, VALID_UNKNOWN_KEY, verify_tree
 from ._common import _group, _leaf
 
 
@@ -48,6 +48,17 @@ def handle_seal_verify(arguments: argparse.Namespace, context: Any) -> int:
     path = (Path(context.cwd) / Path(arguments.path).expanduser()).resolve()
     trusted = _default_trusted_keys(path, list(arguments.trusted_key))
     report = verify_tree(path, trusted_keys=trusted, deep=not arguments.shallow)
+    # Two independent axes, exactly as a signed manifest reports them: whether the
+    # seals still describe the tree (report.ok), and whether every signer is a
+    # trusted anchor. Exit codes mirror manifests.VERDICT_EXIT_CODES.
+    verdicts = [verification.verdict for _level, _subject, verification in report.entries]
+    trusted_only = bool(report.entries) and all(verdict == VALID_TRUSTED for verdict in verdicts)
+    if not report.ok:
+        exit_code, final = 1, "FAILED"
+    elif VALID_UNKNOWN_KEY in verdicts:
+        exit_code, final = 3, "UNTRUSTED"
+    else:
+        exit_code, final = 0, "ok"
     if arguments.json:
         document = {
             "entries": [
@@ -67,15 +78,16 @@ def handle_seal_verify(arguments: argparse.Namespace, context: Any) -> int:
                 for level, subject, verification in report.entries
             ],
             "ok": report.ok,
+            "trusted": trusted_only,
         }
         print(json.dumps(document, indent=2, sort_keys=True))
-        return 0 if report.ok else 1
+        return exit_code
     for level, subject, verification in report.entries:
         print(f"{level}\t{subject}\t{verification.verdict}\t{verification.reason or '-'}")
         for discrepancy in verification.discrepancies:
             print(f"  {discrepancy.kind}\t{discrepancy.path}")
-    print("ok" if report.ok else "FAILED")
-    return 0 if report.ok else 1
+    print(final)
+    return exit_code
 
 
 def build_seal_parser(

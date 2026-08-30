@@ -627,9 +627,7 @@ def test_monitor_remove_mixed_batch_preflights_without_mutation(
     terminal = SimpleNamespace(kind="succeeded", placement=SimpleNamespace(), job_key="terminal", path=Path("t"))
     live = SimpleNamespace(kind="running", placement=SimpleNamespace(), job_key="live", path=Path("l"))
     monkeypatch.setattr(view, "marker_for", lambda job_id: terminal if job_id == "terminal" else live)
-    monkeypatch.setattr(
-        monitor_actions, "_mutable_workspace", lambda _view: SimpleNamespace(_require_unsealed=lambda *a, **k: None)
-    )
+    monkeypatch.setattr(monitor_actions, "_mutable_workspace", lambda _view: SimpleNamespace())
     with pytest.raises(ValueError, match=r"removed 0 of 2 job\(s\)"):
         monitor_actions.remove(view, ["terminal", "live"])
 

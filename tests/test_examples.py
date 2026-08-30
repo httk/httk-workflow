@@ -106,13 +106,17 @@ def _run(command: list[str], *, cwd: Path, environment: dict[str, str]) -> subpr
     return completed
 
 
-def _finished(workspace_root: Path) -> tuple[str, Path]:
-    """Return the terminal state and payload of the one job of a workspace."""
+def _finished(workspace_root: Path) -> tuple[str, Path, Path]:
+    """Return the terminal state, payload, and postprocess SVG path of the one job."""
 
     workspace = Workspace(workspace_root, mutable=False)
     markers = list(workspace.scan_markers())
     assert len(markers) == 1, f"expected exactly one job, found {[marker.job_key for marker in markers]}"
-    return markers[0].kind, workspace.payload_path(markers[0].placement, markers[0].job_key)
+    marker = markers[0]
+    svg = workspace.root.joinpath(
+        "postprocess", *marker.placement.parts, marker.job_key, "relaxation-plot", "relaxation_energies.svg"
+    )
+    return marker.kind, workspace.payload_path(marker.placement, marker.job_key), svg
 
 
 def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
@@ -132,7 +136,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
         environment=_environment(console_scripts),
     )
 
-    kind, payload = _finished(work)
+    kind, payload, postprocess_svg = _finished(work)
     assert kind == "succeeded"
     # The published result is a real VASP result, produced by the documented run.
     published = payload / "data" / "vasp"
@@ -151,7 +155,9 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     assert records[1]["format"] == "httk-workflow-collect-summary"
     assert records[1]["collected"] == 1 and records[1]["degraded"] == 0
     assert (work / "results.sqlite").is_file()
-    assert (payload / "run" / "postprocess" / "relaxation-plot" / "relaxation_energies.svg").is_file()
+    # Postprocess output lives outside the (now sealable) payload.
+    assert postprocess_svg.is_file()
+    assert not postprocess_svg.is_relative_to(payload)
 
 
 def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) -> None:
@@ -168,11 +174,12 @@ def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) ->
         environment=_environment(empty),
     )
 
-    kind, payload = _finished(work)
+    kind, payload, postprocess_svg = _finished(work)
     assert kind == "succeeded"
     assert (payload / "data" / "vasp" / "OUTCAR").is_file()
     assert (work / "results.sqlite").is_file()
-    assert (payload / "run" / "postprocess" / "relaxation-plot" / "relaxation_energies.svg").is_file()
+    assert postprocess_svg.is_file()
+    assert not postprocess_svg.is_relative_to(payload)
     assert '"workflow":"httk.vasp.relax"' in completed.stdout
 
 
@@ -185,7 +192,7 @@ def test_the_python_api_tour_runs(work: Path, tmp_path: Path) -> None:
         environment=_environment(empty),
     )
 
-    kind, payload = _finished(work / "example-workflow-workspace")
+    kind, payload, _svg = _finished(work / "example-workflow-workspace")
     assert kind == "succeeded"
     assert (payload / "data" / "vasp" / "CONTCAR").is_file()
     lines = completed.stdout.splitlines()

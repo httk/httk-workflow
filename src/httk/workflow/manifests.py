@@ -143,6 +143,7 @@ def _records(root: Path, patterns: Sequence[str]) -> Iterator[dict[str, object]]
                 "type": "file",
                 "size": entry.stat().st_size,
                 "sha256": sha256_file(entry),
+                "executable": bool(mode & 0o100),
             }
         else:
             raise ValueError(f"project manifest rejects special filesystem entry: {relative}")

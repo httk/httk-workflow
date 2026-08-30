@@ -298,11 +298,15 @@ Scripts run only from the registered provider package or from the package
 explicitly supplied with --workflow-dir; they are never loaded from job
 payloads or pinned workflow-store trees. (Loading curated scripts from those
 trees is future work.) The process receives
-HTTK_WORKFLOW_WORKSPACE_DIR, HTTK_WORKFLOW_JOB_DIR, and
-HTTK_WORKFLOW_WORKDIR; when transactional data exists it also receives
-HTTK_WORKFLOW_DATA_DIR, otherwise scripts should fall back to the workdir.
-The current working directory is always workdir/postprocess/<NAME>/, where
-reports should be written.
+HTTK_WORKFLOW_WORKSPACE_DIR, HTTK_WORKFLOW_JOB_DIR (the immutable payload,
+read-only from the script's perspective), and HTTK_WORKFLOW_POSTPROCESS_DIR
+(the output directory); it also receives HTTK_WORKFLOW_WORKDIR and
+HTTK_WORKFLOW_DATA_DIR when those exist, otherwise scripts should fall back
+across them. The current working directory is the output directory,
+<root>/<placement>/<job_key>/<NAME>/, where reports should be written; the
+root is <workspace>/postprocess by default, the postprocess.directory
+workspace setting when set, or the postprocess --output-dir override. Output
+never lands in the payload, so a sealed job can still be postprocessed.
 
 The collect hook is a provider output adapter that returns role-keyed data
 for the collect verb; the postprocess scripts: section in describe lists

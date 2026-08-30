@@ -30,6 +30,8 @@ from httk.workflow.seals import (
     seal_project,
     seal_workspace,
     verify_job_seal,
+    verify_tree,
+    verify_workspace_seal,
 )
 from httk.workflow.transfers import TRANSFER_DIRECTORY, TRANSFER_MANIFEST, validate_bundle
 
@@ -210,6 +212,14 @@ def test_sealed_workspace_refuses_writes_but_stays_readable(tmp_path: Path) -> N
     with pytest.raises(SealedError):
         workspace.set_setting("vasp.command", "vasp")
 
+    # Removal refuses as an all-or-nothing report (exit 1), never a raise.
+    from httk.workflow.removal import remove_jobs
+
+    report = remove_jobs(workspace, [marker])
+    assert report.removed_count == 0
+    assert "workspace is sealed" in (report.outcomes[0].reason or "")
+    assert {m.job_id for m in workspace.scan_markers()} == {marker.job_id}
+
     # Attach, scan, gc, and fsck all keep working on a sealed workspace.
     reattached = Workspace(workspace.root)
     assert {m.job_id for m in reattached.scan_markers()} == {marker.job_id}
@@ -295,3 +305,15 @@ def test_a_tampered_bundled_seal_is_refused(tmp_path: Path) -> None:
         destination.import_bundle(bundle)
     # The manifest still declares the transfer; only the seal bytes were altered.
     assert (bundle / TRANSFER_DIRECTORY / TRANSFER_MANIFEST).is_file()
+
+
+def test_verify_tree_on_an_unsealed_subject_reports_not_sealed(tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    workspace.submit(_payload(tmp_path / "source")[0], "jobs")
+    # No seal exists; verification reports it rather than leaking a file error.
+    report = verify_tree(workspace.root)
+    assert not report.ok
+    assert [(level, verification.reason) for level, _subject, verification in report.entries] == [
+        ("workspace", "not sealed")
+    ]
+    assert verify_workspace_seal(workspace).reason == "not sealed"

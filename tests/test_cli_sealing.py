@@ -1,5 +1,6 @@
 """The seal/unseal CLI surface: writing, removing, and verifying seals."""
 
+import base64
 import json
 import sys
 import uuid
@@ -7,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.crypto import ed25519_generate_seed
 
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.configuration import ensure_identity_key
@@ -185,7 +187,7 @@ def test_seal_verify_json_shape(tmp_path: Path, capsys) -> None:
 
     assert command(["seal", "verify", "--json"], _context(project_root)) == 0
     document = json.loads(capsys.readouterr().out)
-    assert document["ok"] is True
+    assert document["ok"] is True and document["trusted"] is True
     assert isinstance(document["entries"], list) and document["entries"]
     first = document["entries"][0]
     assert first["level"] == "project"
@@ -230,3 +232,29 @@ def test_job_show_and_workspace_status_report_sealed(tmp_path: Path, capsys) -> 
 
     assert command(["workspace", "status", "--json"], _context(project_root)) == 0
     assert json.loads(capsys.readouterr().out)[0]["sealed"] is True
+
+
+def test_seal_verify_untrusted_signer_exits_three(tmp_path: Path, capsys) -> None:
+    project_root, workspace, job_id = _setup(tmp_path)
+    marker = workspace.find_marker_by_id(job_id)
+    assert marker is not None
+    seed_file = tmp_path / "foreign.seed"
+    seed_file.write_text(base64.b64encode(ed25519_generate_seed()).decode("ascii"), encoding="utf-8")
+
+    assert command(["job", "seal", "--keys", str(seed_file), job_id], _context(project_root)) == 0
+    capsys.readouterr()
+
+    payload = workspace.payload_path(marker.placement, marker.job_key)
+    assert command(["seal", "verify", str(payload)], _context(project_root)) == 3
+    out = capsys.readouterr().out
+    assert out.strip().splitlines()[-1] == "UNTRUSTED"
+    assert "valid_unknown_key" in out
+
+
+def test_seal_verify_unsealed_subject_renders_not_sealed(tmp_path: Path, capsys) -> None:
+    project_root, _workspace, _job_id = _setup(tmp_path)
+
+    assert command(["seal", "verify"], _context(project_root)) == 1
+    out = capsys.readouterr().out
+    assert "not sealed" in out
+    assert out.strip().splitlines()[-1] == "FAILED"

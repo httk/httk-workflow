@@ -99,7 +99,10 @@ boundary to that data layer — see {doc}`collecting`.
 
 **`postprocess`** ran the registered `relaxation-plot` script against the
 published OUTCAR and wrote
-`<payload>/run/postprocess/relaxation-plot/relaxation_energies.svg`.
+`postprocess/<placement>/<job_key>/relaxation-plot/relaxation_energies.svg`
+under the workspace root. Postprocess output never lands in the payload, so a
+finished job can be sealed and still be postprocessed; change the root with the
+`postprocess.directory` setting or `--output-dir`.
 
 ## Looking at a job
 

@@ -8,7 +8,12 @@ from typing import Any
 
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, job_records
 from ..packages import load_workflow_package
-from ..postprocessing import DEFAULT_POSTPROCESS_TIMEOUT, PostprocessResult, run_postprocess_script
+from ..postprocessing import (
+    DEFAULT_POSTPROCESS_TIMEOUT,
+    PostprocessResult,
+    postprocess_root,
+    run_postprocess_script,
+)
 from ..scaffold import registered_workflow
 from ..workspace import Workspace
 from ._common import _leaf, _local_root
@@ -68,6 +73,7 @@ def handle_postprocess(arguments: argparse.Namespace, context: Any) -> int:
     resolved = None
     if arguments.workflow_dir is not None:
         resolved = load_workflow_package(arguments.workflow_dir, register=False)
+    output_root = postprocess_root(workspace, arguments.output_dir)
     failed = False
     for record in job_records(
         workspace,
@@ -81,7 +87,9 @@ def handle_postprocess(arguments: argparse.Namespace, context: Any) -> int:
                 selected = registered_workflow(workflow) if isinstance(workflow, str) else None
             if selected is None:
                 raise ValueError(f"workflow {record.job.get('workflow')!r} is not registered")
-            result = run_postprocess_script(selected, arguments.script, record, timeout=arguments.timeout)
+            result = run_postprocess_script(
+                selected, arguments.script, record, output_root=output_root, timeout=arguments.timeout
+            )
         except (OSError, ValueError, RuntimeError) as exc:
             failed = True
             error = _error_mapping(record, arguments.script, str(exc))
@@ -126,6 +134,12 @@ def build_postprocess_parser(subparsers: argparse._SubParsersAction[argparse.Arg
         help=f"job state to postprocess (repeatable, default: {', '.join(DEFAULT_COLLECT_STATES)})",
     )
     parser.add_argument("--placement", metavar="PREFIX", help="postprocess only jobs at or below this placement")
+    parser.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        help="output root for this run (default: the postprocess.directory setting, or <workspace>/postprocess); "
+        "a relative path resolves against the workspace root",
+    )
     parser.add_argument(
         "--timeout",
         type=float,

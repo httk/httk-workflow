@@ -15,9 +15,9 @@ from ..packages import load_workflow_package
 from ..projects import read_project_section, require_project, write_project_section
 from ..registry import _update_workspace_path, valid_workspace_name
 from ..seals import (
+    default_workspace_keys,
     is_workspace_sealed,
     read_seal,
-    resolve_seal_keys,
     seal_job,
     seal_workspace,
     unseal_workspace,
@@ -319,8 +319,7 @@ def handle_workspace_seal(arguments: argparse.Namespace, context: CLIContext) ->
     if isinstance(arguments.workspace, list):
         return _workspace_batch(arguments, context, handle_workspace_seal)
     workspace = Workspace(_local_root(arguments, context, action="seal it"))
-    setting = arguments.keys or str(workspace.read_settings().get("seal.keys", "project,identity"))
-    refs = [ref.strip() for ref in setting.split(",") if ref.strip()]
+    refs = [ref.strip() for ref in arguments.keys.split(",") if ref.strip()] if arguments.keys else None
     resolved = None
     with workspace_maintenance_guard(workspace):
         unsealed = unsealed_jobs(workspace)
@@ -328,7 +327,7 @@ def handle_workspace_seal(arguments: argparse.Namespace, context: CLIContext) ->
             for marker in unsealed:
                 print(f"{marker.job_id}\t{marker.kind}", file=sys.stderr)
             return 1
-        resolved = resolve_seal_keys(refs, root=workspace.root)
+        resolved = default_workspace_keys(workspace, refs)
         for marker in unsealed:
             seal_job(workspace, marker, keys=resolved)
         seal_workspace(workspace, keys=resolved)

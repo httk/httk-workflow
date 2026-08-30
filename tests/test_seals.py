@@ -221,6 +221,16 @@ def test_job_seal_detects_mismatch_extra_and_missing(tmp_path: Path) -> None:
     assert "missing" in missing
 
 
+def test_job_seal_detects_an_executable_bit_flip(tmp_path: Path) -> None:
+    env = _setup(tmp_path)
+    marker = env.markers[0]
+    seal_job(env.workspace, marker)
+    runner = env.workspace.payload_path(marker.placement, marker.job_key) / "files" / "runner"
+    runner.chmod(runner.stat().st_mode | 0o100)
+    kinds = {(d.path, d.kind) for d in verify_job_seal(env.workspace, marker).discrepancies}
+    assert ("files/runner", "mismatch") in kinds
+
+
 # -- workspace and project seals ---------------------------------------------
 
 

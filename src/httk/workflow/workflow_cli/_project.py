@@ -16,7 +16,7 @@ from ..configuration import (
 from ..manifests import workspace_maintenance_guard
 from ..models import WORKSPACE_DIRECTORY
 from ..projects import PROJECT_DIRECTORY, require_project
-from ..seals import project_seal_path, read_seal, resolve_seal_keys, seal_project, unseal_project
+from ..seals import default_project_keys, project_seal_path, read_seal, seal_project, unseal_project
 from ._common import *
 from ._common import (
     _ERRORS,
@@ -512,10 +512,8 @@ def handle_project_seal(arguments: argparse.Namespace, context: CLIContext) -> i
     if isinstance(arguments.project, list):
         return _batch(arguments, context, handle_project_seal, "project", "project")
     root = require_project(arguments.project or context.cwd)
-    resolved = None
-    if arguments.keys:
-        refs = [ref.strip() for ref in arguments.keys.split(",") if ref.strip()]
-        resolved = resolve_seal_keys(refs, root=root)
+    refs = [ref.strip() for ref in arguments.keys.split(",") if ref.strip()] if arguments.keys else None
+    resolved = default_project_keys(root, refs) if refs is not None else None
     workspace = (
         Workspace(root)
         if (root / PROJECT_DIRECTORY).is_dir() and (root / WORKSPACE_DIRECTORY / "format.json").is_file()

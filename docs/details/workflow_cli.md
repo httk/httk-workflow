@@ -245,12 +245,19 @@ unreadable `job.json`; unfulfilled roles alone keep the exit at `0`. See
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| postprocess [OPTIONS] | run one declared script for each selected collected job | --workspace WS, --script NAME (required), --workflow-dir PKG, --state, --placement, --timeout, --json |
+| postprocess [OPTIONS] | run one declared script for each selected collected job | --workspace WS, --script NAME (required), --workflow-dir PKG, --state, --placement, --output-dir DIR, --timeout, --json |
 
 ~~~console
 httk workflow postprocess --workspace WS --script relaxation-report
 httk workflow postprocess --workspace WS --script report --workflow-dir ./my-workflow --json
 ~~~
+
+Output is written outside the job payload, under an output root that is
+<workspace>/postprocess by default, the postprocess.directory workspace
+setting when set, or --output-dir DIR for one invocation (a relative value
+resolves against the workspace root); the per-job directory below it is
+<root>/<placement>/<job_key>/<NAME>/. A sealed job can be postprocessed
+because its seal covers only the payload.
 
 With --json, each result is one JSON object in the
 httk-workflow-postprocess wire format, version 2, with workspace_id, job_id,
@@ -466,10 +473,12 @@ single level: verifying a whole sealed tree. {doc}`../sealing` is the full guide
 | `seal verify [PATH]` | verify the seal at `PATH` (a project, workspace, or job payload; default `.`) and, unless `--shallow`, every seal it references | `--json`, `--trusted-key KEY_OR_FINGERPRINT` (repeatable), `--shallow` |
 
 Each line is `<level> <subject> <verdict> <reason>`, with indented `<kind>
-<path>` discrepancy lines beneath a failing entry, then a final `ok` or
-`FAILED`; a failure exits 1. By default the project's pinned keys and the local
-identity's public key are trusted, so a tree sealed by its own project or
-identity verifies as `valid_trusted` without naming a key.
+<path>` discrepancy lines beneath a failing entry, then a final status line whose
+word and exit code mirror `manifest verify`: `ok` / exit 0 when every entry is
+`valid_trusted`, `UNTRUSTED` / exit 3 when none is invalid but a signer is
+untrusted, and `FAILED` / exit 1 on any invalid entry. By default the project's
+pinned keys and the local identity's public key are trusted, so a tree sealed by
+its own project or identity verifies as `valid_trusted` without naming a key.
 
 ### `launcher` — the bundles that start managers
 

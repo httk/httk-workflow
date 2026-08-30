@@ -39,7 +39,9 @@ default = 520
 job from it. Declared inputs are staged objects; parameters are knobs;
 `[workflow.environment.*]` consumes typed workspace settings;
 `[workflow.instantiate]`/`[workflow.collect]` hooks and
-`[workflow.postprocess.NAME]` scripts run in any language; and compiled
+`[workflow.postprocess.NAME]` scripts run in any language and write outside the
+payload (under `<workspace>/postprocess/`, so a sealed job can still be
+postprocessed); and compiled
 workflows declare `[workflow.build]` (sources-only digests, binaries built and
 registered per machine with `httk workflow build`).
 

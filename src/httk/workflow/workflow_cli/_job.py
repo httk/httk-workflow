@@ -40,11 +40,10 @@ from ..models import (
 from ..removal import RemovalReport, remove_jobs
 from ..scaffold import payload_relative
 from ..seals import (
-    SealKeys,
+    default_workspace_keys,
     is_job_sealed,
     job_seal_path,
     read_seal,
-    resolve_seal_keys,
     seal_job,
     unseal_job,
 )
@@ -1508,18 +1507,6 @@ def handle_job_delete(arguments: argparse.Namespace, context: CLIContext) -> int
     return _print_removal_report(remove_jobs(workspace, markers, force=bool(arguments.force)))
 
 
-def _resolve_job_seal_keys(workspace: Workspace, keys_arg: str | None) -> SealKeys:
-    """Resolve the signing keys ``job seal``/``workspace seal`` should use.
-
-    ``--keys`` overrides the workspace's ``seal.keys`` setting for this call; the
-    setting itself defaults to signing with both the project and identity keys.
-    """
-
-    setting = keys_arg or str(workspace.read_settings().get("seal.keys", "project,identity"))
-    refs = [ref.strip() for ref in setting.split(",") if ref.strip()]
-    return resolve_seal_keys(refs, root=workspace.root)
-
-
 def _seal_roles(workspace: Workspace, job_key: str) -> str:
     """Return the comma-joined signer roles recorded in one job's seal."""
 
@@ -1532,7 +1519,8 @@ def handle_job_seal(arguments: argparse.Namespace, context: CLIContext) -> int:
 
     workspace = Workspace(_local_root(arguments, context, action="seal jobs in it"))
     markers = resolve_job_selectors(workspace, context.cwd, arguments.jobs)
-    resolved = _resolve_job_seal_keys(workspace, arguments.keys)
+    refs = [ref.strip() for ref in arguments.keys.split(",") if ref.strip()] if arguments.keys else None
+    resolved = default_workspace_keys(workspace, refs)
     failed = False
     for marker in markers:
         if marker.kind not in QUIESCENT_KINDS:

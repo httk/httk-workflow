@@ -18,8 +18,12 @@ signing key can re-seal it. What a seal buys is detection.
 Each level records the level below it, so a project seal transitively pins whole
 payloads without re-hashing them:
 
-- A **job seal** records the file hashes of one payload. It lives at
-  `.httk-workspace/seals/jobs/<job_key>.json`.
+- A **job seal** records the file hashes of one payload — and each file's owner
+  execute bit, so a runner cannot be quietly made (un)runnable. It lives at
+  `.httk-workspace/seals/jobs/<job_key>.json`. It covers the payload's own files,
+  **not** the payload-private scratch directories `attempts/`, `logs/`, and
+  `.httk-job/`: those are working state a job legitimately rewrites, so they are
+  excluded and may change without breaking the seal.
 - A **workspace seal** records, for every job, the digest of that job's seal. It
   lives at `.httk-workspace/seal.json`. Every job must be sealed before the
   workspace can be.
@@ -85,7 +89,9 @@ seal commits to:
   it first), and changing a policy or setting that a seal depends on.
 
 What still works unchanged: every read-only command (`status`, `show`, `log`,
-`why`, `seal verify`), `gc` and `fsck`, `unlock`, and **transfers** — the seal
+`why`, `seal verify`), `gc` and `fsck`, `unlock`, **`workflow postprocess`** —
+it writes outside the payload (see below), so a sealed job can be postprocessed
+and its output is not covered by the job seal — and **transfers**: the seal
 travels with the payload, so a job sealed here stays sealed, and verifiable, on
 the machine it moves to.
 
@@ -125,9 +131,18 @@ httk workflow seal verify --trusted-key keys/collaborator.pub some/workspace
 ```
 
 Text output is one line per entry — `<level> <subject> <verdict> <reason>` —
-with indented `<kind> <path>` discrepancy lines beneath any failing entry, and a
-final `ok` or `FAILED`; a failure exits 1. `--json` prints `{ "entries": [...],
-"ok": ... }`.
+with indented `<kind> <path>` discrepancy lines beneath any failing entry, then a
+final status line. The exit code and that word mirror a signed manifest's
+verdicts:
+
+| Every entry | Final line | Exit |
+| --- | --- | --- |
+| `valid_trusted` | `ok` | 0 |
+| valid, but at least one `valid_unknown_key` | `UNTRUSTED` | 3 |
+| any `invalid` | `FAILED` | 1 |
+
+`--json` prints `{ "entries": [...], "ok": <no discrepancy or invalid>, "trusted":
+<every signer is a trust anchor> }`.
 
 A verdict is one of `valid_trusted` (a signer is a pinned trust anchor),
 `valid_unknown_key` (the signature verifies but nothing pins the signer), or
@@ -145,6 +160,5 @@ key are trusted, so a tree sealed by its own project or identity verifies as
   described here (though a sealed payload keeps its seal inside the bundle and
   stays verifiable on arrival).
 - **`httk project export`.** The core command that packages a project for
-  distribution was once called `project seal`; it was renamed to `export` in
-  httk-core precisely so the word *seal* means only the integrity seal in this
-  document.
+  distribution as a signed ZIP is an *export*; the word *seal* means only the
+  integrity seal described in this document.

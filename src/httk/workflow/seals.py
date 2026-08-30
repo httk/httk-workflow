@@ -53,10 +53,13 @@ __all__ = [
     "SealKeys",
     "SealReport",
     "SealVerification",
+    "default_project_keys",
+    "default_workspace_keys",
     "is_job_sealed",
     "is_project_sealed",
     "is_workspace_sealed",
     "job_seal_path",
+    "job_seal_path_at",
     "project_seal_path",
     "read_seal",
     "resolve_seal_keys",
@@ -190,6 +193,17 @@ class SealReport:
 # -- locations ---------------------------------------------------------------
 
 
+def job_seal_path_at(root: str | os.PathLike[str], job_key: str) -> Path:
+    """Return where one job's seal lives, from a workspace root path alone.
+
+    :param root: The workspace root directory.
+    :param job_key: The job key whose seal path to build.
+    :return: The job seal path.
+    """
+
+    return Path(root) / WORKSPACE_DIRECTORY / "seals" / "jobs" / f"{job_key}.json"
+
+
 def job_seal_path(workspace: Workspace, job_key: str) -> Path:
     """Return where one job's seal lives.
 
@@ -198,7 +212,7 @@ def job_seal_path(workspace: Workspace, job_key: str) -> Path:
     :return: The job seal path.
     """
 
-    return workspace.control / "seals" / "jobs" / f"{job_key}.json"
+    return job_seal_path_at(workspace.root, job_key)
 
 
 def workspace_seal_path(workspace: Workspace) -> Path:
@@ -329,21 +343,36 @@ def resolve_seal_keys(refs: Sequence[str], *, root: Path) -> SealKeys:
     return SealKeys(tuple(keys), tuple(missing))
 
 
-def _default_workspace_keys(workspace: Workspace) -> SealKeys:
-    """Resolve the signing keys a workspace's ``seal.keys`` setting names."""
+def default_workspace_keys(workspace: Workspace, refs: Sequence[str] | None = None) -> SealKeys:
+    """Resolve a workspace's signing keys from ``seal.keys`` or explicit *refs*.
 
-    setting = workspace.read_settings().get("seal.keys", "project,identity")
-    refs = [item.strip() for item in str(setting).split(",") if item.strip()]
+    :param workspace: The workspace whose ``seal.keys`` setting is read.
+    :param refs: Key refs to use instead of the setting, when given.
+    :return: The resolved signing keys and the roles that could not be resolved.
+    :raises httk.workflow.errors.SealError: If no key at all could be resolved.
+    """
+
+    if refs is None:
+        setting = workspace.read_settings().get("seal.keys", "project,identity")
+        refs = [item.strip() for item in str(setting).split(",") if item.strip()]
     return resolve_seal_keys(refs, root=workspace.root)
 
 
-def _default_project_keys(root: Path) -> SealKeys:
-    """Resolve the signing keys a project's ``seal_keys`` member names."""
+def default_project_keys(root: Path, refs: Sequence[str] | None = None) -> SealKeys:
+    """Resolve a project's signing keys from its ``seal_keys`` member or *refs*.
 
-    raw = read_project(root).get("seal_keys", [ROLE_PROJECT, ROLE_IDENTITY])
-    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
-        raise SealError("project member 'seal_keys' must be an array of strings")
-    return resolve_seal_keys([str(item) for item in raw], root=root)
+    :param root: The project root whose ``seal_keys`` member is read.
+    :param refs: Key refs to use instead of the project member, when given.
+    :return: The resolved signing keys and the roles that could not be resolved.
+    :raises httk.workflow.errors.SealError: If the member is malformed or no key resolves.
+    """
+
+    if refs is None:
+        raw = read_project(root).get("seal_keys", [ROLE_PROJECT, ROLE_IDENTITY])
+        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+            raise SealError("project member 'seal_keys' must be an array of strings")
+        refs = [str(item) for item in raw]
+    return resolve_seal_keys(refs, root=root)
 
 
 # -- writing -----------------------------------------------------------------
@@ -430,7 +459,7 @@ def seal_job(workspace: Workspace, marker: Marker, *, keys: SealKeys | None = No
         if list(existing.records) == records:
             return path
         raise SealedError(f"job {marker.job_key} is already sealed with different contents; unseal it first")
-    resolved = keys if keys is not None else _default_workspace_keys(workspace)
+    resolved = keys if keys is not None else default_workspace_keys(workspace)
     return _write_seal(path, "job", _job_subject(workspace, marker), records, resolved.keys)
 
 
@@ -491,7 +520,7 @@ def seal_workspace(workspace: Workspace, *, keys: SealKeys | None = None) -> Pat
                 "seal_sha256": digest,
             }
         )
-    resolved = keys if keys is not None else _default_workspace_keys(workspace)
+    resolved = keys if keys is not None else default_workspace_keys(workspace)
     return _write_seal(
         workspace_seal_path(workspace), "workspace", {"workspace_id": workspace.workspace_id}, records, resolved.keys
     )
@@ -564,7 +593,7 @@ def _project_patterns(metadata: dict[str, object], root: Path, workspace_roots: 
 
     # The project seal is written into the tree it describes, so — like a
     # manifest excluding its own file — it can never be one of its own records.
-    patterns = [*project_exclusions(metadata), f"{PROJECT_DIRECTORY}/seal.json", ".httk-project/seal.json"]
+    patterns = [*project_exclusions(metadata), f"{PROJECT_DIRECTORY}/seal.json"]
     for relpath in workspace_roots:
         patterns.extend(_workspace_payload_exclusions(root, relpath))
     return tuple(patterns)
@@ -590,7 +619,7 @@ def seal_project(project_root: str | os.PathLike[str], *, keys: SealKeys | None 
         workspace = Workspace(root / relpath)
         digest = hashlib.sha256(workspace_seal_path(workspace).read_bytes()).hexdigest()
         records.append({"workspace": relpath, "workspace_id": workspace.workspace_id, "seal_sha256": digest})
-    resolved = keys if keys is not None else _default_project_keys(root)
+    resolved = keys if keys is not None else default_project_keys(root)
     subject = {"project_id": str(metadata["project_id"])}
     return _write_seal(project_seal_path(root), "project", subject, records, resolved.keys)
 
@@ -821,6 +850,8 @@ def verify_workspace_seal(
     :return: The verdict, including jobs that disagree with the seal.
     """
 
+    if not is_workspace_sealed(workspace):
+        return SealVerification(False, INVALID, "not sealed", (), tuple(expected_roles), ())
     base = verify_seal(workspace_seal_path(workspace), trusted_keys=trusted_keys, expected_roles=expected_roles)
     seal = read_seal(workspace_seal_path(workspace))
     recorded = {str(record["job_key"]): record for record in seal.records}
@@ -855,6 +886,8 @@ def verify_project_seal(
     """
 
     root = Path(project_root).expanduser().resolve()
+    if not is_project_sealed(root):
+        return SealVerification(False, INVALID, "not sealed", (), tuple(expected_roles), ())
     metadata = read_project(root)
     base = verify_seal(project_seal_path(root), trusted_keys=trusted_keys, expected_roles=expected_roles)
     seal = read_seal(project_seal_path(root))
@@ -891,7 +924,7 @@ def _verify_workspace_into(
 
     verification = verify_workspace_seal(workspace, trusted_keys=trusted_keys)
     entries.append(("workspace", workspace.workspace_id, verification))
-    if not deep:
+    if not deep or not is_workspace_sealed(workspace):
         return
     seal = read_seal(workspace_seal_path(workspace))
     for record in seal.records:
@@ -912,7 +945,7 @@ def _verify_project_into(
     verification = verify_project_seal(root, trusted_keys=trusted_keys)
     subject = str(read_project(root).get("project_id", ""))
     entries.append(("project", subject, verification))
-    if not deep:
+    if not deep or not is_project_sealed(root):
         return
     seal = read_seal(project_seal_path(root))
     for record in seal.records:
