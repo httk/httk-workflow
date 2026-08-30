@@ -4,6 +4,8 @@ __all__ = [
     "FormatError",
     "ResolutionMiss",
     "RunnerResolutionError",
+    "SealError",
+    "SealedError",
     "TransactionError",
     "TransitionLostError",
     "UnsupportedExtensionError",
@@ -43,6 +45,25 @@ class UnsupportedExtensionError(WorkflowError):
 
 class TransactionError(WorkflowError):
     """A transactional-data manifest cannot be safely replayed."""
+
+
+class SealError(WorkflowError):
+    """A seal cannot be written or verified.
+
+    This is the *cannot proceed* failure: no signing key is available, or a
+    child level a seal must cover is itself unsealed. It never means that a seal
+    refused an action because something was already sealed; that is
+    :class:`SealedError`.
+    """
+
+
+class SealedError(WorkflowError):
+    """An action was refused because the subject, or its enclosure, is sealed.
+
+    Re-sealing a job whose recorded contents differ, or unsealing a level while
+    the level above it still binds it, is refused rather than silently allowed:
+    a seal that a wider seal already commits to must not change beneath it.
+    """
 
 
 class RunnerResolutionError(WorkflowError):
