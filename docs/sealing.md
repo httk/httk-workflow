@@ -90,10 +90,11 @@ seal commits to:
 
 What still works unchanged: every read-only command (`status`, `show`, `log`,
 `why`, `seal verify`), `gc` and `fsck`, `unlock`, **`workflow postprocess`** —
-it writes outside the payload (see below), so a sealed job can be postprocessed
-and its output is not covered by the job seal — and **transfers**: the seal
-travels with the payload, so a job sealed here stays sealed, and verifiable, on
-the machine it moves to.
+it writes outside the payload (see below), so a sealed job can be postprocessed;
+its output is excluded from the job seal and, when it lives inside the project
+tree, from the project seal too — and **transfers**: the seal travels with the
+payload, so a job sealed here stays sealed, and verifiable, on the machine it
+moves to.
 
 ## Sealing and unsealing in order
 

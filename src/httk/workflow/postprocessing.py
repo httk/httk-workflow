@@ -58,6 +58,25 @@ class PostprocessResult:
     stderr: str
 
 
+def _default_root(workspace_root: Path) -> Path:
+    """Return the built-in default postprocess root for one workspace root."""
+
+    return workspace_root / DEFAULT_POSTPROCESS_DIRNAME
+
+
+def _reject_reserved_root(workspace: Workspace, base: Path) -> None:
+    """Refuse a postprocess root inside the control dir or any job payload."""
+
+    resolved = base.resolve()
+    control = workspace.control.resolve()
+    if resolved == control or resolved.is_relative_to(control):
+        raise ValueError(f"postprocess output root must not be inside the workspace control directory: {base}")
+    for marker in workspace.scan_markers():
+        payload = workspace.payload_path(marker.placement, marker.job_key).resolve()
+        if resolved == payload or resolved.is_relative_to(payload):
+            raise ValueError(f"postprocess output root must not be inside a job payload: {base}")
+
+
 def postprocess_root(workspace: Workspace, override: str | None = None) -> Path:
     """Resolve the output root all this workspace's postprocess output lands in.
 
@@ -73,9 +92,13 @@ def postprocess_root(workspace: Workspace, override: str | None = None) -> Path:
     raw = override
     if raw is None:
         setting = workspace.read_settings().get("postprocess.directory")
-        raw = str(setting) if setting else DEFAULT_POSTPROCESS_DIRNAME
+        if not setting:
+            return _default_root(workspace.root)
+        raw = str(setting)
     base = Path(raw)
-    return base if base.is_absolute() else workspace.root / base
+    base = base if base.is_absolute() else workspace.root / base
+    _reject_reserved_root(workspace, base)
+    return base
 
 
 def _script_path(resolved: ResolvedWorkflow | WorkflowProvider, name: str) -> Path:
@@ -113,10 +136,10 @@ def _script_path(resolved: ResolvedWorkflow | WorkflowProvider, name: str) -> Pa
     return script
 
 
-def _output_dir(record: JobRecord, name: str, output_root: Path | None) -> Path:
+def _output_dir(record: JobRecord, name: str, output_root: Path) -> Path:
     """Resolve and create the per-job output directory, refusing a symlink escape."""
 
-    root = Path(record.workspace_root) / DEFAULT_POSTPROCESS_DIRNAME if output_root is None else output_root
+    root = output_root
     output_dir = root.joinpath(*record.placement.parts, record.job_key, name)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     if output_dir.is_symlink() or (output_dir.exists() and not output_dir.is_dir()):
@@ -149,7 +172,8 @@ def run_postprocess_script(
     script = _script_path(resolved, name)
     if not os.access(script, os.X_OK):
         raise ValueError(f"postprocess script {script} is not executable; chmod +x and give it a shebang line")
-    output_dir = _output_dir(record, name, output_root)
+    root = _default_root(Path(record.workspace_root)) if output_root is None else output_root
+    output_dir = _output_dir(record, name, root)
 
     environment = dict(os.environ)
     for variable in tuple(environment):

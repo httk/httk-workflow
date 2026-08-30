@@ -301,3 +301,15 @@ def test_postprocess_cli_output_dir_flag_places_output(tmp_path: Path, capsys) -
     line = json.loads(capsys.readouterr().out)
     assert Path(line["output_dir"]).is_relative_to(target)
     assert (Path(line["output_dir"]) / "report.json").is_file()
+
+
+def test_postprocess_root_refuses_the_control_directory(tmp_path: Path) -> None:
+    _package, _provider, workspace, _job, _record = _finished(tmp_path)
+    with pytest.raises(ValueError, match="control directory"):
+        postprocess_root(workspace, str(workspace.control / "seals"))
+
+
+def test_postprocess_root_refuses_a_job_payload(tmp_path: Path) -> None:
+    _package, _provider, workspace, _job, record = _finished(tmp_path)
+    with pytest.raises(ValueError, match="job payload"):
+        postprocess_root(workspace, str(record.payload / "sub"))

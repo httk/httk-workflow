@@ -28,7 +28,7 @@ from httk.core.crypto import ed25519_public_key, ed25519_sign, ed25519_verify
 
 from ._util import json_bytes, utc_now, write_json_atomic
 from .configuration import identity_key_paths, identity_seed
-from .errors import FormatError, SealedError, SealError
+from .errors import FormatError, SealedError, SealError, WorkflowError
 from .manifests import _records, _seed
 from .models import WORKSPACE_DIRECTORY, Marker
 from .projects import (
@@ -588,6 +588,30 @@ def _workspace_payload_exclusions(root: Path, relpath: str) -> list[str]:
     return patterns
 
 
+def _postprocess_exclusions(root: Path, workspace_roots: Sequence[str]) -> list[str]:
+    """Return exclusions for each covered workspace's postprocess output tree.
+
+    Postprocess output lives outside the payload, so in the root-as-workspace
+    layout it would otherwise land among a project seal's loose files and break
+    the seal the moment a sealed job is postprocessed. Its location honours the
+    ``postprocess.directory`` setting, so it is resolved per workspace; only a
+    root that lies inside the project tree needs excluding.
+    """
+
+    from .postprocessing import postprocess_root
+
+    patterns: list[str] = []
+    for relpath in workspace_roots:
+        try:
+            output_root = postprocess_root(Workspace(root if relpath == "." else root / relpath))
+        except (WorkflowError, ValueError, OSError):
+            continue
+        if output_root.is_relative_to(root):
+            rel = output_root.relative_to(root).as_posix()
+            patterns.extend((rel, f"{rel}/**"))
+    return patterns
+
+
 def _project_patterns(metadata: dict[str, object], root: Path, workspace_roots: Sequence[str]) -> tuple[str, ...]:
     """Return the manifest exclusions plus every workspace's covered paths."""
 
@@ -596,6 +620,7 @@ def _project_patterns(metadata: dict[str, object], root: Path, workspace_roots: 
     patterns = [*project_exclusions(metadata), f"{PROJECT_DIRECTORY}/seal.json"]
     for relpath in workspace_roots:
         patterns.extend(_workspace_payload_exclusions(root, relpath))
+    patterns.extend(_postprocess_exclusions(root, workspace_roots))
     return tuple(patterns)
 
 

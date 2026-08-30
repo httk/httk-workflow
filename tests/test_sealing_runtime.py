@@ -317,3 +317,41 @@ def test_verify_tree_on_an_unsealed_subject_reports_not_sealed(tmp_path: Path) -
         ("workspace", "not sealed")
     ]
     assert verify_workspace_seal(workspace).reason == "not sealed"
+
+
+def _seal_root_project(tmp_path: Path):
+    """Build a root-as-workspace project with one sealed job, workspace, project."""
+    ensure_identity_key()
+    project = tmp_path / "project"
+    initialize_project(project, name="pp")
+    workspace = Workspace.initialize(project)
+    marker = workspace.submit(_payload(tmp_path / "source")[0], "jobs")
+    return project, workspace, marker
+
+
+def test_project_seal_excludes_the_default_postprocess_tree(tmp_path: Path) -> None:
+    project, workspace, marker = _seal_root_project(tmp_path)
+    seal_job(workspace, marker)
+    seal_workspace(workspace)
+    seal_project(project)
+
+    # Postprocess output lands under <root>/postprocess after sealing; it must not
+    # count as a loose project file, or the project seal would break.
+    out = workspace.root / "postprocess" / "jobs" / marker.job_key / "plot"
+    out.mkdir(parents=True)
+    (out / "chart.svg").write_text("<svg/>\n", encoding="utf-8")
+    assert verify_tree(project).ok
+
+
+def test_project_seal_excludes_a_configured_postprocess_dir(tmp_path: Path) -> None:
+    project, workspace, marker = _seal_root_project(tmp_path)
+    # The setting must be stored before sealing (a sealed workspace refuses writes).
+    workspace.set_setting("postprocess.directory", "reports")
+    seal_job(workspace, marker)
+    seal_workspace(workspace)
+    seal_project(project)
+
+    out = workspace.root / "reports" / "jobs" / marker.job_key / "plot"
+    out.mkdir(parents=True)
+    (out / "chart.svg").write_text("<svg/>\n", encoding="utf-8")
+    assert verify_tree(project).ok
