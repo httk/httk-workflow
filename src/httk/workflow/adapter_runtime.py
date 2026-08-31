@@ -51,7 +51,8 @@ _MISSING_HTTK = (
     "httk-workflow is not available on the target; log in there and make sure "
     "httk is installed and reachable from a non-interactive shell (for example "
     "with 'pipx install httk-workflow'), or configure the remote with "
-    "httk_command=COMMAND"
+    "httk_command=COMMAND, or set a prelude=... that loads the environment "
+    "(e.g. 'module load ...; source ~/venv/bin/activate') before each command"
 )
 
 
@@ -258,17 +259,39 @@ def _ssh_destination(settings: Mapping[str, object]) -> str:
     return f"{username}@{host}"
 
 
+def _remote_prelude(settings: Mapping[str, object]) -> str:
+    """Return the shell prelude to run before every remote command, or ``""``.
+
+    ``ssh`` runs its command in a *non-interactive* shell on the far side, so the
+    environment a site keeps in interactive rc files (``module load`` lines, a
+    virtualenv activation) is not applied and ``httk`` is often not even on
+    ``PATH``. The optional ``prelude`` remote setting carries exactly that setup
+    for httk's ssh commands only, so it need not go in ``~/.bashrc`` where it
+    would also affect every other tool that logs in over ssh.
+    """
+
+    prelude = _text(settings, "prelude")
+    return prelude.strip() if prelude else ""
+
+
 def _ssh_run(
     settings: Mapping[str, object],
     argv: Sequence[str],
     *,
     cwd: str | None = None,
 ) -> "subprocess.CompletedProcess[str]":
+    remote_command = _shell_command(_remote_httk(argv, settings), cwd=cwd)
+    prelude = _remote_prelude(settings)
+    if prelude:
+        # Run the prelude under ``set -e`` so a failing setup line (a bad module,
+        # a missing venv) aborts before the command instead of running it in a
+        # half-configured shell. Both are one string to a single remote shell.
+        remote_command = "set -e\n" + prelude + "\n" + remote_command
     command = [
         *_ssh_transport(settings),
         "--",
         _ssh_destination(settings),
-        _shell_command(_remote_httk(argv, settings), cwd=cwd),
+        remote_command,
     ]
     return subprocess.run(
         command,

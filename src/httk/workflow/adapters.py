@@ -111,6 +111,7 @@ PERSISTABLE_REMOTE_SETTINGS = frozenset(
         "httk_command",
         "legacy_settings",
         "port",
+        "prelude",
         "username",
         "vasp_command",
         "vasp_pseudo_library",

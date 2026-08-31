@@ -238,6 +238,42 @@ def test_remote_invoke_honours_the_requested_directory(tmp_path: Path, remote: R
     assert str(invoked["stdout"]).strip() == str(directory)
 
 
+def test_remote_prelude_runs_before_the_command(tmp_path: Path, remote: Remote) -> None:
+    # The prelude sets an environment variable the command then reports, proving
+    # it ran in the same remote shell before the command (the mechanism a site
+    # uses for module loads and a venv activation).
+    project = tmp_path / "project"
+    initialize_project(project, name="prelude")
+    bundle = fake_remote(project, prelude="export HTTK_PRELUDE_MARKER=ran")
+
+    invoked = run_adapter(
+        bundle,
+        "invoke",
+        {"argv": ["python3", "-c", "import os; print(os.environ.get('HTTK_PRELUDE_MARKER', 'absent'))"]},
+    )
+
+    assert invoked["returncode"] == 0
+    assert str(invoked["stdout"]).strip() == "ran"
+
+
+def test_remote_prelude_failure_aborts_before_the_command(tmp_path: Path, remote: Remote) -> None:
+    # A failing prelude line must stop the command from running in a
+    # half-configured shell (``set -e``), rather than running it regardless.
+    project = tmp_path / "project"
+    initialize_project(project, name="prelude-fail")
+    bundle = fake_remote(project, prelude="false")
+    sentinel = remote.root / "prelude-should-not-reach-this"
+
+    invoked = run_adapter(
+        bundle,
+        "invoke",
+        {"argv": ["touch", str(sentinel)]},
+    )
+
+    assert invoked["returncode"] != 0
+    assert not sentinel.exists()
+
+
 def test_remote_invoke_reports_a_failing_remote_command(tmp_path: Path, remote: Remote) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="failing")

@@ -330,7 +330,11 @@ def build_remote_parser(
             action="append",
             default=[],
             metavar="KEY=VALUE",
-            help="one adapter setting; a secret one is stored in credentials.json (repeatable)",
+            help=(
+                "one adapter setting, e.g. host=, username=, port=, httk_command=, or "
+                "prelude= (shell run before each remote command, e.g. module loads and a "
+                "venv activation); a secret one is stored in credentials.json (repeatable)"
+            ),
         )
         parser.add_argument(
             "--adapter-timeout",

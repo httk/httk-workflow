@@ -34,6 +34,31 @@ install anything. Settings that are credentials are stored in
 values; `remote list`, `remote remove`, and `remote import-v1` cover the other
 common management tasks.
 
+### Making `httk` available over SSH
+
+`ssh` runs its command in a *non-interactive* shell, so the environment your
+login files set up interactively — `module load` lines, a virtualenv — is not
+applied, and `httk` is often not even on `PATH`. Put that setup in the remote's
+`prelude` setting rather than in `~/.bashrc`, so it applies to httk's ssh
+commands only and does not disturb every other tool that logs in over ssh:
+
+```console
+$ httk workflow remote configure --set prelude='module load Python/3.13.5-bundle
+source ~/venv/bin/activate' kappa
+```
+
+The prelude runs (under `set -e`, so a failing line aborts before anything
+else) ahead of *every* command the adapter sends over ssh — including the
+`httk workspace status` that `remote check` uses to find httk in the first
+place. When only the `httk` program lives somewhere non-standard but the
+environment is otherwise ready, the narrower `httk_command=/path/to/httk`
+setting is enough.
+
+This adapter `prelude` is distinct from a workspace's `environment.prelude`
+(below): the adapter prelude bootstraps the shell so `httk` can run at all,
+while `environment.prelude` is applied later by the manager once it is already
+running on the remote.
+
 Initialize a named workspace on the remote by putting the remote name before
 the path:
 
