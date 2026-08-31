@@ -12,6 +12,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from httk.core.project.members import ProjectMember
+
 from ._util import read_json, write_json_atomic
 from .adapters import resolve_remote, valid_remote_name
 from .configuration import config_home, data_home, machine_names
@@ -25,6 +27,7 @@ __all__ = [
     "LOCAL_REMOTE",
     "WORKSPACES_FILE",
     "WorkspaceBinding",
+    "adopt_workspace",
     "create_workspace",
     "default_workspace",
     "delete_workspace",
@@ -157,11 +160,30 @@ def _write_global(workspaces: Mapping[str, Mapping[str, str]], *, durable: bool 
     return path
 
 
-def _unknown(name: str) -> ValueError:
+def _unknown(name: str, *, project: str | os.PathLike[str] | None = None) -> ValueError:
+    if discover_project(project) is not None:
+        return ResolutionMiss(
+            f"unknown workspace: {name}; if this project was copied here, adopt it with "
+            "`httk workspace adopt`, or register a new one with `httk workspace init`"
+        )
     return ResolutionMiss(
         f"unknown workspace: {name}; register it with `httk workspace init` "
         "or list the registered ones with `httk workspace list`"
     )
+
+
+def _member_binding(name: str, project: str | os.PathLike[str] | None) -> "WorkspaceBinding | None":
+    """Resolve a workspace name from the enclosing project's members.json, if present."""
+
+    root = discover_project(project)
+    if root is None:
+        return None
+    from httk.core.project.members import project_members
+
+    for member in project_members(root):
+        if member.kind == "workspace" and member.name == name:
+            return WorkspaceBinding(name, LOCAL_REMOTE, str((root / member.path).resolve()))
+    return None
 
 
 def _local_binding(name: str) -> WorkspaceBinding:
@@ -203,7 +225,27 @@ def register_workspace(
     _refuse_registered(workspaces, name, location)
     workspaces[name] = {"path": location}
     _write_global(workspaces, durable=durable)
+    _record_member_name(Path(location), name)
     return WorkspaceBinding(name, LOCAL_REMOTE, location)
+
+
+def _record_member_name(path: Path, name: str) -> None:
+    """Best-effort record a workspace's registered *name* in its project's members.json.
+
+    A workspace outside a project, or one whose project is sealed, records
+    nothing; the name a copied tree carries is what makes it adoptable elsewhere.
+    """
+
+    project = discover_project(path.expanduser().resolve())
+    if project is None:
+        return
+    from httk.core.project.members import register_project_member
+    from httk.core.project.sealing import SealedError
+
+    try:
+        register_project_member(project, path, "workspace", name=name)
+    except (ValueError, SealedError):
+        pass
 
 
 def _update_workspace_path(name: str, path: Path, *, durable: bool = True) -> WorkspaceBinding:
@@ -258,7 +300,16 @@ def resolve_workspace(name: str, *, project: str | os.PathLike[str] | None = Non
 
     binding = split_workspace_binding(name)
     if binding is None:
-        return _local_binding(name)
+        try:
+            return _local_binding(name)
+        except ResolutionMiss:
+            # A copied project carries its workspace names in members.json; resolve
+            # from there for this invocation without silently writing the registry
+            # (adoption is explicit — `httk workspace adopt`).
+            fallback = _member_binding(name, project)
+            if fallback is not None:
+                return fallback
+            raise _unknown(name, project=project) from None
     remote, plain_name = binding
     if remote in machine_names():
         return _local_binding(plain_name)
@@ -309,6 +360,103 @@ def default_workspace(*, project: str | os.PathLike[str] | None = None, durable:
         if Path(existing.path).resolve() != root.resolve():
             raise
         return existing
+
+
+def _choose_adoption_name(
+    name: str | None,
+    member: ProjectMember | None,
+    project: Path | None,
+    root: Path,
+    members: list[ProjectMember],
+) -> str:
+    """Pick the name to adopt a workspace under, by the documented precedence."""
+
+    if name:
+        return name
+    if member is not None and member.name:
+        return member.name
+    if project is not None:
+        section = read_project_section(project, "workspace")
+        default = section.get("default")
+        # ponytail: only when this is the sole workspace member can an unnamed
+        # member be assumed to be the recorded default; richer disambiguation
+        # would need a name already, which is the case this fallback exists for.
+        workspaces = [candidate for candidate in members if candidate.kind == "workspace"]
+        if isinstance(default, str) and default and len(workspaces) == 1:
+            return default
+    return root.name
+
+
+def adopt_workspace(root: str | os.PathLike[str], *, name: str | None = None) -> tuple[dict[str, object], ...]:
+    """Re-establish a workspace's local links on this machine, idempotently.
+
+    Adoption registers the workspace centrally under its name (never overwriting
+    a different path already holding that name), ensures it is a member of its
+    enclosing project, and records the chosen name in members.json when absent.
+    It never mutates sealed state and reports every step as a doctor-shaped
+    finding rather than raising.
+
+    :param root: The workspace root to adopt.
+    :param name: Override the adopted name; otherwise the recorded/derived name.
+    :return: The adoption findings.
+    """
+
+    from httk.core.project.members import (
+        project_members,
+        register_project_member,
+        set_project_member_name,
+    )
+    from httk.core.project.sealing import SealedError
+
+    from .hygiene import Finding
+
+    root = Path(root).expanduser().resolve()
+    findings: list[dict[str, object]] = []
+    project = discover_project(root)
+    members = list(project_members(project)) if project is not None else []
+    member = None
+    if project is not None:
+        for candidate in members:
+            if (project / candidate.path).resolve() == root:
+                member = candidate
+                break
+    chosen = _choose_adoption_name(name, member, project, root, members)
+
+    # (b)+(c) project membership and the recorded name.
+    if project is not None:
+        try:
+            if member is None:
+                register_project_member(project, root, "workspace", name=chosen)
+                findings.append(
+                    Finding(
+                        "member", "ok", f"registered {root} as project member {chosen!r}", repaired=True
+                    ).as_mapping()
+                )
+            elif member.name is None or (name is not None and member.name != chosen):
+                set_project_member_name(project, root, chosen)
+                findings.append(Finding("member", "ok", f"recorded member name {chosen!r}", repaired=True).as_mapping())
+        except SealedError as exc:
+            findings.append(Finding("member", "error", str(exc)).as_mapping())
+        except ValueError as exc:
+            findings.append(Finding("member", "error", str(exc)).as_mapping())
+
+    # (a) central registration under the chosen name.
+    workspaces = _read_global()
+    registered_here = next((n for n, r in workspaces.items() if Path(r["path"]).resolve() == root), None)
+    if registered_here is not None:
+        findings.append(Finding("registry", "ok", f"already registered here as {registered_here!r}").as_mapping())
+    elif chosen in workspaces:
+        findings.append(
+            Finding(
+                "registry",
+                "error",
+                f"name {chosen!r} is already registered to a different path {workspaces[chosen]['path']}",
+            ).as_mapping()
+        )
+    else:
+        register_workspace(chosen, root)
+        findings.append(Finding("registry", "ok", f"registered workspace {chosen!r}", repaired=True).as_mapping())
+    return tuple(findings)
 
 
 def list_workspaces(*, project: str | os.PathLike[str] | None = None) -> list[WorkspaceBinding]:

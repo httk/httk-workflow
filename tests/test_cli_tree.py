@@ -28,6 +28,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
         "workflows",
         "list",
         "default",
+        "adopt",
         "move",
         "forget",
         "delete",

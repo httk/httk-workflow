@@ -179,6 +179,16 @@ the same workflow commands there. Initialize and address that workspace with
 owning machine, where that workspace's launcher still controls scheduling.
 See {doc}`remotes` for SSH setup, transfers, and the `local` adapter.
 
+## Moving a project between machines
+
+A project directory is self-describing: copy the whole tree (its `httk_project/`
+and its workspaces) to another machine and run `httk project adopt` inside it.
+That registers every workspace in the new machine's per-user registry under the
+name `httk_project/members.json` recorded when you created it, so
+`httk workflow run`, `--workspace NAME`, and the rest work immediately — no
+re-`init`. Adopt a single workspace with `httk workspace adopt`; both are
+idempotent and refuse to overwrite a name already pointing somewhere else.
+
 ## Where to go next
 
 - {doc}`vasp_runners` — what the packaged VASP runners do, every job input and parameter they

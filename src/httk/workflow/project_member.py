@@ -184,8 +184,24 @@ class WorkspaceMemberHandler:
         findings: list[dict[str, object]] = [_unregistered_workspaces(project_root, repair)]
         default = _check_workspace_default(project_root)
         if default is not None:
-            findings.append(default.as_mapping())
+            if repair and default.status == "error":
+                findings.extend(_adopt_default_workspace(project_root))
+                default = _check_workspace_default(project_root)
+            if default is not None:
+                findings.append(default.as_mapping())
         return tuple(findings)
+
+    def adopt(self, member_root: Path, *, name: str | None) -> tuple[dict[str, object], ...]:
+        """Re-establish this workspace's local links on this machine.
+
+        :param member_root: This workspace's root directory.
+        :param name: The member's recorded name, or ``None`` when it has none.
+        :return: The adoption findings.
+        """
+
+        from .registry import adopt_workspace
+
+        return adopt_workspace(member_root, name=name)
 
     def guard(self, member_root: Path) -> AbstractContextManager[object]:
         """Fence this workspace against maintenance while it is snapshotted.
@@ -207,10 +223,11 @@ def _unregistered_workspaces(project_root: Path, repair: bool) -> dict[str, obje
     covered by that outer workspace rather than reported separately.
     """
 
-    from httk.core.project.members import project_members, register_project_member
+    from httk.core.project.members import project_members
 
     from .hygiene import Finding
     from .models import WORKSPACE_DIRECTORY
+    from .registry import adopt_workspace
 
     project = Path(project_root)
     registered = {member.path for member in project_members(project)}
@@ -235,8 +252,26 @@ def _unregistered_workspaces(project_root: Path, repair: bool) -> dict[str, obje
     )
     if repair:
         for relpath in found:
-            register_project_member(project, project if relpath == "." else project / relpath, "workspace")
+            adopt_workspace(project if relpath == "." else project / relpath)
         finding.action = f"registered {len(found)} workspace(s)"
         finding.repaired = True
         finding.status = "ok"
     return finding.as_mapping()
+
+
+def _adopt_default_workspace(project_root: Path) -> list[dict[str, object]]:
+    """Adopt the member that carries the project's recorded default-workspace name."""
+
+    from httk.core.project.members import project_members
+
+    from .projects import read_project_section
+    from .registry import adopt_workspace
+
+    default = read_project_section(project_root, "workspace").get("default")
+    if not isinstance(default, str) or not default:
+        return []
+    for member in project_members(project_root):
+        if member.kind == "workspace" and member.name == default:
+            root = project_root if member.path == "." else project_root / member.path
+            return list(adopt_workspace(root, name=default))
+    return []

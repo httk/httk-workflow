@@ -13,7 +13,7 @@ from ..manifests import read_maintenance_lock, workspace_maintenance_guard
 from ..models import DEFAULT_LEASE_SECONDS, WORKSPACE_DIRECTORY
 from ..packages import load_workflow_package
 from ..projects import read_project_section, require_project, write_project_section
-from ..registry import _update_workspace_path, move_project_member, valid_workspace_name
+from ..registry import _update_workspace_path, adopt_workspace, move_project_member, valid_workspace_name
 from ..seals import (
     default_workspace_keys,
     is_workspace_sealed,
@@ -838,6 +838,36 @@ def handle_workspace_workflow_prelude_unset(arguments: argparse.Namespace, conte
     return 0
 
 
+def handle_workspace_adopt(arguments: argparse.Namespace, context: CLIContext) -> int:
+    """Register copied workspaces on this machine under their recorded names."""
+
+    paths = arguments.paths or [str(context.cwd)]
+    if arguments.name is not None and len(paths) > 1:
+        raise ValueError("workspace adopt --name accepts exactly one PATH")
+    failed = False
+    reports: list[dict[str, object]] = []
+    for raw in paths:
+        start = (Path(context.cwd) / Path(raw).expanduser()).resolve()
+        root = Workspace.discover(start)
+        if root is None:
+            failed = True
+            if arguments.json:
+                reports.append({"path": str(start), "error": "not inside a workspace"})
+            else:
+                print(f"{start}\tERROR\tnot inside a workspace", file=sys.stderr)
+            continue
+        findings = adopt_workspace(root, name=arguments.name)
+        reports.append({"root": str(root), "findings": list(findings)})
+        if any(finding["status"] == "error" for finding in findings):
+            failed = True
+        if not arguments.json:
+            for finding in findings:
+                print(f"{finding['status']}\t{finding['check']}\t{finding['message']}")
+    if arguments.json:
+        print(json.dumps(reports if len(paths) > 1 else reports[0] if reports else {}, indent=2, sort_keys=True))
+    return 1 if failed else 0
+
+
 def build_workspace_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
     *,
@@ -944,6 +974,24 @@ def build_workspace_parser(
     default.add_argument("workspace", metavar="NAME", nargs="?", help="the workspace name to record")
     default.add_argument("--unset", action="store_true", help="clear the recorded project default")
 
+    adopt = _leaf(
+        group,
+        "adopt",
+        summary="register copied workspaces on this machine",
+        description=(
+            "Register one or more workspaces from a copied project tree under their recorded "
+            "names, join them to the enclosing project, and record any missing name"
+        ),
+        handler=handle_workspace_adopt,
+    )
+    adopt.add_argument(
+        "paths",
+        nargs="*",
+        metavar="PATH",
+        help="a workspace or a directory inside one (default: the enclosing workspace)",
+    )
+    adopt.add_argument("--name", metavar="NAME", help="adopt the single PATH under this name")
+    adopt.add_argument("--json", action="store_true", help="print the adoption findings as JSON")
     forget = _leaf(
         group,
         "forget",

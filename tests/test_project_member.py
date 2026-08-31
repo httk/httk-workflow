@@ -12,8 +12,15 @@ from httk.core.project.members import project_members, unregister_project_member
 
 from httk.workflow import Workspace
 from httk.workflow.projects import initialize_project
-from httk.workflow.registry import create_workspace, delete_workspace, move_project_member
+from httk.workflow.registry import (
+    adopt_workspace,
+    create_workspace,
+    delete_workspace,
+    move_project_member,
+    resolve_workspace,
+)
 from httk.workflow.seals import is_project_sealed, seal_job, seal_workspace
+from httk.workflow.workflow_cli import command
 
 
 def _payload(root: Path, tag: str) -> Path:
@@ -139,3 +146,81 @@ def test_move_updates_the_member_path(tmp_path: Path) -> None:
     # A move out of the project unregisters the member.
     move_project_member(project / "new", tmp_path / "outside")
     assert project_members(project) == ()
+
+
+def _fresh_home(tmp_path: Path, monkeypatch, suffix: str) -> None:
+    monkeypatch.setenv("HTTK_CONFIG_HOME", str(tmp_path / f"cfg-{suffix}"))
+    monkeypatch.setenv("HTTK_DATA_HOME", str(tmp_path / f"data-{suffix}"))
+
+
+def _copied_named_project(tmp_path: Path, monkeypatch) -> Path:
+    """Build a project with a named workspace, then copy it to a fresh machine."""
+    import shutil
+
+    _fresh_home(tmp_path, monkeypatch, "origin")
+    origin = tmp_path / "origin-proj"
+    initialize_project(origin, name="p")
+    create_workspace("myws", origin / "work")
+    assert [(m.path, m.name) for m in project_members(origin)] == [("work", "myws")]
+
+    _fresh_home(tmp_path, monkeypatch, "fresh")  # empty registry on the new machine
+    copied = tmp_path / "copied-proj"
+    shutil.copytree(origin, copied)
+    return copied
+
+
+def test_workspace_init_with_name_records_it_in_members(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    initialize_project(project, name="p")
+    create_workspace("named", project / "work")
+    assert [(m.path, m.name) for m in project_members(project)] == [("work", "named")]
+
+
+def test_copied_workspace_resolves_by_name_without_writing_the_registry(tmp_path: Path, monkeypatch) -> None:
+    copied = _copied_named_project(tmp_path, monkeypatch)
+    from httk.workflow.registry import _read_global
+
+    binding = resolve_workspace("myws", project=copied)
+    assert binding.path is not None
+    assert Path(binding.path).resolve() == (copied / "work").resolve()
+    assert _read_global() == {}  # resolution never wrote the central registry
+
+
+def test_adopt_registers_the_copied_workspace_under_its_recorded_name(tmp_path: Path, monkeypatch) -> None:
+    copied = _copied_named_project(tmp_path, monkeypatch)
+    context = CLIContext("httk", copied / "work")
+    assert command(["workspace", "adopt"], context) == 0
+    binding = resolve_workspace("myws")
+    assert binding.path is not None
+    assert Path(binding.path).resolve() == (copied / "work").resolve()
+
+
+def test_project_adopt_adopts_every_member(tmp_path: Path, monkeypatch) -> None:
+    copied = _copied_named_project(tmp_path, monkeypatch)
+    context = CLIContext("httk", copied)
+    assert project_command(["adopt"], context) == 0
+    adopted = resolve_workspace("myws")
+    assert adopted.path is not None
+    assert Path(adopted.path).resolve() == (copied / "work").resolve()
+
+
+def test_adopt_refuses_a_name_already_registered_to_a_different_path(tmp_path: Path, monkeypatch) -> None:
+    copied = _copied_named_project(tmp_path, monkeypatch)
+    # "myws" already points elsewhere on this machine.
+    create_workspace("myws", tmp_path / "other")
+    findings = adopt_workspace(copied / "work")
+    registry = [f for f in findings if f["check"] == "registry"]
+    assert registry and registry[0]["status"] == "error"
+    assert "different path" in str(registry[0]["message"])
+
+
+def test_project_doctor_repair_leaves_workspace_default_clean(tmp_path: Path, monkeypatch) -> None:
+    from httk.workflow.projects import write_project_section
+
+    copied = _copied_named_project(tmp_path, monkeypatch)
+    write_project_section(copied, "workspace", {"default": "myws"})  # default unresolvable centrally yet
+    assert int(project_doctor(copied)["problems"]) >= 1  # type: ignore[arg-type]
+    project_doctor(copied, repair=True)
+    final = project_doctor(copied)
+    by_check = {str(f["check"]): f for f in final["findings"]}  # type: ignore[union-attr]
+    assert by_check["workspace_default"]["status"] == "ok"

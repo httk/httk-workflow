@@ -84,6 +84,7 @@ job UUIDs when precise attribution matters.
 | `workspace init [OPTIONS] PATH...` | create or adopt workspaces and register their basenames | `--name` (one path only), `--setting`, `--no-durable` |
 | `workspace list [--json] [REMOTE:]` | list local or owning-machine workspaces | |
 | `workspace default [--unset] [NAME]` | read or record this project's default name | |
+| `workspace adopt [PATH...] [--name NAME] [--json]` | register copied workspaces on this machine under the names their project's `members.json` records | `--name` (one path only) |
 | `workspace move [--no-durable] NAME DEST_DIR` | move a local workspace and update its registry path | |
 | `workspace forget [--force] NAME...` | deregister names, leaving workspaces on disk | |
 | `workspace delete --force NAME...` | destroy workspaces and deregister them | |
@@ -455,11 +456,20 @@ a workspace's internals to it: what to leave out of a manifest, how to seal it,
 its seal digest, how to verify it, and its health checks. A workspace inside a
 project is recorded in `httk_project/members.json` — registered on
 `httk workspace init`, unregistered on `workspace delete` / `workspace forget`,
-and its path followed on `workspace move`. Create a project with
-`httk project init PATH`, then give it a workspace with `httk workspace init
-PATH`; seal it with `httk workspace seal` and then `httk project seal`, and
-verify the whole tree with `httk project verify-seal` (or `httk seal verify`).
-The project verbs themselves are documented with *httk-core*.
+and its path followed on `workspace move`. The registered *name* travels too:
+`members.json` records each workspace's name, so a project copied to another
+machine stays usable. There, `httk workspace adopt` (per workspace) or
+`httk project adopt` (every member at once) registers the copied workspaces in
+the new machine's per-user registry under their recorded names, joins any that
+are missing from `members.json`, and records a name where one was absent —
+idempotently, never touching a sealed project. Even before adopting, resolving a
+workspace by a name the local registry does not know falls back to the enclosing
+project's `members.json` for that one invocation (it never silently writes the
+registry). Create a project with `httk project init PATH`, then give it a
+workspace with `httk workspace init PATH`; seal it with `httk workspace seal`
+and then `httk project seal`, and verify the whole tree with
+`httk project verify-seal` (or `httk seal verify`). The project verbs themselves
+are documented with *httk-core*.
 
 ### `seal` — verify a sealed tree
 
