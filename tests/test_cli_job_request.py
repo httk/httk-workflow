@@ -8,15 +8,16 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
-
-from httk.workflow import TaskManager, Workspace
-from httk.workflow.configuration import (
+from httk.core.identity import (
     ensure_identity_key,
+    identity_config_path,
     identity_key_paths,
     identity_public_key,
     sign_document,
-    write_config,
+    write_identity_config,
 )
+
+from httk.workflow import TaskManager, Workspace
 from httk.workflow.registry import create_workspace
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import command
@@ -83,10 +84,8 @@ def _configured_default_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.delenv("HTTK_CONFIG_HOME", raising=False)
     monkeypatch.delenv("HTTK_DATA_HOME", raising=False)
-    write_config(
+    write_identity_config(
         {
-            "format": "httk-config",
-            "format_version": 2,
             "identities": {"tester": {"name": "Test User", "email": "tester@example.test"}},
             "default_identity": "tester",
         }
@@ -330,10 +329,8 @@ def test_configured_identity_without_key_fails_loudly(tmp_path: Path, capsys) ->
 
 
 def test_named_operator_identity_selects_its_key(tmp_path: Path) -> None:
-    write_config(
+    write_identity_config(
         {
-            "format": "httk-config",
-            "format_version": 2,
             "identities": {
                 "tester": {"name": "Test User", "email": "tester@example.test"},
                 "bot": {"name": "Build Bot", "email": "bot@example.test"},
@@ -362,14 +359,15 @@ def test_unknown_operator_identity_publishes_nothing(tmp_path: Path, capsys) -> 
     assert not list((workspace.control / "requests" / "ready").iterdir())
 
 
-def test_request_without_any_identity_names_the_config_command(tmp_path: Path, capsys) -> None:
-    write_config({"format": "httk-config", "format_version": 2})
+def test_request_without_any_identity_is_refused(tmp_path: Path, capsys) -> None:
+    # The autouse fixture configured an identity; forget it so the machine has none.
+    identity_config_path().unlink()
     workspace, workspace_name = _new_workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", "no-identity")
     workspace.submit(payload, "project/no-identity")
 
     assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 2
-    assert "config identity add" in capsys.readouterr().err
+    assert "no operator identity is configured" in capsys.readouterr().err
     assert not list((workspace.control / "requests" / "ready").iterdir())
 
 
@@ -402,10 +400,9 @@ def test_literal_operator_on_empty_machine_publishes_unsigned_request(tmp_path: 
 
 
 def test_legacy_operator_identity_is_used_without_named_identities(tmp_path: Path) -> None:
-    write_config(
+    identity_config_path().unlink()
+    write_identity_config(
         {
-            "format": "httk-config",
-            "format_version": 2,
             "name": "Legacy User",
             "email": "legacy@example.test",
         }

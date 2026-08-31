@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.identity import identity_key_paths
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.adapters import add_remote, import_v1_remote, run_adapter
-from httk.workflow.configuration import identity_key_paths
 from httk.workflow.journal import JournalWriter
 from httk.workflow.manifests import create_manifest, verify_manifest, workspace_maintenance_guard
 from httk.workflow.projects import initialize_project

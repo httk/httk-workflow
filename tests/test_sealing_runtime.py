@@ -15,9 +15,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from httk.core.identity import ensure_identity_key
 
 from httk.workflow import TaskManager, Workspace, _manager_commit
-from httk.workflow.configuration import ensure_identity_key
 from httk.workflow.errors import SealedError
 from httk.workflow.journal import JournalWriter
 from httk.workflow.projects import initialize_project

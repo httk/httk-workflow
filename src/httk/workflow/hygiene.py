@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from httk.core.identity import keys_home
+
 from ._util import read_json, utc_now
 from .adapters import (
     ADAPTER_EXECUTABLE,
@@ -26,7 +28,7 @@ from .adapters import (
     valid_remote_name,
     validate_adapter_bundle,
 )
-from .configuration import keys_home, remotes_home
+from .configuration import remotes_home
 from .errors import WorkflowError
 from .manifests import (
     read_maintenance_lock,

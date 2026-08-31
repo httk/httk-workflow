@@ -1,18 +1,21 @@
 """Configuration, project, and umbrella-project command groups."""
 
 import sys
+from collections.abc import Mapping
 from contextlib import nullcontext, redirect_stdout
 from copy import copy
 from io import StringIO
 
-from ..configuration import (
-    _configured_identities,
-    _validate_operator_identity_fields,
-    ensure_identity_key,
+from httk.core.identity import (
+    add_identity,
+    identity_config_path,
     identity_key_paths,
     identity_public_key,
-    write_config,
+    read_identity_config,
+    remove_identity,
+    set_default_identity,
 )
+
 from ..manifests import workspace_maintenance_guard
 from ..models import WORKSPACE_DIRECTORY
 from ..projects import PROJECT_DIRECTORY, require_project
@@ -144,41 +147,33 @@ def _identity_report(short: str, name: str, email: str, is_default: bool) -> dic
 def handle_config_identity_add(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Create and configure one named operator identity."""
 
-    values = read_config()
-    identities = _configured_identities(values)
-    if arguments.short in identities:
-        raise ValueError(f"identity already exists: {arguments.short}")
-    identity_key_paths(arguments.short)
-    _validate_operator_identity_fields(arguments.name, arguments.email)
-    had_default = "default_identity" in values
-    previous_default = values.get("default_identity")
-    ensure_identity_key(arguments.short)
-    identities[arguments.short] = (arguments.name, arguments.email)
-    values["identities"] = {short: {"name": name, "email": email} for short, (name, email) in identities.items()}
-    selected_default = arguments.short if len(identities) == 1 or arguments.default else previous_default
-    if len(identities) == 1 or arguments.default or had_default:
-        values["default_identity"] = selected_default
-    write_config(values)
-    print(
-        json.dumps(
-            _identity_report(arguments.short, arguments.name, arguments.email, selected_default == arguments.short)
-        )
-    )
+    values = add_identity(arguments.short, arguments.name, arguments.email, make_default=arguments.default)
+    is_default = values.get("default_identity") == arguments.short
+    print(json.dumps(_identity_report(arguments.short, arguments.name, arguments.email, is_default)))
     return 0
 
 
 def handle_config_identity_list(arguments: argparse.Namespace, context: CLIContext) -> int:
     """List configured named operator identities."""
 
-    values = read_config()
-    identities = _configured_identities(values)
+    values = read_identity_config()
+    raw = values.get("identities")
+    identities: dict[str, dict[str, str]] = {}
+    if isinstance(raw, Mapping):
+        for short, item in raw.items():
+            if isinstance(item, Mapping):
+                identities[str(short)] = {"name": str(item.get("name", "")), "email": str(item.get("email", ""))}
     default = values.get("default_identity")
-    if "default_identity" in values and (not isinstance(default, str) or default not in identities):
+    default_short = default if isinstance(default, str) else None
+    if "default_identity" in values and (default_short is None or default_short not in identities):
         print(
             f"warning: config identity default {default!r} is not a configured identity",
             file=sys.stderr,
         )
-    reports = [_identity_report(short, *identities[short], short == default) for short in sorted(identities)]
+    reports = [
+        _identity_report(short, identities[short]["name"], identities[short]["email"], short == default_short)
+        for short in sorted(identities)
+    ]
     if arguments.json:
         print(json.dumps(reports, indent=2, sort_keys=True))
     else:
@@ -192,13 +187,8 @@ def handle_config_identity_list(arguments: argparse.Namespace, context: CLIConte
 def handle_config_identity_default(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Select the default named operator identity."""
 
-    values = read_config()
-    identities = _configured_identities(values)
-    if arguments.short not in identities:
-        shorts = ", ".join(sorted(identities)) or "(none)"
-        raise ValueError(f"unknown identity {arguments.short!r}; configured identities: {shorts}")
-    values["default_identity"] = arguments.short
-    print(write_config(values))
+    set_default_identity(arguments.short)
+    print(identity_config_path())
     return 0
 
 
@@ -207,25 +197,8 @@ def handle_config_identity_remove(arguments: argparse.Namespace, context: CLICon
 
     if isinstance(arguments.short, list):
         return _batch(arguments, context, handle_config_identity_remove, "short", "identity")
-    values = read_config()
-    identities = _configured_identities(values)
     short = arguments.short
-    if short not in identities:
-        shorts = ", ".join(sorted(identities)) or "(none)"
-        raise ValueError(f"unknown identity {short!r}; configured identities: {shorts}")
-    default = values.get("default_identity")
-    if default == short and len(identities) > 2:
-        raise ValueError(f"cannot remove default identity {short!r}; choose another default first")
-    identities.pop(short)
-    values["identities"] = {name: {"name": item[0], "email": item[1]} for name, item in identities.items()}
-    if default == short:
-        if len(identities) == 1:
-            values["default_identity"] = next(iter(identities))
-        else:
-            values.pop("default_identity", None)
-    if not identities:
-        values.pop("default_identity", None)
-    write_config(values)
+    remove_identity(short)
     seed_path, public_path = identity_key_paths(short)
     print(f"removed {short}; key files remain: {seed_path}, {public_path}")
     return 0

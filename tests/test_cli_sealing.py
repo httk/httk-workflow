@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 from httk.core.cli import CLIContext
 from httk.core.crypto import ed25519_generate_seed
+from httk.core.identity import ensure_identity_key
 from httk.core.project.cli import command as project_command
 
 from httk.workflow import TaskManager, Workspace
-from httk.workflow.configuration import ensure_identity_key
 from httk.workflow.projects import initialize_project
 from httk.workflow.seals import is_job_sealed, is_project_sealed, is_workspace_sealed, job_seal_path
 from httk.workflow.workflow_cli import command

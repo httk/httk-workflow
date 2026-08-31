@@ -13,6 +13,13 @@ from typing import Any, cast
 import pytest
 from httk.core.cli import CLIContext
 from httk.core.crypto import ed25519_generate_seed, ed25519_public_key, ed25519_sign
+from httk.core.identity import (
+    ensure_identity_key,
+    identity_public_key,
+    initialize_identity,
+    sign_document,
+    verify_document,
+)
 from httk.core.project.cli import command as project_command
 
 from conftest import register_ws
@@ -21,14 +28,10 @@ from httk.workflow.adapters import add_remote, store_credentials
 from httk.workflow.configuration import (
     CONFIG_KEYS,
     config_path,
-    ensure_identity_key,
-    identity_public_key,
     read_config,
     set_config_key,
     settable_config_keys,
-    sign_document,
     unset_config_key,
-    verify_document,
     write_config,
 )
 from httk.workflow.errors import FormatError
@@ -340,15 +343,7 @@ def _handle_requests(workspace: Workspace) -> None:
 
 def test_signed_operator_request_round_trips_and_is_attributed(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
-    write_config(
-        {
-            "format": "httk-config",
-            "format_version": 2,
-            "name": "Me",
-            "email": "me@example.org",
-        }
-    )
-    ensure_identity_key()
+    initialize_identity("Me", "me@example.org")
     workspace, job_id = _request_workspace(tmp_path)
     ws = register_ws(None, workspace.root)
     assert (
@@ -491,28 +486,27 @@ def test_read_config_refuses_a_foreign_format_or_version(tmp_path: Path, monkeyp
 
 def test_config_set_is_restricted_to_the_registry_and_unset_removes(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
-    assert settable_config_keys() == ("email", "machine_names", "name")
+    assert settable_config_keys() == ("machine_names",)
     assert not CONFIG_KEYS["format"].settable
 
-    set_config_key("name", "A User")
-    set_config_key("email", "a@example.test")
-    assert read_config()["name"] == "A User"
+    set_config_key("machine_names", "node-a")
+    assert read_config()["machine_names"] == "node-a"
 
-    with pytest.raises(ValueError, match="unknown configuration key 'nmae'.*email, machine_names, name"):
-        set_config_key("nmae", "A User")
+    with pytest.raises(ValueError, match="unknown configuration key 'mahcine'.*machine_names"):
+        set_config_key("mahcine", "node-a")
     with pytest.raises(ValueError, match="cannot be set"):
         set_config_key("format_version", "2")
 
-    unset_config_key("email")
-    assert "email" not in read_config()
+    unset_config_key("machine_names")
+    assert "machine_names" not in read_config()
     with pytest.raises(ValueError, match="not set"):
-        unset_config_key("email")
+        unset_config_key("machine_names")
 
     context = CLIContext("httk", tmp_path)
-    assert command(["config", "set", "email", "b@example.test"], context) == 0
-    assert read_config()["email"] == "b@example.test"
-    assert command(["config", "unset", "email"], context) == 0
-    assert "email" not in read_config()
+    assert command(["config", "set", "machine_names", "node-b"], context) == 0
+    assert read_config()["machine_names"] == "node-b"
+    assert command(["config", "unset", "machine_names"], context) == 0
+    assert "machine_names" not in read_config()
     assert command(["config", "set", "nickname", "x"], context) == 2
 
 

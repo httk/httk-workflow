@@ -17,6 +17,14 @@ from typing import Any
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.identity import (
+    ensure_identity_key,
+    identity_config_path,
+    identity_key_paths,
+    identity_public_key,
+    verify_document,
+    write_identity_config,
+)
 
 from conftest import register_ws
 from httk.workflow import (
@@ -26,13 +34,6 @@ from httk.workflow import (
     job_records,
 )
 from httk.workflow.adapters import add_remote
-from httk.workflow.configuration import (
-    ensure_identity_key,
-    identity_key_paths,
-    identity_public_key,
-    verify_document,
-    write_config,
-)
 from httk.workflow.models import StateFrame
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
@@ -177,10 +178,8 @@ def pair(template: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pai
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.delenv("HTTK_CONFIG_HOME", raising=False)
     monkeypatch.delenv("HTTK_DATA_HOME", raising=False)
-    write_config(
+    write_identity_config(
         {
-            "format": "httk-config",
-            "format_version": 2,
             "identities": {"local": {"name": "Local User", "email": "local@example.test"}},
             "default_identity": "local",
         }
@@ -263,10 +262,8 @@ def test_job_request_forwards_to_remote_workspace(pair: Pair, capsys: pytest.Cap
 
 
 def test_job_request_remote_uses_selected_identity(pair: Pair, capsys: pytest.CaptureFixture[str]) -> None:
-    write_config(
+    write_identity_config(
         {
-            "format": "httk-config",
-            "format_version": 2,
             "identities": {
                 "local": {"name": "Local User", "email": "local@example.test"},
                 "bot": {"name": "Build Bot", "email": "bot@example.test"},
@@ -322,7 +319,7 @@ def test_job_request_remote_literal_on_unconfigured_machine_is_unsigned(
     pair: Pair,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    write_config({"format": "httk-config", "format_version": 2})
+    identity_config_path().unlink()
     assert (
         command(
             [

@@ -414,7 +414,7 @@ def _print_results(results: list[Result]) -> None:
         parameters = item["size_parameters"]
         size = parameters if isinstance(parameters, dict) else str(parameters)
         print(
-            f"{str(item['name']):27}  {str(size):9}  {as_float(item['duration_seconds']):11.6f}  "
+            f"{item['name']!s:27}  {size!s:9}  {as_float(item['duration_seconds']):11.6f}  "
             f"{as_float(item['rate']):10.2f} {item['rate_unit']}"
         )
 

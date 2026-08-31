@@ -11,7 +11,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..configuration import identity_key_paths
+from httk.core.identity import identity_key_paths
+
 from ..manifests import resolve_trusted_keys
 from ..projects import discover_project, read_public_key_file
 from ..seals import VALID_TRUSTED, VALID_UNKNOWN_KEY, verify_tree

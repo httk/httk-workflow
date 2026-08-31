@@ -32,6 +32,7 @@ from typing import Any
 import httk.core
 from httk.core.cli import CLIContext
 from httk.core.digests import sha256_file, tree_digest
+from httk.core.identity import sign_document
 
 # The packaged domains register their workflows as an import side effect, so the
 # CLI resolves `job new --workflow NAME` against a populated registry. The generic
@@ -80,7 +81,6 @@ from ..configuration import (
     initialize_config,
     read_config,
     set_config_key,
-    sign_document,
     unset_config_key,
 )
 from ..errors import WorkflowError

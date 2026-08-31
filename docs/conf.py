@@ -4,6 +4,7 @@ import warnings
 from datetime import date
 
 from sphinx.deprecation import RemovedInSphinx10Warning
+
 warnings.filterwarnings("ignore", category=RemovedInSphinx10Warning)
 
 project = "httk-workflow"

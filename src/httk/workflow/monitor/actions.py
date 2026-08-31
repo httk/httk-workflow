@@ -4,7 +4,8 @@ from argparse import Namespace
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from ..configuration import resolve_operator_identity
+from httk.core.identity import resolve_operator_identity
+
 from ..removal import remove_jobs
 from ..workflow_cli import (
     ensure_identity_key,

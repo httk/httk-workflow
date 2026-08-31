@@ -19,12 +19,12 @@ from typing import Any
 
 import pytest
 from httk.core.digests import tree_digest
+from httk.core.identity import ensure_identity_key
 
 import httk.workflow.manager as manager_module
 from conftest import TestProfile as _TestProfile
 from httk.workflow import TaskManager, Workspace, _manager_requests
 from httk.workflow._logging import reset_logging
-from httk.workflow.configuration import ensure_identity_key
 from httk.workflow.journal import JournalWriter, read_record
 from httk.workflow.manager import RunningAttempt
 from httk.workflow.models import CARRIED_STATE_MEMBERS, Marker, StateFrame

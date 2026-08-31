@@ -782,7 +782,8 @@ data layer; see {doc}`/collecting`.
 User configuration follows the XDG base-directory convention, and everything
 per-user this package keeps is *configuration*:
 
-- `$XDG_CONFIG_HOME/httk/config.json`;
+- `$XDG_CONFIG_HOME/httk/config.json` (machine-level settings such as `machine_names`);
+- operator identity in `$XDG_CONFIG_HOME/httk/identity.json`, managed by *httk-core*;
 - identity keys in `$XDG_CONFIG_HOME/httk/keys/`;
 - global remote definitions in `$XDG_CONFIG_HOME/httk/remotes/`.
 
@@ -792,8 +793,8 @@ overrides. Legacy `~/.httk` data is read only through `config import-v1`; its
 
 ```console
 httk workflow config init --name "A User" --email user@example.org
-httk workflow config set name "Another User"
-httk workflow config unset email
+httk workflow config set machine_names "node-a,node-b"
+httk workflow config unset machine_names
 httk project init --name example .
 ```
 
@@ -804,10 +805,12 @@ anchor with `httk project init PATH` and give it a workspace with
 `seal`, and `unseal` — are mounted by *httk-workflow* onto the core
 `httk project` command.
 
-`config set` accepts only the keys the configuration actually has — including
-`machine_names`, `name`, and `email` — and names them when it refuses another, so a typo cannot become a
-member that nothing ever reads. `format` and `format_version` describe the
-document and are written by *httk* itself. A configuration whose `format` or
+`config set` accepts only the keys the configuration actually has — `machine_names`
+is the sole settable one — and names them when it refuses another, so a typo cannot
+become a member that nothing ever reads. Operator name, email, and named identities
+are not configuration keys: they live in `identity.json` and are managed by the
+`config identity` commands and `config init`. `format` and `format_version` describe
+the document and are written by *httk* itself. A configuration whose `format` or
 `format_version` is missing or something else is refused rather than read as if
 its members meant what *httk* means by them.
 
@@ -923,7 +926,10 @@ with a different job.
 
 ### Operator identity
 
-`httk workflow config init` creates the legacy `identity.seed`/`identity.pub`
+Operator identity — the recorded name, email, and default, plus every named
+identity — lives in `$XDG_CONFIG_HOME/httk/identity.json`, managed by *httk-core*.
+The same `httk workflow config` commands drive it: `httk workflow config init`
+records the bare `name`/`email` and creates the default `identity.seed`/`identity.pub`
 pair below `$XDG_CONFIG_HOME/httk/keys/`. Named identities are managed with
 `httk workflow config identity add --name NAME --email EMAIL SHORT`; each gets
 its own `identity-SHORT.seed`/`.pub` pair. The first named identity becomes the
@@ -932,9 +938,9 @@ leaves its key files on disk; removing the default with exactly one identity
 remaining selects that identity automatically, while removal with multiple
 remaining identities requires selecting another default first.
 
-The default signing identity resolves in this order: `default_identity`, the
-only configured identity when there is exactly one, then the legacy top-level
-`name`/`email` and `identity.seed`. A selector containing `<` is a literal
+The default signing identity resolves in this order: the `default_identity`
+recorded in `identity.json`, the only configured identity when there is exactly
+one, then the bare top-level `name`/`email` and `identity.seed`. A selector containing `<` is a literal
 `Name <email>` attribution label (the name may be empty) and uses the resolved
 default identity's key; other selectors must be configured short names.
 

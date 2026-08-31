@@ -6,8 +6,9 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from httk.core.identity import verify_document
+
 from ._util import utc_now
-from .configuration import verify_document
 from .errors import FormatError, TransitionLostError, WorkflowError
 from .models import TERMINAL_KINDS, StateFrame, normalize_placement, parse_job_key, validate_step
 

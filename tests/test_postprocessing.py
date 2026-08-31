@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.identity import ensure_identity_key
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace, job_records
-from httk.workflow.configuration import ensure_identity_key
 from httk.workflow.packages import load_workflow_package
 from httk.workflow.postprocessing import postprocess_root, run_postprocess_script
 from httk.workflow.scaffold import new_job

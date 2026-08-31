@@ -25,9 +25,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from httk.core.crypto import ed25519_public_key, ed25519_sign, ed25519_verify
+from httk.core.identity import identity_key_paths, identity_seed
 
 from ._util import json_bytes, utc_now, write_json_atomic
-from .configuration import identity_key_paths, identity_seed
 from .errors import FormatError, SealedError, SealError, WorkflowError
 from .manifests import _records, _seed
 from .models import WORKSPACE_DIRECTORY, Marker

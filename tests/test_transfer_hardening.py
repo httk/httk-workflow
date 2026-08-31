@@ -670,17 +670,15 @@ def test_offer_selection_state_filter_survives_for_sealed_bundle(tmp_path: Path)
 
 
 def test_import_refuses_ambiguous_identity_before_mutating(tmp_path: Path) -> None:
-    from httk.workflow.configuration import write_config
+    from httk.core.identity import write_identity_config
 
-    ambiguous = {
-        "format": "httk-config",
-        "format_version": 2,
+    ambiguous: dict[str, object] = {
         "identities": {
             "alice": {"name": "Alice", "email": "alice@example.test"},
             "bob": {"name": "Bob", "email": "bob@example.test"},
         },
     }
-    write_config(ambiguous)
+    write_identity_config(ambiguous)
     source, destination = _pair(tmp_path)
     payload, job_id = _payload(tmp_path)
     source.submit(payload, "jobs")
@@ -688,13 +686,13 @@ def test_import_refuses_ambiguous_identity_before_mutating(tmp_path: Path) -> No
 
     # 2+ identities with no default is ambiguous, so signing the acknowledgement
     # refuses. That refusal must precede every mutation of the import.
-    with pytest.raises(ValueError, match="configure an identity"):
+    with pytest.raises(ValueError, match="no operator identity is configured"):
         destination.import_bundle(bundle)
 
     assert destination.find_marker_by_id(job_id) is None
     assert (bundle / TRANSFER_DIRECTORY).is_dir()
 
     # Choosing a default identity lets the very same intact bundle import.
-    write_config({**ambiguous, "default_identity": "alice"})
+    write_identity_config({**ambiguous, "default_identity": "alice"})
     destination.import_bundle(bundle)
     assert destination.find_marker_by_id(job_id) is not None

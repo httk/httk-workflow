@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 from httk.core.crypto import ed25519_generate_seed
+from httk.core.identity import ensure_identity_key, identity_public_key
 
 from httk.workflow import Workspace
-from httk.workflow.configuration import ensure_identity_key, identity_public_key
 from httk.workflow.errors import SealedError, SealError
 from httk.workflow.manifests import _records
 from httk.workflow.models import Marker

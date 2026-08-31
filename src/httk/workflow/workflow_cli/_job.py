@@ -9,6 +9,14 @@ import time
 import uuid
 from pathlib import PurePosixPath
 
+from httk.core.identity import (
+    OperatorIdentity,
+    identity_seed,
+    resolve_operator_identity,
+    sign_document,
+    verify_document,
+)
+
 from ..adapters import (
     REMOTE_JOB_DELETE_COMMAND,
     REMOTE_JOB_LIST_COMMAND,
@@ -19,7 +27,6 @@ from ..adapters import (
     REMOTE_JOB_WHY_COMMAND,
     resolve_remote,
 )
-from ..configuration import OperatorIdentity, identity_seed, resolve_operator_identity, sign_document, verify_document
 from ..introspection import (
     JobSelectorResolver,
     count_markers,
