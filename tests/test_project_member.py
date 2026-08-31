@@ -73,6 +73,36 @@ def test_project_doctor_detects_and_repairs_an_unregistered_workspace(tmp_path: 
     assert "b" in {member.path for member in project_members(project)}
 
 
+def test_project_doctor_recovers_a_deleted_members_registry(tmp_path: Path) -> None:
+    # CASE B: the workspace is on disk but members.json is gone entirely, so the
+    # registry is empty; scan_project must still surface and re-register it.
+    from httk.core.project.members import members_path
+
+    project = tmp_path / "project"
+    initialize_project(project, name="member")
+    Workspace.initialize(project)  # the root itself is the workspace, member "."
+    members_path(project).unlink()
+    assert project_members(project) == ()
+
+    report = project_doctor(project)
+    unregistered = [
+        finding
+        for finding in report["findings"]  # type: ignore[union-attr]
+        if finding["check"] == "workspace_members" and finding["status"] == "error"
+    ]
+    assert unregistered and "." in str(unregistered[0]["details"]["workspaces"])
+
+    project_doctor(project, repair=True)
+    assert [member.path for member in project_members(project)] == ["."]
+    # A second run is clean: the workspace is registered again.
+    clean = project_doctor(project)
+    assert all(
+        finding["status"] == "ok"
+        for finding in clean["findings"]  # type: ignore[union-attr]
+        if finding["check"] == "workspace_members"
+    )
+
+
 def test_project_seal_end_to_end_via_the_core_cli(tmp_path: Path) -> None:
     ensure_identity_key()
     project = tmp_path / "project"

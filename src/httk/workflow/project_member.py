@@ -15,7 +15,7 @@ import os
 from collections.abc import Sequence
 from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .seals import SealVerification
@@ -96,30 +96,6 @@ class WorkspaceMemberHandler:
             patterns.extend((rel, f"{rel}/**"))
         return tuple(patterns)
 
-    def seal(self, member_root: Path, keys: object) -> Path:
-        """Seal this workspace and return its seal path.
-
-        :param member_root: This workspace's root directory.
-        :param keys: The resolved signing keys, or ``None`` for the default.
-        :return: The written workspace seal path.
-        """
-
-        from . import seals
-        from .workspace import Workspace
-
-        return seals.seal_workspace(Workspace(member_root), keys=cast(Any, keys) or None)
-
-    def unseal(self, member_root: Path) -> None:
-        """Remove this workspace's seal.
-
-        :param member_root: This workspace's root directory.
-        """
-
-        from . import seals
-        from .workspace import Workspace
-
-        seals.unseal_workspace(Workspace(member_root))
-
     def seal_digest(self, member_root: Path) -> tuple[str, str]:
         """Return this workspace's id and the SHA-256 of its seal bytes.
 
@@ -173,53 +149,43 @@ class WorkspaceMemberHandler:
         return tuple(entries)
 
     def doctor(self, member_root: Path, *, repair: bool) -> tuple[dict[str, object], ...]:
-        """Check this workspace's health and, when a member is the project root,
-        that no sibling workspace is unregistered.
+        """Check this workspace member's own health.
+
+        Project-scope checks — the recorded default binding and any workspace on
+        disk that is not a registered member — live in :meth:`scan_project`.
 
         :param member_root: This workspace's root directory.
         :param repair: Whether to apply automatic repairs.
         :return: The workspace's doctor findings.
         """
 
-        from .hygiene import _check_maintenance_lock, _check_tmp_leftovers, _check_workspace_default
-        from .projects import discover_project
+        from .hygiene import _check_maintenance_lock, _check_tmp_leftovers
 
-        findings = [
+        return (
             _check_maintenance_lock(member_root, repair).as_mapping(),
             _check_tmp_leftovers(member_root, repair).as_mapping(),
-        ]
-        # The recorded default-workspace binding is a project-registry concern, so
-        # only the member that is itself the project root reports on it.
-        project = discover_project(member_root)
-        if project is not None and project.resolve() == member_root.resolve():
-            default = _check_workspace_default(member_root)
-            if default is not None:
-                findings.append(default.as_mapping())
-        unregistered = _unregistered_workspaces(member_root, repair)
-        if unregistered is not None:
-            findings.append(unregistered)
-        return tuple(findings)
+        )
 
-    def describe(self, member_root: Path) -> dict[str, object]:
-        """Describe this workspace for an operator diagnostic.
+    def scan_project(self, project_root: Path, *, repair: bool) -> tuple[dict[str, object], ...]:
+        """Report project-scope workspace findings, even with no registered member.
 
-        :param member_root: This workspace's root directory.
-        :return: A JSON-compatible workspace description.
+        Core calls this once for the workspace kind whether or not members.json
+        holds any workspace, so a workspace present on disk but missing from the
+        registry is surfaced (and, under *repair*, registered) even when the
+        registry is empty or absent.
+
+        :param project_root: The project root to scan.
+        :param repair: Whether to apply automatic repairs.
+        :return: The project-scope findings.
         """
 
-        from . import seals
-        from .workspace import Workspace
+        from .hygiene import _check_workspace_default
 
-        workspace = Workspace(member_root)
-        markers = list(workspace.scan_markers())
-        return {
-            "kind": "workspace",
-            "workspace_id": workspace.workspace_id,
-            "root": str(workspace.root),
-            "sealed": seals.is_workspace_sealed(workspace),
-            "jobs": len(markers),
-            "unsealed_jobs": [marker.job_key for marker in seals.unsealed_jobs(workspace)],
-        }
+        findings: list[dict[str, object]] = [_unregistered_workspaces(project_root, repair)]
+        default = _check_workspace_default(project_root)
+        if default is not None:
+            findings.append(default.as_mapping())
+        return tuple(findings)
 
     def guard(self, member_root: Path) -> AbstractContextManager[object]:
         """Fence this workspace against maintenance while it is snapshotted.
@@ -234,23 +200,19 @@ class WorkspaceMemberHandler:
         return workspace_maintenance_guard(Workspace(member_root))
 
 
-def _unregistered_workspaces(member_root: Path, repair: bool) -> dict[str, object] | None:
-    """Report sibling workspaces under the project that are not registered members.
+def _unregistered_workspaces(project_root: Path, repair: bool) -> dict[str, object]:
+    """Report every workspace on disk under a project that is not a member.
 
-    Only a member that is itself the project root scans the tree, so a project
-    whose root is not a workspace reaches this through its lone nested member and
-    a project whose root *is* a workspace never double-reports.
+    The walk prunes at each workspace, so a workspace nested inside another is
+    covered by that outer workspace rather than reported separately.
     """
 
     from httk.core.project.members import project_members, register_project_member
 
     from .hygiene import Finding
     from .models import WORKSPACE_DIRECTORY
-    from .projects import discover_project
 
-    project = discover_project(member_root)
-    if project is None or project.resolve() == member_root.resolve():
-        return None
+    project = Path(project_root)
     registered = {member.path for member in project_members(project)}
     found: list[str] = []
     for dirpath, dirnames, _filenames in os.walk(project):

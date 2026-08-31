@@ -1,24 +1,22 @@
-"""Describe and repair a project, its remotes, and its workspace.
+"""Describe and repair a project's remotes, and check its workspace health.
 
 Everything here answers an operator question about state that already exists:
-*what is this project*, *what is this remote configured to do*, *what is wrong
-with this project and can it be fixed*. Nothing here is on the execution path of
-a job, and every repair is explicit — :func:`project_doctor` reports by default
-and only changes something when it is asked to.
+*what is this remote configured to do*, *what is wrong with this workspace and
+can it be fixed*. Nothing here is on the execution path of a job. The individual
+workspace checks are the ones the project-member doctor and ``scan_project``
+surface through core's ``httk project doctor``; each repair is explicit.
 """
 
 import logging
 import os
 import shutil
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from httk.core.identity import keys_home
-
-from ._util import read_json, utc_now
+from ._util import read_json
 from .adapters import (
     ADAPTER_EXECUTABLE,
     CREDENTIALS_FILE,
@@ -33,20 +31,13 @@ from .errors import WorkflowError
 from .manifests import (
     read_maintenance_lock,
     release_maintenance_lock,
-    verify_manifest,
 )
 from .models import STATE_KINDS, WORKSPACE_DIRECTORY
 from .projects import (
-    PROJECT_DIRECTORY,
     discover_project,
     key_fingerprint,
-    pin_project_key,
-    pinned_project_key,
     read_project,
     read_project_section,
-    read_public_key_file,
-    require_project,
-    trusted_project_keys,
 )
 from .registry import list_workspaces, resolve_workspace
 from .workspace import Workspace
@@ -54,24 +45,16 @@ from .workspace import Workspace
 _LOGGER = logging.getLogger(__name__)
 
 __all__ = [
-    "DOCTOR_FRAME_FORMAT",
-    "DOCTOR_REPORT_FORMAT",
-    "PROJECT_DESCRIPTION_FORMAT",
     "REMOTE_DESCRIPTION_FORMAT",
     "TMP_MAXIMUM_AGE_SECONDS",
     "Finding",
-    "describe_project",
     "describe_remote",
-    "project_doctor",
     "remove_remote",
 ]
 
-PROJECT_DESCRIPTION_FORMAT = "httk-project-description"
 REMOTE_DESCRIPTION_FORMAT = "httk-remote-description"
-DOCTOR_REPORT_FORMAT = "httk-project-doctor"
 #: The journal frame one repairing doctor run appends. It is not a state frame,
 #: so every reader that walks the journal for job history ignores it.
-DOCTOR_FRAME_FORMAT = "httk-workflow-doctor"
 
 #: How long a staging entry may sit below ``.httk-workspace/tmp`` before the
 #: doctor calls it a leftover. Every publication renames its staging entry out
@@ -136,76 +119,6 @@ def _workspace_summary(project: Path, metadata: Mapping[str, object]) -> dict[st
         }
     )
     return summary
-
-
-def _manifest_summary(project: Path, *, verify: bool) -> dict[str, object]:
-    """Report which manifest a project has and, on request, what it verifies as."""
-
-    path = project / PROJECT_DIRECTORY / "manifest.jsonl.bz2"
-    legacy = project / "ht.project" / "manifest.bz2"
-    present = path.is_file() or legacy.is_file()
-    summary: dict[str, object] = {
-        "path": str(path if path.is_file() else legacy if legacy.is_file() else path),
-        "present": present,
-        "verdict": None,
-        "reason": None if present else "this project has no manifest yet",
-    }
-    if present:
-        summary["modified_at"] = int(Path(str(summary["path"])).stat().st_mtime)
-    if not present or not verify:
-        return summary
-    try:
-        verification = verify_manifest(project)
-    except (WorkflowError, OSError, ValueError) as exc:
-        summary["reason"] = f"the manifest could not be verified: {exc}"
-        return summary
-    summary.update({"verdict": verification.verdict, "reason": verification.reason})
-    return summary
-
-
-def describe_project(
-    project_root: str | os.PathLike[str] | None = None,
-    *,
-    verify: bool = True,
-) -> dict[str, object]:
-    """Describe one project: its metadata, its keys, its workspace, its manifest.
-
-    *verify* walks the tree to classify the manifest, which is what makes the
-    description say whether the project is *currently* described by what it
-    signed; by design, pass ``False`` for a cheap answer when verification is
-    not required, because that skips the tree walk.
-
-    :param project_root: Project directory, or the discovered project.
-    :param verify: Whether to verify the project manifest contents.
-    :return: JSON-compatible project description.
-    """
-
-    project = require_project(project_root)
-    metadata = read_project(project)
-    own = pinned_project_key(metadata)
-    trusted = trusted_project_keys(metadata)
-    seed = project / PROJECT_DIRECTORY / "keys" / "project.seed"
-    return {
-        "format": PROJECT_DESCRIPTION_FORMAT,
-        "format_version": 2,
-        "root": str(project),
-        "project": {
-            "project_id": metadata.get("project_id"),
-            "name": metadata.get("name"),
-            "description": metadata.get("description"),
-            "imported_from": metadata.get("imported_from"),
-            "manifest_exclusions": metadata.get("manifest_exclusions", []),
-        },
-        "keys": {
-            "pinned": own is not None,
-            "public_key": None if own is None else _key_record(own),
-            "seed_present": seed.is_file(),
-            "trusted_keys": [_key_record(key) for key in trusted],
-        },
-        "workspace": _workspace_summary(project, metadata),
-        "manifest": _manifest_summary(project, verify=verify),
-        "remotes": _project_remotes(project),
-    }
 
 
 def _project_remotes(project: Path) -> list[str]:
@@ -436,26 +349,6 @@ def _check_workspace_default(project: Path) -> Finding | None:
     )
 
 
-def _check_key_pin(project: Path, metadata: dict[str, object], repair: bool) -> Finding:
-    """Without a pin, manifest verification has no anchor but the manifest itself."""
-
-    if pinned_project_key(metadata) is not None:
-        return Finding("key_pin", "ok", "project.json pins the project's public key")
-    finding = Finding(
-        "key_pin",
-        "warning",
-        "project.json pins no public key, so every manifest verifies as an unknown key",
-        repairable=(project / PROJECT_DIRECTORY / "keys" / "project.pub").is_file(),
-    )
-    if repair and finding.repairable:
-        pinned = pin_project_key(project)
-        finding.action = f"pinned {key_fingerprint(str(pinned['public_key']))}"
-        finding.repaired = True
-        finding.status = "ok"
-        metadata.update(pinned)
-    return finding
-
-
 def _check_tmp_leftovers(project: Path, repair: bool) -> Finding:
     """Staging entries nothing renamed out are pure leftovers."""
 
@@ -496,127 +389,3 @@ def _check_tmp_leftovers(project: Path, repair: bool) -> Finding:
         finding.repaired = True
         finding.status = "ok"
     return finding
-
-
-def _check_legacy_identity(project: Path, metadata: dict[str, object]) -> Finding:
-    """An imported legacy identity that nothing trusts verifies nothing."""
-
-    trusted = set(trusted_project_keys(metadata))
-    legacy_dir = project / PROJECT_DIRECTORY / "keys" / "legacy-public"
-    unpinned: list[str] = []
-    for path in sorted(legacy_dir.glob("*.pub")) if legacy_dir.is_dir() else ():
-        try:
-            recorded = read_public_key_file(path)
-        except ValueError:
-            unpinned.append(path.name)
-            continue
-        if recorded not in trusted:
-            unpinned.append(path.name)
-    user_legacy = keys_home() / "legacy-identity.pub"
-    if user_legacy.is_file():
-        try:
-            if read_public_key_file(user_legacy) not in trusted:
-                unpinned.append(str(user_legacy))
-        except ValueError:
-            unpinned.append(str(user_legacy))
-    if not unpinned:
-        return Finding("legacy_identity", "ok", "every imported legacy identity is pinned or absent")
-    return Finding(
-        "legacy_identity",
-        "warning",
-        f"{len(unpinned)} imported legacy public key(s) are present but not trusted by this project; "
-        "adopt one deliberately with trust_project_key() if its old manifests must verify",
-        details={"keys": unpinned},
-    )
-
-
-def _check_manifest(project: Path) -> Finding:
-    """Manifest staleness is reported and never repaired behind an operator."""
-
-    summary = _manifest_summary(project, verify=True)
-    if not summary["present"]:
-        return Finding("manifest", "warning", "this project has no manifest", details=dict(summary))
-    verdict = str(summary["verdict"] or "unknown")
-    status = {"valid_trusted": "ok", "valid_unknown_key": "warning"}.get(verdict, "error")
-    return Finding("manifest", status, f"{verdict}: {summary['reason']}", details=dict(summary))
-
-
-def project_doctor(
-    project_root: str | os.PathLike[str] | None = None,
-    *,
-    repair: bool = False,
-) -> dict[str, object]:
-    """Check one project for the conditions that quietly break it later.
-
-    Every check reports; a check that can be fixed automatically is fixed only
-    when *repair* is asked for, and a run that repaired anything says exactly
-    what it did — in the log and, when the project has a workspace, in that
-    workspace's journal, so the repair is part of its durable history.
-
-    :param project_root: Project directory, or the discovered project.
-    :param repair: Whether to apply automatic repairs.
-    :return: JSON-compatible doctor report.
-    """
-
-    project = require_project(project_root)
-    metadata = read_project(project)
-    findings: list[Finding] = [finding for finding in (_check_workspace_default(project),) if finding is not None] + [
-        _check_maintenance_lock(project, repair),
-        _check_key_pin(project, metadata, repair),
-        _check_tmp_leftovers(project, repair),
-        _check_legacy_identity(project, metadata),
-        _check_manifest(project),
-    ]
-    report: dict[str, object] = {
-        "format": DOCTOR_REPORT_FORMAT,
-        "format_version": 2,
-        "root": str(project),
-        "project_id": metadata.get("project_id"),
-        "checked_at": utc_now(),
-        "repair": repair,
-        "findings": [finding.as_mapping() for finding in findings],
-        "problems": sum(finding.status != "ok" for finding in findings),
-        "repaired": sum(finding.repaired for finding in findings),
-        "workspace": _workspace_summary(project, metadata),
-    }
-    _journal_repairs(project, report, findings)
-    return report
-
-
-def _journal_repairs(project: Path, report: Mapping[str, object], findings: Sequence[Finding]) -> None:
-    """Record what a repairing run changed, in the log and in the journal.
-
-    A run that changed nothing writes nothing: opening a journal writer creates
-    a writer directory, and a read-only check that left one behind would be
-    making work for the collector it came to report on.
-    """
-
-    repairs = [finding for finding in findings if finding.repaired]
-    if not repairs:
-        return
-    for finding in repairs:
-        _LOGGER.warning(
-            "project doctor repaired %s in %s: %s",
-            finding.check,
-            project,
-            finding.action,
-            extra={"event": "project_doctor_repair", "check": finding.check, "project": str(project)},
-        )
-    workspace = _workspace_of(project)
-    if workspace is None:
-        return
-    frame = {
-        "format": DOCTOR_FRAME_FORMAT,
-        "format_version": 2,
-        "workspace_id": workspace.workspace_id,
-        "project_id": report.get("project_id"),
-        "checked_at": report.get("checked_at"),
-        "repairs": [
-            {"check": finding.check, "action": finding.action, "message": finding.message} for finding in repairs
-        ],
-    }
-    try:
-        with Workspace(project).open_journal_writer() as writer:
-            writer.append(frame)
-    except (WorkflowError, OSError, ValueError) as exc:  # pragma: no cover - a broken journal is its own finding
-        _LOGGER.warning("cannot journal the doctor repairs of %s: %s", project, exc)

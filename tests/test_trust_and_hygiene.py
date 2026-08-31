@@ -3,10 +3,8 @@
 import base64
 import bz2
 import json
-import os
-import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -41,11 +39,7 @@ from httk.workflow.configuration import (
     write_config,
 )
 from httk.workflow.errors import FormatError
-from httk.workflow.hygiene import (
-    describe_project,
-    describe_remote,
-    project_doctor,
-)
+from httk.workflow.hygiene import describe_remote
 from httk.workflow.manifests import verify_manifest
 from httk.workflow.projects import (
     PROJECT_DIRECTORY,
@@ -55,9 +49,7 @@ from httk.workflow.projects import (
     pin_project_key,
     read_project,
     trust_project_key,
-    write_project_section,
 )
-from httk.workflow.registry import register_workspace
 from httk.workflow.workflow_cli import command
 
 
@@ -65,12 +57,6 @@ def _fields(value: Mapping[str, object]) -> dict[str, Any]:
     """Read one JSON report in a test without restating every member type."""
 
     return cast(dict[str, Any], dict(value))
-
-
-def _by_check(report: Mapping[str, object]) -> dict[str, Any]:
-    """Index the findings of one doctor report by the check that made them."""
-
-    return {str(finding["check"]): finding for finding in cast(Sequence[Any], report["findings"])}
 
 
 def _isolate(tmp_path: Path, monkeypatch) -> None:
@@ -521,32 +507,6 @@ def test_config_set_is_restricted_to_the_registry_and_unset_removes(tmp_path: Pa
     assert command(["config", "set", "nickname", "x"], context) == 2
 
 
-# ---------------------------------------------------------------------------
-# Task 3: describing and repairing
-# ---------------------------------------------------------------------------
-
-
-def test_describe_project_reports_keys_workspace_and_manifest(tmp_path: Path, monkeypatch) -> None:
-    project = _project(tmp_path, monkeypatch, name="described")
-    add_remote("cluster", template="local", project=project)
-    create_manifest(project)
-
-    description = _fields(describe_project(project))
-    assert description["format"] == "httk-project-description"
-    assert description["project"]["name"] == "described"
-    assert description["keys"]["pinned"] is True
-    assert description["keys"]["public_key"]["fingerprint"].startswith("sha256:")
-    assert description["keys"]["seed_present"] is True
-    assert description["workspace"]["present"] is True
-    assert description["workspace"]["extensions"] == []
-    assert description["workspace"]["counts"] == {} and description["workspace"]["jobs"] == 0
-    assert description["manifest"]["verdict"] == VALID_TRUSTED
-    assert description["remotes"] == ["cluster"]
-
-    cheap = _fields(describe_project(project, verify=False))
-    assert cheap["manifest"]["present"] is True and cheap["manifest"]["verdict"] is None
-
-
 def test_describe_remote_never_reports_a_credential_value(tmp_path: Path, monkeypatch) -> None:
     project = _project(tmp_path, monkeypatch, name="remotes")
     bundle = add_remote("cluster", template="local", project=project)
@@ -569,92 +529,6 @@ def test_describe_remote_never_reports_a_credential_value(tmp_path: Path, monkey
         "token": "credentials.json",
     }
     assert "hunter2" not in json.dumps(description) and "abc" not in json.dumps(description)
-
-
-def test_project_doctor_reports_then_repairs(tmp_path: Path, monkeypatch) -> None:
-    project = _project(tmp_path, monkeypatch, name="doctored")
-    metadata = read_project(project)
-    del metadata["public_key"]
-    _write_project(project, metadata)
-    lock = project / ".httk-workspace" / "maintenance.lock"
-    lock.write_text(json.dumps({"pid": 1, "hostname": "gone.example.test", "created": "2000-01-01T00:00:00.000000Z"}))
-    leftover = project / ".httk-workspace" / "tmp" / "import.abandoned"
-    leftover.mkdir(parents=True, exist_ok=True)
-    old = time.time() - 3 * 24 * 60 * 60
-    os.utime(leftover, (old, old))
-
-    report = _fields(project_doctor(project))
-    findings = _by_check(report)
-    assert report["format"] == "httk-project-doctor" and report["repaired"] == 0
-    assert findings["maintenance_lock"]["status"] == "error"
-    assert findings["key_pin"]["status"] == "warning"
-    assert findings["tmp_leftovers"]["status"] == "warning"
-    assert findings["manifest"]["status"] == "warning"
-    assert report["problems"] == 4
-    assert lock.is_file() and leftover.is_dir()
-
-    repaired = _fields(project_doctor(project, repair=True))
-    fixed = _by_check(repaired)
-    assert repaired["repaired"] == 3
-    assert all(fixed[name]["repaired"] for name in ("maintenance_lock", "key_pin", "tmp_leftovers"))
-    assert not lock.exists() and not leftover.exists()
-    assert str(read_project(project)["public_key"]).startswith("ed25519:")
-    # The manifest check is reported and never repaired behind an operator.
-    assert fixed["manifest"]["repaired"] is False
-
-    create_manifest(project)
-    final = _by_check(project_doctor(project))
-    assert final["manifest"]["status"] == "ok"
-    assert project_doctor(project)["problems"] == 0
-
-
-def test_project_doctor_journals_what_it_repaired(tmp_path: Path, monkeypatch) -> None:
-    project = _project(tmp_path, monkeypatch, name="journalled")
-    metadata = read_project(project)
-    del metadata["public_key"]
-    _write_project(project, metadata)
-
-    journal = project / ".httk-workspace" / "journal"
-    assert project_doctor(project)["repaired"] == 0
-    # A read-only check opens no writer, so it creates no writer directory.
-    assert not list(journal.glob("*/*.hwj"))
-
-    assert project_doctor(project, repair=True)["repaired"] == 1
-    segments = list(journal.glob("*/*.hwj"))
-    assert len(segments) == 1
-    assert b'"httk-workflow-doctor"' in segments[0].read_bytes()
-    assert b'"key_pin"' in segments[0].read_bytes()
-
-
-def test_legacy_identity_import_is_pinned_and_reported(tmp_path: Path, monkeypatch) -> None:
-    from httk.workflow.projects import import_v1_project
-
-    _isolate(tmp_path, monkeypatch)
-    project = tmp_path / "legacy"
-    legacy = project / "ht.project"
-    (legacy / "keys").mkdir(parents=True)
-    seed = ed25519_generate_seed()
-    recorded = "ed25519:" + base64.b64encode(ed25519_public_key(seed)).decode("ascii")
-    (legacy / "keys" / "key1.pub").write_text(
-        base64.b64encode(ed25519_public_key(seed)).decode("ascii") + "\n",
-        encoding="ascii",
-    )
-    (legacy / "config").write_text("[main]\nproject_name = legacy\n", encoding="utf-8")
-
-    metadata = _fields(import_v1_project(project))
-    assert metadata["trusted_keys"] == [recorded]
-    described = _fields(describe_project(project, verify=False))
-    assert [key["public_key"] for key in described["keys"]["trusted_keys"]][1:] == [recorded]
-
-    findings = _by_check(project_doctor(project))
-    assert findings["legacy_identity"]["status"] == "ok"
-
-    # A legacy key that was copied but never adopted is reported, not adopted.
-    metadata["trusted_keys"] = []
-    _write_project(project, metadata)
-    findings = _by_check(project_doctor(project))
-    assert findings["legacy_identity"]["status"] == "warning"
-    assert findings["legacy_identity"]["details"]["keys"] == ["key1.pub"]
 
 
 def test_written_configuration_keeps_its_format_members(tmp_path: Path, monkeypatch) -> None:
@@ -685,25 +559,6 @@ def test_project_doctor_is_reachable_from_the_command_line(
     assert project_command(["doctor", "--repair", "--json", str(project)], context) == 0
     repaired = _fields(json.loads(capsys.readouterr().out))
     assert repaired["format"] == "httk-project-doctor" and repaired["repair"] is True
-
-
-def test_detached_project_manifests_and_reports_its_recorded_workspace(tmp_path: Path, monkeypatch, capsys) -> None:
-    _isolate(tmp_path, monkeypatch)
-    project = tmp_path / "detached"
-    initialize_project(project, name="detached")
-    workspace = Workspace.initialize(tmp_path / "runs")
-    register_workspace("runs", workspace.root)
-    write_project_section(project, "workspace", {"default": "runs"})
-    (project / "content.txt").write_text("content\n", encoding="utf-8")
-
-    create_manifest(project)
-    assert not (project / ".httk-workspace").exists()
-    description = _fields(describe_project(project, verify=False))
-    assert description["workspace"]["present"] is False
-    assert description["workspace"]["default"] == {"name": "runs", "resolves": True}
-    report = _fields(project_doctor(project))
-    assert report["workspace"]["default"] == {"name": "runs", "resolves": True}
-    assert _by_check(report)["workspace_default"]["status"] == "ok"
 
 
 def test_remote_show_and_remove_are_reachable_from_the_command_line(

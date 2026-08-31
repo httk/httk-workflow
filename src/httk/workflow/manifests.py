@@ -18,8 +18,8 @@ from httk.core.project.manifests import (
     INVALID,
     VALID_UNKNOWN_KEY,
     ManifestVerification,
-    _verdict_for_key,
     resolve_trusted_keys,
+    verdict_for_key,
 )
 from httk.core.project.manifests import verify_manifest as _core_verify_manifest
 from httk.core.records import file_records
@@ -326,7 +326,7 @@ def _verify_legacy(root: Path, path: Path, trusted: Sequence[str]) -> ManifestVe
             None,
             tuple(trusted),
         )
-    return _verdict_for_key(public_key, trusted, manifest=path, manifest_format="legacy")
+    return verdict_for_key(public_key, trusted, manifest=path, manifest_format="legacy")
 
 
 def verify_manifest(

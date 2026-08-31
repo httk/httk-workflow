@@ -86,9 +86,7 @@ from ..configuration import (
 from ..errors import WorkflowError
 from ..gc import iter_report_rows
 from ..hygiene import (
-    describe_project,
     describe_remote,
-    project_doctor,
     remove_remote,
 )
 from ..introspection import (
@@ -148,6 +146,8 @@ _LOGGER = logging.getLogger(__name__)
 
 #: Everything a handler may raise that is an operator's problem rather than a
 #: defect. Anything here is reported as ``PROGRAM: message`` and exits ``2``.
+# RuntimeError membership is load-bearing: httk-core's SealError / SealedError are
+# RuntimeError subclasses, so a sealed-tree refusal renders as a clean CLI error here.
 _ERRORS = (WorkflowError, OSError, ValueError, RuntimeError, TimeoutError)
 
 #: The hidden protocol subcommands the ``transfer`` verb dispatches by name: the
