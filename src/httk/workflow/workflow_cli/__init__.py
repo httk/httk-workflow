@@ -104,21 +104,12 @@ from ._monitor import build_monitor_parser, handle_monitor
 from ._postprocess import build_postprocess_parser, handle_postprocess
 from ._precheck import build_precheck_parser, handle_precheck
 from ._project import (
-    add_project_doctor_arguments,
-    add_project_manifest_create_arguments,
-    add_project_manifest_verify_arguments,
     build_config_parser,
     handle_config_import_v1,
     handle_config_init,
     handle_config_set,
     handle_config_show,
     handle_config_unset,
-    handle_project_doctor,
-    handle_project_manifest_create,
-    handle_project_manifest_verify,
-    handle_project_seal,
-    handle_project_unseal,
-    project_extension,
 )
 from ._seal import build_seal_parser, handle_seal_verify
 from ._transfer import (

@@ -446,23 +446,20 @@ warning names how many such tasks a harvest saw.
 
 ### `project` — the directory a campaign lives in
 
-The project *anchor* — the `httk_project` directory, discovery, keys, and pins —
-belongs to *httk-core*, which owns the umbrella `httk project` command, including
-its `init`, `show`, and `import-v1` leaves. *httk-workflow* mounts the
-workflow-aware verbs — those that read or write workspace and manifest state —
-onto that same `httk project` command through the extension registry, so they
-appear beside the core leaves as `httk project doctor | manifest | seal |
-unseal`. Create a project with `httk project init PATH`,
-then give it a workspace with `httk workspace init PATH`; describe it with
-`httk project show` and `httk workspace status`.
-
-| Command | What it does | Notable options |
-| --- | --- | --- |
-| `project doctor [OPTIONS] [PATH...]` | check projects, reporting workspace and manifest state; `--repair` requires explicit paths | `--repair`, `--json` |
-| `project manifest create [--manifest PATH] PROJECT...` | write signed manifests | |
-| `project manifest verify [OPTIONS] [PROJECT...]` | verify manifests against their trees | `--manifest` (one project only), `--trusted-key` |
-| `project seal [--keys REFS] [PROJECT...]` | seal a project's loose files and every nested workspace's seal digest | `--keys` overrides the project's `seal_keys` member |
-| `project unseal [--force] [PROJECT...]` | remove the project's seal, freeing its workspaces to be unsealed | `--force` skips the confirmation |
+The project *anchor* and every project-level verb — `init`, `show`, `import-v1`,
+`export`, `doctor`, `manifest create | verify`, `seal`, `unseal`, and
+`verify-seal` — belong to *httk-core*, which owns the whole `httk project`
+command. *httk-workflow* no longer mounts project verbs of its own; instead it
+registers the **workspace** as a project-*member* kind, so core's verbs delegate
+a workspace's internals to it: what to leave out of a manifest, how to seal it,
+its seal digest, how to verify it, and its health checks. A workspace inside a
+project is recorded in `httk_project/members.json` — registered on
+`httk workspace init`, unregistered on `workspace delete` / `workspace forget`,
+and its path followed on `workspace move`. Create a project with
+`httk project init PATH`, then give it a workspace with `httk workspace init
+PATH`; seal it with `httk workspace seal` and then `httk project seal`, and
+verify the whole tree with `httk project verify-seal` (or `httk seal verify`).
+The project verbs themselves are documented with *httk-core*.
 
 ### `seal` — verify a sealed tree
 

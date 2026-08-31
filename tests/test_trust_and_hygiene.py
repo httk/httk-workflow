@@ -195,7 +195,7 @@ def test_resigning_with_a_fresh_key_is_valid_but_not_trusted(tmp_path: Path, mon
     assert "not among this project's trusted keys" in verification.reason
 
     context = CLIContext("httk", project)
-    assert project_command(["manifest", "verify", str(project)], context) == 1
+    assert project_command(["manifest", "verify", str(project)], context) == 3
     assert VALID_UNKNOWN_KEY in capsys.readouterr().out
 
     # Naming the key explicitly is the one-off way to accept it.
@@ -672,7 +672,7 @@ def test_project_doctor_is_reachable_from_the_command_line(
     assert "manifest" in report and "problem(s)" in report
 
     assert project_command(["doctor", "--repair", "--json", str(project)], context) == 0
-    repaired = _fields(json.loads(capsys.readouterr().out)[0])
+    repaired = _fields(json.loads(capsys.readouterr().out))
     assert repaired["format"] == "httk-project-doctor" and repaired["repair"] is True
 
 

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from httk.core.crypto import ed25519_generate_seed
 from httk.core.identity import ensure_identity_key, identity_public_key
+from httk.core.project.sealing import seal_project, unseal_project, verify_project
 
 from httk.workflow import Workspace
 from httk.workflow.errors import SealedError, SealError
@@ -28,14 +29,11 @@ from httk.workflow.seals import (
     read_seal,
     resolve_seal_keys,
     seal_job,
-    seal_project,
     seal_workspace,
     unseal_job,
-    unseal_project,
     unseal_workspace,
     unsealed_jobs,
     verify_job_seal,
-    verify_project_seal,
     verify_seal,
     verify_tree,
     verify_workspace_seal,
@@ -257,12 +255,12 @@ def test_project_seal_covers_loose_files_and_workspace_but_not_payloads(tmp_path
     paths = {str(record["path"]) for record in records if "type" in record}
     assert "content.txt" in paths
     assert not any(name.startswith("work/") for name in paths)
-    workspace_records = [record for record in records if "workspace" in record]
+    workspace_records = [record for record in records if "member" in record]
     assert len(workspace_records) == 1
-    assert workspace_records[0]["workspace"] == "work"
+    assert workspace_records[0]["member"] == "work"
     expected = hashlib.sha256(workspace_seal_path(env.workspace).read_bytes()).hexdigest()
     assert workspace_records[0]["seal_sha256"] == expected
-    assert verify_project_seal(env.project, trusted_keys=_project_trust(env.project)).valid
+    assert verify_project(env.project, trusted_keys=_project_trust(env.project)).ok
 
 
 # -- whole-tree verification -------------------------------------------------
@@ -356,8 +354,8 @@ def test_project_seal_of_root_workspace_layout(tmp_path: Path) -> None:
     assert "content.txt" in paths
     payload_rel = env.workspace.payload_path(marker.placement, marker.job_key).relative_to(env.project).as_posix()
     assert not any(name == payload_rel or name.startswith(f"{payload_rel}/") for name in paths)
-    workspace_records = [record for record in records if "workspace" in record]
-    assert [record["workspace"] for record in workspace_records] == ["."]
+    workspace_records = [record for record in records if "member" in record]
+    assert [record["member"] for record in workspace_records] == ["."]
     expected = hashlib.sha256(workspace_seal_path(env.workspace).read_bytes()).hexdigest()
     assert workspace_records[0]["seal_sha256"] == expected
 

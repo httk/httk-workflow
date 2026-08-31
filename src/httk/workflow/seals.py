@@ -28,7 +28,7 @@ from httk.core.crypto import ed25519_public_key, ed25519_sign, ed25519_verify
 from httk.core.identity import identity_key_paths, identity_seed
 
 from ._util import json_bytes, utc_now, write_json_atomic
-from .errors import FormatError, SealedError, SealError, WorkflowError
+from .errors import FormatError, SealedError, SealError
 from .manifests import _records, _seed
 from .models import WORKSPACE_DIRECTORY, Marker
 from .projects import (
@@ -38,7 +38,6 @@ from .projects import (
     format_public_key,
     key_fingerprint,
     parse_public_key,
-    project_exclusions,
     read_project,
 )
 from .workspace import Workspace
@@ -64,14 +63,11 @@ __all__ = [
     "read_seal",
     "resolve_seal_keys",
     "seal_job",
-    "seal_project",
     "seal_workspace",
     "unseal_job",
-    "unseal_project",
     "unseal_workspace",
     "unsealed_jobs",
     "verify_job_seal",
-    "verify_project_seal",
     "verify_seal",
     "verify_tree",
     "verify_workspace_seal",
@@ -539,128 +535,6 @@ def unseal_workspace(workspace: Workspace) -> None:
     workspace_seal_path(workspace).unlink(missing_ok=True)
 
 
-# -- project seals -----------------------------------------------------------
-
-
-def _project_workspace_roots(root: Path) -> list[str]:
-    """Return the posix relpaths of every workspace at or below a project root.
-
-    A workspace is a directory holding a ``.httk-workspace/format.json``; the
-    walk prunes at each one, so a workspace inside another is covered by that
-    workspace's seal rather than twice. The project root itself counts: the
-    common single-directory layout (``Workspace.initialize(project)``) yields
-    the relpath ``"."``.
-
-    :param root: The project root to search at and below.
-    :return: The workspace relpaths, sorted.
-    """
-
-    found: list[str] = []
-    for dirpath, dirnames, _filenames in os.walk(root):
-        directory = Path(dirpath)
-        if (directory / WORKSPACE_DIRECTORY / "format.json").is_file():
-            found.append(directory.relative_to(root).as_posix())
-            dirnames[:] = []
-    return sorted(found)
-
-
-def _workspace_payload_exclusions(root: Path, relpath: str) -> list[str]:
-    """Return the file-record exclusions for one workspace under a project.
-
-    A nested workspace is excluded as a whole subtree. The root workspace shares
-    the project tree, so only its job payloads are excluded — each covered via
-    the seal chain — while its control dir is already excluded by
-    :func:`project_exclusions` and its loose project files stay recorded.
-
-    :param root: The project root.
-    :param relpath: The workspace relpath, ``"."`` for the root workspace.
-    :return: The fnmatch exclusion patterns for this workspace.
-    """
-
-    if relpath != ".":
-        return [relpath, f"{relpath}/**"]
-    workspace = Workspace(root)
-    patterns: list[str] = []
-    for marker in _workspace_job_markers(workspace):
-        payload = workspace.payload_path(marker.placement, marker.job_key).relative_to(root).as_posix()
-        patterns.append(payload)
-        patterns.append(f"{payload}/**")
-    return patterns
-
-
-def _postprocess_exclusions(root: Path, workspace_roots: Sequence[str]) -> list[str]:
-    """Return exclusions for each covered workspace's postprocess output tree.
-
-    Postprocess output lives outside the payload, so in the root-as-workspace
-    layout it would otherwise land among a project seal's loose files and break
-    the seal the moment a sealed job is postprocessed. Its location honours the
-    ``postprocess.directory`` setting, so it is resolved per workspace; only a
-    root that lies inside the project tree needs excluding.
-    """
-
-    from .postprocessing import postprocess_root
-
-    patterns: list[str] = []
-    for relpath in workspace_roots:
-        try:
-            output_root = postprocess_root(Workspace(root if relpath == "." else root / relpath))
-        except (WorkflowError, ValueError, OSError):
-            continue
-        if output_root.is_relative_to(root):
-            rel = output_root.relative_to(root).as_posix()
-            patterns.extend((rel, f"{rel}/**"))
-    return patterns
-
-
-def _project_patterns(metadata: dict[str, object], root: Path, workspace_roots: Sequence[str]) -> tuple[str, ...]:
-    """Return the manifest exclusions plus every workspace's covered paths."""
-
-    # The project seal is written into the tree it describes, so — like a
-    # manifest excluding its own file — it can never be one of its own records.
-    patterns = [*project_exclusions(metadata), f"{PROJECT_DIRECTORY}/seal.json"]
-    for relpath in workspace_roots:
-        patterns.extend(_workspace_payload_exclusions(root, relpath))
-    patterns.extend(_postprocess_exclusions(root, workspace_roots))
-    return tuple(patterns)
-
-
-def seal_project(project_root: str | os.PathLike[str], *, keys: SealKeys | None = None) -> Path:
-    """Seal a project's loose files and every nested workspace's seal digest.
-
-    :param project_root: The project root to seal.
-    :param keys: The signing keys, or ``None`` to use the project default.
-    :return: The project seal path.
-    :raises httk.workflow.errors.SealError: If a workspace is unsealed or no key is available.
-    """
-
-    root = Path(project_root).expanduser().resolve()
-    metadata = read_project(root)
-    workspace_roots = _project_workspace_roots(root)
-    unsealed = [relpath for relpath in workspace_roots if not is_workspace_sealed(Workspace(root / relpath))]
-    if unsealed:
-        raise SealError(f"cannot seal the project while these workspaces are unsealed: {', '.join(unsealed)}")
-    records: list[dict[str, object]] = list(_records(root, _project_patterns(metadata, root, workspace_roots)))
-    for relpath in workspace_roots:
-        workspace = Workspace(root / relpath)
-        digest = hashlib.sha256(workspace_seal_path(workspace).read_bytes()).hexdigest()
-        records.append({"workspace": relpath, "workspace_id": workspace.workspace_id, "seal_sha256": digest})
-    resolved = keys if keys is not None else default_project_keys(root)
-    subject = {"project_id": str(metadata["project_id"])}
-    return _write_seal(project_seal_path(root), "project", subject, records, resolved.keys)
-
-
-def unseal_project(project_root: str | os.PathLike[str]) -> None:
-    """Remove a project's seal.
-
-    :param project_root: The project root to unseal.
-    """
-
-    project_seal_path(project_root).unlink(missing_ok=True)
-
-
-# -- reading and signature verification --------------------------------------
-
-
 def read_seal(path: str | os.PathLike[str]) -> Seal:
     """Read and structurally validate one seal document.
 
@@ -896,49 +770,6 @@ def verify_workspace_seal(
     return _combine(base, discrepancies)
 
 
-def verify_project_seal(
-    project_root: str | os.PathLike[str],
-    *,
-    trusted_keys: Iterable[str] = (),
-    expected_roles: Iterable[str] = (),
-) -> SealVerification:
-    """Verify a project seal's signature, its loose files, and every workspace.
-
-    :param project_root: The project root to verify.
-    :param trusted_keys: Trust anchors to classify the signers against.
-    :param expected_roles: Signing roles the seal is expected to carry.
-    :return: The verdict, including files and workspaces that disagree.
-    """
-
-    root = Path(project_root).expanduser().resolve()
-    if not is_project_sealed(root):
-        return SealVerification(False, INVALID, "not sealed", (), tuple(expected_roles), ())
-    metadata = read_project(root)
-    base = verify_seal(project_seal_path(root), trusted_keys=trusted_keys, expected_roles=expected_roles)
-    seal = read_seal(project_seal_path(root))
-    workspace_roots = _project_workspace_roots(root)
-    recorded_files = [record for record in seal.records if "type" in record]
-    actual_files = list(_records(root, _project_patterns(metadata, root, workspace_roots)))
-    discrepancies = _diff_records(recorded_files, actual_files)
-    recorded_ws = {str(record["workspace"]): record for record in seal.records if "workspace" in record}
-    present_ws = set(workspace_roots)
-    for relpath in sorted(set(recorded_ws) | present_ws):
-        if relpath not in present_ws:
-            discrepancies.append(Discrepancy(relpath, "missing_job"))
-        elif relpath not in recorded_ws:
-            discrepancies.append(Discrepancy(relpath, "unsealed"))
-        else:
-            path = workspace_seal_path(Workspace(root / relpath))
-            if not path.is_file():
-                discrepancies.append(Discrepancy(relpath, "missing"))
-            elif hashlib.sha256(path.read_bytes()).hexdigest() != recorded_ws[relpath]["seal_sha256"]:
-                discrepancies.append(Discrepancy(relpath, "mismatch"))
-    return _combine(base, discrepancies)
-
-
-# -- whole-tree verification -------------------------------------------------
-
-
 def _verify_workspace_into(
     workspace: Workspace,
     entries: list[tuple[str, str, SealVerification]],
@@ -957,26 +788,6 @@ def _verify_workspace_into(
         placement = PurePosixPath(str(record["placement"]))
         job = _verify_job(workspace, job_key, placement, trusted_keys=trusted_keys, expected_roles=())
         entries.append(("job", job_key, job))
-
-
-def _verify_project_into(
-    root: Path,
-    entries: list[tuple[str, str, SealVerification]],
-    trusted_keys: Iterable[str],
-    deep: bool,
-) -> None:
-    """Append a project verdict and, when deep, every referenced workspace."""
-
-    verification = verify_project_seal(root, trusted_keys=trusted_keys)
-    subject = str(read_project(root).get("project_id", ""))
-    entries.append(("project", subject, verification))
-    if not deep or not is_project_sealed(root):
-        return
-    seal = read_seal(project_seal_path(root))
-    for record in seal.records:
-        if "workspace" not in record:
-            continue
-        _verify_workspace_into(Workspace(root / str(record["workspace"])), entries, trusted_keys, deep)
 
 
 def verify_tree(
@@ -1003,8 +814,28 @@ def verify_tree(
     location = Path(path).expanduser().resolve()
     entries: list[tuple[str, str, SealVerification]] = []
     if (location / PROJECT_DIRECTORY).is_dir():
-        _verify_project_into(location, entries, trusted_keys, deep)
-    elif (location / WORKSPACE_DIRECTORY).is_dir():
+        # The project level is core-owned: core seals a project's members and
+        # verifies them through their registered handlers. Delegate and adapt
+        # core's report entries back to this module's tuple shape.
+        from httk.core.project.sealing import verify_project as _core_verify_project
+
+        core_report = _core_verify_project(location, trusted_keys=list(trusted_keys), deep=deep)
+        for entry in core_report.entries:
+            discrepancies = tuple(
+                Discrepancy(str(item["path"]), str(item["kind"]))
+                for item in entry["discrepancies"]  # type: ignore[union-attr]
+            )
+            verification = SealVerification(
+                bool(entry["valid"]),
+                str(entry["verdict"]),
+                str(entry["reason"]),
+                tuple(str(value) for value in entry["signers"]),  # type: ignore[union-attr]
+                tuple(str(value) for value in entry["missing_signers"]),  # type: ignore[union-attr]
+                discrepancies,
+            )
+            entries.append((str(entry["level"]), str(entry["subject"]), verification))
+        return SealReport(tuple(entries), core_report.ok)
+    if (location / WORKSPACE_DIRECTORY).is_dir():
         _verify_workspace_into(Workspace(location), entries, trusted_keys, deep)
     else:
         workspace_root = Workspace.discover(location)

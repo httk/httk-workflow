@@ -228,6 +228,7 @@ def forget_workspace(name: str, *, durable: bool = True, force: bool = False) ->
     """
     binding = _local_binding(name)
     assert binding.path is not None
+    _unregister_project_member(Path(binding.path), allow_sealed=True)
     if not force:
         transfers = Path(binding.path) / WORKSPACE_DIRECTORY / "transfers"
         pending = []
@@ -328,6 +329,54 @@ def is_local(binding: WorkspaceBinding) -> bool:
     return binding.remote == LOCAL_REMOTE
 
 
+def _unregister_project_member(path: Path, *, allow_sealed: bool = False) -> None:
+    """Remove the project-member record of the workspace at *path*.
+
+    A workspace outside any project, or one the project never recorded, is a
+    no-op. A sealed project refuses so its members cannot silently change; when
+    *allow_sealed* is set — forgetting a name while the files stay in place — the
+    refusal is swallowed and the still-present workspace keeps its membership.
+    """
+
+    project = discover_project(path.expanduser().resolve())
+    if project is None:
+        return
+    from httk.core.project.members import unregister_project_member
+    from httk.core.project.sealing import SealedError
+
+    try:
+        unregister_project_member(project, path)
+    except ValueError:
+        pass
+    except SealedError:
+        if not allow_sealed:
+            raise
+
+
+def move_project_member(old_path: Path, new_path: Path) -> None:
+    """Follow a moved workspace in its project's member registry.
+
+    A move that stays inside the same project updates the recorded relpath; one
+    that leaves the project unregisters it; a workspace outside any project is a
+    no-op. A sealed project refuses either change.
+    """
+
+    old = old_path.expanduser().resolve()
+    new = new_path.expanduser().resolve()
+    project = discover_project(old)
+    if project is None:
+        return
+    from httk.core.project.members import unregister_project_member, update_project_member_path
+
+    if new.is_relative_to(project):
+        update_project_member_path(project, old, new)
+    else:
+        try:
+            unregister_project_member(project, old)
+        except ValueError:
+            pass
+
+
 def create_workspace(
     name: str,
     path: str | os.PathLike[str] | None = None,
@@ -383,4 +432,5 @@ def remove_local_workspace(path: Path) -> None:
     resolved = path.expanduser().resolve()
     if not (resolved / WORKSPACE_DIRECTORY / "format.json").is_file():
         raise ValueError(f"not an httk execution workspace: {resolved}")
+    _unregister_project_member(resolved)
     shutil.rmtree(resolved)

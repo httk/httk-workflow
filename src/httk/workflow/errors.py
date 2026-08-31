@@ -15,7 +15,7 @@ __all__ = [
 ]
 
 
-class WorkflowError(Exception):
+class WorkflowError(RuntimeError):
     """Base class for workflow protocol failures."""
 
 

@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 from httk.core.identity import ensure_identity_key
+from httk.core.project.sealing import seal_project
 
 from httk.workflow import TaskManager, Workspace, _manager_commit
 from httk.workflow.errors import SealedError
@@ -27,7 +28,6 @@ from httk.workflow.seals import (
     is_workspace_sealed,
     job_seal_path,
     seal_job,
-    seal_project,
     seal_workspace,
     verify_job_seal,
     verify_tree,

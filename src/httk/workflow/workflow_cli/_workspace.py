@@ -13,7 +13,7 @@ from ..manifests import read_maintenance_lock, workspace_maintenance_guard
 from ..models import DEFAULT_LEASE_SECONDS, WORKSPACE_DIRECTORY
 from ..packages import load_workflow_package
 from ..projects import read_project_section, require_project, write_project_section
-from ..registry import _update_workspace_path, valid_workspace_name
+from ..registry import _update_workspace_path, move_project_member, valid_workspace_name
 from ..seals import (
     default_workspace_keys,
     is_workspace_sealed,
@@ -646,6 +646,7 @@ def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) ->
                 ) from exc
             renamed = True
             updated = _update_workspace_path(binding.name, destination, durable=_durable(arguments))
+            move_project_member(Path(binding.path), destination)
     finally:
         if renamed:
             release_maintenance_lock(Workspace(destination), force=True)
