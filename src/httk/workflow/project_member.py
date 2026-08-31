@@ -181,12 +181,20 @@ class WorkspaceMemberHandler:
         :return: The workspace's doctor findings.
         """
 
-        from .hygiene import _check_maintenance_lock, _check_tmp_leftovers
+        from .hygiene import _check_maintenance_lock, _check_tmp_leftovers, _check_workspace_default
+        from .projects import discover_project
 
         findings = [
             _check_maintenance_lock(member_root, repair).as_mapping(),
             _check_tmp_leftovers(member_root, repair).as_mapping(),
         ]
+        # The recorded default-workspace binding is a project-registry concern, so
+        # only the member that is itself the project root reports on it.
+        project = discover_project(member_root)
+        if project is not None and project.resolve() == member_root.resolve():
+            default = _check_workspace_default(member_root)
+            if default is not None:
+                findings.append(default.as_mapping())
         unregistered = _unregistered_workspaces(member_root, repair)
         if unregistered is not None:
             findings.append(unregistered)

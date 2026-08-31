@@ -105,7 +105,7 @@ from ..introspection import (
     resolve_job,
 )
 from ..manager import DEFAULT_TAKEOVER_GRACE_FACTOR, TaskManager
-from ..manifests import create_manifest, release_maintenance_lock, verify_manifest
+from ..manifests import release_maintenance_lock, verify_manifest
 from ..models import CORE_PROFILE, POLICY_KEYS, STATE_KINDS, canonical_uuid
 from ..projects import import_v1_project, initialize_project
 from ..registry import (

@@ -14,7 +14,7 @@ from httk.core.project.sealing import seal_project, unseal_project, verify_proje
 
 from httk.workflow import Workspace
 from httk.workflow.errors import SealedError, SealError
-from httk.workflow.manifests import _records
+from httk.workflow.manifests import payload_file_records
 from httk.workflow.models import Marker
 from httk.workflow.projects import initialize_project, key_fingerprint, read_project, trusted_project_keys
 from httk.workflow.seals import (
@@ -108,7 +108,7 @@ def test_body_digest_is_deterministic_and_self_describing(tmp_path: Path) -> Non
     env = _setup(tmp_path)
     marker = env.markers[0]
     payload = env.workspace.payload_path(marker.placement, marker.job_key)
-    assert list(_records(payload, ())) == list(_records(payload, ()))
+    assert payload_file_records(payload) == payload_file_records(payload)
     seal_job(env.workspace, marker)
     seal = read_seal(job_seal_path(env.workspace, marker.job_key))
     assert hashlib.sha256(_DOMAIN + seal.body_bytes).hexdigest() == seal.body_sha256
@@ -157,7 +157,7 @@ def test_tampered_signature_is_invalid(tmp_path: Path) -> None:
 
 def test_missing_identity_key_leaves_project_only_signature(tmp_path: Path) -> None:
     env = _setup(tmp_path, identity=False)
-    keys = resolve_seal_keys(["project", "identity"], root=env.workspace.root)
+    keys = resolve_seal_keys(["project", "identity"], project_root=env.workspace.root)
     assert keys.missing_roles == ("identity",)
     assert [role for role, _seed in keys.keys] == ["project"]
     path = seal_job(env.workspace, env.markers[0], keys=keys)
@@ -169,16 +169,16 @@ def test_missing_identity_key_leaves_project_only_signature(tmp_path: Path) -> N
 def test_no_available_key_is_an_error(tmp_path: Path) -> None:
     env = _setup(tmp_path, identity=False)
     with pytest.raises(SealError):
-        resolve_seal_keys(["identity"], root=env.workspace.root)
+        resolve_seal_keys(["identity"], project_root=env.workspace.root)
     with pytest.raises(SealError):
-        resolve_seal_keys([], root=env.workspace.root)
+        resolve_seal_keys([], project_root=env.workspace.root)
 
 
 def test_seal_key_file_ref(tmp_path: Path) -> None:
     env = _setup(tmp_path, identity=False)
     seed_file = tmp_path / "extra.seed"
     seed_file.write_text(base64.b64encode(ed25519_generate_seed()).decode("ascii"), encoding="utf-8")
-    keys = resolve_seal_keys([str(seed_file)], root=env.workspace.root)
+    keys = resolve_seal_keys([str(seed_file)], project_root=env.workspace.root)
     assert [role for role, _seed in keys.keys] == ["file"]
 
 
@@ -275,18 +275,20 @@ def test_verify_tree_is_ok_and_pinpoints_a_tampered_job_file(tmp_path: Path) -> 
     trust = _project_trust(env.project)
     report = verify_tree(env.project, trusted_keys=trust, deep=True)
     assert report.ok
-    assert [level for level, _subject, _v in report.entries] == ["project", "workspace", "job"]
-    assert all(verification.verdict == VALID_TRUSTED for _l, _s, verification in report.entries)
+    assert [entry["level"] for entry in report.entries] == ["project", "workspace", "job"]
+    assert all(entry["verdict"] == VALID_TRUSTED for entry in report.entries)
 
     (env.workspace.payload_path(marker.placement, marker.job_key) / "files" / "runner").write_text(
         "evil\n", encoding="utf-8"
     )
     after = verify_tree(env.project, trusted_keys=trust, deep=True)
     assert not after.ok
-    faults = {level: verification for level, _subject, verification in after.entries}
-    assert faults["project"].valid and faults["workspace"].valid
-    assert not faults["job"].valid
-    assert [(d.path, d.kind) for d in faults["job"].discrepancies] == [("files/runner", "mismatch")]
+    faults = {entry["level"]: entry for entry in after.entries}
+    assert faults["project"]["valid"] and faults["workspace"]["valid"]
+    assert not faults["job"]["valid"]
+    job_discrepancies = faults["job"]["discrepancies"]
+    assert isinstance(job_discrepancies, list)
+    assert [(d["path"], d["kind"]) for d in job_discrepancies] == [("files/runner", "mismatch")]
 
 
 def test_verify_tree_from_a_job_payload(tmp_path: Path) -> None:
@@ -296,7 +298,7 @@ def test_verify_tree_from_a_job_payload(tmp_path: Path) -> None:
     payload = env.workspace.payload_path(marker.placement, marker.job_key)
     report = verify_tree(payload, trusted_keys=_project_trust(env.project))
     assert report.ok
-    assert [level for level, _s, _v in report.entries] == ["job"]
+    assert [entry["level"] for entry in report.entries] == ["job"]
 
 
 # -- unseal ordering ---------------------------------------------------------
@@ -362,13 +364,15 @@ def test_project_seal_of_root_workspace_layout(tmp_path: Path) -> None:
     trust = _project_trust(env.project)
     report = verify_tree(env.project, trusted_keys=trust, deep=True)
     assert report.ok
-    assert [level for level, _s, _v in report.entries] == ["project", "workspace", "job"]
+    assert [entry["level"] for entry in report.entries] == ["project", "workspace", "job"]
 
     (env.workspace.payload_path(marker.placement, marker.job_key) / "files" / "runner").write_text(
         "evil\n", encoding="utf-8"
     )
     after = verify_tree(env.project, trusted_keys=trust, deep=True)
     assert not after.ok
-    faults = {level: verification for level, _s, verification in after.entries}
-    assert faults["project"].valid and faults["workspace"].valid
-    assert [(d.path, d.kind) for d in faults["job"].discrepancies] == [("files/runner", "mismatch")]
+    faults = {entry["level"]: entry for entry in after.entries}
+    assert faults["project"]["valid"] and faults["workspace"]["valid"]
+    job_discrepancies = faults["job"]["discrepancies"]
+    assert isinstance(job_discrepancies, list)
+    assert [(d["path"], d["kind"]) for d in job_discrepancies] == [("files/runner", "mismatch")]

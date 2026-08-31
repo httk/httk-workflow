@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.project.manifests import create_manifest
 
 from conftest import register_ws
 from httk.workflow import Workspace
@@ -17,7 +18,6 @@ from httk.workflow.adapters import add_remote, remote_settings, run_adapter
 from httk.workflow.manifests import (
     MAINTENANCE_LOCK_FILE,
     MAINTENANCE_LOCK_MAX_AGE_SECONDS,
-    create_manifest,
     read_maintenance_lock,
     workspace_maintenance_guard,
 )

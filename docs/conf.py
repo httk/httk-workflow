@@ -119,6 +119,12 @@ nitpick_ignore = [
     # The command tree annotates the action `add_subparsers` returns, which is
     # a private stdlib class the Python documentation has no page for.
     ("py:class", "argparse._SubParsersAction"),
+    # Seal errors and the manifest verdict are owned by httk-core now and only
+    # re-exported / referenced from httk-workflow, so AutoAPI resolves the
+    # aliases against a home that carries no doc target of its own.
+    ("py:exc", "httk.workflow.errors.SealError"),
+    ("py:exc", "httk.workflow.errors.SealedError"),
+    ("py:class", "httk.core.project.manifests.ManifestVerification"),
 ]
 
 # A documented public signature routinely annotates a type whose *definition*

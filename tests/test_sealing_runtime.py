@@ -313,9 +313,7 @@ def test_verify_tree_on_an_unsealed_subject_reports_not_sealed(tmp_path: Path) -
     # No seal exists; verification reports it rather than leaking a file error.
     report = verify_tree(workspace.root)
     assert not report.ok
-    assert [(level, verification.reason) for level, _subject, verification in report.entries] == [
-        ("workspace", "not sealed")
-    ]
+    assert [(entry["level"], entry["reason"]) for entry in report.entries] == [("workspace", "not sealed")]
     assert verify_workspace_seal(workspace).reason == "not sealed"
 
 

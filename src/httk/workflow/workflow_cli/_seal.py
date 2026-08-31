@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from httk.core.identity import identity_key_paths
+from httk.core.project.manifests import resolve_trusted_keys
 
-from ..manifests import resolve_trusted_keys
 from ..projects import discover_project, read_public_key_file
 from ..seals import VALID_TRUSTED, VALID_UNKNOWN_KEY, verify_tree
 from ._common import _group, _leaf
@@ -52,7 +52,7 @@ def handle_seal_verify(arguments: argparse.Namespace, context: Any) -> int:
     # Two independent axes, exactly as a signed manifest reports them: whether the
     # seals still describe the tree (report.ok), and whether every signer is a
     # trusted anchor. Exit codes mirror manifests.VERDICT_EXIT_CODES.
-    verdicts = [verification.verdict for _level, _subject, verification in report.entries]
+    verdicts = [str(entry["verdict"]) for entry in report.entries]
     trusted_only = bool(report.entries) and all(verdict == VALID_TRUSTED for verdict in verdicts)
     if not report.ok:
         exit_code, final = 1, "FAILED"
@@ -61,32 +61,15 @@ def handle_seal_verify(arguments: argparse.Namespace, context: Any) -> int:
     else:
         exit_code, final = 0, "ok"
     if arguments.json:
-        document = {
-            "entries": [
-                {
-                    "level": level,
-                    "subject": subject,
-                    "valid": verification.valid,
-                    "verdict": verification.verdict,
-                    "reason": verification.reason,
-                    "signers": list(verification.signers),
-                    "missing_signers": list(verification.missing_signers),
-                    "discrepancies": [
-                        {"kind": discrepancy.kind, "path": discrepancy.path}
-                        for discrepancy in verification.discrepancies
-                    ],
-                }
-                for level, subject, verification in report.entries
-            ],
-            "ok": report.ok,
-            "trusted": trusted_only,
-        }
+        document = {"entries": list(report.entries), "ok": report.ok, "trusted": trusted_only}
         print(json.dumps(document, indent=2, sort_keys=True))
         return exit_code
-    for level, subject, verification in report.entries:
-        print(f"{level}\t{subject}\t{verification.verdict}\t{verification.reason or '-'}")
-        for discrepancy in verification.discrepancies:
-            print(f"  {discrepancy.kind}\t{discrepancy.path}")
+    for entry in report.entries:
+        print(f"{entry['level']}\t{entry['subject']}\t{entry['verdict']}\t{entry['reason'] or '-'}")
+        discrepancies = entry["discrepancies"]
+        assert isinstance(discrepancies, list)
+        for discrepancy in discrepancies:
+            print(f"  {discrepancy['kind']}\t{discrepancy['path']}")
     print(final)
     return exit_code
 

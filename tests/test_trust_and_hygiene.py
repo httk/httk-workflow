@@ -21,6 +21,12 @@ from httk.core.identity import (
     verify_document,
 )
 from httk.core.project.cli import command as project_command
+from httk.core.project.manifests import (
+    INVALID,
+    VALID_TRUSTED,
+    VALID_UNKNOWN_KEY,
+    create_manifest,
+)
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
@@ -40,13 +46,7 @@ from httk.workflow.hygiene import (
     describe_remote,
     project_doctor,
 )
-from httk.workflow.manifests import (
-    INVALID,
-    VALID_TRUSTED,
-    VALID_UNKNOWN_KEY,
-    create_manifest,
-    verify_manifest,
-)
+from httk.workflow.manifests import verify_manifest
 from httk.workflow.projects import (
     PROJECT_DIRECTORY,
     PROJECT_FILE,
@@ -260,45 +260,56 @@ def test_an_adopted_third_party_key_becomes_a_trust_anchor(tmp_path: Path, monke
     assert _fields(trust_project_key(project, collaborator))["trusted_keys"] == [collaborator]
 
 
-def test_job_private_entries_are_scoped_to_job_payloads(tmp_path: Path, monkeypatch) -> None:
-    """Private names are excluded only below a genuine job payload root."""
+def test_workspace_payloads_are_excluded_from_the_project_manifest(tmp_path: Path, monkeypatch) -> None:
+    """A workspace member's payloads are excluded; loose project files are covered."""
 
-    project = _project(tmp_path, monkeypatch)
-    job_id = str(uuid.uuid4())
-    payload = project / f"job--{job_id}"
-    (payload / "attempts/a").mkdir(parents=True)
-    (payload / "attempts/a" / "f").write_text("private\n", encoding="utf-8")
-    (payload / "logs").mkdir()
-    (payload / "logs" / "l").write_text("private\n", encoding="utf-8")
-    (payload / ".httk-job").mkdir()
-    (payload / ".httk-job" / "s").write_text("private\n", encoding="utf-8")
-    (payload / "job.json").write_text(
-        json.dumps({"format": "httk-workflow-job", "id": job_id}),
+    project = _project(tmp_path, monkeypatch)  # root-as-workspace, a registered member
+    workspace = Workspace(project)
+    source = tmp_path / "src" / "job"
+    (source / "files").mkdir(parents=True)
+    (source / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (source / "job.json").write_text(
+        json.dumps(
+            {
+                "format": "httk-workflow-job",
+                "format_version": 2,
+                "id": str(uuid.uuid4()),
+                "tag": "priv",
+                "name": "priv",
+                "workflow": "tests.priv",
+                "runner": {"path": "files/runner", "arguments": []},
+                "workdir": {"mode": "persistent", "path": "run"},
+                "data": {"mode": "none"},
+                "initial_step": "start",
+                "priority": 500,
+                "claim": {"pool": "default", "required_capabilities": []},
+                "retry_policy": {"retry_on": []},
+                "resources": {},
+            }
+        ),
         encoding="utf-8",
     )
+    marker = workspace.submit(source, "jobs")
+    payload = workspace.payload_path(marker.placement, marker.job_key)
+    (payload / "attempts" / "a").mkdir(parents=True)
+    (payload / "attempts" / "a" / "f").write_text("private\n", encoding="utf-8")
+
     plain_docs = project / "docs"
     plain_docs.mkdir()
-    (plain_docs / "job.json").write_text("{}", encoding="utf-8")
-    plain_logs = project / "docs" / "logs"
-    plain_logs.mkdir()
-    (plain_logs / "notes.txt").write_text("user content\n", encoding="utf-8")
+    (plain_docs / "notes.txt").write_text("user content\n", encoding="utf-8")
 
     manifest = create_manifest(project)
-    records = bz2.decompress(manifest.read_bytes()).decode("utf-8").splitlines()[1:]
-    body = "\n".join(records)
-    assert f'"path":"{payload.name}/job.json"' in body
-    assert f'"path":"{payload.name}/attempts"' not in body
-    assert f'"path":"{payload.name}/logs"' not in body
-    assert f'"path":"{payload.name}/.httk-job"' not in body
-    assert '"path":"docs/logs/notes.txt"' in body
-    assert '"path":"docs/job.json"' in body
+    body = "\n".join(bz2.decompress(manifest.read_bytes()).decode("utf-8").splitlines()[1:])
+    # The workspace subtree is excluded whole — payload and its private trees alike;
+    # it is covered through the workspace seal chain, not the loose manifest records.
+    assert marker.job_key not in body
+    assert "attempts" not in body
+    assert '"path":"docs/notes.txt"' in body
     assert '"path":"content.txt"' in body
     assert verify_manifest(project).verdict == VALID_TRUSTED
 
-    # A runner writing inside its own private trees never invalidates the manifest.
-    (payload / "attempts/a" / "f").write_text("more private output\n", encoding="utf-8")
-    (payload / "logs" / "l").write_text("more private output\n", encoding="utf-8")
-    (payload / ".httk-job" / "s").write_text("more private output\n", encoding="utf-8")
+    # A runner writing inside its own payload never invalidates the project manifest.
+    (payload / "attempts" / "a" / "f").write_text("more private output\n", encoding="utf-8")
     assert verify_manifest(project).verdict == VALID_TRUSTED
 
 
