@@ -393,7 +393,7 @@ def adopt_workspace(root: str | os.PathLike[str], *, name: str | None = None) ->
     Adoption registers the workspace centrally under its name (never overwriting
     a different path already holding that name), ensures it is a member of its
     enclosing project, and records the chosen name in members.json when absent.
-    It never mutates sealed state and reports every step as a doctor-shaped
+    It never mutates sealed state and reports every step as a repair-shaped
     finding rather than raising.
 
     :param root: The workspace root to adopt.

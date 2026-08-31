@@ -14,7 +14,7 @@ httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-"managers"
 httk workflow remote     list | add | configure | check | show | remove
 httk workflow transfer   [OPTIONS] SRC DST
-httk project             init | show | import-v1 | doctor | manifest | seal | unseal | verify-seal   (all core-owned; httk-workflow registers the workspace as a project member so these verbs cover it)
+httk project             init | show | import-v1 | repair | manifest | seal | unseal | verify-seal   (all core-owned; httk-workflow registers the workspace as a project member so these verbs cover it)
 httk workflow config | v1
 ```
 

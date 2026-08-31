@@ -193,11 +193,11 @@ def test_core_dispatches_the_standalone_groups(tmp_path: Path, monkeypatch, caps
 
 
 def test_workflow_project_verbs_are_mounted_on_the_core_project_command(capsys) -> None:
-    # doctor/manifest/seal/unseal live under the core `httk project` command,
+    # repair/manifest/seal/unseal live under the core `httk project` command,
     # mounted there by httk-workflow via register_cli_extension.
     assert main(["project", "--help"]) == 0
     printed = capsys.readouterr().out
-    for verb in ("doctor", "manifest", "seal", "unseal"):
+    for verb in ("repair", "manifest", "seal", "unseal"):
         assert verb in printed
 
 

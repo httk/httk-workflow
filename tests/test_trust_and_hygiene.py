@@ -543,7 +543,7 @@ def test_written_configuration_keeps_its_format_members(tmp_path: Path, monkeypa
 # ---------------------------------------------------------------------------
 
 
-def test_project_doctor_is_reachable_from_the_command_line(
+def test_project_repair_is_reachable_from_the_command_line(
     tmp_path: Path,
     monkeypatch,
     capsys,
@@ -552,13 +552,13 @@ def test_project_doctor_is_reachable_from_the_command_line(
     context = CLIContext("httk", project)
 
     # A project with no manifest yet is a warning, and a warning is not a failure.
-    assert project_command(["doctor"], context) == 0
+    assert project_command(["repair", "--dry-run"], context) == 0
     report = capsys.readouterr().out
     assert "manifest" in report and "problem(s)" in report
 
-    assert project_command(["doctor", "--repair", "--json", str(project)], context) == 0
+    assert project_command(["repair", "--json", str(project)], context) == 0
     repaired = _fields(json.loads(capsys.readouterr().out))
-    assert repaired["format"] == "httk-project-doctor" and repaired["repair"] is True
+    assert repaired["format"] == "httk-project-repair" and repaired["apply"] is True
 
 
 def test_remote_show_and_remove_are_reachable_from_the_command_line(

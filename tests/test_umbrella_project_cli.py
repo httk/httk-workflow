@@ -13,5 +13,5 @@ def test_workflow_cli_registration_is_discovered() -> None:
 def test_workflow_project_verbs_extend_the_umbrella(capsys) -> None:
     assert main(["project", "--help"]) == 0
     output = capsys.readouterr().out
-    for verb in ("doctor", "manifest", "seal", "unseal"):
+    for verb in ("repair", "manifest", "seal", "unseal"):
         assert verb in output

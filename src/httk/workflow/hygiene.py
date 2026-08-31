@@ -3,8 +3,8 @@
 Everything here answers an operator question about state that already exists:
 *what is this remote configured to do*, *what is wrong with this workspace and
 can it be fixed*. Nothing here is on the execution path of a job. The individual
-workspace checks are the ones the project-member doctor and ``scan_project``
-surface through core's ``httk project doctor``; each repair is explicit.
+workspace checks are the ones the project-member ``repair`` and ``scan_project``
+surface through core's ``httk project repair``; each repair is explicit.
 """
 
 import logging
@@ -53,11 +53,9 @@ __all__ = [
 ]
 
 REMOTE_DESCRIPTION_FORMAT = "httk-remote-description"
-#: The journal frame one repairing doctor run appends. It is not a state frame,
-#: so every reader that walks the journal for job history ignores it.
 
 #: How long a staging entry may sit below ``.httk-workspace/tmp`` before the
-#: doctor calls it a leftover. Every publication renames its staging entry out
+#: check calls it a leftover. Every publication renames its staging entry out
 #: within one operation, so a day is far beyond any honest in-flight window.
 TMP_MAXIMUM_AGE_SECONDS = 24 * 60 * 60
 
@@ -266,7 +264,7 @@ def remove_remote(
 
 @dataclass
 class Finding:
-    """Describe one thing the doctor looked at and what it found.
+    """Describe one thing the check looked at and what it found.
 
     :param check: Check name.
     :param status: Check result status.

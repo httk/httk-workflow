@@ -29,14 +29,14 @@ payloads without re-hashing them:
   workspace can be.
 - A **project seal** records the project's loose files and, for every registered
   *member*, the digest of that member's own seal. It lives at
-  `httk_project/seal.json`, and the project level — seal, manifest, doctor,
+  `httk_project/seal.json`, and the project level — seal, manifest, repair,
   verify — is owned by *httk-core*. A workflow workspace is a project member: it
   is recorded in `httk_project/members.json` (registered when the workspace is
   created, unregistered when it is deleted or forgotten, its path followed on
   move), and *httk-workflow* teaches core's verbs how to seal, exclude, verify,
   and check it. Every member must be sealed before the project can be.
 
-`httk project seal | unseal | verify-seal | doctor | manifest` are core commands;
+`httk project seal | unseal | verify-seal | repair | manifest` are core commands;
 this guide describes what a workflow workspace contributes to them. The signature
 is over a domain-separated digest of the document body, exactly as a signed
 project manifest is signed, so a seal digest can never be replayed as a

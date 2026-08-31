@@ -7,7 +7,7 @@ from pathlib import Path
 from httk.core.cli import CLIContext
 from httk.core.identity import ensure_identity_key
 from httk.core.project.cli import command as project_command
-from httk.core.project.cli import project_doctor
+from httk.core.project.cli import project_repair
 from httk.core.project.members import project_members, unregister_project_member
 
 from httk.workflow import Workspace
@@ -63,24 +63,24 @@ def test_workspace_outside_a_project_registers_nothing(tmp_path: Path) -> None:
     assert project_members(tmp_path) == ()
 
 
-def test_project_doctor_detects_and_repairs_an_unregistered_workspace(tmp_path: Path) -> None:
+def test_project_repair_detects_and_repairs_an_unregistered_workspace(tmp_path: Path) -> None:
     project = tmp_path / "project"
     initialize_project(project, name="member")
     Workspace.initialize(project / "a")
     Workspace.initialize(project / "b")
     unregister_project_member(project, project / "b")  # b now exists but is not a member
 
-    report = project_doctor(project)
+    report = project_repair(project, apply=False, adopt=True)
     findings = report["findings"]
     assert isinstance(findings, list)
     unregistered = [f for f in findings if f["check"] == "workspace_members" and f["status"] == "error"]
     assert unregistered and "b" in str(unregistered[0]["message"])
 
-    project_doctor(project, repair=True)
+    project_repair(project, apply=True, adopt=True)
     assert "b" in {member.path for member in project_members(project)}
 
 
-def test_project_doctor_recovers_a_deleted_members_registry(tmp_path: Path) -> None:
+def test_project_repair_recovers_a_deleted_members_registry(tmp_path: Path) -> None:
     # CASE B: the workspace is on disk but members.json is gone entirely, so the
     # registry is empty; scan_project must still surface and re-register it.
     from httk.core.project.members import members_path
@@ -91,7 +91,7 @@ def test_project_doctor_recovers_a_deleted_members_registry(tmp_path: Path) -> N
     members_path(project).unlink()
     assert project_members(project) == ()
 
-    report = project_doctor(project)
+    report = project_repair(project, apply=False, adopt=True)
     unregistered = [
         finding
         for finding in report["findings"]  # type: ignore[union-attr]
@@ -99,10 +99,10 @@ def test_project_doctor_recovers_a_deleted_members_registry(tmp_path: Path) -> N
     ]
     assert unregistered and "." in str(unregistered[0]["details"]["workspaces"])
 
-    project_doctor(project, repair=True)
+    project_repair(project, apply=True, adopt=True)
     assert [member.path for member in project_members(project)] == ["."]
     # A second run is clean: the workspace is registered again.
-    clean = project_doctor(project)
+    clean = project_repair(project, apply=False, adopt=True)
     assert all(
         finding["status"] == "ok"
         for finding in clean["findings"]  # type: ignore[union-attr]
@@ -214,36 +214,57 @@ def test_adopt_refuses_a_name_already_registered_to_a_different_path(tmp_path: P
     assert "different path" in str(registry[0]["message"])
 
 
-def test_project_doctor_repair_leaves_workspace_default_clean(tmp_path: Path, monkeypatch) -> None:
+def test_project_repair_leaves_workspace_default_clean(tmp_path: Path, monkeypatch) -> None:
     from httk.workflow.projects import write_project_section
 
     copied = _copied_named_project(tmp_path, monkeypatch)
     write_project_section(copied, "workspace", {"default": "myws"})  # default unresolvable centrally yet
-    assert int(project_doctor(copied)["problems"]) >= 1  # type: ignore[arg-type]
-    project_doctor(copied, repair=True)
-    final = project_doctor(copied)
+    assert int(project_repair(copied, apply=False, adopt=True)["problems"]) >= 1  # type: ignore[arg-type]
+    project_repair(copied, apply=True, adopt=True)
+    final = project_repair(copied, apply=False, adopt=True)
     by_check = {str(f["check"]): f for f in final["findings"]}  # type: ignore[union-attr]
     assert by_check["workspace_default"]["status"] == "ok"
 
 
-def test_doctor_on_a_clean_copy_reports_then_repair_wires_everything(tmp_path: Path, monkeypatch) -> None:
+def test_project_repair_on_a_clean_copy_wires_everything(tmp_path: Path, monkeypatch) -> None:
     copied = _copied_named_project(tmp_path, monkeypatch)
     from httk.workflow.registry import _read_global
 
-    # Plain doctor: the copied member is not adopted on this machine, so it is flagged.
-    report = project_doctor(copied)
+    # --dry-run: the copied member is not adopted on this machine, so it is flagged
+    # and nothing is written.
+    report = project_repair(copied, apply=False, adopt=True)
     members = next(f for f in report["findings"] if f["check"] == "workspace_members")  # type: ignore[union-attr]
     assert members["status"] == "error" and "adopt" in str(members["message"])
     assert _read_global() == {}
 
-    # Repair adopts every member: the central registry is populated...
-    project_doctor(copied, repair=True)
+    # --no-adopt: other repairs run, but no member is linked into this machine.
+    project_repair(copied, apply=True, adopt=False)
+    assert _read_global() == {}
+
+    # Plain repair (default apply + adopt) wires everything in one shot.
+    project_repair(copied)
     assert Path(_read_global()["myws"]["path"]).resolve() == (copied / "work").resolve()
 
     # ...and a re-run is clean on adoption: the members check is ok and nothing errors.
-    clean = project_doctor(copied)
+    clean = project_repair(copied, apply=False, adopt=True)
     findings = clean["findings"]
     assert isinstance(findings, list)
     members_now = next(f for f in findings if f["check"] == "workspace_members")
     assert members_now["status"] == "ok"
     assert not [f for f in findings if f["status"] == "error"]
+
+
+def test_scan_does_not_descend_into_a_workspace_within_a_workspace(tmp_path: Path) -> None:
+    # A workspace nested inside another workspace's subtree is pruned by the crawl,
+    # so it is never adopted or reported by the project scan.
+    project = tmp_path / "project"
+    initialize_project(project, name="member")
+    Workspace.initialize(project)  # the project root itself is a workspace, member "."
+    nested = project / "sub" / "inner"
+    nested.mkdir(parents=True)
+    (nested / ".httk-workspace" / "format.json").parent.mkdir(parents=True)
+    (nested / ".httk-workspace" / "format.json").write_text("{}", encoding="utf-8")
+
+    report = project_repair(project, apply=False, adopt=True)
+    members = next(f for f in report["findings"] if f["check"] == "workspace_members")  # type: ignore[union-attr]
+    assert "sub/inner" not in str(members)

@@ -35,7 +35,7 @@ httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-"managers"
 httk workflow v1         collect
 httk workflow config     init | show | set | unset | import-v1
-httk project             doctor | manifest create | manifest verify | seal | unseal   (httk-workflow mounts these beside core init | show | import-v1)
+httk project             repair | manifest create | manifest verify | seal | unseal   (httk-workflow mounts these beside core init | show | import-v1)
 httk workflow remote     list | add | configure | check | import-v1 | show | remove
 httk workflow transfer   [OPTIONS] SRC DST      (plus the protocol spellings: receive | offer | retire)
 ```
@@ -448,7 +448,7 @@ warning names how many such tasks a harvest saw.
 ### `project` — the directory a campaign lives in
 
 The project *anchor* and every project-level verb — `init`, `show`, `import-v1`,
-`export`, `doctor`, `manifest create | verify`, `seal`, `unseal`, and
+`export`, `repair`, `manifest create | verify`, `seal`, `unseal`, and
 `verify-seal` — belong to *httk-core*, which owns the whole `httk project`
 command. *httk-workflow* no longer mounts project verbs of its own; instead it
 registers the **workspace** as a project-*member* kind, so core's verbs delegate
@@ -808,7 +808,7 @@ httk project init --name example .
 The project *anchor* is owned by *httk-core*, which provides the umbrella
 `httk project` command and its `init`, `show`, and `import-v1` leaves. Create the
 anchor with `httk project init PATH` and give it a workspace with
-`httk workspace init PATH`. The workflow-aware verbs — `doctor`, `manifest`,
+`httk workspace init PATH`. The workflow-aware verbs — `repair`, `manifest`,
 `seal`, and `unseal` — are mounted by *httk-workflow* onto the core
 `httk project` command.
 
@@ -831,19 +831,21 @@ working directory's parent chain.
 ```console
 httk project show
 httk project show --json
-httk project doctor
-httk project doctor --repair .
+httk project repair --dry-run
+httk project repair .
 ```
 
 `httk project show` (core) reports the project's metadata and keys. `project
-doctor` adds the workflow-aware view — the recorded workspace default and its job
-counts, the maintenance lock, and a manifest check — and repairs what it safely
-can; `httk workspace status` and `httk project manifest verify` report
-the live workspace and manifest state directly.
+repair` applies the safe repairs by default and adopts every member workspace on
+this machine — the exact one-shot a freshly copied tree needs; `--dry-run`
+reports without touching anything, and `--no-adopt` repairs without adopting.
+`httk workspace status` and `httk project manifest verify` report the live
+workspace and manifest state directly.
 
-`project doctor` checks the conditions that quietly break a project later — a
-stale maintenance lock, an unpinned key, staging leftovers, a legacy identity,
-an unverifiable manifest — and reports them all.
+`project repair` covers the conditions that quietly break a project later — a
+stale maintenance lock, staging leftovers, a workspace on disk missing from the
+registry, and a member not yet adopted on this machine — reporting or fixing
+each.
 `--repair` fixes the ones that can be fixed automatically, says exactly what it
 did, and journals it in the project's workspace, so the repair is part of that
 workspace's durable history. The command exits `1` only when a check is actually

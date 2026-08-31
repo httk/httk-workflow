@@ -384,7 +384,7 @@ class Workspace:
             durable=durable,
         )
         # A workspace inside a project is a project member: core's project verbs
-        # (seal, manifest, doctor, verify) discover it through members.json.
+        # (seal, manifest, repair, verify) discover it through members.json.
         if project is not None:
             from httk.core.project.members import register_project_member
 

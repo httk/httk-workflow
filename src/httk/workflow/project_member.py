@@ -1,6 +1,6 @@
 """The workflow-workspace project-member handler.
 
-Core owns the project verbs — seal, manifest, doctor, verify — and delegates a
+Core owns the project verbs — seal, manifest, repair, verify — and delegates a
 member's internals to the handler its kind registers (see
 :mod:`httk.core.project.members`). A *workflow workspace* is one member kind;
 this module is what core calls to seal it, exclude its scratch from a project
@@ -148,43 +148,46 @@ class WorkspaceMemberHandler:
             entries.append(_entry("job", job_key, job))
         return tuple(entries)
 
-    def doctor(self, member_root: Path, *, repair: bool) -> tuple[dict[str, object], ...]:
-        """Check this workspace member's own health.
+    def repair(self, member_root: Path, *, apply: bool) -> tuple[dict[str, object], ...]:
+        """Repair this workspace member's own health, or report only.
 
         Project-scope checks — the recorded default binding and any workspace on
         disk that is not a registered member — live in :meth:`scan_project`.
 
         :param member_root: This workspace's root directory.
-        :param repair: Whether to apply automatic repairs.
-        :return: The workspace's doctor findings.
+        :param apply: Whether to apply repairs; ``False`` reports only.
+        :return: The workspace's repair findings.
         """
 
         from .hygiene import _check_maintenance_lock, _check_tmp_leftovers
 
         return (
-            _check_maintenance_lock(member_root, repair).as_mapping(),
-            _check_tmp_leftovers(member_root, repair).as_mapping(),
+            _check_maintenance_lock(member_root, apply).as_mapping(),
+            _check_tmp_leftovers(member_root, apply).as_mapping(),
         )
 
-    def scan_project(self, project_root: Path, *, repair: bool) -> tuple[dict[str, object], ...]:
+    def scan_project(self, project_root: Path, *, apply: bool, adopt: bool) -> tuple[dict[str, object], ...]:
         """Report project-scope workspace findings, even with no registered member.
 
         Core calls this once for the workspace kind whether or not members.json
-        holds any workspace, so a workspace present on disk but missing from the
-        registry is surfaced (and, under *repair*, registered) even when the
-        registry is empty or absent.
+        holds any workspace. Every mutation this scan makes — re-registering a
+        workspace as a member and linking its name into this machine's registry —
+        is part of adoption, so it mutates only when both *apply* and *adopt* are
+        set; otherwise it reports and touches nothing.
 
         :param project_root: The project root to scan.
-        :param repair: Whether to apply automatic repairs.
+        :param apply: Whether to apply repairs; ``False`` reports only.
+        :param adopt: Whether to adopt members on this machine.
         :return: The project-scope findings.
         """
 
         from .hygiene import _check_workspace_default
 
-        findings: list[dict[str, object]] = [_unregistered_workspaces(project_root, repair)]
+        mutate = apply and adopt
+        findings: list[dict[str, object]] = [_unregistered_workspaces(project_root, mutate)]
         default = _check_workspace_default(project_root)
         if default is not None:
-            if repair and default.status == "error":
+            if mutate and default.status == "error":
                 findings.extend(_adopt_default_workspace(project_root))
                 default = _check_workspace_default(project_root)
             if default is not None:
@@ -216,7 +219,7 @@ class WorkspaceMemberHandler:
         return workspace_maintenance_guard(Workspace(member_root))
 
 
-def _unregistered_workspaces(project_root: Path, repair: bool) -> dict[str, object]:
+def _unregistered_workspaces(project_root: Path, adopt: bool) -> dict[str, object]:
     """Report every workspace on disk under a project that is not a member.
 
     The walk prunes at each workspace, so a workspace nested inside another is
@@ -239,7 +242,7 @@ def _unregistered_workspaces(project_root: Path, repair: bool) -> dict[str, obje
             on_disk.append(directory.relative_to(project).as_posix())
             dirnames[:] = []
 
-    if repair:
+    if adopt:
         # Idempotent: adopt every workspace under the project, whether or not it is
         # already a member or already centrally registered. This fully wires a
         # cleanly-copied tree in one pass.

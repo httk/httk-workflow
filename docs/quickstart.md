@@ -182,12 +182,14 @@ See {doc}`remotes` for SSH setup, transfers, and the `local` adapter.
 ## Moving a project between machines
 
 A project directory is self-describing: copy the whole tree (its `httk_project/`
-and its workspaces) to another machine and run `httk project adopt` inside it.
+and its workspaces) to another machine and run `httk project repair` inside it.
 That registers every workspace in the new machine's per-user registry under the
 name `httk_project/members.json` recorded when you created it, so
 `httk workflow run`, `--workspace NAME`, and the rest work immediately — no
-re-`init`. Adopt a single workspace with `httk workspace adopt`; both are
-idempotent and refuse to overwrite a name already pointing somewhere else.
+re-`init`. `httk project repair` applies any safe fixes and adopts every member
+in one shot (`--dry-run` to preview, `--no-adopt` to skip adoption); adopt a
+single workspace with `httk workspace adopt`. All are idempotent and refuse to
+overwrite a name already pointing somewhere else.
 
 ## Where to go next
 
