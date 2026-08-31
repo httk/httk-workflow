@@ -227,36 +227,56 @@ def _unregistered_workspaces(project_root: Path, repair: bool) -> dict[str, obje
 
     from .hygiene import Finding
     from .models import WORKSPACE_DIRECTORY
-    from .registry import adopt_workspace
+    from .registry import _read_global, adopt_workspace
 
     project = Path(project_root)
-    registered = {member.path for member in project_members(project)}
-    found: list[str] = []
+    members = list(project_members(project))
+    registered = {member.path for member in members}
+    on_disk: list[str] = []
     for dirpath, dirnames, _filenames in os.walk(project):
         directory = Path(dirpath)
         if (directory / WORKSPACE_DIRECTORY / "format.json").is_file():
-            relpath = directory.relative_to(project).as_posix()
-            if relpath not in registered:
-                found.append(relpath)
+            on_disk.append(directory.relative_to(project).as_posix())
             dirnames[:] = []
-    if not found:
+
+    if repair:
+        # Idempotent: adopt every workspace under the project, whether or not it is
+        # already a member or already centrally registered. This fully wires a
+        # cleanly-copied tree in one pass.
+        for relpath in on_disk:
+            adopt_workspace(project if relpath == "." else project / relpath)
         return Finding(
-            "workspace_members", "ok", "every workspace under the project is a registered member"
+            "workspace_members",
+            "ok",
+            f"adopted {len(on_disk)} workspace(s) under the project",
+            details={"workspaces": on_disk},
         ).as_mapping()
-    finding = Finding(
+
+    # Detection only: a workspace missing from members.json, or a member whose
+    # recorded name is not registered centrally on this machine (a freshly copied
+    # tree), both need `httk workspace adopt` / `httk project adopt --repair`.
+    central = {str(Path(record["path"]).resolve()) for record in _read_global().values()}
+    unregistered = [relpath for relpath in on_disk if relpath not in registered]
+    # Only a member with a recorded *name* is adoptable by name; an unnamed local
+    # init has nothing to adopt and is left alone.
+    unadopted = [
+        member.path
+        for member in members
+        if member.name is not None and str((project / member.path).resolve()) not in central
+    ]
+    problems = sorted(set(unregistered) | set(unadopted))
+    if not problems:
+        return Finding(
+            "workspace_members", "ok", "every workspace under the project is a registered, adopted member"
+        ).as_mapping()
+    return Finding(
         "workspace_members",
         "error",
-        f"{len(found)} workspace(s) under the project are not registered members: {', '.join(found)}",
+        f"{len(problems)} workspace(s) are not registered members or not adopted on this machine "
+        f"({', '.join(problems)}); run `httk project adopt`",
         repairable=True,
-        details={"workspaces": found},
-    )
-    if repair:
-        for relpath in found:
-            adopt_workspace(project if relpath == "." else project / relpath)
-        finding.action = f"registered {len(found)} workspace(s)"
-        finding.repaired = True
-        finding.status = "ok"
-    return finding.as_mapping()
+        details={"workspaces": problems},
+    ).as_mapping()
 
 
 def _adopt_default_workspace(project_root: Path) -> list[dict[str, object]]:

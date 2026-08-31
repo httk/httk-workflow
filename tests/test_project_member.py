@@ -224,3 +224,26 @@ def test_project_doctor_repair_leaves_workspace_default_clean(tmp_path: Path, mo
     final = project_doctor(copied)
     by_check = {str(f["check"]): f for f in final["findings"]}  # type: ignore[union-attr]
     assert by_check["workspace_default"]["status"] == "ok"
+
+
+def test_doctor_on_a_clean_copy_reports_then_repair_wires_everything(tmp_path: Path, monkeypatch) -> None:
+    copied = _copied_named_project(tmp_path, monkeypatch)
+    from httk.workflow.registry import _read_global
+
+    # Plain doctor: the copied member is not adopted on this machine, so it is flagged.
+    report = project_doctor(copied)
+    members = next(f for f in report["findings"] if f["check"] == "workspace_members")  # type: ignore[union-attr]
+    assert members["status"] == "error" and "adopt" in str(members["message"])
+    assert _read_global() == {}
+
+    # Repair adopts every member: the central registry is populated...
+    project_doctor(copied, repair=True)
+    assert Path(_read_global()["myws"]["path"]).resolve() == (copied / "work").resolve()
+
+    # ...and a re-run is clean on adoption: the members check is ok and nothing errors.
+    clean = project_doctor(copied)
+    findings = clean["findings"]
+    assert isinstance(findings, list)
+    members_now = next(f for f in findings if f["check"] == "workspace_members")
+    assert members_now["status"] == "ok"
+    assert not [f for f in findings if f["status"] == "error"]
