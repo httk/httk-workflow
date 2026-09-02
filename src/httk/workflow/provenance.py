@@ -9,7 +9,7 @@ are all optional:
       "workflow_declaration_uri": "https://schemas.httk.org/defs/v0.1/workflows/vasp-relax",
       "inputs":    {"initial_structure": {"type": "structures", "id": "<served id>"}},
       "artifacts": {"relaxed_structure": {"type": "structures", "id": "..."}},
-      "outputs":   {"total_energy":      {"type": "_httk_records", "id": "..."}}
+      "outputs":   {"total_energy":      {"type": "records", "id": "..."}}
     }
 
 The object keys are edge labels, so labels are unique per side. Targets are

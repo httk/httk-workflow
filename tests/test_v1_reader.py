@@ -35,7 +35,7 @@ def _package(root: Path) -> Path:
         '[workflow]\nid = "tests.v1.finished"\ndeclaration_uri = "urn:finished"\n'
         '[workflow.runner]\nlanguage = "httk-v1"\n'
         '[workflow.collect]\nfile = "collect.py"\n'
-        '[workflow.outputs.result]\nentry_type = "_httk_records"\n',
+        '[workflow.outputs.result]\nentry_type = "records"\n',
         encoding="utf-8",
     )
     (root / "collect.py").write_text(
@@ -146,7 +146,7 @@ def test_v1_collect_cli_json_lines(tmp_path: Path, capsys: pytest.CaptureFixture
     lines = capsys.readouterr().out.splitlines()
     report = json.loads(lines[0])
     assert report["workflow"] == "tests.v1.finished"
-    assert report["outputs"]["result"]["type"] == "_httk_records"
+    assert report["outputs"]["result"]["type"] == "records"
     assert report["identity_stable"] is False
     summary = json.loads(lines[-1])
     assert summary["format"] == "httk-workflow-v1-collect-summary"

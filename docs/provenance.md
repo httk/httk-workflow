@@ -11,7 +11,7 @@ consumed, created, and returned. All members are optional:
   "workflow_declaration_uri": "https://schemas.httk.org/defs/v0.1/workflows/vasp-relax",
   "inputs":    {"initial_structure": {"type": "structures", "id": "<served id>"}},
   "artifacts": {"relaxed_structure": {"type": "structures", "id": "..."}},
-  "outputs":   {"total_energy":      {"type": "_httk_records", "id": "..."}}
+  "outputs":   {"total_energy":      {"type": "records", "id": "..."}}
 }
 ```
 
@@ -22,6 +22,11 @@ documents the collection used by `run_record`.
 File-valued output roles yield run edges with `type = "files"` and the
 corresponding `FileRecord` id, so stored provenance names the file entry
 directly.
+
+The `type` strings above are httk's internal entry-type names
+(`records`, `runs`, `structures`, `files`); OPTIMADE wire prefixing
+(`_httk_records`, `_httk_runs`, …) is applied only at the OPTIMADE serving
+edge.
 
 ## Declared and observed
 
@@ -43,7 +48,7 @@ a.declare("provenance", {
     "workflow_declaration_uri": "https://schemas.httk.org/defs/v0.1/workflows/vasp-relax",
     "inputs": {"initial_structure": {"type": "structures", "id": "structures/si"}},
     "artifacts": {"relaxed_structure": {"type": "structures", "id": "structures/si-relaxed"}},
-    "outputs": {"total_energy": {"type": "_httk_records", "id": "records/energy-1"}},
+    "outputs": {"total_energy": {"type": "records", "id": "records/energy-1"}},
 })
 ```
 

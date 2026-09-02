@@ -349,17 +349,17 @@ def test_in_process_and_executable_collectors_have_identical_results(
     workflow_uri = "https://example.test/workflows/exec-conformance"
     document = {
         "$id": workflow_uri,
-        "inputs": [{"name": "source", "entry_type": "_httk_records"}],
+        "inputs": [{"name": "source", "entry_type": "records"}],
         "outputs": [
-            {"name": "first", "entry_type": "_httk_records"},
-            {"name": "second", "entry_type": "_httk_records"},
+            {"name": "first", "entry_type": "records"},
+            {"name": "second", "entry_type": "records"},
         ],
     }
     provenance = {
         "workflow_declaration_uri": workflow_uri,
-        "inputs": {"source": {"type": "_httk_records", "id": "input-id"}},
-        "artifacts": {"artifact": {"type": "_httk_records", "id": "artifact-id"}},
-        "outputs": {"first": {"type": "_httk_records", "id": "old-output-id"}},
+        "inputs": {"source": {"type": "records", "id": "input-id"}},
+        "artifacts": {"artifact": {"type": "records", "id": "artifact-id"}},
+        "outputs": {"first": {"type": "records", "id": "old-output-id"}},
     }
     record = replace(
         source_record,
@@ -391,8 +391,8 @@ def test_in_process_and_executable_collectors_have_identical_results(
         declarations={"workflow": document},
         directory=package,
         outputs={
-            "first": {"entry_type": "_httk_records", "role": "first", "product_of": "source"},
-            "second": {"entry_type": "_httk_records", "role": "second", "product_of": "first"},
+            "first": {"entry_type": "records", "role": "first", "product_of": "source"},
+            "second": {"entry_type": "records", "role": "second", "product_of": "first"},
         },
         collector=in_process,
     )

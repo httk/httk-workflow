@@ -53,7 +53,7 @@ def test_declared_provenance_builds_edges_and_uri() -> None:
                     "workflow_declaration_uri": "https://example.test/workflows/relax",
                     "inputs": {"initial": {"type": "structures", "id": "s1"}},
                     "artifacts": {"relaxed": {"type": "structures", "id": "s2"}},
-                    "outputs": {"energy": {"type": "_httk_records", "id": "e1"}},
+                    "outputs": {"energy": {"type": "records", "id": "e1"}},
                 },
                 "observed": None,
             }
@@ -66,7 +66,7 @@ def test_declared_provenance_builds_edges_and_uri() -> None:
     assert run.immutable_id is None
     assert [(edge.label, edge.entry_type, edge.entry_id) for edge in run.inputs] == [("initial", "structures", "s1")]
     assert [(edge.label, edge.entry_type, edge.entry_id) for edge in run.artifacts] == [("relaxed", "structures", "s2")]
-    assert [(edge.label, edge.entry_type, edge.entry_id) for edge in run.outputs] == [("energy", "_httk_records", "e1")]
+    assert [(edge.label, edge.entry_type, edge.entry_id) for edge in run.outputs] == [("energy", "records", "e1")]
 
 
 def test_observed_replaces_declared_wholesale_and_workflow_uri_falls_back() -> None:
@@ -77,7 +77,7 @@ def test_observed_replaces_declared_wholesale_and_workflow_uri_falls_back() -> N
                     "workflow_declaration_uri": "https://example.test/provenance/declared",
                     "inputs": {"initial": {"type": "structures", "id": "s1"}},
                 },
-                "observed": {"outputs": {"energy": {"type": "_httk_records", "id": "e1"}}},
+                "observed": {"outputs": {"energy": {"type": "records", "id": "e1"}}},
             },
             "workflow": {
                 "declared": {"$id": "https://example.test/workflows/declared"},

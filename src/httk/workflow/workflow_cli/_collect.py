@@ -172,7 +172,7 @@ def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, .
 
     from httk.core.register import known_entry_families, known_entry_records, resolve_entry_family, resolve_entry_record
 
-    required_types = {"_httk_records", "_httk_runs"}
+    required_types = {"records", "runs"}
     failures: dict[int, str] = {}
     for index, item in enumerate(items):
         for value in item.outputs.values():

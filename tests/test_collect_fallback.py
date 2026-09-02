@@ -170,22 +170,22 @@ def test_collect_into_remaps_cross_job_edges_and_products(tmp_path: Path) -> Non
         record,
         "first",
         {"first": first},
-        Run(outputs=(RunEdge("first", "_httk_records", first_content_id),), source_id="ws:first"),
+        Run(outputs=(RunEdge("first", "records", first_content_id),), source_id="ws:first"),
     )
     second_item = _synthetic_item(
         record,
         "second",
         {"second": second},
         Run(
-            inputs=(RunEdge("from_first", "_httk_records", first_content_id),),
-            outputs=(RunEdge("second", "_httk_records", second_content_id),),
+            inputs=(RunEdge("from_first", "records", first_content_id),),
+            outputs=(RunEdge("second", "records", second_content_id),),
             source_id="ws:second",
         ),
         products=(
             ProductLink(
-                "_httk_records",
+                "records",
                 first_content_id,
-                "_httk_records",
+                "records",
                 second_content_id,
                 "derived",
             ),
@@ -230,15 +230,15 @@ def test_collect_into_resolves_cross_job_edges_from_an_earlier_invocation(tmp_pa
         record,
         "first",
         {"first": first},
-        Run(outputs=(RunEdge("first", "_httk_records", first_content_id),), source_id="ws:first"),
+        Run(outputs=(RunEdge("first", "records", first_content_id),), source_id="ws:first"),
     )
     second_item = _synthetic_item(
         record,
         "second",
         {"second": second},
         Run(
-            inputs=(RunEdge("from_first", "_httk_records", first_content_id),),
-            outputs=(RunEdge("second", "_httk_records", second_content_id),),
+            inputs=(RunEdge("from_first", "records", first_content_id),),
+            outputs=(RunEdge("second", "records", second_content_id),),
             source_id="ws:second",
         ),
     )
@@ -270,7 +270,7 @@ def test_collect_into_preserves_an_existing_public_id_reference(tmp_path: Path) 
         record,
         "existing",
         {"existing": existing},
-        Run(outputs=(RunEdge("existing", "_httk_records", public_id),), source_id="ws:existing"),
+        Run(outputs=(RunEdge("existing", "records", public_id),), source_id="ws:existing"),
     )
     second = DataRecord.from_value("https://example.test/public", "second", 2)
     second_item = _synthetic_item(
@@ -278,8 +278,8 @@ def test_collect_into_preserves_an_existing_public_id_reference(tmp_path: Path) 
         "second",
         {"second": second},
         Run(
-            inputs=(RunEdge("existing", "_httk_records", public_id),),
-            outputs=(RunEdge("second", "_httk_records", content_id(second)),),
+            inputs=(RunEdge("existing", "records", public_id),),
+            outputs=(RunEdge("second", "records", content_id(second)),),
             source_id="ws:second",
         ),
     )
@@ -311,7 +311,7 @@ def test_collect_into_preserves_a_loose_external_reference(tmp_path: Path) -> No
         {"output": output},
         Run(
             inputs=(RunEdge("structure", "structures", "structures/si"),),
-            outputs=(RunEdge("output", "_httk_records", content_id(output)),),
+            outputs=(RunEdge("output", "records", content_id(output)),),
             source_id="ws:external",
         ),
     )
@@ -342,8 +342,8 @@ def test_collect_into_leaves_outputs_when_a_provenance_reference_is_unknown(tmp_
         "bad",
         {"bad": bad},
         Run(
-            inputs=(RunEdge("missing", "_httk_records", unknown_content_id),),
-            outputs=(RunEdge("bad", "_httk_records", content_id(bad)),),
+            inputs=(RunEdge("missing", "records", unknown_content_id),),
+            outputs=(RunEdge("bad", "records", content_id(bad)),),
             source_id="ws:bad",
         ),
     )
@@ -351,7 +351,7 @@ def test_collect_into_leaves_outputs_when_a_provenance_reference_is_unknown(tmp_
         record,
         "good",
         {"good": good},
-        Run(outputs=(RunEdge("good", "_httk_records", content_id(good)),), source_id="ws:good"),
+        Run(outputs=(RunEdge("good", "records", content_id(good)),), source_id="ws:good"),
     )
     path = tmp_path / "unresolved.sqlite"
     reports = _store_collected([bad_item, good_item], str(path), id_base="httk.probe", id_series="1")
@@ -363,7 +363,7 @@ def test_collect_into_leaves_outputs_when_a_provenance_reference_is_unknown(tmp_
         good_run = _stored_run(store, _stored_run_id(reports, 1))
     error = reports[0].get("storage_error")
     assert isinstance(error, str)
-    assert "unresolved provenance reference _httk_records/" in error
+    assert "unresolved provenance reference records/" in error
     assert "stored" not in reports[0]
     assert bad_fetched is not None
     assert good_fetched is not None and good_run.outputs[0].entry_id == good_fetched.id
@@ -431,9 +431,9 @@ role = "total_energy"
     assert item.missing_collector is None
     assert len(item.products) == 1
     product = item.products[0]
-    assert product.source_type == "_httk_records"
+    assert product.source_type == "records"
     assert product.source_id == content_id(item.outputs["relaxed_structure"])
-    assert product.target_type == "_httk_records"
+    assert product.target_type == "records"
     assert product.target_id == content_id(item.outputs["total_energy"])
     assert product.label == "total_energy"
 
