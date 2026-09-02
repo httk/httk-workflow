@@ -42,7 +42,7 @@ applied, and `httk` is often not even on `PATH`. Put that setup in the remote's
 `prelude` setting rather than in `~/.bashrc`, so it applies to httk's ssh
 commands only and does not disturb every other tool that logs in over ssh:
 
-```console
+```text
 $ httk workflow remote configure --set prelude='module load Python/3.13.5-bundle
 source ~/venv/bin/activate' kappa
 ```
