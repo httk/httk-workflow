@@ -7,6 +7,7 @@ the collect hook (:func:`_store_collected`) that allocates through the ledger,
 each asserting something that fails without the machinery it exercises.
 """
 
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -18,6 +19,26 @@ from httk.core.storage import content_id
 
 from httk.workflow import CollectedJob, JobRecord, UnstableIdentityError, job_records, ledger_key
 from test_collect_fallback import _finished, _synthetic_item
+
+
+def _ledger_records(path: Path) -> list[dict[str, str]]:
+    """Read the sqlite id-ledger's records table as JSON-record-shaped dicts.
+
+    The ledger is a stdlib-``sqlite3`` database now, not a JSON seal document;
+    each row becomes a ``{key, family, id, alias_of, supersedes}`` mapping with
+    absent (NULL) fields dropped, matching the old seal-record shape the
+    assertions below were written against.
+
+    :param path: The ledger database path.
+    :return: The ordered ledger records.
+    """
+
+    with sqlite3.connect(path) as connection:
+        rows = connection.execute(
+            "SELECT key, family, id, alias_of, supersedes FROM records ORDER BY seq"
+        ).fetchall()
+    fields = ("key", "family", "id", "alias_of", "supersedes")
+    return [{name: value for name, value in zip(fields, row) if value is not None} for row in rows]
 
 
 def _keys() -> list[tuple[str, bytes]]:
@@ -81,7 +102,7 @@ def test_ledger_stabilizes_ids_across_fresh_stores_regardless_of_sweep_order(tmp
     b, eb = _record_item(record, "B", "https://x", "b", 2)
     c, ec = _record_item(record, "C", "https://x", "c", 3)
 
-    ledger = tmp_path / "shared.ids.json"
+    ledger = tmp_path / "shared.ids.sqlite"
     first_reports = _store_collected(
         [a, b, c],
         str(tmp_path / "one.sqlite"),
@@ -150,7 +171,6 @@ def test_ledger_stabilizes_ids_across_fresh_stores_regardless_of_sweep_order(tmp
 def test_ledger_aliases_content_identical_outputs(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
     from httk.core import DataRecordEntry
-    from httk.core.project.sealing import read_seal
     from httk.store import Backend, SqlStore
 
     from httk.workflow.workflow_cli._collect import _store_collected
@@ -163,7 +183,7 @@ def test_ledger_aliases_content_identical_outputs(tmp_path: Path) -> None:
     b, entry_b = _record_item(record, "B", "https://x", "same", 7)
     assert content_id(entry) == content_id(entry_b)
 
-    ledger = tmp_path / "dedup.ids.json"
+    ledger = tmp_path / "dedup.ids.sqlite"
     reports = _store_collected(
         [a, b],
         str(tmp_path / "s.sqlite"),
@@ -182,7 +202,7 @@ def test_ledger_aliases_content_identical_outputs(tmp_path: Path) -> None:
     assert cast(Any, reports[1]["stored"])["entries"] == [stored_id]
 
     ws = record.workspace_id
-    records = read_seal(ledger).records
+    records = _ledger_records(ledger)
     assigned = {r["key"]: r for r in records if "id" in r}
     aliases = {r["key"]: r["alias_of"] for r in records if "alias_of" in r}
     # The output is assigned to one job and aliased from the other.
@@ -197,7 +217,6 @@ def test_ledger_aliases_content_identical_outputs(tmp_path: Path) -> None:
 
 def test_ledger_skips_outputs_already_carrying_an_id(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
-    from httk.core.project.sealing import read_seal
 
     from httk.workflow.workflow_cli._collect import _store_collected
 
@@ -208,7 +227,7 @@ def test_ledger_skips_outputs_already_carrying_an_id(tmp_path: Path) -> None:
     run = Run(outputs=(RunEdge("out", "records", "external.db-9-42"),), source_id="ws:pre")
     item = _synthetic_item(record, "pre", {"out": preassigned}, run)
 
-    ledger = tmp_path / "skip.ids.json"
+    ledger = tmp_path / "skip.ids.sqlite"
     reports = _store_collected(
         [item],
         str(tmp_path / "s.sqlite"),
@@ -219,7 +238,7 @@ def test_ledger_skips_outputs_already_carrying_an_id(tmp_path: Path) -> None:
     )
     assert cast(Any, reports[0]["stored"])["entries"] == ["external.db-9-42"]
     ws = record.workspace_id
-    keys_in_ledger = {r["key"] for r in read_seal(ledger).records}
+    keys_in_ledger = {r["key"] for r in _ledger_records(ledger)}
     # The pre-assigned output never entered the ledger; only the run did.
     assert f"{ws}:pre:out" not in keys_in_ledger
     assert keys_in_ledger == {f"{ws}:pre"}
@@ -227,7 +246,6 @@ def test_ledger_skips_outputs_already_carrying_an_id(tmp_path: Path) -> None:
 
 def test_unstable_identity_degrades_without_failing_the_collect(tmp_path: Path, caplog) -> None:
     pytest.importorskip("httk.store")
-    from httk.core.project.sealing import read_seal
 
     from httk.workflow.workflow_cli._collect import _store_collected
 
@@ -237,7 +255,7 @@ def test_unstable_identity_degrades_without_failing_the_collect(tmp_path: Path, 
     item, _entry = _record_item(record, "v1", "https://x", "a", 1)
     item = replace(item, identity_stable=False)
 
-    ledger = tmp_path / "v1.ids.json"
+    ledger = tmp_path / "v1.ids.sqlite"
     with caplog.at_level("WARNING"):
         reports = _store_collected(
             [item],
@@ -250,7 +268,7 @@ def test_unstable_identity_degrades_without_failing_the_collect(tmp_path: Path, 
     # Collect succeeds: the output is store-minted, and the ledger holds nothing.
     assert "storage_error" not in reports[0]
     assert cast(Any, reports[0]["stored"])["entries"] == ["httk.probe-1-1"]
-    assert list(read_seal(ledger).records) == []
+    assert list(_ledger_records(ledger)) == []
     assert any("unstable identity" in message for message in caplog.messages)
 
 
@@ -291,7 +309,7 @@ def test_collect_into_default_ledger_is_created_and_opt_out_warns(tmp_path: Path
             == 0
         )
     # On by default: a keep-worthy ledger appears beside the store, announced loudly.
-    assert (tmp_path / "into.sqlite.ids.json").exists()
+    assert (tmp_path / "into.sqlite.ids.sqlite").exists()
     assert any("creating id ledger" in message for message in caplog.messages)
 
     caplog.clear()
@@ -314,8 +332,40 @@ def test_collect_into_default_ledger_is_created_and_opt_out_warns(tmp_path: Path
             )
             == 0
         )
-    assert not (tmp_path / "plain.sqlite.ids.json").exists()
+    assert not (tmp_path / "plain.sqlite.ids.sqlite").exists()
     assert any("not be stable across rebuilds" in message.lower() for message in caplog.messages)
+
+
+def test_collect_refuses_default_ledger_when_legacy_json_sibling_exists(tmp_path: Path) -> None:
+    # Pre-release format change: the default ledger is <into>.ids.sqlite now. A
+    # store with a stale <into>.ids.json sibling must NOT silently get a fresh
+    # sqlite ledger (which would re-mint every id from 1); collect refuses.
+    pytest.importorskip("httk.store")
+    import base64
+
+    from httk.core.cli import CLIContext
+
+    from conftest import register_ws
+    from httk.workflow.workflow_cli import command
+
+    workspace, _ = _finished(tmp_path)
+    seed = tmp_path / "seal.seed"
+    seed.write_text(base64.b64encode(ed25519_generate_seed()).decode("ascii"), encoding="utf-8")
+    workspace.set_setting("seal.keys", str(seed))
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "collect-legacy-ledger")
+
+    store = tmp_path / "into.sqlite"
+    (tmp_path / "into.sqlite.ids.json").write_text("{}", encoding="utf-8")
+    assert (
+        command(
+            ["collect", "--workspace", name, "--allow-job-collector", "--into", str(store), "--id-base", "httk.probe"],
+            context,
+        )
+        == 2
+    )
+    # No fresh sqlite ledger was minted behind the user's back.
+    assert not (tmp_path / "into.sqlite.ids.sqlite").exists()
 
 
 def test_reopen_after_multi_family_sweep_does_not_brick(tmp_path: Path) -> None:
@@ -329,7 +379,7 @@ def test_reopen_after_multi_family_sweep_does_not_brick(tmp_path: Path) -> None:
     record = next(job_records(workspace))
     keys = _keys()
     item, _entry = _record_item(record, "A", "https://x", "a", 1)
-    ledger = tmp_path / "multi.ids.json"
+    ledger = tmp_path / "multi.ids.sqlite"
 
     first = _store_collected(
         [item],
@@ -359,7 +409,6 @@ def test_cross_sweep_content_dedup_aliases_without_bogus_assignment(tmp_path: Pa
     # alias onto A's id, not mint a fresh (bogus) one.
     pytest.importorskip("httk.store")
     from httk.core import DataRecordEntry
-    from httk.core.project.sealing import read_seal
     from httk.store import Backend, SqlStore
 
     from httk.workflow.workflow_cli._collect import _store_collected
@@ -370,7 +419,7 @@ def test_cross_sweep_content_dedup_aliases_without_bogus_assignment(tmp_path: Pa
     a, entry = _record_item(record, "A", "https://x", "same", 5)
     b, entry_b = _record_item(record, "B", "https://x", "same", 5)
     assert content_id(entry) == content_id(entry_b)
-    ledger = tmp_path / "cross.ids.json"
+    ledger = tmp_path / "cross.ids.sqlite"
 
     _store_collected(
         [a],
@@ -395,7 +444,7 @@ def test_cross_sweep_content_dedup_aliases_without_bogus_assignment(tmp_path: Pa
     assert cast(Any, reports[1]["stored"])["entries"] == [stored_id]
 
     ws = record.workspace_id
-    records = read_seal(ledger).records
+    records = _ledger_records(ledger)
     assigned = {r["key"]: r for r in records if "id" in r}
     aliases = {r["key"]: r["alias_of"] for r in records if "alias_of" in r}
     # A's output owns the id; B's output is an alias — never its own assignment.
@@ -408,7 +457,6 @@ def test_ledger_leaves_a_non_conforming_user_id_untouched(tmp_path: Path) -> Non
     # A user id the store accepts but that is not the base-series-number shape
     # (e.g. "mydb:foo") must NOT be mistaken for "no id yet" and overwritten.
     pytest.importorskip("httk.store")
-    from httk.core.project.sealing import read_seal
 
     from httk.workflow.workflow_cli._collect import _store_collected
 
@@ -419,7 +467,7 @@ def test_ledger_leaves_a_non_conforming_user_id_untouched(tmp_path: Path) -> Non
     run = Run(outputs=(RunEdge("out", "records", "mydb:foo"),), source_id="ws:nc")
     item = _synthetic_item(record, "nc", {"out": preassigned}, run)
 
-    ledger = tmp_path / "nc.ids.json"
+    ledger = tmp_path / "nc.ids.sqlite"
     reports = _store_collected(
         [item],
         str(tmp_path / "s.sqlite"),
@@ -431,4 +479,4 @@ def test_ledger_leaves_a_non_conforming_user_id_untouched(tmp_path: Path) -> Non
     # Saved with its own id, and the output never entered the ledger.
     assert cast(Any, reports[0]["stored"])["entries"] == ["mydb:foo"]
     ws = record.workspace_id
-    assert f"{ws}:nc:out" not in {r["key"] for r in read_seal(ledger).records}
+    assert f"{ws}:nc:out" not in {r["key"] for r in _ledger_records(ledger)}

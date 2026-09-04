@@ -32,17 +32,23 @@ same id rather than a fresh entry.
   one file of that output (marked by a literal `file:` segment so a role and a
   file can never be confused). Keys are opaque to the allocator: embedded colons
   in a role or path are harmless.
-- **The seal and git are the witnesses.** The ledger file is one signed seal
-  document (`kind="httk-idledger"`), written atomically and re-signed only when
-  something was actually allocated. The signature is an **audit record**, not a
-  build gate: reopening the ledger logs who signed it (the manual-audit surface)
-  but never demands a particular signer. The integrity self-check is always on —
-  a signature that no longer matches its own content (tamper, corruption, a
-  hand-edit) makes the reopen refuse; verification against a *pinned* signer is
-  available (`IdLedger.open(trusted_keys=...)`) but optional. Git history is the
-  tamper witness for the sequence of re-signings; there is no separate hash
-  chain. A corrupted or lost ledger is recovered by **restoring it from git**,
-  and the verification errors say so.
+- **The segments and git are the witnesses.** The ledger file is one
+  `sqlite3` database. Each close that allocated something appends its new
+  records plus exactly **one signed segment** covering just them (the segment's
+  subject carries the per-family base map, the series, the ledger identity, and
+  the record range it signs); a close that allocated nothing leaves the file
+  byte-identical. Reopening verifies every segment's signature and checks that
+  the segments exactly partition the records. A signature is an **audit
+  record**, not a build gate: the reopen logs who signed each segment (the
+  manual-audit surface) but never demands a particular signer, unless a *pinned*
+  signer is required (`IdLedger.open(trusted_keys=...)`), which is optional. The
+  integrity self-check is always on — an edit, a middle deletion, a reordering,
+  or a segment/record range mismatch makes the reopen refuse. What in-file
+  checks cannot see is a **whole-file rollback**: dropping the newest
+  segment(s) together with their records leaves a self-consistent older ledger,
+  so that is witnessed only by **git history**. The committed file is binary;
+  `sqlite3 <file> .dump` renders it for inspection. A corrupted or lost ledger
+  is recovered by **restoring it from git**, and the verification errors say so.
 
 ## The anchoring rule
 
@@ -58,11 +64,11 @@ store-minted (unstable) ids with a loud warning rather than pinning it wrongly.
 ## Using it from `collect`
 
 With `--into`, the ledger is **on by default**, kept beside the store at
-`<into>.ids.json`:
+`<into>.ids.sqlite`:
 
 | Flag | Effect |
 | --- | --- |
-| *(default)* | Allocate ids through `<into>.ids.json`, creating and signing it on first use (announced loudly — a keep-worthy file appears next to the store; commit it alongside the store). |
+| *(default)* | Allocate ids through `<into>.ids.sqlite`, creating and signing it on first use (announced loudly — a keep-worthy file appears next to the store; commit it alongside the store). |
 | `--id-ledger PATH` | Put the ledger somewhere else, e.g. a path committed in the database repo. |
 | `--no-id-ledger` | Do not use a ledger; the store mints ids, which are **not** stable across rebuilds. Warned once. |
 

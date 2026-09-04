@@ -233,7 +233,7 @@ Language documents use `job new --from-runner DOCUMENT`; see
 | `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--degraded`, `--raw`, `--allow-job-collector`, `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--no-id-ledger`, `--id-ledger PATH` |
 
 With `--into`, a sealed id ledger keeps entry ids stable across rebuilds. It is
-on by default at `<into>.ids.json`; `--id-ledger PATH` relocates it and
+on by default at `<into>.ids.sqlite`; `--id-ledger PATH` relocates it and
 `--no-id-ledger` disables it (ids then become unstable across rebuilds). See
 {doc}`/stable_ids`.
 

@@ -189,7 +189,7 @@ stored keeps a `"storage_error"` and fails the exit code.
 for minted entry ids; `--id-series` selects the campaign series and defaults to
 `1`. By default a sealed **id ledger** allocates those ids so they stay stable
 across rebuilds — see {doc}`stable_ids`. It lives beside the store at
-`<into>.ids.json` (relocate with `--id-ledger PATH`), is created and signed on
+`<into>.ids.sqlite` (relocate with `--id-ledger PATH`), is created and signed on
 first use, and is announced loudly because it is a keep-worthy file to commit
 alongside the store. `--no-id-ledger` opts out, and a sweep with no resolvable
 workspace signing key falls back to no ledger; both mean store-minted ids that

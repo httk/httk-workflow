@@ -253,7 +253,7 @@ def _open_id_ledger(
     and never collide across families — the ledger enforces id uniqueness
     globally, not per family, so one shared base would brick a second sweep.
 
-    :param ledger_path: Where the ledger seal document lives.
+    :param ledger_path: Where the ledger database lives.
     :param keys: The signing keys used to seal the ledger.
     :param id_base: The entry-id namespace base minted ids carry.
     :param id_series: The entry-id series minted ids carry.
@@ -411,9 +411,9 @@ def _store_collected(
     :param path: The SQLite store file path.
     :param id_base: The entry-id namespace base.
     :param id_series: The entry-id campaign series.
-    :param ledger_path: An id-ledger seal document to allocate stable ids
+    :param ledger_path: An id-ledger database to allocate stable ids
         through, or ``None`` to let the store mint ids directly.
-    :param ledger_keys: The signing keys the ledger reseals with.
+    :param ledger_keys: The signing keys each appended segment is signed with.
     :return: One report mapping per collected job.
     """
 
@@ -584,7 +584,7 @@ def _ledger_settings(
 ) -> tuple[str | None, Sequence[tuple[str, bytes]]]:
     """Resolve the id-ledger path and signing keys for a ``--into`` sweep.
 
-    A ledger is on by default at ``<into>.ids.json`` so entry ids stay stable
+    A ledger is on by default at ``<into>.ids.sqlite`` so entry ids stay stable
     across rebuilds; ``--no-id-ledger`` opts out and ``--id-ledger PATH``
     relocates it. A sweep with no resolvable workspace signing key falls back to
     no ledger with a loud warning rather than failing the collect.
@@ -610,7 +610,16 @@ def _ledger_settings(
             arguments.into,
         )
         return None, ()
-    return arguments.id_ledger or f"{arguments.into}.ids.json", resolved.keys
+    if not arguments.id_ledger:
+        default_path = Path(f"{arguments.into}.ids.sqlite")
+        legacy_path = Path(f"{arguments.into}.ids.json")
+        if not default_path.exists() and legacy_path.exists():
+            raise ValueError(
+                f"the id ledger format changed to sqlite: {default_path} does not exist, but a legacy JSON "
+                f"ledger {legacy_path} does. Creating a fresh ledger here would re-mint every id from 1. "
+                "Migrate the old ledger to sqlite, or pass --id-ledger PATH / --no-id-ledger explicitly."
+            )
+    return arguments.id_ledger or f"{arguments.into}.ids.sqlite", resolved.keys
 
 
 def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -736,5 +745,5 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
     parser.add_argument(
         "--id-ledger",
         metavar="PATH",
-        help="id-ledger seal document location (default: <into>.ids.json; on by default with --into)",
+        help="id-ledger database location (default: <into>.ids.sqlite; on by default with --into)",
     )
