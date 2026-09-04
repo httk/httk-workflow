@@ -156,7 +156,8 @@ def test_an_unknown_action_under_a_known_group_names_that_group(tmp_path: Path, 
     assert "httk workspace" in captured
     assert "invalid choice: 'frobnicate'" in captured
     # The group's own actions are what it offers instead, not the tree's groups.
-    assert "'fsck'" in captured and "'remote'" not in captured
+    # (argparse dropped the quotes around each choice in 3.13+, so match the bare name.)
+    assert "fsck" in captured and "remote" not in captured
 
 
 def test_an_unknown_action_under_a_nested_group_names_that_nested_group(capsys) -> None:
