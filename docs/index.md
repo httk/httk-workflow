@@ -52,6 +52,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`taskmanager` — workspaces, submission, managers, inspection, repair
 - {doc}`workflow_cli` — the whole `httk workflow` tree: projects, config, remotes, and launchers
 - {doc}`sealing` — signing finished jobs, workspaces, and projects so tampering is detectable
+- {doc}`stable_ids` — keeping entry ids stable across store rebuilds with a sealed id ledger
 - {doc}`campaigns` — partitioning a very large campaign across many workspaces
 - {doc}`composing_workflows` — a workflow that calls other workflows as child jobs
 - {doc}`benchmarks` — measured local scale snapshot and benchmark methodology
@@ -114,6 +115,7 @@ workflow_languages
 taskmanager
 workflow_cli
 sealing
+stable_ids
 campaigns
 composing_workflows
 benchmarks

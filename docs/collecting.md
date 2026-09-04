@@ -187,7 +187,18 @@ stored keeps a `"storage_error"` and fails the exit code.
 
 `--id-base` is required with `--into` and names the dot-separated namespace used
 for minted entry ids; `--id-series` selects the campaign series and defaults to
-`1`. Before persistence, edges to output records that do not yet have store ids
+`1`. By default a sealed **id ledger** allocates those ids so they stay stable
+across rebuilds — see {doc}`stable_ids`. It lives beside the store at
+`<into>.ids.json` (relocate with `--id-ledger PATH`), is created and signed on
+first use, and is announced loudly because it is a keep-worthy file to commit
+alongside the store. `--no-id-ledger` opts out, and a sweep with no resolvable
+workspace signing key falls back to no ledger; both mean store-minted ids that
+are **not** stable across rebuilds, warned once. An output already carrying an
+assigned public id is never re-numbered, content the store deduplicates onto one
+row is recorded as one id with the other keys aliased to it, and a job whose
+identity is not stable (a v1 tree with no manifest) is store-minted with a
+warning rather than pinned to a stale key. Before persistence, edges to output
+records that do not yet have store ids
 use those records' content ids. The `--into` path uses two passes: it commits
 all job outputs first while building one sweep-wide content-id-to-entry-id map,
 then rewrites and commits runs and product links. References not produced in

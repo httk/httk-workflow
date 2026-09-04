@@ -32,6 +32,7 @@ from .errors import (
     WorkspaceCorruptionError,
     WorkspaceUnavailableError,
 )
+from .id_keys import UnstableIdentityError, ledger_key
 from .manager import NotIdleError, TaskManager, WorkCensus
 from .runtime_builders import JobState
 from .scaffold import ScaffoldedJob, new_job, new_jobs, scaffold_job
@@ -65,6 +66,7 @@ __all__ = [
     "TaskManager",
     "TransactionError",
     "TransitionLostError",
+    "UnstableIdentityError",
     "UnsupportedExtensionError",
     # Orchestration and management entry points.
     "WorkCensus",
@@ -75,6 +77,7 @@ __all__ = [
     "WorkspaceUnavailableError",
     "collect",
     "job_records",
+    "ledger_key",
     "new_job",
     "new_jobs",
     "scaffold_job",

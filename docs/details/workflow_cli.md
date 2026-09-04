@@ -229,7 +229,12 @@ Language documents use `job new --from-runner DOCUMENT`; see
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--degraded`, `--raw`, `--allow-job-collector`, `--into PATH`, `--id-base BASE`, `--id-series SERIES` |
+| `collect WORKSPACE` | stream one collected summary per finished job | `--state`, `--placement`, `--degraded`, `--raw`, `--allow-job-collector`, `--into PATH`, `--id-base BASE`, `--id-series SERIES`, `--no-id-ledger`, `--id-ledger PATH` |
+
+With `--into`, a sealed id ledger keeps entry ids stable across rebuilds. It is
+on by default at `<into>.ids.json`; `--id-ledger PATH` relocates it and
+`--no-id-ledger` disables it (ids then become unstable across rebuilds). See
+{doc}`/stable_ids`.
 
 `--degraded` prints only the degraded per-job lines; the trailing summary still
 counts the whole sweep, so a filtered listing never hides how many jobs ran. It

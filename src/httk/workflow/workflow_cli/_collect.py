@@ -1,18 +1,23 @@
 """The collect command."""
 
 import argparse
+import contextlib
 import json
 import re
-from dataclasses import replace
+from collections.abc import Sequence
+from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from httk.core import Run, RunEdge
 from httk.core.storage import content_id, resolve_storage_record
 
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, CollectedJob, collect, job_records
+from ..errors import SealError
+from ..id_keys import UnstableIdentityError, ledger_key
+from ..seals import default_workspace_keys
 from ._common import *
-from ._common import _leaf, _local_root
+from ._common import _LOGGER, _leaf, _local_root
 
 _CONTENT_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -223,8 +228,194 @@ def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, .
     return layout, failures
 
 
-def _store_collected(items: list[CollectedJob], path: str, *, id_base: str, id_series: str) -> list[dict[str, object]]:
-    """Save one bounded collected sweep into a file-backed SQLite store."""
+def _id_settable(value: object) -> bool:
+    """Report whether an output value can be handed an explicit entry id.
+
+    Only a dataclass carrying its own ``id`` field — a record like ``DataRecord``
+    or ``Run`` that is its own storage record — can be given a ledger id through
+    :func:`dataclasses.replace`. A view over a record whose backing dataclass has
+    no ``id`` field (a structure view) cannot, so the store mints its id instead.
+
+    :param value: The collected output value.
+    :return: Whether an explicit id can be threaded onto it.
+    """
+
+    return is_dataclass(value) and any(field.name == "id" for field in fields(value))
+
+
+def _open_id_ledger(
+    ledger_path: str, keys: Sequence[tuple[str, bytes]], id_base: str, id_series: str, items: list[CollectedJob]
+) -> Any:
+    """Create or open the sweep's id ledger, deriving its per-family bases.
+
+    Each family gets a distinct base ``<id_base>.<family>`` (the store's
+    ``type_in_base`` convention), so ids are ``<id_base>.<family>-<series>-<n>``
+    and never collide across families — the ledger enforces id uniqueness
+    globally, not per family, so one shared base would brick a second sweep.
+
+    :param ledger_path: Where the ledger seal document lives.
+    :param keys: The signing keys used to seal the ledger.
+    :param id_base: The entry-id namespace base minted ids carry.
+    :param id_series: The entry-id series minted ids carry.
+    :param items: The collected sweep, read for the families to configure.
+    :return: The open, locked ledger, or ``None`` when nothing in the sweep can
+        be allocated through it (no id-settable output).
+    """
+
+    from httk.store import IdLedger
+
+    values = [value for item in items if item.missing_collector is None for value in (*item.outputs.values(), item.run)]
+    families = sorted(
+        {str(getattr(value, "type", "")) for value in values if getattr(value, "type", None) and _id_settable(value)}
+    )
+    if not families:
+        _LOGGER.info("no id-settable entries in this sweep; not creating an id ledger at %s", ledger_path)
+        return None
+    location = Path(ledger_path).expanduser()
+    location.parent.mkdir(parents=True, exist_ok=True)
+    if location.exists():
+        return IdLedger.open(location, keys=keys)
+    _LOGGER.warning(
+        "creating id ledger %s: entry ids for this store are now allocated through it and stay stable across "
+        "rebuilds. Keep this file with the store (commit it alongside it) — deleting it re-mints every id.",
+        location,
+    )
+    bases = {family: f"{id_base}.{family}" for family in families}
+    return IdLedger.create(location, bases=bases, series=id_series, keys=keys)
+
+
+def _stored_ledger_id(store: Any, type_to_family: dict[str, type], entry_type: str, identity: str) -> str | None:
+    """Return the public id an entry-type row already stored under one content id.
+
+    This is how a *later* sweep aliases onto content an *earlier* sweep stored in
+    the same store (the ledger maps keys, not content, so a brand-new key for
+    already-stored content is invisible to it otherwise).
+
+    :param store: The destination store.
+    :param type_to_family: Entry type to its registered family class.
+    :param entry_type: The value's entry type.
+    :param identity: The content id to look up.
+    :return: The stored public id, or ``None`` when the content is not present.
+    """
+
+    family = type_to_family.get(entry_type)
+    if family is None:
+        return None
+    try:
+        existing = store.fetch_entry(family, identity, eager=False)
+    except Exception:
+        # The content is not stored (the normal miss), or the family is not
+        # content-addressable; either way there is no id to alias onto.
+        return None
+    stored = getattr(existing, "id", None)
+    return stored if isinstance(stored, str) else None
+
+
+def _ledger_entry_id(
+    ledger: Any,
+    store: Any,
+    type_to_family: dict[str, type],
+    item: CollectedJob,
+    role: str | None,
+    value: object,
+    original_id: object,
+    content_to_ledger: dict[str, str],
+    warned_unstable: set[str],
+) -> str | None:
+    """Return the ledger id to save an output under, or ``None`` to let the store mint.
+
+    An output already carrying a real (non-content) public id is never
+    overwritten; a value that cannot carry an explicit id is minted by the store;
+    an unstable-identity job warns once and is minted; content already allocated
+    a ledger id this sweep is aliased onto that id, and anything else mints a
+    fresh id keyed by the job coordinate.
+
+    :param ledger: The open id ledger.
+    :param store: The destination store, consulted for already-stored content.
+    :param type_to_family: Entry type to its registered family class.
+    :param item: The collected job the output belongs to.
+    :param role: The declared output role, or ``None`` for the job's run.
+    :param value: The output value.
+    :param original_id: The value's own ``id`` before storing, if any.
+    :param content_to_ledger: The sweep's content-id to ledger-id map, updated in place.
+    :param warned_unstable: Job coordinates already warned about, updated in place.
+    :return: The ledger id to inject, or ``None`` to fall back to store minting.
+    """
+
+    from httk.store import IdLedgerError
+
+    if isinstance(original_id, str) and _CONTENT_ID_RE.fullmatch(original_id) is None:
+        # The value already carries a user-assigned id (conforming or not); never
+        # overwrite it.  Only a content-id-shaped placeholder (64 lowercase hex)
+        # is treated as "no id yet" and gets allocated one here.
+        # ponytail: a user id that is itself exactly 64 lowercase hex is misread as a content id and overwritten; carry an explicit "has real id" flag if that collision must be ruled out.
+        return None
+    if not _id_settable(value):
+        return None
+    try:
+        key = ledger_key(item, role=role)
+    except UnstableIdentityError:
+        coordinate = f"{item.record.workspace_id}:{item.record.job_id}"
+        if coordinate not in warned_unstable:
+            warned_unstable.add(coordinate)
+            _LOGGER.warning(
+                "job %s has an unstable identity (a v1 tree with no manifest); its entry ids are store-minted "
+                "and will NOT be stable across rebuilds.",
+                coordinate,
+            )
+        return None
+    identity = content_id(value)
+    prior = ledger.lookup(key)
+    if prior is not None:
+        # A later job with identical content must alias onto this id, not mint.
+        content_to_ledger.setdefault(identity, prior)
+        return prior
+    entry_type = str(getattr(value, "type", ""))
+    # Alias onto an id this content already holds: allocated earlier this sweep,
+    # or stored by an earlier sweep into this same store.  This is the residual
+    # dedup case the plan calls out; resolving it here (before the save) aliases
+    # cleanly and never writes a bogus assignment the append-only ledger cannot
+    # take back.
+    allocated = content_to_ledger.get(identity) or _stored_ledger_id(store, type_to_family, entry_type, identity)
+    try:
+        if allocated is not None:
+            ledger.alias(key, allocated)
+            content_to_ledger[identity] = allocated
+            return allocated
+        entry_id = ledger.assign(key, entry_type)
+    except IdLedgerError as exc:
+        if allocated is not None:
+            # The content is stored under an id outside the ledger (mixed
+            # ledger/no-ledger use of one store); reuse it so the store stays
+            # consistent, without a ledger record.
+            _LOGGER.warning("reusing store id %s for %s (not ledger-managed): %s", allocated, key, exc)
+            return allocated
+        _LOGGER.warning("id ledger could not allocate for %s: %s; falling back to store minting.", key, exc)
+        return None
+    content_to_ledger[identity] = entry_id
+    return entry_id
+
+
+def _store_collected(
+    items: list[CollectedJob],
+    path: str,
+    *,
+    id_base: str,
+    id_series: str,
+    ledger_path: str | None = None,
+    ledger_keys: Sequence[tuple[str, bytes]] = (),
+) -> list[dict[str, object]]:
+    """Save one bounded collected sweep into a file-backed SQLite store.
+
+    :param items: The collected jobs to store.
+    :param path: The SQLite store file path.
+    :param id_base: The entry-id namespace base.
+    :param id_series: The entry-id campaign series.
+    :param ledger_path: An id-ledger seal document to allocate stable ids
+        through, or ``None`` to let the store mint ids directly.
+    :param ledger_keys: The signing keys the ledger reseals with.
+    :return: One report mapping per collected job.
+    """
 
     try:
         from httk.store import Backend, EntryIdScheme, SqlStore
@@ -245,7 +436,18 @@ def _store_collected(items: list[CollectedJob], path: str, *, id_base: str, id_s
         }
     )
     reports = [_collected_mapping(item) for item in items]
-    with Backend.sqlite(target) as database:
+    with contextlib.ExitStack() as stack:
+        ledger = (
+            _open_id_ledger(ledger_path, ledger_keys, id_base, id_series, items) if ledger_path is not None else None
+        )
+        if ledger is not None:
+            stack.enter_context(ledger)
+        database = stack.enter_context(Backend.sqlite(target))
+        content_to_ledger: dict[str, str] = {}
+        warned_unstable: set[str] = set()
+        type_to_family: dict[str, type] = {
+            str(getattr(family, "type", "")): family for family in layout if getattr(family, "type", None)
+        }
         try:
             store = SqlStore(database, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series))
         except StorageLayoutUpgradeRequiredError as exc:
@@ -277,23 +479,45 @@ def _store_collected(items: list[CollectedJob], path: str, *, id_base: str, id_s
                 with store.transaction():
                     pending_remap: dict[str, str] = {}
                     entry_ids: list[str] = []
-                    for value in item.outputs.values():
+                    for role, value in item.outputs.items():
                         original_id = getattr(value, "id", None)
-                        sid = store.save(value)
+                        chosen = (
+                            _ledger_entry_id(
+                                ledger,
+                                store,
+                                type_to_family,
+                                item,
+                                role,
+                                value,
+                                original_id,
+                                content_to_ledger,
+                                warned_unstable,
+                            )
+                            if ledger is not None
+                            else None
+                        )
+                        # Only an id-settable dataclass reaches a non-None id, so
+                        # this replace never lands on the view-fallback branch.
+                        saved = replace(cast(Any, value), id=chosen) if chosen is not None else value
+                        sid = store.save(saved)
                         try:
-                            fetched = store.fetch(type(value), sid)
+                            fetched = store.fetch(type(saved), sid)
                         except (SchemaError, TypeError) as exc:
                             # Structure-family collectors may return a view over
                             # a storable record; fetch the record backing that
                             # view when the view class itself is not a dataclass.
                             try:
-                                record_type = resolve_storage_record(value)
+                                record_type = resolve_storage_record(saved)
                             except (SchemaError, TypeError):
                                 raise exc
                             fetched = store.fetch(record_type, sid)
                         fetched_id = getattr(fetched, "id", None)
                         if not isinstance(fetched_id, str):
                             raise ValueError(f"stored output {type(value).__name__} has no string entry id")
+                        # A ledger-chosen id always matches what the store stores
+                        # under it: the pre-check in _ledger_entry_id aliases onto
+                        # already-stored content rather than minting a colliding id,
+                        # so the store never deduplicates onto a different id here.
                         entry_ids.append(fetched_id)
                         pending_remap[content_id(value)] = fetched_id
                         if isinstance(original_id, str) and original_id != fetched_id:
@@ -321,6 +545,27 @@ def _store_collected(items: list[CollectedJob], path: str, *, id_base: str, id_s
                         )
                         for product in item.products
                     )
+                    # The run is the provenance hub every relationship points
+                    # at, so it takes a ledger id too, keyed by the bare job
+                    # coordinate.  The edges were already rewritten above; the
+                    # run's own id is orthogonal to them.
+                    run_chosen = (
+                        _ledger_entry_id(
+                            ledger,
+                            store,
+                            type_to_family,
+                            item,
+                            None,
+                            rewritten_run,
+                            getattr(rewritten_run, "id", None),
+                            content_to_ledger,
+                            warned_unstable,
+                        )
+                        if ledger is not None
+                        else None
+                    )
+                    if run_chosen is not None:
+                        rewritten_run = replace(rewritten_run, id=run_chosen)
                     run_sid = store.save(rewritten_run)
                     fetched_run = store.fetch(type(rewritten_run), run_sid)
                     run_id = getattr(fetched_run, "id", None)
@@ -332,6 +577,40 @@ def _store_collected(items: list[CollectedJob], path: str, *, id_base: str, id_s
             except Exception as exc:
                 report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
     return reports
+
+
+def _ledger_settings(
+    arguments: argparse.Namespace, workspace: Workspace
+) -> tuple[str | None, Sequence[tuple[str, bytes]]]:
+    """Resolve the id-ledger path and signing keys for a ``--into`` sweep.
+
+    A ledger is on by default at ``<into>.ids.json`` so entry ids stay stable
+    across rebuilds; ``--no-id-ledger`` opts out and ``--id-ledger PATH``
+    relocates it. A sweep with no resolvable workspace signing key falls back to
+    no ledger with a loud warning rather than failing the collect.
+
+    :param arguments: The parsed collect arguments.
+    :param workspace: The workspace the sweep collects from.
+    :return: The ledger path (or ``None`` when disabled) and the signing keys.
+    """
+
+    if arguments.no_id_ledger:
+        _LOGGER.warning(
+            "--no-id-ledger: entry ids for %s are store-minted and will NOT be stable across rebuilds.",
+            arguments.into,
+        )
+        return None, ()
+    try:
+        resolved = default_workspace_keys(workspace)
+    except SealError as exc:
+        _LOGGER.warning(
+            "no signing key is available to seal an id ledger (%s); entry ids for %s are store-minted and will "
+            "NOT be stable across rebuilds. Configure seal.keys, or pass --no-id-ledger to silence this.",
+            exc,
+            arguments.into,
+        )
+        return None, ()
+    return arguments.id_ledger or f"{arguments.into}.ids.json", resolved.keys
 
 
 def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
@@ -373,11 +652,18 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             on_skipped=_skip,
         )
     )
-    reports = (
-        _store_collected(items, arguments.into, id_base=arguments.id_base, id_series=arguments.id_series)
-        if arguments.into is not None
-        else [_collected_mapping(item) for item in items]
-    )
+    if arguments.into is not None:
+        ledger_path, ledger_keys = _ledger_settings(arguments, workspace)
+        reports = _store_collected(
+            items,
+            arguments.into,
+            id_base=arguments.id_base,
+            id_series=arguments.id_series,
+            ledger_path=ledger_path,
+            ledger_keys=ledger_keys,
+        )
+    else:
+        reports = [_collected_mapping(item) for item in items]
     for item, report in zip(items, reports):
         # --degraded prints only the degraded lines; the summary below still
         # reflects the whole sweep, so the counts do not silently shrink.
@@ -441,4 +727,14 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
         metavar="SERIES",
         default="1",
         help="entry-id campaign series (default: 1)",
+    )
+    parser.add_argument(
+        "--no-id-ledger",
+        action="store_true",
+        help="do not allocate ids through a stable id ledger (ids become unstable across rebuilds)",
+    )
+    parser.add_argument(
+        "--id-ledger",
+        metavar="PATH",
+        help="id-ledger seal document location (default: <into>.ids.json; on by default with --into)",
     )
