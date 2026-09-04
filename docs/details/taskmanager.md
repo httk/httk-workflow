@@ -654,8 +654,8 @@ apply again — because the job has moved on — is moved to
 of being reread on every pass; a request for a runner executor this manager does
 not serve is left alone for a manager that does.
 
-When the publishing installation has an operator identity key — created by
-`httk init` — the request also carries a detached Ed25519
+When the publishing installation has established an operator identity with
+`httk init`, the request also carries a detached Ed25519
 signature over its canonical JSON, and the manager records the verified
 `operator_key` in the journalled state frame beside `operator` and `reason`. The
 signature is optional in both directions: a request without one is applied

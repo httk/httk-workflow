@@ -125,8 +125,9 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
 ) -> None:
     commands = [line.replace(" --remote local", "") for line in _documented_commands(_QUICKSTART)]
 
-    # The page really is seven commands, including explicit workspace setup.
-    assert sum(1 for line in commands if line.startswith("httk")) == 7
+    # The page really is eight commands, including identity and workspace setup.
+    assert sum(1 for line in commands if line.startswith("httk")) == 8
+    assert 'httk init --name "Your Name" --email you@example.org' in commands
     assert "httk project init --name quickstart ." in commands
     assert any(line.startswith("httk job new --workflow vasp-relax") for line in commands)
 
@@ -146,7 +147,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     assert (payload / "files" / "POSCAR").read_text(encoding="utf-8").splitlines()[0] == "silicon"
 
     # And the last documented command printed one collected record and the sweep summary.
-    records = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{")]
+    records = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{") and line != "{"]
     assert len(records) == 2
     assert records[0]["format"] == "httk-workflow-collected"
     assert records[0]["workflow"] == "httk.vasp.relax"

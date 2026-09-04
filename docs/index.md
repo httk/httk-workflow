@@ -82,6 +82,7 @@ python -m pip install -e .
 One workspace, one job of a packaged runner, and one manager that runs it:
 
 ```console
+httk init --name "Your Name" --email you@example.org
 httk project init --name quickstart .
 httk workspace init --name default .
 httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon

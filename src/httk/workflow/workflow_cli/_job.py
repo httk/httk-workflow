@@ -11,6 +11,7 @@ from pathlib import PurePosixPath
 
 from httk.core.identity import (
     OperatorIdentity,
+    configured_operator_identity,
     identity_seed,
     resolve_operator_identity,
     sign_document,
@@ -686,7 +687,7 @@ def handle_job_request(arguments: argparse.Namespace, context: CLIContext) -> in
         raise ValueError("--wait is only valid with the pause action")
     if arguments.timeout is not None and arguments.timeout < 0:
         raise ValueError("--timeout must not be negative")
-    identity = resolve_operator_identity(arguments.operator)
+    identity = _resolve_request_identity(arguments.operator)
     ensure_identity_key(identity)
 
     binding, root = _resolve_binding(arguments, context)
@@ -821,7 +822,7 @@ def publish_job_requests(
 
     if action not in _REQUEST_ACTIONS:
         raise ValueError(f"unknown job request action: {action}")
-    selected_identity = identity or resolve_operator_identity(None)
+    selected_identity = identity or _resolve_request_identity(None)
     ensure_identity_key(selected_identity)
     label = operator or selected_identity.label
     published: list[tuple[str, Marker, Path]] = []
@@ -1025,9 +1026,8 @@ def ensure_identity_key(identity: OperatorIdentity) -> None:
     if identity.seed_path is not None and identity_seed(identity.seed_path) is None:
         if identity.short is None:
             raise ValueError(
-                f"the default identity has no key file at {identity.seed_path}; "
-                f"create one with `httk init`, "
-                f"or restore the key file at {identity.seed_path}"
+                f"the selected default identity has no key file at {identity.seed_path}; "
+                "check `httk identity list` and re-add the default identity"
             )
         short = identity.short
         raise ValueError(
@@ -1035,6 +1035,17 @@ def ensure_identity_key(identity: OperatorIdentity) -> None:
             f"remove it with `httk identity remove {short}` then re-add it with "
             f"`httk identity add {short} ...`, or restore the key file at {identity.seed_path}"
         )
+
+
+def _resolve_request_identity(selector: str | None) -> OperatorIdentity:
+    """Resolve a request identity and guide an unconfigured user to ``httk init``."""
+
+    if selector is None:
+        identity = configured_operator_identity()
+        if identity is None:
+            raise ValueError("no operator identity is configured; run `httk init` to establish one")
+        return identity
+    return resolve_operator_identity(selector)
 
 
 def _complete_job_requests(

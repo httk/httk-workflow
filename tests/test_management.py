@@ -68,17 +68,20 @@ def test_config_import_v1_writes_identity_and_config(tmp_path: Path, monkeypatch
         encoding="utf-8",
     )
     (legacy / "keys" / "key1.pub").write_bytes(b"legacy-public-key")
+    (legacy / "keys" / "key1.seed").write_bytes(b"legacy-private-key")
 
     assert command(["config", "import-v1", str(legacy)], context) == 0
 
     # The identity part is written to identity.json by the core function.
     identity = read_identity_config()
-    assert identity["name"] == "Legacy User" and identity["email"] == "legacy@example.test"
+    assert identity["identities"] == {"legacy": {"name": "Legacy User", "email": "legacy@example.test"}}
+    assert identity["default_identity"] == "legacy"
     assert Path(str(identity["legacy_public_key"])).read_bytes() == b"legacy-public-key"
     # The workflow config records only where the import came from.
     assert read_config()["imported_from"] == str(legacy.resolve())
-    # The legacy 64-byte private material is deliberately left untouched.
-    assert not identity_key_paths()[0].exists()
+    # The new named key is generated; legacy private material remains untouched.
+    assert identity_key_paths("legacy")[0].is_file()
+    assert (legacy / "keys" / "key1.seed").read_bytes() == b"legacy-private-key"
 
 
 def test_manifest_determinism_special_names_exclusions_and_tampering(tmp_path: Path) -> None:

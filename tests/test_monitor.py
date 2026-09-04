@@ -260,7 +260,7 @@ def test_monitor_actions_delegate_to_cli_implementations(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(monitor_actions, "_mutable_workspace", lambda _view: MutableWorkspace())
     monkeypatch.setattr(monitor_actions, "ensure_identity_key", lambda _identity: None)
-    monkeypatch.setattr(monitor_actions, "resolve_operator_identity", lambda _operator: object())
+    monkeypatch.setattr(monitor_actions, "_resolve_request_identity", lambda _selector: object())
     monkeypatch.setattr(view, "marker_for", lambda _job_id: object())
 
     def fake_publish(*_args: object, **_kwargs: object) -> list[tuple[str, Any, Any]]:
@@ -304,7 +304,7 @@ def test_monitor_actions_forward_adapter_timeout(tmp_path: Path, monkeypatch: py
         context,
         adapter_timeout=12.5,
     )
-    monkeypatch.setattr(monitor_actions, "resolve_operator_identity", lambda _operator: SimpleNamespace())
+    monkeypatch.setattr(monitor_actions, "_resolve_request_identity", lambda _selector: SimpleNamespace())
     monkeypatch.setattr(monitor_actions, "ensure_identity_key", lambda _identity: None)
 
     def fake_request(_binding: object, _context: object, arguments: Any, _identity: object) -> tuple[int, str, str]:

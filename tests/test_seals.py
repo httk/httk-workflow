@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 from httk.core.crypto import ed25519_generate_seed
-from httk.core.identity import ensure_identity_key, identity_public_key
+from httk.core.identity import identity_public_key
 from httk.core.project.sealing import seal_project, unseal_project, verify_project
 
+from conftest import configure_identity
 from httk.workflow import Workspace
 from httk.workflow.errors import SealedError, SealError
 from httk.workflow.manifests import payload_file_records
@@ -87,7 +88,7 @@ def _setup(tmp_path: Path, *, identity: bool = True, jobs: int = 1) -> Env:
     """Build a project, a nested workspace, a loose project file, and *jobs* jobs."""
 
     if identity:
-        ensure_identity_key()
+        configure_identity()
     project = tmp_path / "project"
     initialize_project(project, name="sealed")
     (project / "content.txt").write_text("loose project file\n", encoding="utf-8")
@@ -335,7 +336,7 @@ def test_identity_public_key_is_a_signer(tmp_path: Path) -> None:
 def _setup_root_workspace(tmp_path: Path, *, jobs: int = 1) -> Env:
     """Build the single-directory layout: the project root is itself a workspace."""
 
-    ensure_identity_key()
+    configure_identity()
     project = tmp_path / "project"
     initialize_project(project, name="sealed-root")
     (project / "content.txt").write_text("loose project file\n", encoding="utf-8")

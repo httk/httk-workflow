@@ -686,7 +686,7 @@ def test_import_refuses_ambiguous_identity_before_mutating(tmp_path: Path) -> No
 
     # 2+ identities with no default is ambiguous, so signing the acknowledgement
     # refuses. That refusal must precede every mutation of the import.
-    with pytest.raises(ValueError, match="no operator identity is configured"):
+    with pytest.raises(ValueError, match="multiple operator identities are configured"):
         destination.import_bundle(bundle)
 
     assert destination.find_marker_by_id(job_id) is None

@@ -446,11 +446,12 @@ warning names how many such tasks a harvest saw.
 | `config unset KEY` | remove one member | |
 | `config import-v1 [SOURCE]` | read a legacy `~/.httk` configuration | |
 
-Operator identity is no longer a `config` member. The per-user identity — the
-bare name and email and every named identity — is set up and managed by the
-core-owned root commands `httk init` and `httk identity`, documented with *httk-core*.
-`config import-v1` still imports the legacy name, email, and public key into
-`identity.json` through *httk-core* while recording only `imported_from` here.
+Operator identity is no longer a `config` member. The per-user named identities
+and default are set up and managed by the core-owned root commands `httk init`
+and `httk identity`, documented with *httk-core*. `config import-v1` imports a
+legacy name and email as the first named identity when none is configured, and
+imports the legacy public key into `identity.json` through *httk-core* while
+recording only `imported_from` here.
 
 ### `project` — the directory a campaign lives in
 
@@ -493,8 +494,8 @@ Each line is `<level> <subject> <verdict> <reason>`, with indented `<kind>
 word and exit code mirror `manifest verify`: `ok` / exit 0 when every entry is
 `valid_trusted`, `UNTRUSTED` / exit 3 when none is invalid but a signer is
 untrusted, and `FAILED` / exit 1 on any invalid entry. By default the project's
-pinned keys and the local identity's public key are trusted, so a tree sealed by
-its own project or identity verifies as `valid_trusted` without naming a key.
+pinned keys and the local identities' public keys are trusted, so a tree sealed
+by its own project or identity verifies as `valid_trusted` without naming a key.
 
 ### `launcher` — the bundles that start managers
 
@@ -942,23 +943,25 @@ with a different job.
 
 ### Operator identity
 
-Operator identity — the recorded name, email, and default, plus every named
-identity — lives in `$XDG_CONFIG_HOME/httk/identity.json`, managed by *httk-core*.
-The core-owned root commands drive it: `httk init`
-records the bare `name`/`email` and creates the default `identity.seed`/`identity.pub`
-pair below `$XDG_CONFIG_HOME/httk/keys/`. Named identities are managed with
-`httk identity add --name NAME --email EMAIL SHORT`; each gets
-its own `identity-SHORT.seed`/`.pub` pair. The first named identity becomes the
-default, and `httk identity default SHORT` changes it. Removing an identity
-leaves its key files on disk; removing the default with exactly one identity
-remaining selects that identity automatically, while removal with multiple
-remaining identities requires selecting another default first.
+Operator identity — the recorded name, email, default, and named identities —
+lives in `$XDG_CONFIG_HOME/httk/identity.json`, managed by *httk-core*. The
+core-owned root command `httk init` derives a short name from the email local
+part, creates the first named identity and its
+`identity-SHORT.seed`/`.pub` pair below `$XDG_CONFIG_HOME/httk/keys/`, and makes
+it the default. Named identities can also be managed with
+`httk identity add --name NAME --email EMAIL SHORT`; `httk identity default
+SHORT` changes the default. Removing an identity leaves its key files on disk;
+removing the default with exactly one identity remaining selects that identity
+automatically, while removal with multiple remaining identities requires
+selecting another default first.
 
 The default signing identity resolves in this order: the `default_identity`
-recorded in `identity.json`, the only configured identity when there is exactly
-one, then the bare top-level `name`/`email` and `identity.seed`. A selector containing `<` is a literal
-`Name <email>` attribution label (the name may be empty) and uses the resolved
-default identity's key; other selectors must be configured short names.
+recorded in `identity.json`, or the only configured identity when there is
+exactly one. With no configured identity, signing is unsigned; multiple
+identities without a resolvable default are refused. A selector containing `<`
+is a literal `Name <email>` attribution label (the name may be empty) and uses
+the resolved default identity's key; other selectors must be configured short
+names.
 
 `job request` records the selected identity's `Name <email>` label and signs
 the request with that identity's key. Omitting `--operator` selects the

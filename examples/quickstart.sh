@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The seven commands of docs/quickstart.md, runnable.
+# The commands of docs/quickstart.md, runnable (the one-time identity setup is
+# deliberately left out; see below).
 #
 # Run it in an empty directory:
 #
@@ -51,6 +52,9 @@ Direct
 0.0000000000 0.0000000000 0.0000000000
 0.5000000000 0.5000000000 0.5000000000
 END
+
+# One-time per-user setup is `httk init --name "Your Name" --email you@example.org`;
+# deliberately not run here so this example leaves your per-user configuration untouched.
 
 # 1. The project anchor and an explicit workspace at its root.
 httk_project init --name quickstart .

@@ -15,9 +15,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from httk.core.identity import ensure_identity_key
 from httk.core.project.sealing import seal_project
 
+from conftest import configure_identity
 from httk.workflow import TaskManager, Workspace, _manager_commit
 from httk.workflow.errors import SealedError
 from httk.workflow.journal import JournalWriter
@@ -94,7 +94,7 @@ def _payload(root: Path, name: str = "job", *, runner_source: str = "#!/bin/sh\n
 
 
 def test_manager_seals_a_succeeded_job(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, job_id = _payload(tmp_path / "source", runner_source=_SUCCEED_RUNNER)
     workspace.submit(payload, "jobs")
@@ -107,7 +107,7 @@ def test_manager_seals_a_succeeded_job(tmp_path: Path) -> None:
 
 
 def test_manager_does_not_seal_when_disabled(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     workspace = Workspace.initialize(tmp_path / "workspace")
     workspace.set_setting("seal.succeeded", "false")
     payload, job_id = _payload(tmp_path / "source", runner_source=_SUCCEED_RUNNER)
@@ -141,7 +141,7 @@ def test_manager_keeps_a_job_succeeded_when_sealing_cannot_sign(tmp_path: Path, 
 
 
 def test_reseal_is_idempotent_and_recreated_after_a_lost_seal(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     workspace = Workspace.initialize(tmp_path / "workspace")
     payload, _job_id = _payload(tmp_path / "source")
     marker = workspace.submit(payload, "jobs")
@@ -168,7 +168,7 @@ def test_reseal_is_idempotent_and_recreated_after_a_lost_seal(tmp_path: Path) ->
 
 
 def test_sealed_job_refuses_transition_and_removal(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     workspace = Workspace.initialize(tmp_path / "workspace")
     sealed_marker = workspace.submit(_payload(tmp_path / "source", "sealed")[0], "jobs")
     open_marker = workspace.submit(_payload(tmp_path / "source", "open")[0], "jobs")
@@ -196,7 +196,7 @@ def test_sealed_job_refuses_transition_and_removal(tmp_path: Path) -> None:
 
 
 def test_sealed_workspace_refuses_writes_but_stays_readable(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     workspace = Workspace.initialize(tmp_path / "workspace")
     marker = workspace.submit(_payload(tmp_path / "source")[0], "jobs")
     seal_job(workspace, marker)
@@ -230,7 +230,7 @@ def test_sealed_workspace_refuses_writes_but_stays_readable(tmp_path: Path) -> N
 
 
 def test_sealed_project_refuses_new_workspace(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     project = tmp_path / "project"
     initialize_project(project, name="sealed")
     workspace = Workspace.initialize(project / "work")
@@ -247,7 +247,7 @@ def test_sealed_project_refuses_new_workspace(tmp_path: Path) -> None:
 
 
 def test_gc_keeps_a_sealed_job_and_the_seal_store(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     workspace = Workspace.initialize(tmp_path / "workspace", durable=False)
     marker = workspace.submit(_payload(tmp_path / "source")[0], "jobs")
     seal_job(workspace, marker)
@@ -268,7 +268,7 @@ def _pair(tmp_path: Path) -> tuple[Workspace, Workspace]:
 
 
 def test_a_seal_survives_a_detached_transfer_round_trip(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     source, destination = _pair(tmp_path)
     marker = source.submit(_payload(tmp_path / "src-payload")[0], "jobs")
     seal_job(source, marker)
@@ -290,7 +290,7 @@ def test_a_seal_survives_a_detached_transfer_round_trip(tmp_path: Path) -> None:
 
 
 def test_a_tampered_bundled_seal_is_refused(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     source, destination = _pair(tmp_path)
     marker = source.submit(_payload(tmp_path / "src-payload")[0], "jobs")
     seal_job(source, marker)
@@ -319,7 +319,7 @@ def test_verify_tree_on_an_unsealed_subject_reports_not_sealed(tmp_path: Path) -
 
 def _seal_root_project(tmp_path: Path):
     """Build a root-as-workspace project with one sealed job, workspace, project."""
-    ensure_identity_key()
+    configure_identity()
     project = tmp_path / "project"
     initialize_project(project, name="pp")
     workspace = Workspace.initialize(project)
@@ -356,7 +356,7 @@ def test_project_seal_excludes_a_configured_postprocess_dir(tmp_path: Path) -> N
 
 
 def test_detach_refuses_a_sealed_workspace(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     source, destination = _pair(tmp_path)
     marker = source.submit(_payload(tmp_path / "src-payload")[0], "jobs")
     seal_job(source, marker)

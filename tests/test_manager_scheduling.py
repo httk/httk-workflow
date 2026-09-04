@@ -19,10 +19,10 @@ from typing import Any
 
 import pytest
 from httk.core.digests import tree_digest
-from httk.core.identity import ensure_identity_key
 
 import httk.workflow.manager as manager_module
 from conftest import TestProfile as _TestProfile
+from conftest import configure_identity
 from httk.workflow import TaskManager, Workspace, _manager_requests
 from httk.workflow._logging import reset_logging
 from httk.workflow.journal import JournalWriter, read_record
@@ -1606,7 +1606,7 @@ def test_a_normal_run_never_reports_an_orphaned_attempt(
 ) -> None:
     # A real deployment has a signing key from ``httk init``, so auto-sealing a
     # succeeded job stays quiet; a keyless workspace would warn on every job.
-    ensure_identity_key()
+    configure_identity()
     workspace = Workspace.initialize(tmp_path / "workspace")
     for index in range(3):
         payload, _ = _payload(tmp_path / "source", _SUCCEED_RUNNER, tag=f"clean-{index}")

@@ -367,7 +367,9 @@ def test_request_without_any_identity_is_refused(tmp_path: Path, capsys) -> None
     workspace.submit(payload, "project/no-identity")
 
     assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 2
-    assert "no operator identity is configured" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "no operator identity is configured" in error
+    assert "run `httk init`" in error
     assert not list((workspace.control / "requests" / "ready").iterdir())
 
 
@@ -388,7 +390,6 @@ def test_literal_operator_on_empty_machine_publishes_unsigned_request(tmp_path: 
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "empty-data"))
     monkeypatch.delenv("HTTK_CONFIG_HOME", raising=False)
     monkeypatch.delenv("HTTK_DATA_HOME", raising=False)
-    ensure_identity_key()
     workspace, workspace_name = _new_workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", "literal-empty")
     workspace.submit(payload, "project/literal-empty")
@@ -399,15 +400,15 @@ def test_literal_operator_on_empty_machine_publishes_unsigned_request(tmp_path: 
     assert "operator_key" not in request and "signature" not in request
 
 
-def test_legacy_operator_identity_is_used_without_named_identities(tmp_path: Path) -> None:
+def test_named_operator_identity_is_used_as_the_default(tmp_path: Path) -> None:
     identity_config_path().unlink()
     write_identity_config(
         {
-            "name": "Legacy User",
-            "email": "legacy@example.test",
+            "identities": {"legacy": {"name": "Legacy User", "email": "legacy@example.test"}},
+            "default_identity": "legacy",
         }
     )
-    ensure_identity_key()
+    ensure_identity_key("legacy")
     workspace, workspace_name = _new_workspace(tmp_path)
     payload, job_id = _payload(tmp_path / "source", "legacy")
     workspace.submit(payload, "project/legacy")
@@ -415,7 +416,7 @@ def test_legacy_operator_identity_is_used_without_named_identities(tmp_path: Pat
     assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 0
     request = json.loads(next((workspace.control / "requests" / "ready").iterdir()).read_text(encoding="utf-8"))
     assert request["operator"] == "Legacy User <legacy@example.test>"
-    assert request["operator_key"] == identity_public_key(identity_key_paths()[0])
+    assert request["operator_key"] == identity_public_key(identity_key_paths("legacy")[0])
 
 
 def test_wait_returns_zero_when_manager_pauses_jobs(tmp_path: Path, capsys, monkeypatch) -> None:

@@ -5,11 +5,11 @@ import uuid
 from pathlib import Path
 
 from httk.core.cli import CLIContext
-from httk.core.identity import ensure_identity_key
 from httk.core.project.cli import command as project_command
 from httk.core.project.cli import project_repair
 from httk.core.project.members import project_members, unregister_project_member
 
+from conftest import configure_identity
 from httk.workflow import Workspace
 from httk.workflow.projects import initialize_project
 from httk.workflow.registry import (
@@ -111,7 +111,7 @@ def test_project_repair_recovers_a_deleted_members_registry(tmp_path: Path) -> N
 
 
 def test_project_seal_end_to_end_via_the_core_cli(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     project = tmp_path / "project"
     initialize_project(project, name="member")
     workspace = Workspace.initialize(project)

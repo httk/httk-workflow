@@ -32,6 +32,7 @@ sweep.
 From nothing to a finished VASP relaxation, without writing a runner:
 
 ```console
+httk init --name "Your Name" --email you@example.org
 httk project init --name quickstart .
 httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
 httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
@@ -39,9 +40,13 @@ httk workflow run
 httk workflow collect
 ```
 
+`httk init` sets up your per-user operator identity, used to attribute and sign
+what you publish, and is idempotent.
+
 [`docs/quickstart.md`](docs/quickstart.md) explains each command, and
-`examples/quickstart.sh` runs the whole sequence — with the mock VASP above
-standing in for VASP on a machine that has none.
+`examples/quickstart.sh` runs the whole sequence apart from the one-time
+identity setup — with the mock VASP above standing in for VASP on a machine
+that has none.
 
 ## Install
 

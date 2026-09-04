@@ -7,9 +7,8 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
-from httk.core.identity import ensure_identity_key
 
-from conftest import register_ws
+from conftest import configure_identity, register_ws
 from httk.workflow import TaskManager, Workspace, job_records
 from httk.workflow.packages import load_workflow_package
 from httk.workflow.postprocessing import postprocess_root, run_postprocess_script
@@ -237,7 +236,7 @@ def test_postprocess_cli_surfaces_failing_script_stderr(tmp_path: Path, capsys) 
 
 
 def test_postprocess_of_a_sealed_job_works_and_leaves_the_seal_valid(tmp_path: Path) -> None:
-    ensure_identity_key()
+    configure_identity()
     _package, provider, workspace, _job, record = _finished(tmp_path)
     marker = workspace.find_marker_by_id(record.job_id)
     assert marker is not None

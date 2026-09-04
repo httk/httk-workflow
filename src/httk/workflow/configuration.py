@@ -218,18 +218,18 @@ def unset_config_key(key: str) -> Path:
 def import_v1_configuration(source: str | os.PathLike[str] | None = None) -> dict[str, object]:
     """Import safe metadata and public identity from a legacy ``~/.httk`` tree.
 
-    The operator name, email, and public identity are recorded in the per-user
-    identity configuration via ``httk.core.identity.import_v1_identity``; the
-    workflow configuration records only where the import came from. Legacy
-    64-byte private material is deliberately left untouched.
+    The named operator identity report and legacy public key are returned from
+    ``httk.core.identity.import_v1_identity``; the workflow configuration
+    records only where the import came from. Legacy 64-byte private material is
+    deliberately left untouched.
 
     :param source: Legacy configuration root, or the default legacy home.
-    :return: Imported configuration and identity members.
+    :return: Imported workflow configuration and identity report members.
     :raises FileNotFoundError: If the legacy configuration file is absent.
     """
 
     root = Path(source).expanduser().resolve() if source is not None else (Path.home() / ".httk").resolve()
-    identity_values = import_v1_identity(root)
+    identity_report = import_v1_identity(root)
 
     current = read_config()
     current.update(
@@ -240,4 +240,4 @@ def import_v1_configuration(source: str | os.PathLike[str] | None = None) -> dic
         }
     )
     write_config(current)
-    return {**current, **identity_values}
+    return {**current, **identity_report}

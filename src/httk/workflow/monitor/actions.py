@@ -4,8 +4,6 @@ from argparse import Namespace
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from httk.core.identity import resolve_operator_identity
-
 from ..removal import remove_jobs
 from ..workflow_cli import (
     ensure_identity_key,
@@ -15,6 +13,7 @@ from ..workflow_cli import (
     run_transfer_verb_result,
     submit_remote_manager_result,
 )
+from ..workflow_cli._job import _resolve_request_identity
 from ..workspace import Workspace
 from .data import WorkspaceView
 
@@ -67,7 +66,7 @@ def request(view: WorkspaceView, action: str, job_ids: Sequence[str], reason: st
     if context is None:
         raise ValueError("a CLI context is required for monitor actions")
     if view.remote:
-        identity = resolve_operator_identity(None)
+        identity = _resolve_request_identity(None)
         ensure_identity_key(identity)
         status, _stdout, _stderr = request_remote_job_result(view.binding, context, arguments, identity)
         if status:

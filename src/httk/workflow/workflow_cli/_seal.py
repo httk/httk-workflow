@@ -11,10 +11,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from httk.core.identity import identity_key_paths
+from httk.core.identity import local_public_keys
 from httk.core.project.manifests import resolve_trusted_keys
 
-from ..projects import discover_project, read_public_key_file
+from ..projects import discover_project
 from ..seals import VALID_TRUSTED, VALID_UNKNOWN_KEY, verify_tree
 from ._common import _group, _leaf
 
@@ -24,8 +24,8 @@ def _default_trusted_keys(path: Path, explicit: list[str]) -> list[str]:
 
     A tree sealed by its own project or its own operator identity should verify
     as trusted without the operator having to name a key: the project's pinned
-    keys, plus every explicitly supplied key, plus the local identity's public
-    key when one exists.
+    keys, plus every explicitly supplied key, plus the local identities' public
+    keys when they exist.
 
     :param path: The tree to verify, from which the project is discovered.
     :param explicit: The ``--trusted-key`` values, keys or ``*.pub`` files.
@@ -35,9 +35,7 @@ def _default_trusted_keys(path: Path, explicit: list[str]) -> list[str]:
 
     project = discover_project(path)
     trusted = list(resolve_trusted_keys(project, trusted_keys=explicit))
-    public_key_path = identity_key_paths()[1]
-    if public_key_path.is_file():
-        identity_key = read_public_key_file(public_key_path)
+    for identity_key in local_public_keys():
         if identity_key not in trusted:
             trusted.append(identity_key)
     return trusted
@@ -110,7 +108,7 @@ def build_seal_parser(
         metavar="KEY_OR_FINGERPRINT",
         help=(
             "trust this key as well: an ed25519:BASE64 value, a sha256: fingerprint, or the path of a "
-            "*.pub file (repeatable). The project's pinned keys and the local identity are always trusted"
+            "*.pub file (repeatable). The project's pinned keys and all local identities are always trusted"
         ),
     )
     verify.add_argument(

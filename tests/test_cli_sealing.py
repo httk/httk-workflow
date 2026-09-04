@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 from httk.core.cli import CLIContext
 from httk.core.crypto import ed25519_generate_seed
-from httk.core.identity import ensure_identity_key
 from httk.core.project.cli import command as project_command
 
+from conftest import configure_identity
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.projects import initialize_project
 from httk.workflow.seals import is_job_sealed, is_project_sealed, is_workspace_sealed, job_seal_path
@@ -79,7 +79,7 @@ def _setup(tmp_path: Path) -> tuple[Path, Workspace, str]:
     project_root = tmp_path / "project"
     project_root.mkdir()
     initialize_project(project_root, name="sealing")
-    ensure_identity_key()
+    configure_identity()
     workspace = Workspace.initialize(project_root, durable=False)
     # Drive the job to succeeded without the manager auto-sealing it, so these
     # tests exercise the explicit seal commands from a known unsealed start.
@@ -113,7 +113,7 @@ def test_job_seal_refuses_a_non_quiescent_job(tmp_path: Path, capsys) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
     initialize_project(project_root, name="sealing")
-    ensure_identity_key()
+    configure_identity()
     workspace = Workspace.initialize(project_root, durable=False)
     payload, job_id = _payload(tmp_path / "source", "silicon")
     marker = workspace.submit(payload, "jobs/silicon")

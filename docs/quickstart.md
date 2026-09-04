@@ -5,7 +5,7 @@
 The mock VASP used below lives at `examples/mock_vasp.py` in that checkout; the
 walkthrough does not run from an arbitrary empty directory.
 
-Seven commands from a checkout to a finished VASP relaxation whose results
+Eight commands from a checkout to a finished VASP relaxation whose results
 are stored and plotted. Nothing here needs a runner to be written or a graph
 to be declared.
 
@@ -42,9 +42,10 @@ Direct
 END
 ```
 
-## The seven commands
+## The eight commands
 
 ```console
+$ httk init --name "Your Name" --email you@example.org
 $ httk project init --name quickstart .
 $ httk workspace init --name default .
 $ httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
@@ -60,6 +61,10 @@ On a VASP machine, set `vasp.command` to a command such as
 `vasp.command`; see [Environment preludes](taskmanager.md#environment-preludes).
 
 ## What each command did
+
+**`init`** sets up your per-user operator identity used to attribute and sign
+what you publish. It is idempotent, so an existing setup is reported and left
+unchanged.
 
 **`project init`** created the project anchor. The next command initialized and
 registered the workspace at the project root as `default`; project creation

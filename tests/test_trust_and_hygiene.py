@@ -12,7 +12,6 @@ import pytest
 from httk.core.cli import CLIContext
 from httk.core.crypto import ed25519_generate_seed, ed25519_public_key, ed25519_sign
 from httk.core.identity import (
-    ensure_identity_key,
     identity_public_key,
     initialize_identity,
     sign_document,
@@ -26,7 +25,7 @@ from httk.core.project.manifests import (
     create_manifest,
 )
 
-from conftest import register_ws
+from conftest import configure_identity, register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.adapters import add_remote, store_credentials
 from httk.workflow.configuration import (
@@ -314,7 +313,8 @@ def test_document_signing_is_optional_and_verifiable(tmp_path: Path, monkeypatch
     absent = verify_document(document)
     assert not absent.present and not absent.valid
 
-    ensure_identity_key()
+    created, identity = initialize_identity("Me", "me@example.org")
+    assert created and identity.short == "me"
     signed = sign_document(document)
     assert signed["operator_key"] == identity_public_key()
     checked = verify_document(signed)
@@ -340,7 +340,8 @@ def _handle_requests(workspace: Workspace) -> None:
 
 def test_signed_operator_request_round_trips_and_is_attributed(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
-    initialize_identity("Me", "me@example.org")
+    created, identity = initialize_identity("Me", "me@example.org")
+    assert created and identity.short == "me"
     workspace, job_id = _request_workspace(tmp_path)
     ws = register_ws(None, workspace.root)
     assert (
@@ -403,7 +404,7 @@ def test_unsigned_operator_request_is_still_accepted(tmp_path: Path, monkeypatch
 
 def test_forged_operator_request_is_quarantined(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
-    ensure_identity_key()
+    configure_identity()
     workspace, job_id = _request_workspace(tmp_path)
     marker = workspace.find_marker_by_id(job_id)
     assert marker is not None
@@ -437,7 +438,7 @@ def test_forged_operator_request_is_quarantined(tmp_path: Path, monkeypatch) -> 
 
 def test_transfer_acknowledgement_is_signed_and_a_forged_one_is_refused(tmp_path: Path, monkeypatch) -> None:
     _isolate(tmp_path, monkeypatch)
-    ensure_identity_key()
+    configure_identity()
     source = Workspace.initialize(tmp_path / "source")
     destination = Workspace.initialize(tmp_path / "destination")
     payload, job_id = _payload(tmp_path)

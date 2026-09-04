@@ -71,7 +71,7 @@ A seal is signed by one or more keys, each named by a *ref*:
 | --- | --- |
 | `project` | the project's own signing seed, discovered from the tree |
 | `identity` | the default operator identity |
-| `identity:<name>` | a named operator identity |
+| `identity:<short>` | a named operator identity |
 | a path | a base64 Ed25519 seed file |
 
 The `--keys REFS` option on `job seal`, `workspace seal`, and `project seal`
@@ -154,8 +154,8 @@ verdicts:
 A verdict is one of `valid_trusted` (a signer is a pinned trust anchor),
 `valid_unknown_key` (the signature verifies but nothing pins the signer), or
 `invalid` (the seal no longer describes the tree, or a signature does not
-verify). By default the project's pinned keys and the local identity's public
-key are trusted, so a tree sealed by its own project or identity verifies as
+verify). By default the project's pinned keys and the local identities' public
+keys are trusted, so a tree sealed by its own project or identity verifies as
 `valid_trusted` without naming a key; `--trusted-key` adds more, as an
 `ed25519:` key, a `sha256:` fingerprint, or a `*.pub` file.
 

@@ -25,12 +25,30 @@ import pytest
 for _thread_limit in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
     os.environ[_thread_limit] = "1"
 
+from httk.core.identity import ensure_identity_key, write_identity_config
+
 from httk.workflow.adapters import (
     add_remote,
 )
 from httk.workflow.registry import (
     register_workspace,
 )
+
+
+def configure_identity(
+    short: str = "local",
+    name: str = "Local User",
+    email: str = "local@example.test",
+) -> None:
+    """Configure one named identity and create its standard key pair."""
+
+    write_identity_config(
+        {
+            "identities": {short: {"name": name, "email": email}},
+            "default_identity": short,
+        }
+    )
+    ensure_identity_key(short)
 
 
 @pytest.fixture(autouse=True)
