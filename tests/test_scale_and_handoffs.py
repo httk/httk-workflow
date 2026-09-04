@@ -123,6 +123,16 @@ class _ScandirCounter:
             return original(*args, **kwargs)
 
         monkeypatch.setattr(os, "scandir", counting)
+        # Python 3.13's pathlib routes globbing through a glob globber
+        # (``Path._globber``) that captures ``os.scandir`` at class-definition
+        # time, so the module-level patch above does not see ``Path.glob``'s
+        # directory reads. Patch that captured reference too, guarded so it is a
+        # no-op on 3.12 and 3.14 (which call ``os.scandir`` directly and expose
+        # no such globber). The product code is unchanged; only this instrument
+        # was blind on 3.13.
+        globber = getattr(Path, "_globber", None)
+        if globber is not None and getattr(globber, "scandir", None) is not None:
+            monkeypatch.setattr(globber, "scandir", staticmethod(counting))
 
     def reset(self) -> int:
         seen = self.calls
