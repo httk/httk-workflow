@@ -34,10 +34,15 @@ same id rather than a fresh entry.
   in a role or path are harmless.
 - **The seal and git are the witnesses.** The ledger file is one signed seal
   document (`kind="httk-idledger"`), written atomically and re-signed only when
-  something was actually allocated. Its signature attests the bytes; git history
-  attests the sequence of versions. There is no separate hash chain — those two
-  witnesses are enough. A corrupted or lost ledger is recovered by
-  **restoring it from git**, and the verification errors say so.
+  something was actually allocated. The signature is an **audit record**, not a
+  build gate: reopening the ledger logs who signed it (the manual-audit surface)
+  but never demands a particular signer. The integrity self-check is always on —
+  a signature that no longer matches its own content (tamper, corruption, a
+  hand-edit) makes the reopen refuse; verification against a *pinned* signer is
+  available (`IdLedger.open(trusted_keys=...)`) but optional. Git history is the
+  tamper witness for the sequence of re-signings; there is no separate hash
+  chain. A corrupted or lost ledger is recovered by **restoring it from git**,
+  and the verification errors say so.
 
 ## The anchoring rule
 
