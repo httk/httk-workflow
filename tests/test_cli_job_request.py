@@ -324,7 +324,7 @@ def test_configured_identity_without_key_fails_loudly(tmp_path: Path, capsys) ->
     assert command(_request_args(workspace_name, job_id), _context(tmp_path)) == 2
     error = capsys.readouterr().err
     assert f"identity 'tester' has no key file at {key_path}" in error
-    assert "config identity remove tester" in error and "config identity add tester" in error
+    assert "identity remove tester" in error and "identity add tester" in error
     assert not list((workspace.control / "requests" / "ready").iterdir())
 
 

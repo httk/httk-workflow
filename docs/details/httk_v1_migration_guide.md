@@ -99,7 +99,9 @@ compatibility boundary.
 
 These imports do not migrate workflow code or task queues.
 
-Import safe user configuration explicitly:
+Import safe user configuration explicitly; this imports the legacy name, email,
+and public key into the core-owned `identity.json` and records where it came
+from (a fresh identity is otherwise set up with `httk init`):
 
 ```console
 httk workflow config import-v1

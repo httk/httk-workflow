@@ -5,12 +5,13 @@ from pathlib import Path
 
 import pytest
 from httk.core.cli import CLIContext
-from httk.core.identity import identity_key_paths
+from httk.core.identity import identity_key_paths, read_identity_config
 from httk.core.project.manifests import create_manifest
 
 from conftest import register_ws
 from httk.workflow import TaskManager, Workspace
 from httk.workflow.adapters import add_remote, import_v1_remote, run_adapter
+from httk.workflow.configuration import read_config
 from httk.workflow.journal import JournalWriter
 from httk.workflow.manifests import verify_manifest, workspace_maintenance_guard
 from httk.workflow.projects import initialize_project
@@ -56,21 +57,28 @@ def test_all_command_groups_have_help(tmp_path: Path, capsys) -> None:
     assert "usage:" in capsys.readouterr().out
 
 
-def test_config_is_xdg_isolated_and_private_key_is_0600(tmp_path: Path, monkeypatch) -> None:
+def test_config_import_v1_writes_identity_and_config(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     context = CLIContext("httk", tmp_path)
-    assert (
-        command(
-            ["config", "init", "--name", "A User", "--email", "a@example.test", "--non-interactive"],
-            context,
-        )
-        == 0
+    legacy = tmp_path / "legacy-httk"
+    (legacy / "keys").mkdir(parents=True)
+    (legacy / "config").write_text(
+        "[main]\nname = Legacy User\nemail = legacy@example.test\n",
+        encoding="utf-8",
     )
-    private, public = identity_key_paths()
-    assert private.is_file() and public.is_file()
-    assert private.stat().st_mode & 0o777 == 0o600
-    assert not (tmp_path / ".httk").exists()
+    (legacy / "keys" / "key1.pub").write_bytes(b"legacy-public-key")
+
+    assert command(["config", "import-v1", str(legacy)], context) == 0
+
+    # The identity part is written to identity.json by the core function.
+    identity = read_identity_config()
+    assert identity["name"] == "Legacy User" and identity["email"] == "legacy@example.test"
+    assert Path(str(identity["legacy_public_key"])).read_bytes() == b"legacy-public-key"
+    # The workflow config records only where the import came from.
+    assert read_config()["imported_from"] == str(legacy.resolve())
+    # The legacy 64-byte private material is deliberately left untouched.
+    assert not identity_key_paths()[0].exists()
 
 
 def test_manifest_determinism_special_names_exclusions_and_tampering(tmp_path: Path) -> None:

@@ -78,7 +78,6 @@ from ..campaigns import (
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, collect, job_records
 from ..configuration import (
     import_v1_configuration,
-    initialize_config,
     read_config,
     set_config_key,
     unset_config_key,

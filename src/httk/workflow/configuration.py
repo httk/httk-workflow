@@ -7,19 +7,13 @@ identity — signing keys, named identities, and signatures — lives in
 machine-level settings such as ``machine_names``.
 """
 
-import configparser
 import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from httk.core.identity import (
-    initialize_identity,
-    keys_home,
-    read_identity_config,
-    write_identity_config,
-)
+from httk.core.identity import import_v1_identity
 from httk.core.userdirs import config_home, data_home
 
 from ._util import write_json_atomic
@@ -33,7 +27,6 @@ __all__ = [
     "config_path",
     "data_home",
     "import_v1_configuration",
-    "initialize_config",
     "launchers_home",
     "machine_names",
     "read_config",
@@ -222,27 +215,13 @@ def unset_config_key(key: str) -> Path:
     return write_config(values)
 
 
-def initialize_config(*, name: str, email: str) -> dict[str, object]:
-    """Record the operator identity and ensure a signing key exists.
-
-    Identity now lives in ``identity.json`` managed by ``httk.core.identity``;
-    this delegates to ``httk.core.identity.initialize_identity``.
-
-    :param name: Operator name to record.
-    :param email: Operator email address to record.
-    :return: The resulting identity configuration members.
-    """
-
-    return initialize_identity(name, email)
-
-
 def import_v1_configuration(source: str | os.PathLike[str] | None = None) -> dict[str, object]:
     """Import safe metadata and public identity from a legacy ``~/.httk`` tree.
 
     The operator name, email, and public identity are recorded in the per-user
-    identity configuration via ``httk.core.identity``; the workflow
-    configuration records only where the import came from. Legacy 64-byte
-    private material is deliberately left untouched.
+    identity configuration via ``httk.core.identity.import_v1_identity``; the
+    workflow configuration records only where the import came from. Legacy
+    64-byte private material is deliberately left untouched.
 
     :param source: Legacy configuration root, or the default legacy home.
     :return: Imported configuration and identity members.
@@ -250,26 +229,7 @@ def import_v1_configuration(source: str | os.PathLike[str] | None = None) -> dic
     """
 
     root = Path(source).expanduser().resolve() if source is not None else (Path.home() / ".httk").resolve()
-    legacy_config = root / "config"
-    if not legacy_config.is_file():
-        raise FileNotFoundError(legacy_config)
-    parser = configparser.ConfigParser()
-    parser.read(legacy_config, encoding="utf-8")
-
-    identity_values = read_identity_config()
-    identity_values.update(
-        {
-            "name": parser.get("main", "name", fallback=str(identity_values.get("name", ""))),
-            "email": parser.get("main", "email", fallback=str(identity_values.get("email", ""))),
-        }
-    )
-    legacy_public = root / "keys" / "key1.pub"
-    if legacy_public.is_file():
-        public_target = keys_home() / "legacy-identity.pub"
-        public_target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        public_target.write_bytes(legacy_public.read_bytes())
-        identity_values["legacy_public_key"] = str(public_target)
-    write_identity_config(identity_values)
+    identity_values = import_v1_identity(root)
 
     current = read_config()
     current.update(
@@ -280,7 +240,4 @@ def import_v1_configuration(source: str | os.PathLike[str] | None = None) -> dic
         }
     )
     write_config(current)
-    return {
-        **current,
-        **{key: identity_values[key] for key in ("name", "email", "legacy_public_key") if key in identity_values},
-    }
+    return {**current, **identity_values}

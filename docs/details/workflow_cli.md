@@ -34,7 +34,8 @@ httk workflow run        [--workspace WORKSPACE]  (the recommended spelling of `
 httk workflow manager    run
 httk workflow campaign   init | show | submit | collect | start-"managers"
 httk workflow v1         collect
-httk workflow config     init | show | set | unset | import-v1
+httk workflow config     show | set | unset | import-v1
+httk init | identity     (core-owned: per-user configuration and named operator identities)
 httk project             repair | manifest create | manifest verify | seal | unseal   (httk-workflow mounts these beside core init | show | import-v1)
 httk workflow remote     list | add | configure | check | import-v1 | show | remove
 httk workflow transfer   [OPTIONS] SRC DST      (plus the protocol spellings: receive | offer | retire)
@@ -436,19 +437,20 @@ dated run directory). Each collected report carries `identity_stable`: `false`
 for a task whose identity is path-derived because it has no `ht.manifest`, and a
 warning names how many such tasks a harvest saw.
 
-### `config` — the per-user configuration and identity
+### `config` — the per-user machine configuration
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `config init` | write the configuration and the identity key | `--name`, `--email`, `--non-interactive` |
 | `config show [KEY]` | print the configuration, or one member | |
 | `config set KEY VALUE` | store one member | `machine_names` is a comma-separated list of names this machine answers to |
 | `config unset KEY` | remove one member | |
 | `config import-v1 [SOURCE]` | read a legacy `~/.httk` configuration | |
-| `config identity add SHORT` | add a named operator identity and its key | `--name`, `--email`, `--default` |
-| `config identity list` | list named identities and public keys | `--json` |
-| `config identity default SHORT` | select the default named identity | |
-| `config identity remove SHORT` | remove an identity from config, leaving its key files | |
+
+Operator identity is no longer a `config` member. The per-user identity — the
+bare name and email and every named identity — is set up and managed by the
+core-owned root commands `httk init` and `httk identity`, documented with *httk-core*.
+`config import-v1` still imports the legacy name, email, and public key into
+`identity.json` through *httk-core* while recording only `imported_from` here.
 
 ### `project` — the directory a campaign lives in
 
@@ -804,7 +806,7 @@ overrides. Legacy `~/.httk` data is read only through `config import-v1`; its
 64-byte private material is not converted.
 
 ```console
-httk workflow config init --name "A User" --email user@example.org
+httk init --name "A User" --email user@example.org
 httk workflow config set machine_names "node-a,node-b"
 httk workflow config unset machine_names
 httk project init --name example .
@@ -821,7 +823,7 @@ anchor with `httk project init PATH` and give it a workspace with
 is the sole settable one — and names them when it refuses another, so a typo cannot
 become a member that nothing ever reads. Operator name, email, and named identities
 are not configuration keys: they live in `identity.json` and are managed by the
-`config identity` commands and `config init`. `format` and `format_version` describe
+core-owned `httk identity` commands and `httk init`. `format` and `format_version` describe
 the document and are written by *httk* itself. A configuration whose `format` or
 `format_version` is missing or something else is refused rather than read as if
 its members meant what *httk* means by them.
@@ -942,12 +944,12 @@ with a different job.
 
 Operator identity — the recorded name, email, and default, plus every named
 identity — lives in `$XDG_CONFIG_HOME/httk/identity.json`, managed by *httk-core*.
-The same `httk workflow config` commands drive it: `httk workflow config init`
+The core-owned root commands drive it: `httk init`
 records the bare `name`/`email` and creates the default `identity.seed`/`identity.pub`
 pair below `$XDG_CONFIG_HOME/httk/keys/`. Named identities are managed with
-`httk workflow config identity add --name NAME --email EMAIL SHORT`; each gets
+`httk identity add --name NAME --email EMAIL SHORT`; each gets
 its own `identity-SHORT.seed`/`.pub` pair. The first named identity becomes the
-default, and `config identity default SHORT` changes it. Removing an identity
+default, and `httk identity default SHORT` changes it. Removing an identity
 leaves its key files on disk; removing the default with exactly one identity
 remaining selects that identity automatically, while removal with multiple
 remaining identities requires selecting another default first.
@@ -967,8 +969,8 @@ For remote requests, the control-center identity builds the signature locally
 after the far side returns unsigned envelopes. The remote publishes those
 signed documents verbatim, so attribution and signer are the same identity.
 If a configured identity's key file is missing or unreadable, the request fails
-loudly; remove and re-add it with `httk workflow config identity remove SHORT`
-then `httk workflow config identity add SHORT ...`, or restore the key file.
+loudly; remove and re-add it with `httk identity remove SHORT`
+then `httk identity add SHORT ...`, or restore the key file.
 The two request protocol spellings are additive; when a remote cannot parse
 them, upgrade `httk-workflow` on the remote.
 

@@ -106,7 +106,6 @@ from ._precheck import build_precheck_parser, handle_precheck
 from ._project import (
     build_config_parser,
     handle_config_import_v1,
-    handle_config_init,
     handle_config_set,
     handle_config_show,
     handle_config_unset,
