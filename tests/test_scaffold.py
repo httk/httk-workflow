@@ -320,6 +320,159 @@ def test_workflow_declarations_are_forwarded_and_digest_covered(
     assert definition.digest == sha256_file(job.payload / "job.json")
 
 
+def test_no_provenance_leaves_declarations_byte_identical(workspace: Workspace, structure: Path) -> None:
+    job = new_job(workspace, "vasp-relax", files={"POSCAR": structure}, tag="silicon")
+    definition = JobDefinition.from_path(job.payload / "job.json")
+    assert set(definition.declarations) == {"workflow"}
+
+
+def test_provenance_becomes_the_declared_entry_when_the_workflow_has_none(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = WorkflowProvider(
+        workflow_id="tests.provenance.none",
+        runner_package=PACKAGE,
+        runner_file="vasp_relax.py",
+        initial_step="prepare",
+        steps=("publish", "prepare", "run"),
+    )
+    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
+    claim = {"inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}}}
+
+    job = new_job(workspace, provider.workflow_id, provenance=claim)
+    definition = JobDefinition.from_path(job.payload / "job.json")
+    assert definition.declarations == {"provenance": claim}
+
+
+def test_provenance_merges_section_wise_with_a_workflow_declared_provenance(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = WorkflowProvider(
+        workflow_id="tests.provenance.merge",
+        runner_package=PACKAGE,
+        runner_file="vasp_relax.py",
+        initial_step="prepare",
+        steps=("publish", "prepare", "run"),
+        declarations={
+            "provenance": {
+                "workflow_declaration_uri": "https://example.test/workflows/fixed",
+                "inputs": {"reference": {"type": "structures", "id": "ref-1"}},
+                "outputs": {"summary": {"type": "records", "id": "sum-1"}},
+            }
+        },
+    )
+    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
+
+    job = new_job(
+        workspace,
+        provider.workflow_id,
+        provenance={
+            "inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}},
+            "artifacts": {"relaxed": {"type": "structures", "id": "s2"}},
+        },
+    )
+    definition = JobDefinition.from_path(job.payload / "job.json")
+    # workflow_declaration_uri and the outputs section, which only the workflow
+    # declares, are untouched; inputs is concatenated; artifacts, which only the
+    # caller declares, is carried through outright.
+    assert definition.declarations["provenance"] == {
+        "workflow_declaration_uri": "https://example.test/workflows/fixed",
+        "inputs": {
+            "reference": {"type": "structures", "id": "ref-1"},
+            "entity": {"type": "amdb_material", "id": "magndata:1.108"},
+        },
+        "outputs": {"summary": {"type": "records", "id": "sum-1"}},
+        "artifacts": {"relaxed": {"type": "structures", "id": "s2"}},
+    }
+
+
+def test_provenance_duplicate_label_in_one_section_raises_value_error(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = WorkflowProvider(
+        workflow_id="tests.provenance.duplicate",
+        runner_package=PACKAGE,
+        runner_file="vasp_relax.py",
+        initial_step="prepare",
+        steps=("publish", "prepare", "run"),
+        declarations={"provenance": {"inputs": {"entity": {"type": "amdb_material", "id": "old"}}}},
+    )
+    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
+
+    with pytest.raises(ValueError, match=r"provenance inputs label 'entity'.*workflow.*caller-supplied"):
+        new_job(
+            workspace,
+            provider.workflow_id,
+            provenance={"inputs": {"entity": {"type": "amdb_material", "id": "new"}}},
+        )
+    assert not list(workspace.scan_markers())
+
+
+def test_provenance_non_mapping_section_on_either_side_raises_and_does_not_erase_edges(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = WorkflowProvider(
+        workflow_id="tests.provenance.non_mapping",
+        runner_package=PACKAGE,
+        runner_file="vasp_relax.py",
+        initial_step="prepare",
+        steps=("publish", "prepare", "run"),
+        declarations={"provenance": {"inputs": {"reference": {"type": "structures", "id": "ref-1"}}}},
+    )
+    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
+
+    # A caller-side list must not silently replace the workflow's declared edges.
+    with pytest.raises(ValueError, match=r"provenance inputs: the caller-supplied section must be a mapping"):
+        new_job(workspace, provider.workflow_id, provenance={"inputs": ["not-a-mapping"]})
+    assert not list(workspace.scan_markers())
+
+    # A malformed workflow-declared section is caught the same way when the
+    # caller's side is a well-formed mapping.
+    broken = WorkflowProvider(
+        workflow_id="tests.provenance.non_mapping.workflow_side",
+        runner_package=PACKAGE,
+        runner_file="vasp_relax.py",
+        initial_step="prepare",
+        steps=("publish", "prepare", "run"),
+        declarations={"provenance": {"inputs": []}},
+    )
+    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, broken.workflow_id, broken)
+    with pytest.raises(ValueError, match=r"provenance inputs: the workflow's section must be a mapping"):
+        new_job(
+            workspace,
+            broken.workflow_id,
+            provenance={"inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}}},
+        )
+    assert not list(workspace.scan_markers())
+
+
+def test_new_jobs_per_item_provenance_overrides_the_shared_default(
+    workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = WorkflowProvider(
+        workflow_id="tests.provenance.campaign",
+        runner_package=PACKAGE,
+        runner_file="vasp_relax.py",
+        initial_step="prepare",
+        steps=("publish", "prepare", "run"),
+    )
+    monkeypatch.setitem(scaffold._WORKFLOW_PROVIDERS, provider.workflow_id, provider)
+    shared = {"inputs": {"entity": {"type": "amdb_material", "id": "shared"}}}
+    override = {"inputs": {"entity": {"type": "amdb_material", "id": "override"}}}
+
+    jobs = list(
+        new_jobs(
+            workspace,
+            provider.workflow_id,
+            [{}, {"provenance": override}],
+            provenance=shared,
+        )
+    )
+    definitions = [JobDefinition.from_path(job.payload / "job.json") for job in jobs]
+    assert definitions[0].declarations["provenance"] == shared
+    assert definitions[1].declarations["provenance"] == override
+
+
 def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, structure: Path) -> None:
     job = new_job(
         workspace, "vasp-relax", files={"POSCAR": structure}, tag="silicon", parameters={"kpoint_density": 30.0}

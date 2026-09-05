@@ -8,10 +8,26 @@ from typing import cast
 import pytest
 
 import httk.workflow.vasp  # noqa: F401 - imports and registers packaged workflows
-from httk.workflow import JobRecord, Workspace, job_records
+from httk.workflow import JobRecord, TaskManager, Workspace, job_records, new_job
 from httk.workflow.provenance import run_record
 from httk.workflow.scaffold import registered_workflow
 from test_collect import campaign as _collect_campaign
+
+_CLAIM_RUNNER = """#!/usr/bin/env python3
+from httk.workflow import Runner
+
+run = Runner("tests.provenance.claim")
+
+
+@run.step
+def start(a):
+    (a.workdir / "done.txt").write_text("done\\n", encoding="utf-8")
+    a.succeed()
+
+
+if __name__ == "__main__":
+    raise SystemExit(run.main())
+"""
 
 
 @pytest.fixture(scope="module")
@@ -178,3 +194,37 @@ def test_last_modified_is_the_latest_aware_finished_timestamp() -> None:
 def test_last_modified_is_aware_on_a_really_run_job(real_record: JobRecord) -> None:
     run = run_record(real_record)
     assert run.last_modified is not None and run.last_modified.tzinfo is not None
+
+
+def test_a_scaffold_time_entity_claim_survives_collection_as_an_input_edge(tmp_path: Path) -> None:
+    """The whole point: a birth-time ``provenance`` passthrough reaches ``Run.inputs`` untouched.
+
+    A job created with ``new_job(..., provenance=...)`` carries an ``entity``
+    claim edge naming a database entity by its stable ledger key; the job is
+    driven to completion by a real :class:`httk.workflow.TaskManager`, and
+    :func:`run_record` on the resulting :class:`httk.workflow.JobRecord` — read
+    through :func:`job_records` exactly as :mod:`tests.test_declarations` and
+    the ``real_record`` fixture above do — must report exactly that edge, with
+    no change to :mod:`httk.workflow.collecting` or :mod:`httk.workflow.provenance`.
+    """
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    runner = tmp_path / "claim.py"
+    runner.write_text(_CLAIM_RUNNER, encoding="utf-8")
+
+    job = new_job(
+        workspace,
+        runner,
+        tag="claim",
+        provenance={"inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}}},
+    )
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=120.0)
+
+    record = next(iter(job_records(workspace)))
+    run = run_record(record)
+    assert [(edge.label, edge.entry_type, edge.entry_id) for edge in run.inputs] == [
+        ("entity", "amdb_material", "magndata:1.108")
+    ]
+    assert run.artifacts == () and run.outputs == ()
+    assert run.source_id == f"{workspace.workspace_id}:{job.job_id}"

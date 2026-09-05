@@ -408,7 +408,9 @@ class JobItem(TypedDict, total=False):
 
     Every member is optional, and a member that is absent takes the value
     :func:`new_jobs` was called with. ``inputs`` and ``files`` are merged over the
-    shared mappings key by key; everything else replaces the shared value.
+    shared mappings key by key; everything else, including ``provenance``, replaces
+    the shared value — see :func:`new_job` for what a supplied ``provenance``
+    document does.
     """
 
     inputs: Mapping[str, object]
@@ -419,6 +421,7 @@ class JobItem(TypedDict, total=False):
     name: str
     placement: str | PurePosixPath
     priority: int | None
+    provenance: Mapping[str, object] | None
 
 
 @dataclass(frozen=True)
@@ -1177,6 +1180,7 @@ def new_job(
     workflow_id: str | None = None,
     runner_name: str | PurePosixPath | None = None,
     name: str | None = None,
+    provenance: Mapping[str, object] | None = None,
 ) -> ScaffoldedJob:
     """Scaffold, submit, and describe one job of *workflow*.
 
@@ -1218,6 +1222,15 @@ def new_job(
     :param workflow_id: Override the workflow id in the job definition.
     :param runner_name: Override the workspace runner-store name when publishing.
     :param name: Set the job's display name.
+    :param provenance: Merge one declared-side ``provenance`` document (see
+        :mod:`httk.workflow.provenance`) into the job's declarations. When the
+        workflow declares no ``provenance`` of its own, *provenance* is used as
+        that declaration outright; otherwise each of its ``inputs``/``artifacts``/
+        ``outputs`` sections is concatenated label by label with the workflow's,
+        and a label declared by both raises ``ValueError``. Its primary use is a
+        birth-time claim that this job is for a database entity: an ``inputs``
+        edge labelled ``entity`` naming the entity by its stable ledger key, e.g.
+        ``{"inputs": {"entity": {"type": "amdb_material", "id": "magndata:1.108"}}}``.
     :return: The submitted job description.
     :raises ValueError: If workflow, inputs, placement, or job settings are invalid.
     """
@@ -1244,6 +1257,7 @@ def new_job(
         priority=priority,
         workdir_mode=workdir_mode,
         name=name,
+        provenance=provenance,
     )
 
 
@@ -1267,6 +1281,7 @@ def new_jobs(
     workflow_id: str | None = None,
     runner_name: str | PurePosixPath | None = None,
     name: str | None = None,
+    provenance: Mapping[str, object] | None = None,
 ) -> Iterator[ScaffoldedJob]:
     """Scaffold and submit one job per member of *items*, lazily.
 
@@ -1300,6 +1315,10 @@ def new_jobs(
     :param workflow_id: Override the workflow id in each job definition.
     :param runner_name: Override the workspace runner-store name when publishing.
     :param name: Set the shared display name.
+    :param provenance: Set the shared ``provenance`` document; a per-item
+        ``provenance`` in :class:`JobItem` replaces it entirely rather than
+        merging with it. See :func:`new_job` for the merge rule against a
+        workflow-declared ``provenance`` and the entity-claim convention.
     :return: An iterator yielding each submitted job description.
     :yield: Each submitted job description.
     :raises ValueError: If workflow, inputs, placement, or job settings are invalid.
@@ -1337,6 +1356,7 @@ def new_jobs(
             priority=item.get("priority", priority),
             workdir_mode=workdir_mode,
             name=item.get("name", name),
+            provenance=item.get("provenance", provenance),
         )
 
 
@@ -1530,6 +1550,86 @@ def _resolve_instantiate(workflow: ResolvedWorkflow, runner_sha256: str) -> Call
     return runner._instantiate
 
 
+def _merge_provenance_declaration(
+    declarations: Mapping[str, Mapping[str, object]], provenance: Mapping[str, object] | None
+) -> Mapping[str, Mapping[str, object]]:
+    """Merge a caller-supplied ``provenance`` document into a workflow's declarations.
+
+    *provenance* is one declared-side document in the vocabulary of
+    :mod:`httk.workflow.provenance` (its ``inputs``/``artifacts``/``outputs``
+    sections). ``None`` leaves *declarations* untouched. When *declarations* has
+    no ``provenance`` member of its own, *provenance* becomes that member
+    outright; otherwise the two documents are merged by :func:`_merge_provenance_documents`.
+
+    :param declarations: The workflow's own declarations, keyed by name.
+    :param provenance: The caller-supplied ``provenance`` document, or ``None``.
+    :return: *declarations*, with its ``"provenance"`` member merged in when *provenance* is supplied.
+    :raises ValueError: If a label is declared by both documents in one merged section.
+    """
+
+    if provenance is None:
+        return declarations
+    existing = declarations.get("provenance")
+    document: Mapping[str, object] = (
+        provenance if existing is None else _merge_provenance_documents(existing, provenance)
+    )
+    return {**declarations, "provenance": document}
+
+
+def _merge_provenance_documents(
+    workflow_document: Mapping[str, object], caller_document: Mapping[str, object]
+) -> dict[str, object]:
+    """Merge one caller-supplied ``provenance`` document into the workflow's own.
+
+    Each of ``inputs``/``artifacts``/``outputs`` present in either document is
+    the concatenation of the two documents' labeled edges; a label declared by
+    both in the same section is a :class:`ValueError` naming the label and both
+    sources. A section only one side declares is carried through verbatim, so a
+    malformed shape is left for the existing declarations/provenance validation
+    to reject, exactly as a workflow-only declaration would be — but a section
+    both sides declare must be concatenated, so a non-mapping value on either
+    side there is a :class:`ValueError` naming the section and the malformed
+    side, rather than one side silently replacing the other's edges. No other
+    members are merged: any other top-level member comes from the workflow's
+    document only, since the caller-supplied document exists to carry only this
+    section vocabulary.
+
+    :param workflow_document: The workflow's declared ``provenance`` document.
+    :param caller_document: The caller-supplied ``provenance`` document.
+    :return: The merged ``provenance`` document.
+    :raises ValueError: If a label is declared by both documents in one merged
+        section, or if a section declared by both is not a mapping on one side.
+    """
+
+    merged = dict(workflow_document)
+    for section in ("inputs", "artifacts", "outputs"):
+        in_workflow = section in workflow_document
+        in_caller = section in caller_document
+        if not in_workflow and not in_caller:
+            continue
+        workflow_section = workflow_document.get(section)
+        caller_section = caller_document.get(section)
+        if in_workflow and in_caller:
+            if not isinstance(workflow_section, Mapping):
+                raise ValueError(f"provenance {section}: the workflow's section must be a mapping")
+            if not isinstance(caller_section, Mapping):
+                raise ValueError(f"provenance {section}: the caller-supplied section must be a mapping")
+            combined: dict[str, object] = dict(workflow_section)
+            for label, edge in caller_section.items():
+                if label in combined:
+                    raise ValueError(
+                        f"provenance {section} label {label!r} is declared by both the workflow "
+                        "and the caller-supplied provenance"
+                    )
+                combined[label] = edge
+            merged[section] = combined
+        elif in_caller:
+            merged[section] = caller_section
+        else:
+            merged[section] = workflow_section
+    return merged
+
+
 def _input_required(metadata: Mapping[str, object]) -> bool:
     """Report whether one declared input must be supplied at submission.
 
@@ -1658,6 +1758,7 @@ def _build_payload(
     priority: int | None,
     workdir_mode: WorkdirMode,
     name: str | None,
+    provenance: Mapping[str, object] | None = None,
 ) -> JobDefinition:
     """Stage one job payload into *destination* and write its ``job.json``.
 
@@ -1829,7 +1930,7 @@ def _build_payload(
             if declared_environment
             else {}
         ),
-        declarations=workflow.declarations,
+        declarations=_merge_provenance_declaration(workflow.declarations, provenance),
         declared=declared_member,
     )
     if prepared.finalize is not None:
@@ -1852,6 +1953,7 @@ def _submit(
     priority: int | None,
     workdir_mode: WorkdirMode,
     name: str | None,
+    provenance: Mapping[str, object] | None = None,
 ) -> ScaffoldedJob:
     """Build one payload below the workspace and publish it as a submitted job."""
 
@@ -1874,6 +1976,7 @@ def _submit(
             priority=priority,
             workdir_mode=workdir_mode,
             name=name,
+            provenance=provenance,
         )
         marker = workspace.submit(staging, normalized, move=True)
     finally:
