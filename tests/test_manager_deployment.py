@@ -136,7 +136,6 @@ def test_remote_run_forwards_worker_resources(tmp_path: Path, monkeypatch: pytes
         ]
     )
     seen: dict[str, object] = {}
-    monkeypatch.setattr(_manager, "resolve_remote", lambda *_args, **_kwargs: "target")
     monkeypatch.setattr(
         _manager,
         "remote_workspace_output",

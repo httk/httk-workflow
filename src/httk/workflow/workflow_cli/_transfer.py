@@ -1,30 +1,61 @@
 """Remote and transfer command groups."""
 
+import argparse
 import json
 import os
 import sys
+import tempfile
+import uuid
 from collections.abc import Mapping, Sequence
 from contextlib import redirect_stdout
 from copy import copy
 from io import StringIO
 from pathlib import Path, PurePosixPath
+from typing import Any
+
+from httk.core.cli import CLIContext
 
 from .._runner_builds import workspace_build_command
-from ..adapters import probe_remote_workspace
-from ..adapters import run_adapter as read_adapter
+from .._util import read_json, write_json_atomic
+from ..adapters import (
+    REMOTE_OFFER_COMMAND,
+    REMOTE_RECEIVE_COMMAND,
+    REMOTE_RETIRE_COMMAND,
+    REMOTE_WORKSPACE_SETTINGS_COMMAND,
+    add_remote,
+    import_v1_remote,
+    list_remotes,
+    metadata_path,
+    probe_remote_workspace,
+    read_metadata,
+    resolve_remote,
+    run_adapter,
+    split_settings,
+    store_credentials,
+)
+from ..adapters import (
+    run_adapter as read_adapter,
+)
+from ..collecting import COLLECTABLE_KINDS
 from ..errors import ResolutionMiss, WorkflowError
+from ..hygiene import describe_remote, remove_remote
 from ..introspection import JobSelectorResolver
 from ..models import QUIESCENT_KINDS, WORKSPACE_DIRECTORY, JobDefinition, Marker, canonical_uuid, parse_job_key
 from ..packages import read_build_spec
 from ..precheck import environment_findings
+from ..registry import LOCAL_REMOTE, WorkspaceBinding, list_workspaces, resolve_workspace
 from ..transfers import (
     DEFAULT_OFFER_STATES,
+    TRANSFER_OFFER_FORMAT,
+    TRANSFER_RETIREMENT_FORMAT,
     TransferCandidate,
     _waiting_parent_map,
+    discard_staged_bundle,
     offer_transfers,
+    retire_transfers,
     select_transfer_jobs,
 )
-from ._common import *
+from ..workspace import Workspace
 from ._common import (
     _ERRORS,
     _add_adapter_timeout,
@@ -33,8 +64,8 @@ from ._common import (
     _leaf,
     _required,
     _settings,
+    confirm,
 )
-from ._common import _run_adapter as run_adapter
 
 
 def _print_build_reminder(

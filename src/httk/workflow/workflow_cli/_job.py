@@ -1,14 +1,21 @@
 """Runner and job command groups."""
 
+import argparse
 import hashlib
+import json
 import os
 import re
 import shlex
+import sys
 import tempfile
 import time
 import uuid
-from pathlib import PurePosixPath
+from collections.abc import Iterator, Mapping, Sequence
+from pathlib import Path, PurePosixPath
+from typing import Any
 
+from httk.core.cli import CLIContext
+from httk.core.digests import sha256_file, tree_digest
 from httk.core.identity import (
     OperatorIdentity,
     configured_operator_identity,
@@ -18,6 +25,8 @@ from httk.core.identity import (
     verify_document,
 )
 
+from .._logging import LOG_LEVELS, configure_logging
+from .._util import read_json, utc_now
 from ..adapters import (
     REMOTE_JOB_DELETE_COMMAND,
     REMOTE_JOB_LIST_COMMAND,
@@ -27,11 +36,23 @@ from ..adapters import (
     REMOTE_JOB_SHOW_COMMAND,
     REMOTE_JOB_WHY_COMMAND,
     resolve_remote,
+    run_adapter,
 )
+from ..errors import WorkflowError
 from ..introspection import (
+    JOB_HISTORY_FORMAT,
+    JOB_LIST_FORMAT,
     JobSelectorResolver,
     count_markers,
+    debug_job,
+    describe_job,
+    explain_job,
+    job_frames,
+    list_jobs,
     read_managers,
+    render_frames,
+    render_job,
+    render_rows,
     resolve_job,
     resolve_job_selectors,
     selector_uses_remote_path,
@@ -45,8 +66,17 @@ from ..models import (
     ensure_step_known,
     parse_job_key,
 )
+from ..registry import WorkspaceBinding
 from ..removal import RemovalReport, remove_jobs
-from ..scaffold import payload_relative
+from ..scaffold import (
+    DEFAULT_PLACEMENT,
+    ScaffoldedJob,
+    _sanitize_tag,
+    new_job,
+    new_jobs,
+    payload_relative,
+    registered_workflow_labels,
+)
 from ..seals import (
     default_workspace_keys,
     is_job_sealed,
@@ -55,7 +85,7 @@ from ..seals import (
     seal_job,
     unseal_job,
 )
-from ._common import *
+from ..workspace import Workspace
 from ._common import (
     _ERRORS,
     _add_adapter_timeout,
@@ -69,8 +99,9 @@ from ._common import (
     _published_runner_entries,
     _remote_workspace_read,
     _resolve_binding,
-    _run_adapter,
-    _sanitize_tag,
+    add_durability_arguments,
+    confirm,
+    remote_workspace_output,
 )
 from ._transfer import _protocol_workspace
 
@@ -1115,7 +1146,7 @@ def request_remote_job_result(
     if arguments.force:
         envelope_argv.append("--force")
     envelope_argv.extend(arguments.job_id)
-    result = _run_adapter(
+    result = run_adapter(
         target.bundle,
         "invoke",
         {"argv": envelope_argv},
@@ -1155,7 +1186,7 @@ def request_remote_job_result(
         publish_argv.append("--durable")
     if getattr(arguments, "no_durable", False):
         publish_argv.append("--no-durable")
-    published = _run_adapter(
+    published = run_adapter(
         target.bundle,
         "invoke",
         {"argv": publish_argv},

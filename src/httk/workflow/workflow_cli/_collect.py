@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import Any, cast
 
 from httk.core import Run, RunEdge
+from httk.core.cli import CLIContext
 from httk.core.storage import content_id, resolve_storage_record
 
 from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, CollectedJob, collect, job_records
 from ..errors import SealError
 from ..id_keys import UnstableIdentityError, ledger_key
 from ..seals import default_workspace_keys
-from ._common import *
+from ..workspace import Workspace
 from ._common import _LOGGER, _leaf, _local_root
 
 _CONTENT_ID_RE = re.compile(r"[0-9a-f]{64}\Z")

@@ -15,6 +15,8 @@ from httk.workflow.configuration import read_config
 from httk.workflow.journal import JournalWriter
 from httk.workflow.manifests import verify_manifest, workspace_maintenance_guard
 from httk.workflow.projects import initialize_project
+from httk.workflow.workflow_cli import _common as workflow_common
+from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
 
 
@@ -277,9 +279,7 @@ def test_transfer_send_resumes_after_copy_before_import(tmp_path: Path, monkeypa
     register_ws(context, source_root, "home")
     register_ws(context, destination_root, "station", remote="cluster")
 
-    from httk.workflow import workflow_cli
-
-    real_run_adapter = workflow_cli.run_adapter
+    real_run_adapter = transfer_cli.run_adapter
     failed = False
 
     def interrupt_import(bundle, operation, request, *, timeout=None):
@@ -289,12 +289,14 @@ def test_transfer_send_resumes_after_copy_before_import(tmp_path: Path, monkeypa
             raise RuntimeError("simulated interruption after push")
         return real_run_adapter(bundle, operation, request, timeout=timeout)
 
-    monkeypatch.setattr(workflow_cli, "run_adapter", interrupt_import)
+    monkeypatch.setattr(transfer_cli, "run_adapter", interrupt_import)
+    monkeypatch.setattr(workflow_common, "run_adapter", interrupt_import)
     # A resumed transfer: an interrupted send, retyped, must pick up where it
     # stopped rather than start a second copy.
     arguments = ["transfer", "--job", job_id, "home", "cluster:station"]
     assert command(arguments, context) == 2
     assert Workspace(source_root).find_marker_by_id(job_id) is None
-    monkeypatch.setattr(workflow_cli, "run_adapter", real_run_adapter)
+    monkeypatch.setattr(transfer_cli, "run_adapter", real_run_adapter)
+    monkeypatch.setattr(workflow_common, "run_adapter", real_run_adapter)
     assert command(arguments, context) == 0
     assert Workspace(destination_root).find_marker_by_id(job_id) is not None

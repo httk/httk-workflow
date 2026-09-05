@@ -1,16 +1,25 @@
 """Manager command group."""
 
+import argparse
+import json
 import os
 import signal
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import cast
 
+from httk.core.cli import CLIContext
+
+from .._logging import LOG_LEVELS, add_log_file, configure_logging
+from ..adapters import REMOTE_MANAGER_COMMAND
 from ..errors import FormatError
 from ..launchers import PROCESS_LAUNCHER, launch_processes, resolve_launcher, split_capacity, start_managers
-from ..manager import NotIdleError
+from ..manager import DEFAULT_TAKEOVER_GRACE_FACTOR, NotIdleError, TaskManager
 from ..models import WORKSPACE_DIRECTORY, validate_resources
-from ._common import *
+from ..registry import WorkspaceBinding
+from ..workspace import Workspace
 from ._common import (
     _LOGGER,
     _add_adapter_timeout,
@@ -19,6 +28,7 @@ from ._common import (
     _group,
     _leaf,
     _resolve_binding,
+    add_durability_arguments,
     remote_workspace_output,
 )
 

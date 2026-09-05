@@ -1,6 +1,24 @@
 """Campaign command group."""
 
-from ._common import *
+import argparse
+import json
+from collections.abc import Mapping
+from pathlib import Path
+
+from httk.core.cli import CLIContext
+
+from ..campaigns import (
+    ASSIGNMENT_POLICIES,
+    campaign_managers,
+    campaign_submit,
+    campaign_submit_many,
+    read_campaign,
+    write_campaign,
+)
+from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES
+from ..registry import LOCAL_REMOTE, resolve_workspace
+from ..scaffold import DEFAULT_PLACEMENT
+from ..workspace import Workspace
 from ._common import (
     _add_adapter_timeout,
     _group,

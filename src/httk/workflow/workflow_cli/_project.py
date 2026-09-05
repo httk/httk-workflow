@@ -1,11 +1,16 @@
 """Configuration, project, and umbrella-project command groups."""
 
+import argparse
+import json
 import sys
 from contextlib import redirect_stdout
 from copy import copy
 from io import StringIO
+from typing import Any
 
-from ._common import *
+from httk.core.cli import CLIContext
+
+from ..configuration import import_v1_configuration, read_config, set_config_key, unset_config_key
 from ._common import (
     _ERRORS,
     _group,

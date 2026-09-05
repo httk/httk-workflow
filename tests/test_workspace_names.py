@@ -128,8 +128,8 @@ def test_remote_workspace_adapter_requests_are_exact_argv(tmp_path: Path, monkey
         captured.append(tuple(request["argv"]))  # type: ignore[arg-type]
         return {"returncode": 0, "stdout": "[]", "stderr": ""}
 
-    monkeypatch.setattr(workspace_cli, "_run_adapter", adapter)
-    monkeypatch.setattr(workflow_common, "_run_adapter", adapter)
+    monkeypatch.setattr(workspace_cli, "run_adapter", adapter)
+    monkeypatch.setattr(workflow_common, "run_adapter", adapter)
     commands = (
         ["workspace", "init", "--name", "runs", "cluster:runs"],
         ["workspace", "status", "--json", "cluster:runs"],

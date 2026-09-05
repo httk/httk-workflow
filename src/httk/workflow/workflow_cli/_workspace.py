@@ -1,19 +1,54 @@
 """Workspace command group."""
 
+import argparse
 import errno
+import json
 import os
+import sys
 from contextlib import redirect_stdout
 from copy import copy
 from io import StringIO
+from pathlib import Path
+from typing import Any
 
-from ..adapters import REMOTE_WORKSPACE_DELETE_COMMAND, REMOTE_WORKSPACE_INIT_COMMAND, seed_application_settings
+from httk.core.cli import CLIContext
+from httk.core.digests import sha256_file, tree_digest
+
+from ..adapters import (
+    REMOTE_STATUS_COMMAND,
+    REMOTE_WORKSPACE_DELETE_COMMAND,
+    REMOTE_WORKSPACE_FSCK_COMMAND,
+    REMOTE_WORKSPACE_GC_COMMAND,
+    REMOTE_WORKSPACE_INIT_COMMAND,
+    REMOTE_WORKSPACE_LIST_COMMAND,
+    REMOTE_WORKSPACE_MOVE_COMMAND,
+    REMOTE_WORKSPACE_SETTINGS_COMMAND,
+    REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND,
+    resolve_remote,
+    run_adapter,
+    seed_application_settings,
+)
 from ..configuration import machine_names
+from ..gc import iter_report_rows
 from ..introspection import read_managers
-from ..manifests import read_maintenance_lock, workspace_maintenance_guard
-from ..models import DEFAULT_LEASE_SECONDS, WORKSPACE_DIRECTORY
+from ..manifests import read_maintenance_lock, release_maintenance_lock, workspace_maintenance_guard
+from ..models import DEFAULT_LEASE_SECONDS, POLICY_KEYS, STATE_KINDS, WORKSPACE_DIRECTORY
 from ..packages import load_workflow_package
 from ..projects import read_project_section, require_project, write_project_section
-from ..registry import _update_workspace_path, adopt_workspace, move_project_member, valid_workspace_name
+from ..registry import (
+    LOCAL_REMOTE,
+    _update_workspace_path,
+    adopt_workspace,
+    create_workspace,
+    delete_workspace,
+    forget_workspace,
+    list_workspaces,
+    move_project_member,
+    register_workspace,
+    remove_local_workspace,
+    resolve_workspace,
+    valid_workspace_name,
+)
 from ..seals import (
     default_workspace_keys,
     is_workspace_sealed,
@@ -24,7 +59,7 @@ from ..seals import (
     unsealed_jobs,
     workspace_seal_path,
 )
-from ._common import *
+from ..workspace import Workspace
 from ._common import (
     _ERRORS,
     _add_by_path_argument,
@@ -38,7 +73,9 @@ from ._common import (
     _published_runner_entries,
     _remote_workspace_read,
     _resolve_binding,
-    _run_adapter,
+    add_durability_arguments,
+    add_workspace_argument,
+    confirm,
 )
 
 # ---------------------------------------------------------------------------
@@ -141,7 +178,7 @@ def handle_workspace_init(arguments: argparse.Namespace, context: CLIContext) ->
         for key, value in merged.items():
             argv += ["--setting", f"{key}={json.dumps(value)}"]
         argv.append(remote_path)
-        result = _run_adapter(target.bundle, "invoke", {"argv": argv})
+        result = run_adapter(target.bundle, "invoke", {"argv": argv})
         if result.get("returncode") != 0:
             raise RuntimeError(f"remote workspace init failed: {result.get('stderr', '')}")
         print(name)
@@ -498,7 +535,7 @@ def handle_workspace_list(arguments: argparse.Namespace, context: CLIContext) ->
         if not separator or empty:
             raise ValueError("workspace list expects REMOTE:")
         target = resolve_remote(remote_name, project=context.cwd)
-        result = _run_adapter(target.bundle, "invoke", {"argv": [*REMOTE_WORKSPACE_LIST_COMMAND, "--json"]})
+        result = run_adapter(target.bundle, "invoke", {"argv": [*REMOTE_WORKSPACE_LIST_COMMAND, "--json"]})
         if result.get("returncode") != 0:
             raise RuntimeError(f"remote workspace list failed: {result.get('stderr', '')}")
         remote_rows = json.loads(str(result.get("stdout", "[]")))
@@ -567,7 +604,7 @@ def handle_workspace_delete(arguments: argparse.Namespace, context: CLIContext) 
     if binding.remote != LOCAL_REMOTE:
         target = resolve_remote(binding.remote, project=context.cwd)
         name = binding.name.split(":", 1)[1]
-        result = _run_adapter(
+        result = run_adapter(
             target.bundle,
             "invoke",
             {"argv": [*REMOTE_WORKSPACE_DELETE_COMMAND, "--force", name]},
@@ -609,7 +646,7 @@ def handle_workspace_move(arguments: argparse.Namespace, context: CLIContext) ->
     if binding.remote != LOCAL_REMOTE:
         target = resolve_remote(binding.remote, project=context.cwd)
         name = binding.name.split(":", 1)[1]
-        result = _run_adapter(
+        result = run_adapter(
             target.bundle, "invoke", {"argv": [*REMOTE_WORKSPACE_MOVE_COMMAND, name, arguments.destination]}
         )
         if result.get("returncode") != 0:

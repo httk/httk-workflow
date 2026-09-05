@@ -16,129 +16,27 @@ top, because the machine that runs them may have an older or newer *httk*
 installed than the machine that composed them.
 """
 
-# ruff: noqa: F401
-
 import argparse
 import fnmatch
 import json
 import logging
 import sys
-import tempfile
-import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import Any
 
 import httk.core
 from httk.core.cli import CLIContext
-from httk.core.digests import sha256_file, tree_digest
-from httk.core.identity import sign_document
 
 # The packaged domains register their workflows as an import side effect, so the
 # CLI resolves `job new --workflow NAME` against a populated registry. The generic
 # execution layer never imports a domain; the CLI does, exactly here.
-from .. import vasp as _vasp
-from .._logging import LOG_LEVELS, add_log_file, configure_logging
+# Importing the domain registers its built-in workflows in the shared registry.
+from .. import vasp as _vasp  # noqa: F401
 from .._manager_runners import RUNNER_TREE_ENTRY
-from .._util import read_json, utc_now, write_json_atomic
-from ..adapters import (
-    REMOTE_MANAGER_COMMAND,
-    REMOTE_OFFER_COMMAND,
-    REMOTE_RECEIVE_COMMAND,
-    REMOTE_RETIRE_COMMAND,
-    REMOTE_STATUS_COMMAND,
-    REMOTE_WORKSPACE_DELETE_COMMAND,
-    REMOTE_WORKSPACE_FSCK_COMMAND,
-    REMOTE_WORKSPACE_GC_COMMAND,
-    REMOTE_WORKSPACE_INIT_COMMAND,
-    REMOTE_WORKSPACE_LIST_COMMAND,
-    REMOTE_WORKSPACE_MOVE_COMMAND,
-    REMOTE_WORKSPACE_SETTINGS_COMMAND,
-    REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND,
-    add_remote,
-    import_v1_remote,
-    list_remotes,
-    metadata_path,
-    read_metadata,
-    remote_settings,
-    resolve_remote,
-    run_adapter,
-    split_settings,
-    store_credentials,
-)
-from ..campaigns import (
-    ASSIGNMENT_POLICIES,
-    campaign_collect,
-    campaign_managers,
-    campaign_submit,
-    campaign_submit_many,
-    read_campaign,
-    write_campaign,
-)
-from ..collecting import COLLECTABLE_KINDS, DEFAULT_COLLECT_STATES, collect, job_records
-from ..configuration import (
-    import_v1_configuration,
-    read_config,
-    set_config_key,
-    unset_config_key,
-)
+from ..adapters import resolve_remote, run_adapter
 from ..errors import WorkflowError
-from ..gc import iter_report_rows
-from ..hygiene import (
-    describe_remote,
-    remove_remote,
-)
-from ..introspection import (
-    JOB_HISTORY_FORMAT,
-    JOB_LIST_FORMAT,
-    debug_job,
-    describe_job,
-    explain_job,
-    job_frames,
-    list_jobs,
-    render_frames,
-    render_job,
-    render_rows,
-    resolve_job,
-)
-from ..manager import DEFAULT_TAKEOVER_GRACE_FACTOR, TaskManager
-from ..manifests import release_maintenance_lock, verify_manifest
-from ..models import CORE_PROFILE, POLICY_KEYS, STATE_KINDS, canonical_uuid
-from ..projects import import_v1_project, initialize_project
-from ..registry import (
-    LOCAL_REMOTE,
-    WorkspaceBinding,
-    create_workspace,
-    default_workspace,
-    delete_workspace,
-    forget_workspace,
-    list_workspaces,
-    register_workspace,
-    remove_local_workspace,
-    resolve_workspace,
-    split_workspace_binding,
-)
-from ..scaffold import (
-    DEFAULT_PLACEMENT,
-    STRUCTURE_PATTERNS,
-    JobItem,
-    ScaffoldedJob,
-    _sanitize_tag,
-    new_job,
-    new_jobs,
-    registered_workflow_labels,
-    registered_workflows,
-    structure_tag,
-    workflow_provider,
-)
-from ..transfers import (
-    DEFAULT_OFFER_STATES,
-    TRANSFER_OFFER_FORMAT,
-    TRANSFER_RETIREMENT_FORMAT,
-    discard_staged_bundle,
-    offer_transfers,
-    retire_transfers,
-)
+from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, resolve_workspace
+from ..scaffold import STRUCTURE_PATTERNS, JobItem, _sanitize_tag, structure_tag
 from ..workspace import Workspace
 
 _LOGGER = logging.getLogger(__name__)
@@ -155,15 +53,6 @@ _ERRORS = (WorkflowError, OSError, ValueError, RuntimeError, TimeoutError)
 _TRANSFER_PROTOCOL = ("receive", "offer", "retire")
 
 Handler = Callable[[argparse.Namespace, CLIContext], int]
-
-
-# ---------------------------------------------------------------------------
-def _run_adapter(*args: Any, **kwargs: Any) -> Any:
-    """Call the package-level adapter, preserving the historical patch point."""
-
-    from . import run_adapter as configured_run_adapter
-
-    return configured_run_adapter(*args, **kwargs)
 
 
 # Parser construction helpers
@@ -623,7 +512,7 @@ def remote_workspace_output(
     if ":" not in binding.name:
         raise ValueError(f"remote workspace binding has no remote-qualified name: {binding.name}")
     target = resolve_remote(binding.remote, project=context.cwd)
-    result = _run_adapter(
+    result = run_adapter(
         target.bundle,
         "invoke",
         {"argv": list(argv_tail)},
