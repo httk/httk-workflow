@@ -1,0 +1,81 @@
+httk.workflow.projects
+======================
+
+.. py:module:: httk.workflow.projects
+
+.. autoapi-nested-parse::
+
+   Expose workflow project policy over the project anchor owned by :mod:`httk.core.project`.
+
+   The project anchor — the ``httk_project`` directory, ``project.json`` and its
+   validation, upward discovery, the identity key, and key pinning and trust —
+   moved to *httk-core* as :mod:`httk.core.project` so a core-only installation has
+   projects. This module re-exports that API unchanged (this is an internal move,
+   so no deprecation is warranted and every public name keeps working) and keeps
+   the pieces that are workflow policy rather than anchor:
+
+   * :data:`DEFAULT_MANIFEST_EXCLUSIONS` and :func:`project_exclusions` — what a
+     signed manifest never records, which is a property of the manifest format and
+     therefore stays here beside :mod:`httk.workflow.manifests`.
+     The manifest walker omits direct ``attempts``, ``logs``, and ``.httk-job``
+     children only below a directory whose regular ``job.json`` parses as an
+     ``httk-workflow-job`` and whose id matches the UUID in its valid job-key
+     basename.
+   * :func:`initialize_project` and :func:`import_v1_project` — the anchor plus the
+     project's registered default execution workspace.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.projects.DEFAULT_MANIFEST_EXCLUSIONS
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.projects.initialize_project
+   httk.workflow.projects.import_v1_project
+   httk.workflow.projects.project_exclusions
+
+
+Module Contents
+---------------
+
+.. py:data:: DEFAULT_MANIFEST_EXCLUSIONS
+
+.. py:function:: initialize_project(root, *, name, description = '', manifest_exclusions = ())
+
+   Initialize the project anchor without creating a workspace.
+
+   :param root: Directory in which to create the project anchor.
+   :param name: Project name.
+   :param description: Optional project description.
+   :param manifest_exclusions: Relative paths excluded from the manifest.
+   :return: Created project metadata.
+
+
+.. py:function:: import_v1_project(root, *, source = None, name = None)
+
+   Create v2 project metadata from a legacy ``ht.project`` directory.
+
+   :param root: Directory in which to create the project anchor.
+   :param source: Legacy project directory, or the default legacy location.
+   :param name: Replacement project name, or the legacy name.
+   :return: Created project metadata.
+
+
+.. py:function:: project_exclusions(metadata)
+
+   Return default and configured manifest exclusions.
+
+   :param metadata: Project metadata containing optional exclusions.
+   :return: Exclusion patterns applied to the signed manifest.
+   :raises ValueError: If configured exclusions are not strings in an array.
+
+

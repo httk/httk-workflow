@@ -1,0 +1,587 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="./">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="genindex.html"><link rel="search" title="Search" href="search.html"><link rel="next" title="Scale benchmarks" href="benchmarks.html"><link rel="prev" title="Campaigns" href="campaigns.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>Composing workflows - httk-workflow dev:main documentation</title>
+      <link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:main) — content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="index.html"><div class="brand">httk-workflow dev:main documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:main documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul class="current">
+<li class="toctree-l1"><a class="reference internal" href="quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_protocol_api.html">The filesystem protocol API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="runtime_helpers.html">Native runner helpers</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="sdks/index.html">Runner SDKs</a><input aria-label="Toggle navigation of Runner SDKs" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="sdks/sdk_parity.html">Python and Bash authoring parity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_bash_api.html">Native Bash runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_c_api.html">Native C runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_fortran_api.html">Native modern-Fortran runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_rust_api.html">Native Rust runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_perl_api.html">Native Perl runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_ada_api.html">Native Ada runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_cpp_api.html">Native C++ runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="sdks/native_java_api.html">Native Java runner API</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="vasp_runners.html">Packaged VASP runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_packages.html">Workflow packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_languages.html">Workflow-language runner realizations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="taskmanager.html">Task-manager usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_cli.html">Project and workflow command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="sealing.html">Sealing jobs, workspaces, and projects</a></li>
+<li class="toctree-l1"><a class="reference internal" href="stable_ids.html">Stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="campaigns.html">Campaigns</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#">Composing workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="remotes.html">Remotes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="launchers.html">Launchers</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="reference/index.html">Reference</a><input aria-label="Toggle navigation of Reference" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/index.html">httk.workflow</a><input aria-label="Toggle navigation of httk.workflow" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/adapter_protocol/index.html">httk.workflow.adapter_protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/adapters/index.html">httk.workflow.adapters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/collecting/index.html">httk.workflow.collecting</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/compat/index.html">httk.workflow.compat</a><input aria-label="Toggle navigation of httk.workflow.compat" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/compat/v1/index.html">httk.workflow.compat.v1</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/configuration/index.html">httk.workflow.configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/errors/index.html">httk.workflow.errors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/executors/index.html">httk.workflow.executors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/hookapi/index.html">httk.workflow.hookapi</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/hygiene/index.html">httk.workflow.hygiene</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/manifests/index.html">httk.workflow.manifests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/projects/index.html">httk.workflow.projects</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/protocol/index.html">httk.workflow.protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/provenance/index.html">httk.workflow.provenance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/runtime/index.html">httk.workflow.runtime</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/runtime_utils/index.html">httk.workflow.runtime_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/scaffold/index.html">httk.workflow.scaffold</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/sdk/index.html">httk.workflow.sdk</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/shell_bridge/index.html">httk.workflow.shell_bridge</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/supervision/index.html">httk.workflow.supervision</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/transfers/index.html">httk.workflow.transfers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/vasp/index.html">httk.workflow.vasp</a></li>
+</ul>
+</li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-6" name="toctree-checkbox-6" role="switch" type="checkbox"/><label for="toctree-checkbox-6"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="notebooks/examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="workflow_filesystem_api.html">Workflow filesystem API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="details/runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/monitor.html">Workflow monitor</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/launcher_authoring.html">Writing a manager launcher in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="details/httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="_sources/composing_workflows.md.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section class="tex2jax_ignore mathjax_ignore" id="composing-workflows">
+<h1>Composing workflows<a class="headerlink" href="#composing-workflows" title="Link to this heading">¶</a></h1>
+<p><em>A workflow that builds on other workflows — calling one as a child job and
+resuming when it finishes, not re-implementing what it already does.</em></p>
+<p>A runner does not have to do everything itself. From inside a running step it can
+<strong>call</strong> another registered workflow — a packaged one like <code class="docutils literal notranslate"><span class="pre">vasp-relax</span></code>, or a
+runner of your own — which runs as a child job with that workflow’s own runner,
+and the calling step resumes when the child is done. This is how one workflow is
+assembled out of others without copying their steps into it.</p>
+<section id="the-model">
+<h2>The model<a class="headerlink" href="#the-model" title="Link to this heading">¶</a></h2>
+<p>A calling workflow is an ordinary runner. <a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.Attempt.call" title="httk.workflow.Attempt.call"><code class="xref py py-meth docutils literal notranslate"><span class="pre">call()</span></code></a>
+scaffolds a complete child payload for the workflow you name, stages the files
+and inputs you give it, and registers it as a child of this attempt’s outcome —
+exactly the child <a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.Attempt.spawn" title="httk.workflow.Attempt.spawn"><code class="xref py py-meth docutils literal notranslate"><span class="pre">spawn()</span></code></a> registers, only its
+runner is <em>another workflow’s</em> runner instead of a step of yours. You then
+<a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.Attempt.gather" title="httk.workflow.Attempt.gather"><code class="xref py py-meth docutils literal notranslate"><span class="pre">gather()</span></code></a> on it: the manager resumes the calling
+job when the child is terminal, and the gathering step reads the child back
+through <a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.Attempt.children" title="httk.workflow.Attempt.children"><code class="xref py py-attr docutils literal notranslate"><span class="pre">children</span></code></a>.</p>
+<p>This is a distinct tool from the two nearby ones:</p>
+<ul class="simple">
+<li><p>It is <strong>not</strong> a single multi-step runner sharing one workdir. <code class="docutils literal notranslate"><span class="pre">vasp-relax-static</span></code>
+(see <a class="reference internal" href="vasp_runners.html"><span class="doc">Packaged VASP runners</span></a>) is one runner whose steps hand a directory from
+relaxation to a static run in place. Reach for that when the stages are one
+program’s phases; reach for <code class="docutils literal notranslate"><span class="pre">call</span></code> when a stage <em>is</em> another workflow with its
+own runner, inputs, and failure handling.</p></li>
+<li><p>It is <strong>not</strong> a <code class="docutils literal notranslate"><span class="pre">ChildSpec</span></code> spawn. <a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.ChildSpec" title="httk.workflow.ChildSpec"><code class="xref py py-class docutils literal notranslate"><span class="pre">ChildSpec</span></code></a> and
+<a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.Attempt.spawn" title="httk.workflow.Attempt.spawn"><code class="xref py py-meth docutils literal notranslate"><span class="pre">spawn()</span></code></a> fan a job out into children that run
+<em>this same runner’s</em> steps — the partitioned-campaign pattern of
+<a class="reference internal" href="campaigns.html"><span class="doc">Campaigns</span></a>. <code class="docutils literal notranslate"><span class="pre">call</span></code> runs a <em>different</em> workflow, and carries input files a
+<code class="docutils literal notranslate"><span class="pre">ChildSpec</span></code> deliberately cannot.</p></li>
+</ul>
+</section>
+<section id="what-can-be-called">
+<h2>What can be called<a class="headerlink" href="#what-can-be-called" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">call</span></code> resolves its first argument exactly as
+<a class="reference internal" href="reference/autoapi/httk/workflow/scaffold/index.html#httk.workflow.scaffold.new_job" title="httk.workflow.scaffold.new_job"><code class="xref py py-func docutils literal notranslate"><span class="pre">new_job()</span></code></a> (and <code class="docutils literal notranslate"><span class="pre">httk</span> <span class="pre">workflow</span> <span class="pre">job</span> <span class="pre">new</span></code>) does:</p>
+<ul class="simple">
+<li><p>a <strong>registered id or alias</strong> — a packaged workflow such as <code class="docutils literal notranslate"><span class="pre">vasp-relax</span></code>;</p></li>
+<li><p>a <strong>runner file</strong> of your own (<code class="docutils literal notranslate"><span class="pre">./elastic_constant.py</span></code>);</p></li>
+<li><p>a <strong>workflow package directory</strong> (one holding <code class="docutils literal notranslate"><span class="pre">httk_workflow.toml</span></code>);</p></li>
+<li><p>a <strong>bare language document</strong> (a CWL file, a jobflow document, …).</p></li>
+</ul>
+<p>Where the runner ends up depends on what it is. A registered packaged workflow is
+referenced through the reserved <code class="docutils literal notranslate"><span class="pre">pkg:</span></code> form, so <strong>nothing is copied</strong> into the
+workspace runner store. A runner file of your own is <strong>published into the
+workspace runner store</strong>, which is content-addressed and idempotent: calling the
+same runner twice publishes nothing the second time, and the child’s <code class="docutils literal notranslate"><span class="pre">job.json</span></code>
+pins it by digest so an upgrade underneath a queued job cannot change what runs.</p>
+</section>
+<section id="a-worked-example">
+<h2>A worked example<a class="headerlink" href="#a-worked-example" title="Link to this heading">¶</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">start</span></code> calls the packaged <code class="docutils literal notranslate"><span class="pre">vasp-relax</span></code> on a structure, waits for it, then calls a
+second runner of your own on the relaxed structure, and finishes.</p>
+<div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">from</span><span class="w"> </span><span class="nn">httk.workflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">Runner</span>
+
+<span class="n">run</span> <span class="o">=</span> <span class="n">Runner</span><span class="p">(</span><span class="s2">"elastic_constant"</span><span class="p">)</span>
+
+
+<span class="nd">@run</span><span class="o">.</span><span class="n">step</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">start</span><span class="p">(</span><span class="n">a</span><span class="p">):</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">call</span><span class="p">(</span><span class="s2">"vasp-relax"</span><span class="p">,</span> <span class="n">label</span><span class="o">=</span><span class="s2">"relax"</span><span class="p">,</span> <span class="n">files</span><span class="o">=</span><span class="p">{</span><span class="s2">"POSCAR"</span><span class="p">:</span> <span class="n">a</span><span class="o">.</span><span class="n">payload</span> <span class="o">/</span> <span class="s2">"files"</span> <span class="o">/</span> <span class="s2">"POSCAR"</span><span class="p">})</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span><span class="s2">"after_relax"</span><span class="p">,</span> <span class="n">when</span><span class="o">=</span><span class="s2">"all_succeeded"</span><span class="p">,</span> <span class="n">on_impossible</span><span class="o">=</span><span class="s2">"triage"</span><span class="p">)</span>
+
+
+<span class="nd">@run</span><span class="o">.</span><span class="n">step</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">after_relax</span><span class="p">(</span><span class="n">a</span><span class="p">):</span>
+    <span class="n">relaxed</span> <span class="o">=</span> <span class="n">a</span><span class="o">.</span><span class="n">children</span><span class="p">[</span><span class="s2">"relax"</span><span class="p">]</span>
+    <span class="c1"># File plumbing is explicit: copy the relaxed structure out of the child's</span>
+    <span class="c1"># committed data and hand it to the next call as an input file.</span>
+    <span class="n">contcar</span> <span class="o">=</span> <span class="n">relaxed</span><span class="o">.</span><span class="n">data</span> <span class="o">/</span> <span class="s2">"CONTCAR"</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">call</span><span class="p">(</span><span class="s2">"./strain.py"</span><span class="p">,</span> <span class="n">label</span><span class="o">=</span><span class="s2">"strain"</span><span class="p">,</span> <span class="n">files</span><span class="o">=</span><span class="p">{</span><span class="s2">"POSCAR"</span><span class="p">:</span> <span class="n">contcar</span><span class="p">})</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">gather</span><span class="p">(</span><span class="s2">"finish"</span><span class="p">,</span> <span class="n">when</span><span class="o">=</span><span class="s2">"all_succeeded"</span><span class="p">,</span> <span class="n">on_impossible</span><span class="o">=</span><span class="s2">"triage"</span><span class="p">)</span>
+
+
+<span class="nd">@run</span><span class="o">.</span><span class="n">step</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">finish</span><span class="p">(</span><span class="n">a</span><span class="p">):</span>
+    <span class="n">strained</span> <span class="o">=</span> <span class="n">a</span><span class="o">.</span><span class="n">children</span><span class="p">[</span><span class="s2">"strain"</span><span class="p">]</span>
+    <span class="c1"># Read the strain child's results out of its committed data here.</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">state</span><span class="p">[</span><span class="s2">"strain_data"</span><span class="p">]</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">strained</span><span class="o">.</span><span class="n">data</span><span class="p">)</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">succeed</span><span class="p">()</span>
+
+
+<span class="nd">@run</span><span class="o">.</span><span class="n">step</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">triage</span><span class="p">(</span><span class="n">a</span><span class="p">):</span>
+    <span class="n">a</span><span class="o">.</span><span class="n">fail</span><span class="p">(</span><span class="s2">"elastic.dependency_failed"</span><span class="p">,</span> <span class="s2">"a called workflow did not succeed"</span><span class="p">)</span>
+
+
+<span class="k">if</span> <span class="vm">__name__</span> <span class="o">==</span> <span class="s2">"__main__"</span><span class="p">:</span>
+    <span class="k">raise</span> <span class="ne">SystemExit</span><span class="p">(</span><span class="n">run</span><span class="o">.</span><span class="n">main</span><span class="p">())</span>
+</pre></div>
+</div>
+<p>The same shape in a Bash runner uses <code class="docutils literal notranslate"><span class="pre">httk_workflow_call</span></code> and
+<code class="docutils literal notranslate"><span class="pre">httk_workflow_gather</span></code>:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span><span class="ch">#!/usr/bin/env bash</span>
+<span class="nb">set</span><span class="w"> </span>-euo<span class="w"> </span>pipefail
+<span class="nb">source</span><span class="w"> </span><span class="s2">"</span><span class="nv">$HTTK_WORKFLOW_BASH_API</span><span class="s2">"</span>
+httk_workflow_runner<span class="w"> </span>elastic_constant<span class="w"> </span>start<span class="w"> </span>after_relax<span class="w"> </span>finish<span class="w"> </span>triage
+
+step_start<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">    </span>httk_workflow_call<span class="w"> </span>relax<span class="w"> </span>vasp-relax<span class="w"> </span>--file<span class="w"> </span><span class="s2">"POSCAR=</span><span class="nv">$HTTK_WORKFLOW_JOB_DIR</span><span class="s2">/files/POSCAR"</span>
+<span class="w">    </span>httk_workflow_gather<span class="w"> </span>after_relax<span class="w"> </span>--when<span class="w"> </span>all_succeeded<span class="w"> </span>--on-impossible<span class="w"> </span>triage
+<span class="o">}</span>
+
+step_after_relax<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<span class="w">    </span><span class="nv">contcar</span><span class="o">=</span><span class="k">$(</span>httk_workflow_child<span class="w"> </span>relax<span class="w"> </span>data<span class="k">)</span>/CONTCAR
+<span class="w">    </span>httk_workflow_call<span class="w"> </span>strain<span class="w"> </span>./strain.sh<span class="w"> </span>--file<span class="w"> </span><span class="s2">"POSCAR=</span><span class="nv">$contcar</span><span class="s2">"</span>
+<span class="w">    </span>httk_workflow_gather<span class="w"> </span>finish<span class="w"> </span>--when<span class="w"> </span>all_succeeded<span class="w"> </span>--on-impossible<span class="w"> </span>triage
+<span class="o">}</span>
+
+step_finish<span class="o">()</span><span class="w"> </span><span class="o">{</span><span class="w"> </span>httk_workflow_succeed<span class="p">;</span><span class="w"> </span><span class="o">}</span>
+step_triage<span class="o">()</span><span class="w"> </span><span class="o">{</span><span class="w"> </span>httk_workflow_fail<span class="w"> </span>elastic.dependency_failed<span class="w"> </span><span class="s2">"a called workflow did not succeed"</span><span class="p">;</span><span class="w"> </span><span class="o">}</span>
+
+httk_workflow_main
+</pre></div>
+</div>
+</section>
+<section id="passing-results-between-calls">
+<h2>Passing results between calls<a class="headerlink" href="#passing-results-between-calls" title="Link to this heading">¶</a></h2>
+<p>Wiring outputs into the next call’s inputs is <strong>explicit today</strong>: read the child
+back through <a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.Attempt.children" title="httk.workflow.Attempt.children"><code class="xref py py-attr docutils literal notranslate"><span class="pre">children</span></code></a>, and copy the file you
+want out of <a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.ChildResult.data" title="httk.workflow.ChildResult.data"><code class="xref py py-attr docutils literal notranslate"><span class="pre">data</span></code></a> (its committed
+transactional data) or <a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.ChildResult.workdir" title="httk.workflow.ChildResult.workdir"><code class="xref py py-attr docutils literal notranslate"><span class="pre">workdir</span></code></a> into the
+<code class="docutils literal notranslate"><span class="pre">files=</span></code> of the next <code class="docutils literal notranslate"><span class="pre">call</span></code>. There is no automatic output-role → input-role
+matching between jobs. A workflow’s <a class="reference internal" href="declarations.html"><span class="doc">Workflow declarations</span></a> describe what it consumes
+and produces as <em>provenance</em> — they are recorded, not used to plumb one call into
+the next.</p>
+</section>
+<section id="failure-semantics">
+<h2>Failure semantics<a class="headerlink" href="#failure-semantics" title="Link to this heading">¶</a></h2>
+<p>A called child that fails is an ordinary join dependency. When the join condition
+can no longer be met, the calling job advances to the step named by
+<code class="docutils literal notranslate"><span class="pre">on_impossible</span></code> if one is given, and otherwise fails with <code class="docutils literal notranslate"><span class="pre">dependency_failure</span></code>
+(see <a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.Attempt.gather" title="httk.workflow.Attempt.gather"><code class="xref py py-meth docutils literal notranslate"><span class="pre">gather()</span></code></a>). Retries belong to the <em>child’s
+own</em> runner and retry policy; the caller does not retry the child on its behalf.
+The calling job’s private <a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.Attempt.state" title="httk.workflow.Attempt.state"><code class="xref py py-attr docutils literal notranslate"><span class="pre">state</span></code></a> survives across
+the wait, so a <code class="docutils literal notranslate"><span class="pre">start</span></code> step can record what it needs and read it back in the
+gathering step.</p>
+</section>
+<section id="requirements-and-limits">
+<h2>Requirements and limits<a class="headerlink" href="#requirements-and-limits" title="Link to this heading">¶</a></h2>
+<ul class="simple">
+<li><p><strong>Workspace reachability.</strong> <code class="docutils literal notranslate"><span class="pre">call</span></code> scaffolds into, and publishes a runner file
+into, the workspace the calling step runs in, so the workspace root must be
+reachable from where the step executes — the same condition
+<a class="reference internal" href="reference/autoapi/httk/workflow/index.html#httk.workflow.Attempt.children" title="httk.workflow.Attempt.children"><code class="xref py py-attr docutils literal notranslate"><span class="pre">children</span></code></a> needs. For a packaged workflow only
+the <code class="docutils literal notranslate"><span class="pre">pkg:</span></code> reference is written, so nothing is copied, but the child payload is
+still built in the workspace.</p></li>
+<li><p><strong>Nesting is unrestricted.</strong> A called workflow is just another job, so a
+workflow it calls may itself call further workflows; the depth is not capped.</p></li>
+<li><p><strong>A child inherits its parent’s workspace and placement.</strong> Like every spawned
+child, a called child is created in the calling job’s workspace (and its
+placement, unless you pass <code class="docutils literal notranslate"><span class="pre">placement=</span></code>), so the whole tree below a root stays
+where the root was assigned — the convention <a class="reference internal" href="campaigns.html"><span class="doc">Campaigns</span></a> relies on.</p></li>
+</ul>
+</section>
+<section id="where-to-go-next">
+<h2>Where to go next<a class="headerlink" href="#where-to-go-next" title="Link to this heading">¶</a></h2>
+<ul class="simple">
+<li><p><a class="reference internal" href="sdks/native_bash_api.html"><span class="doc">Native Bash runner API</span></a> — <code class="docutils literal notranslate"><span class="pre">httk_workflow_call</span></code> and the rest of the Bash
+authoring SDK.</p></li>
+<li><p><a class="reference internal" href="campaigns.html"><span class="doc">Campaigns</span></a> — <code class="docutils literal notranslate"><span class="pre">ChildSpec</span></code> fan-out and partitioning, the other way one job
+becomes many.</p></li>
+<li><p><a class="reference internal" href="declarations.html"><span class="doc">Workflow declarations</span></a> — what a workflow records about its inputs and outputs.</p></li>
+<li><p><a class="reference internal" href="vasp_runners.html"><span class="doc">Packaged VASP runners</span></a> — the packaged VASP workflows a runner most often calls.</p></li>
+</ul>
+</section>
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="benchmarks.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title">Scale benchmarks</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="campaigns.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Campaigns</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#">Composing workflows</a><ul>
+<li><a class="reference internal" href="#the-model">The model</a></li>
+<li><a class="reference internal" href="#what-can-be-called">What can be called</a></li>
+<li><a class="reference internal" href="#a-worked-example">A worked example</a></li>
+<li><a class="reference internal" href="#passing-results-between-calls">Passing results between calls</a></li>
+<li><a class="reference internal" href="#failure-semantics">Failure semantics</a></li>
+<li><a class="reference internal" href="#requirements-and-limits">Requirements and limits</a></li>
+<li><a class="reference internal" href="#where-to-go-next">Where to go next</a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="_static/documentation_options.js?v=fe42cd0d"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="_static/copybutton.js?v=fd10adb8"></script>
+    <script src="_static/selector.js?v=e591e119"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:main","versionPathDepth":2};</script>
+    </body>
+</html>

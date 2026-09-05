@@ -1,0 +1,180 @@
+httk.workflow.compat.v1
+=======================
+
+.. py:module:: httk.workflow.compat.v1
+
+.. autoapi-nested-parse::
+
+   Compatibility support for reading instantiated httk v1 task trees.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.compat.v1.V1_PRIORITY_MAP
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.compat.v1.V1FinishedTask
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.compat.v1.bundled_v1_root
+   httk.workflow.compat.v1.legacy_priority
+   httk.workflow.compat.v1.code_of
+   httk.workflow.compat.v1.collect_finished_tree
+   httk.workflow.compat.v1.finished_tasks
+   httk.workflow.compat.v1.run_directory
+   httk.workflow.compat.v1.task_file
+
+
+Package Contents
+----------------
+
+.. py:data:: V1_PRIORITY_MAP
+
+.. py:function:: bundled_v1_root()
+
+   Return the packaged compatibility ``HTTK_DIR`` root.
+
+   :return: The packaged v1 runtime root.
+
+
+.. py:function:: legacy_priority(value)
+
+   Map a legacy priority from 1 through 5 onto the v2 range.
+
+   :param value: Map this legacy priority.
+   :return: The corresponding v2 priority.
+   :raises ValueError: If the priority is outside the legacy range.
+
+
+.. py:class:: V1FinishedTask
+
+   Describe one finished v1 task and its newest dated run directory.
+
+
+   .. py:attribute:: directory
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: rundir
+      :type:  pathlib.Path
+
+
+   .. py:attribute:: taskset
+      :type:  str
+
+
+   .. py:attribute:: task_id
+      :type:  str
+
+
+   .. py:attribute:: computation_date
+      :type:  datetime.datetime
+
+
+   .. py:attribute:: code_name
+      :type:  str
+
+
+   .. py:attribute:: code_version
+      :type:  str
+
+
+   .. py:attribute:: description
+      :type:  str | None
+
+
+   .. py:attribute:: manifest_hash
+      :type:  str | None
+
+
+   .. py:property:: immutable_id
+      :type: str
+
+
+      Return the stable manifest id or a weaker path-derived identity.
+
+
+   .. py:property:: identity_stable
+      :type: bool
+
+
+      Whether this task's identity is manifest-backed and relocation-stable.
+
+      A task without a readable ``ht.manifest`` falls back to a path-derived
+      identity that changes when the tree moves, so its collected result cannot
+      be de-duplicated across machines; this is ``False`` for those tasks.
+
+
+.. py:function:: code_of(program_path)
+
+   Read code name/version from lines 2 and 3 of a v1 program.
+
+   Both ht_steps and ht_run use this format. Missing, unreadable, or
+   malformed metadata returns the legacy fallback ("unknown", "0").
+
+
+.. py:function:: collect_finished_tree(root, *, workflow_dir = None, extract = None, workflow_id = 'httk.v1.finished', stats = None, fail_fast = False)
+
+   Collect old finished trees through a package hook or direct extractor.
+
+   Exactly one of workflow_dir and extract is required. A per-task
+   hook/extractor failure degrades that task and the sweep continues unless
+   ``fail_fast`` is set. Missing host dependencies still abort collection.
+
+   :param root: Collect the finished tree rooted here.
+   :param workflow_dir: Locate the directory workflow package, when used.
+   :param extract: Supply a direct per-task extractor, when used.
+   :param workflow_id: Name the synthesized workflow, for the extractor path.
+   :param stats: Receive the finished-tree counters from :func:`finished_tasks`.
+   :param fail_fast: Raise the first per-task collection failure instead of
+       yielding its degraded result.
+   :yields: One collected job per finished task, degraded ones included.
+   :raises ValueError: If not exactly one of ``workflow_dir``/``extract`` is
+       given, or the package declares no collector.
+
+
+.. py:function:: finished_tasks(root, *, stats = None)
+
+   Lazily yield finished v1 tasks in deterministic walk order.
+
+   Every ht.task.* directory is a walk boundary, so nested subtasks are not
+   scanned. ht.run.current is intentionally ignored because only dated run
+   names define a computation date.
+
+   When *stats* is supplied it is populated, once the walk is exhausted, with
+   ``unfinished_by_status`` (a status-keyed :class:`collections.Counter` of the
+   tasks the regex matched that were not ``.finished``) and ``skipped_no_rundir``
+   (the count of finished tasks dropped for lacking a dated run directory).
+
+   :param root: Walk this finished result tree.
+   :param stats: Receive the finished-tree counters, or leave unpopulated.
+   :yields: One finished, run-bearing task per readable directory.
+
+
+.. py:function:: run_directory(record)
+
+   Return the result directory described by record.workdir.
+
+   Postprocess hooks must read result files from this path. Live v1 jobs use
+   ht.run.current; synthesized old-tree records use their dated run dir.
+
+
+.. py:function:: task_file(directory, name)
+
+   Return a plain or bzip2-compressed task member without opening it.
+
+

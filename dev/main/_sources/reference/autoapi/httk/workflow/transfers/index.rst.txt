@@ -1,0 +1,274 @@
+httk.workflow.transfers
+=======================
+
+.. py:module:: httk.workflow.transfers
+
+.. autoapi-nested-parse::
+
+   Crash-recoverable detached job transfer.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.transfers.TRANSFER_DIRECTORY
+   httk.workflow.transfers.TRANSFER_MANIFEST
+   httk.workflow.transfers.TRANSFER_RUNNERS
+   httk.workflow.transfers.TRANSFER_FORMAT
+   httk.workflow.transfers.TRANSFER_FORMAT_VERSION
+   httk.workflow.transfers.TRANSFER_OFFER_FORMAT
+   httk.workflow.transfers.TRANSFER_RETIREMENT_FORMAT
+   httk.workflow.transfers.DEFAULT_OFFER_STATES
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.transfers.TransferCandidate
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.transfers.detach_job
+   httk.workflow.transfers.validate_bundle
+   httk.workflow.transfers.import_bundle
+   httk.workflow.transfers.acknowledge_transfer
+   httk.workflow.transfers.recover_transfers
+   httk.workflow.transfers.select_transfer_jobs
+   httk.workflow.transfers.offer_transfers
+   httk.workflow.transfers.retire_transfers
+   httk.workflow.transfers.discard_staged_bundle
+
+
+Module Contents
+---------------
+
+.. py:data:: TRANSFER_DIRECTORY
+   :value: '.httk-transfer'
+
+
+.. py:data:: TRANSFER_MANIFEST
+   :value: 'manifest.json'
+
+
+.. py:data:: TRANSFER_RUNNERS
+   :value: 'runners'
+
+
+.. py:data:: TRANSFER_FORMAT
+   :value: 'httk-workflow-detached-transfer'
+
+
+.. py:data:: TRANSFER_FORMAT_VERSION
+   :value: 2
+
+
+.. py:data:: TRANSFER_OFFER_FORMAT
+   :value: 'httk-workflow-transfer-offer'
+
+
+.. py:data:: TRANSFER_RETIREMENT_FORMAT
+   :value: 'httk-workflow-transfer-retirement'
+
+
+.. py:data:: DEFAULT_OFFER_STATES
+   :value: ('succeeded', 'failed')
+
+
+.. py:class:: TransferCandidate
+
+   One job a transfer offer or resume can actually inspect.
+
+   :param job_id: Identify the job.
+   :param job_key: Preserve the stable job key.
+   :param prior_kind: State the job had before transfer.
+   :param source_placement: Placement in the source workspace.
+   :param bundle: Sealed payload, when this is a resumed transfer.
+   :param marker: Live source marker, when this is a new offer.
+   :param job: Readable immutable job definition, when available.
+   :param manifest: Validated sealed-bundle manifest, when available.
+   :param problem: Readability problem, if the candidate cannot be validated.
+
+
+   .. py:attribute:: job_id
+      :type:  str
+
+
+   .. py:attribute:: job_key
+      :type:  str
+
+
+   .. py:attribute:: prior_kind
+      :type:  str
+
+
+   .. py:attribute:: source_placement
+      :type:  pathlib.PurePosixPath
+
+
+   .. py:attribute:: bundle
+      :type:  pathlib.Path | None
+
+
+   .. py:attribute:: marker
+      :type:  httk.workflow.models.Marker | None
+
+
+   .. py:attribute:: job
+      :type:  httk.workflow.models.JobDefinition | None
+
+
+   .. py:attribute:: manifest
+      :type:  collections.abc.Mapping[str, Any] | None
+      :value: None
+
+
+
+   .. py:attribute:: problem
+      :type:  str | None
+      :value: None
+
+
+
+.. py:function:: detach_job(workspace, job_id, *, marker = None, waiting_parent_map = None, destination_workspace_id, destination_remote = None, destination_placement = None, transfer_id = None)
+
+   Fence and seal one job, leaving no schedulable source marker.
+
+   :param workspace: Provide the source workspace.
+   :param job_id: Identify the job to detach.
+   :param marker: An already resolved source marker; avoids scanning all states.
+   :param waiting_parent_map: Precomputed child-to-parent map for this transfer batch.
+   :param destination_workspace_id: Identify the destination workspace.
+   :param destination_remote: Preserve the destination's remote identifier.
+   :param destination_placement: Override the destination placement.
+   :param transfer_id: Reuse a transfer id when resuming sealing.
+   :return: The sealed source bundle path.
+   :raises ValueError: If the job is missing, active, joined, or already transferring incompatibly.
+
+
+.. py:function:: validate_bundle(bundle)
+
+   Validate a sealed bundle and return its manifest.
+
+   :param bundle: Locate the sealed transfer bundle.
+   :return: The validated transfer manifest.
+   :raises httk.workflow.errors.FormatError: If the bundle format, digest, marker, or runner is invalid.
+
+
+.. py:function:: import_bundle(workspace, bundle)
+
+   Idempotently import a sealed bundle and publish its prior state.
+
+   Runners are installed and verified before the imported job becomes schedulable;
+   the returned acknowledgement identifies the imported payload and transfer.
+
+   :param workspace: Provide the destination workspace.
+   :param bundle: Locate the sealed source bundle.
+   :return: The destination acknowledgement.
+   :raises httk.workflow.errors.FormatError: If the bundle or copied payload fails validation.
+   :raises ValueError: If the bundle names another destination workspace.
+
+
+.. py:function:: acknowledge_transfer(workspace, acknowledgement)
+
+   Validate an acknowledgement and retire the sealed source bundle.
+
+   An acknowledgement that carries an identity signature must carry a valid
+   one: retiring a source is irreversible enough that a damaged or forged
+   attribution is refused rather than recorded. An acknowledgement with no
+   signature is accepted exactly as before, so a destination without an
+   identity key keeps working.
+
+   :param workspace: Provide the source workspace.
+   :param acknowledgement: Supply the destination acknowledgement.
+   :return: The retired source bundle path.
+   :raises httk.workflow.errors.FormatError: If the acknowledgement format, signature, or identity is invalid.
+
+
+.. py:function:: recover_transfers(workspace)
+
+   Finish source sealing and inventory every retained bundle.
+
+   :param workspace: Provide the workspace whose transfers to recover.
+   :return: The recovered and retained transfer records.
+
+
+.. py:function:: select_transfer_jobs(workspace, *, destination_workspace_id, states = DEFAULT_OFFER_STATES, placement = None, job_ids = None, destination_remote = None, include_transferring = False, known_markers = None, waiting_parent_map = None)
+
+   Select sealed and live jobs without changing transfer state.
+
+   :param workspace: Provide the source workspace.
+   :param destination_workspace_id: Select one destination's sealed ledgers.
+   :param states: Select quiescent states eligible for offering.
+   :param placement: Restrict source placements by normalized prefix.
+   :param job_ids: Restrict selection to explicit job ids when supplied.
+   :param destination_remote: Restrict sealed ledgers to one remote name.
+   :param include_transferring: Include live interrupted-transfer markers for advisory checks.
+   :param known_markers: Use these already-resolved live markers instead of scanning the workspace.
+   :param waiting_parent_map: Reuse one waiting-parent map across a transfer batch.
+   :return: Candidates in the same placement/key order as :func:`offer_transfers`.
+   :raises ValueError: If the destination id or requested states are invalid.
+
+
+.. py:function:: offer_transfers(workspace, *, destination_workspace_id, states = DEFAULT_OFFER_STATES, placement = None, job_ids = None)
+
+   Seal every finished job of *workspace* into a bundle for one destination.
+
+   This is the far side of a results fetch: the remote that ran the work
+   offers what stopped there, and the workspace that asked pulls each bundle
+   and imports it. Offering is idempotent because a sealed bundle is reported
+   from its ledger rather than sealed again, so the jobs a first call detached
+   — which no longer have a schedulable marker — are exactly the jobs a second
+   call re-offers, and an interrupted fetch resumes by simply asking again.
+
+   A job that cannot leave right now is skipped rather than fatal: one still
+   referenced by an unresolved join keeps the campaign it belongs to
+   consistent, and reporting the rest lets the fetch make progress.
+
+   :param workspace: Provide the source workspace.
+   :param destination_workspace_id: Identify the destination workspace.
+   :param states: Select quiescent states eligible for offering.
+   :param placement: Restrict offers to this placement prefix.
+   :param job_ids: Restrict the offer to these explicit job ids.
+   :return: Offered transfer records in placement order.
+   :raises ValueError: If the destination id or requested states are invalid.
+
+
+.. py:function:: retire_transfers(workspace, job_ids, *, destination_workspace_id = None)
+
+   Retire the sealed source bundle of every named job.
+
+   A fetch retires at the source only once the destination holds an
+   acknowledgement, so the identity of the job is all this side needs; naming
+   the destination as well refuses to retire a bundle that was sealed for
+   somebody else. Retirement moves the bundle rather than deleting it, and a
+   bundle already retired is reported as such, so calling this twice is the
+   same as calling it once.
+
+   :param workspace: Provide the source workspace.
+   :param job_ids: Identify the jobs whose bundles to retire.
+   :param destination_workspace_id: Restrict retirement to one destination.
+   :return: Retirement records for the named jobs.
+   :raises ValueError: If a job id has no matching detached transfer.
+
+
+.. py:function:: discard_staged_bundle(workspace, staging)
+
+   Drop a staged incoming bundle whose payload the workspace now owns.
+
+   The staging tree is renamed out of the incoming directory before it is
+   removed, so an interrupted removal can never leave a partial bundle where a
+   resumed fetch would find one and mistake it for the real thing.
+
+   :param workspace: Provide the workspace owning the staging directory.
+   :param staging: Locate the staged bundle to discard.
+
+
