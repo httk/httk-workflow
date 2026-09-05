@@ -65,7 +65,7 @@ def test_monitor_view_uses_marker_counts_and_one_visible_page(tmp_path: Path, mo
             scanned_entries += 1
             return next(self.iterator)
 
-    def counted_scandir(path: object) -> CountedScan:
+    def counted_scandir(path: str | os.PathLike[str]) -> CountedScan:
         return CountedScan(real_scandir(path))
 
     monkeypatch.setattr(os, "scandir", counted_scandir)

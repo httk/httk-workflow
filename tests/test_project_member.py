@@ -92,10 +92,10 @@ def test_project_repair_recovers_a_deleted_members_registry(tmp_path: Path) -> N
     assert project_members(project) == ()
 
     report = project_repair(project, apply=False, adopt=True)
+    findings = report["findings"]
+    assert isinstance(findings, list)
     unregistered = [
-        finding
-        for finding in report["findings"]  # type: ignore[union-attr]
-        if finding["check"] == "workspace_members" and finding["status"] == "error"
+        finding for finding in findings if finding["check"] == "workspace_members" and finding["status"] == "error"
     ]
     assert unregistered and "." in str(unregistered[0]["details"]["workspaces"])
 
@@ -103,11 +103,9 @@ def test_project_repair_recovers_a_deleted_members_registry(tmp_path: Path) -> N
     assert [member.path for member in project_members(project)] == ["."]
     # A second run is clean: the workspace is registered again.
     clean = project_repair(project, apply=False, adopt=True)
-    assert all(
-        finding["status"] == "ok"
-        for finding in clean["findings"]  # type: ignore[union-attr]
-        if finding["check"] == "workspace_members"
-    )
+    findings = clean["findings"]
+    assert isinstance(findings, list)
+    assert all(finding["status"] == "ok" for finding in findings if finding["check"] == "workspace_members")
 
 
 def test_project_seal_end_to_end_via_the_core_cli(tmp_path: Path) -> None:
@@ -219,10 +217,13 @@ def test_project_repair_leaves_workspace_default_clean(tmp_path: Path, monkeypat
 
     copied = _copied_named_project(tmp_path, monkeypatch)
     write_project_section(copied, "workspace", {"default": "myws"})  # default unresolvable centrally yet
-    assert int(project_repair(copied, apply=False, adopt=True)["problems"]) >= 1  # type: ignore[arg-type]
+    problems = project_repair(copied, apply=False, adopt=True)["problems"]
+    assert isinstance(problems, int) and problems >= 1
     project_repair(copied, apply=True, adopt=True)
     final = project_repair(copied, apply=False, adopt=True)
-    by_check = {str(f["check"]): f for f in final["findings"]}  # type: ignore[union-attr]
+    findings = final["findings"]
+    assert isinstance(findings, list)
+    by_check = {str(f["check"]): f for f in findings}
     assert by_check["workspace_default"]["status"] == "ok"
 
 
@@ -233,7 +234,9 @@ def test_project_repair_on_a_clean_copy_wires_everything(tmp_path: Path, monkeyp
     # --dry-run: the copied member is not adopted on this machine, so it is flagged
     # and nothing is written.
     report = project_repair(copied, apply=False, adopt=True)
-    members = next(f for f in report["findings"] if f["check"] == "workspace_members")  # type: ignore[union-attr]
+    findings = report["findings"]
+    assert isinstance(findings, list)
+    members = next(f for f in findings if f["check"] == "workspace_members")
     assert members["status"] == "error" and "adopt" in str(members["message"])
     assert _read_global() == {}
 
@@ -266,5 +269,7 @@ def test_scan_does_not_descend_into_a_workspace_within_a_workspace(tmp_path: Pat
     (nested / ".httk-workspace" / "format.json").write_text("{}", encoding="utf-8")
 
     report = project_repair(project, apply=False, adopt=True)
-    members = next(f for f in report["findings"] if f["check"] == "workspace_members")  # type: ignore[union-attr]
+    findings = report["findings"]
+    assert isinstance(findings, list)
+    members = next(f for f in findings if f["check"] == "workspace_members")
     assert "sub/inner" not in str(members)

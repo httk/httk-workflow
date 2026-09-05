@@ -24,7 +24,14 @@ from typing import TYPE_CHECKING
 
 import httk.core
 
-from ...collecting import CollectedJob, JobRecord, _assemble_collected, _degraded_job
+from ...collecting import (
+    CollectedJob,
+    JobRecord,
+    _assemble_collected,
+    _CollectEnvironmentError,
+    _degraded_job,
+    _validate_batch_size,
+)
 from ...models import make_job_key
 from ...packages import load_workflow_package
 
@@ -293,23 +300,30 @@ def collect_finished_tree(
     extract: Callable[[V1FinishedTask], Mapping[str, object]] | None = None,
     workflow_id: str = "httk.v1.finished",
     stats: dict[str, object] | None = None,
+    fail_fast: bool = False,
+    batch_size: int = 64,
 ) -> Iterator[CollectedJob]:
     """Collect old finished trees through a package hook or direct extractor.
 
-    Exactly one of workflow_dir and extract is required. Unlike live
-    collection, a hook/extractor failure degrades only that task and the sweep
-    continues: old trees are expected to contain uneven historical results.
+    Exactly one of workflow_dir and extract is required. A per-task
+    hook/extractor failure degrades that task and the sweep continues unless
+    ``fail_fast`` is set. Missing host dependencies still abort collection.
 
     :param root: Collect the finished tree rooted here.
     :param workflow_dir: Locate the directory workflow package, when used.
     :param extract: Supply a direct per-task extractor, when used.
     :param workflow_id: Name the synthesized workflow, for the extractor path.
     :param stats: Receive the finished-tree counters from :func:`finished_tasks`.
+    :param fail_fast: Raise the first per-task collection failure instead of
+        yielding its degraded result.
+    :param batch_size: Validate the live-collection compatible positive window
+        size; v1 tasks already stream one at a time.
     :yields: One collected job per finished task, degraded ones included.
     :raises ValueError: If not exactly one of ``workflow_dir``/``extract`` is
         given, or the package declares no collector.
     """
 
+    _validate_batch_size(batch_size)
     if (workflow_dir is None) == (extract is None):
         raise ValueError("exactly one of workflow_dir or extract is required")
     provider: WorkflowProvider | None = None
@@ -349,9 +363,14 @@ def collect_finished_tree(
             collected = _assemble_collected(
                 f"{record.workspace_id}:{record.job_id}", record, provider, run, raw_outputs
             )
+        except (ImportError, _CollectEnvironmentError):
+            raise
         except Exception as exc:
             collected = _degraded_job(record, provider, run, f"{task.directory}: {exc}")
-        yield replace(collected, identity_stable=task.identity_stable)
+        collected = replace(collected, identity_stable=task.identity_stable)
+        if fail_fast and collected.missing_collector is not None:
+            raise ValueError(collected.missing_collector)
+        yield collected
     if unstable:
         _LOGGER.warning(
             "v1 finished-tree collect: %d task(s) have path-derived (unstable) identities without a manifest hash; "

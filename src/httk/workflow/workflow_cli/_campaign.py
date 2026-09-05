@@ -104,6 +104,8 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
         raise ValueError("--into cannot be combined with --raw")
     if arguments.into is not None and arguments.id_base is None:
         raise ValueError("--id-base is required with --into")
+    if arguments.degraded and arguments.raw:
+        raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
     config = read_campaign(context.cwd)
     selected = sorted(arguments.partition or config.partitions)
     states = arguments.state or DEFAULT_COLLECT_STATES
@@ -135,30 +137,52 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
             collected=collected, degraded=0, unfulfilled_roles=0, storage_errors=0, skipped_unreadable=skipped
         )
 
-    items: list[CollectedJob] = []
-    for partition in selected:
-        items.extend(
-            collect_jobs(
+    collected = degraded = unfulfilled_roles = storage_errors = 0
+    if arguments.into is not None:
+        # Store provenance resolves across the whole campaign, so --into keeps
+        # this sweep in memory; normal campaign reports stream.
+        items: list[CollectedJob] = []
+        for partition in selected:
+            items.extend(
+                collect_jobs(
+                    _workspace(partition),
+                    states=states,
+                    placement=arguments.placement,
+                    allow_job_collector=arguments.allow_job_collector,
+                    on_skipped=_skip,
+                    fail_fast=arguments.fail_fast,
+                    batch_size=arguments.batch_size,
+                )
+            )
+        reports = _store_collected(items, arguments.into, id_base=arguments.id_base, id_series=arguments.id_series)
+        for item, report in zip(items, reports):
+            degraded += item.missing_collector is not None
+            collected += item.missing_collector is None
+            unfulfilled_roles += len(item.unfulfilled)
+            storage_errors += report.get("storage_error") is not None
+            if not arguments.degraded or item.missing_collector is not None:
+                print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+    else:
+        for partition in selected:
+            for item in collect_jobs(
                 _workspace(partition),
                 states=states,
                 placement=arguments.placement,
                 allow_job_collector=arguments.allow_job_collector,
                 on_skipped=_skip,
-            )
-        )
-    reports = (
-        _store_collected(items, arguments.into, id_base=arguments.id_base, id_series=arguments.id_series)
-        if arguments.into is not None
-        else [_collected_mapping(item) for item in items]
-    )
-    for report in reports:
-        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
-    degraded = sum(1 for item in items if item.missing_collector is not None)
+                fail_fast=arguments.fail_fast,
+                batch_size=arguments.batch_size,
+            ):
+                degraded += item.missing_collector is not None
+                collected += item.missing_collector is None
+                unfulfilled_roles += len(item.unfulfilled)
+                if not arguments.degraded or item.missing_collector is not None:
+                    print(json.dumps(_collected_mapping(item), sort_keys=True, separators=(",", ":")))
     return _emit_collect_summary(
-        collected=len(items) - degraded,
+        collected=collected,
         degraded=degraded,
-        unfulfilled_roles=sum(len(item.unfulfilled) for item in items),
-        storage_errors=sum(1 for report in reports if report.get("storage_error") is not None),
+        unfulfilled_roles=unfulfilled_roles,
+        storage_errors=storage_errors,
         skipped_unreadable=skipped,
     )
 
@@ -198,6 +222,8 @@ def build_campaign_parser(
     subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
 ) -> None:
     """Declare the ``campaign`` group: a partition map over many workspaces."""
+
+    from ._collect import _positive_int
 
     _, group = _group(
         subparsers,
@@ -332,9 +358,22 @@ def build_campaign_parser(
     )
     collect_parser.add_argument("--raw", action="store_true", help="print raw collect records")
     collect_parser.add_argument(
+        "--degraded",
+        action="store_true",
+        help="print only degraded per-job lines; the summary still counts the whole sweep",
+    )
+    collect_parser.add_argument(
         "--allow-job-collector",
         action="store_true",
         help="allow collectors loaded and verified from a pinned workspace workflow tree",
+    )
+    collect_parser.add_argument("--fail-fast", action="store_true", help="stop at the first degraded job")
+    collect_parser.add_argument(
+        "--batch-size",
+        type=_positive_int,
+        default=64,
+        metavar="N",
+        help="records retained and executable requests grouped at once (default: 64)",
     )
     collect_parser.add_argument(
         "--into",

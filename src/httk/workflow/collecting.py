@@ -50,6 +50,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import cache
 from importlib import metadata
+from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import unquote
@@ -1324,12 +1325,16 @@ def _run_executable_collector(
                 str(role): _resolve_executable_output(record, provider, str(role), output)
                 for role, output in outputs.items()
             }
+        except (ImportError, _CollectEnvironmentError):
+            raise
         except UnicodeDecodeError as exc:
             failures[index] = f"{identity}: executable collector response is not UTF-8: {exc}"
         except ValueError as exc:
             failures[index] = f"{identity}: executable collector response failed: {exc}"
         except TypeError as exc:
             failures[index] = f"{identity}: executable collector response is malformed: {exc}"
+        except Exception as exc:
+            failures[index] = f"{identity}: executable collector output failed: {exc}"
     exit_status: int | None = None
     if len(responses) == len(records) and process.returncode:
         exit_status = process.returncode
@@ -1383,6 +1388,8 @@ def _job_collector(
         from .packages import _tree_hook, parse_workflow_manifest
 
         provider = parse_workflow_manifest(store_tree)
+    except ImportError:
+        raise
     except Exception as exc:
         return None, None, f"job-pinned collector manifest is invalid: {exc}"
     if provider.workflow_id != workflow_id:
@@ -1490,6 +1497,14 @@ def _degraded_job(record: JobRecord, provider: object | None, run: httk.core.Run
     return CollectedJob(workflow_id, {}, unfulfilled, run, (), record, reason)
 
 
+def _validate_batch_size(value: object) -> int:
+    """Return one positive collection window size."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("batch_size must be a positive integer")
+    return value
+
+
 def collect(
     workspace: Workspace,
     *,
@@ -1497,6 +1512,8 @@ def collect(
     placement: str | PurePosixPath | None = None,
     allow_job_collector: bool = False,
     on_skipped: Callable[[str], None] | None = None,
+    fail_fast: bool = False,
+    batch_size: int = 64,
 ) -> Iterator[CollectedJob]:
     """Collect records through registered or explicitly allowed job collectors.
 
@@ -1504,10 +1521,10 @@ def collect(
     them to the store-minted ids.
 
     A fallback reads and verifies the package manifest from the pinned runner
-    tree itself. A changed pinned tree raises ``_PinnedTreeError``, which degrades
-    that job and does not stop the rest of the sweep; other hook-loading errors
-    propagate and stop iteration. An unusable observed provenance document
-    degrades only its own job, exactly like every other per-job failure.
+    tree itself. Per-job collector, load, and assembly failures degrade that job
+    and do not stop the sweep unless *fail_fast* is set. Records are consumed in
+    bounded windows; executable collectors run once per matching collector in
+    each window, and yielded results retain scan order.
 
     :param workspace: Read jobs from this workspace.
     :param states: Select the stopped state kinds to report.
@@ -1516,163 +1533,176 @@ def collect(
         job-pinned workspace package trees.
     :param on_skipped: Receive the job key of every selected job dropped for an
         unreadable ``job.json``, forwarded to :func:`job_records`.
+    :param fail_fast: Use single-job windows and raise the first per-job
+        collection failure instead of yielding its degraded result.
+    :param batch_size: Limit records retained and executable requests grouped at
+        once; must be a positive integer.
     :yields: Framework-assembled collected jobs, including degraded jobs.
-    :raises ValueError: If a registered collector fails to resolve or
-        returns invalid output roles.
+    :raises ValueError: If ``batch_size`` is invalid, or *fail_fast* observes a
+        per-job collection failure.
     """
 
     from .provenance import run_record
     from .scaffold import workflow_provider
 
-    records = list(job_records(workspace, states=states, placement=placement, on_skipped=on_skipped))
-    results: list[CollectedJob | None] = [None] * len(records)
-    executable_groups: dict[str, list[tuple[int, JobRecord, WorkflowProvider, httk.core.Run]]] = {}
+    batch_size = _validate_batch_size(batch_size)
+    # Fail-fast must not execute later collectors after observing a failed job.
+    if fail_fast:
+        batch_size = 1
+    records = job_records(workspace, states=states, placement=placement, on_skipped=on_skipped)
+    while window := list(islice(records, batch_size)):
+        results: list[CollectedJob | None] = [None] * len(window)
+        executable_groups: dict[str, list[tuple[int, JobRecord, WorkflowProvider, httk.core.Run]]] = {}
 
-    for index, record in enumerate(records):
-        identity = f"{record.workspace_id}:{record.job_id}"
-        workflow_id = record.job.get("workflow")
-        workflow_id = workflow_id if isinstance(workflow_id, str) else ""
-        provider = workflow_provider(workflow_id)
-        try:
-            run = run_record(record)
-        except ValueError as exc:
-            empty_run = _core().Run(
-                workflow_declaration_uri=None,
-                inputs=(),
-                artifacts=(),
-                outputs=(),
-                source_id=identity,
-                last_modified=None,
-            )
-            results[index] = _degraded_job(
-                record,
-                provider,
-                empty_run,
-                f"{identity}: provenance declaration is unusable: {exc}; "
-                f"inspect {record.payload}/.httk-job/declarations/provenance.json",
-            )
-            continue
-        fallback = False
-        if provider is not None and provider.collector_exec is not None:
-            if provider.directory is None:
-                raise ValueError(f"{identity}: executable collector has no trusted package directory")
-            key = f"{provider.directory.resolve()}:{provider.collector_exec}"
-            executable_groups.setdefault(key, []).append((index, record, provider, run))
-            continue
-        try:
-            adapter = _collector(provider.collector if provider is not None else None)
-        except Exception as exc:
-            raise ValueError(f"{identity}: collector resolution failed: {exc}") from exc
-        if adapter is None:
-            parameters = record.job.get("parameters")
-            language_realization = False
-            language_name: object = None
-            if isinstance(parameters, Mapping):
-                language_realization = parameters.get("workflow_realization") == "language"
-                language_name = parameters.get("workflow_language")
-            package_collect = (
-                language_realization
-                and isinstance(parameters, Mapping)
-                and parameters.get("workflow_collect") == "package"
-            )
-            if provider is None and package_collect:
+        for index, record in enumerate(window):
+            identity = f"{record.workspace_id}:{record.job_id}"
+            workflow_id = record.job.get("workflow")
+            workflow_id = workflow_id if isinstance(workflow_id, str) else ""
+            provider = workflow_provider(workflow_id)
+            try:
+                run = run_record(record)
+            except ValueError as exc:
+                empty_run = _core().Run(
+                    workflow_declaration_uri=None,
+                    inputs=(),
+                    artifacts=(),
+                    outputs=(),
+                    source_id=identity,
+                    last_modified=None,
+                )
                 results[index] = _degraded_job(
                     record,
                     provider,
-                    run,
-                    f"{identity}: workflow package collect hook is unavailable without its registered provider; "
-                    "collect while the package is registered",
+                    empty_run,
+                    f"{identity}: provenance declaration is unusable: {exc}; "
+                    f"inspect {record.payload}/.httk-job/declarations/provenance.json",
                 )
                 continue
-            if provider is None and language_realization and isinstance(language_name, str):
-                try:
-                    lang = languages.language(language_name)
-                    if not lang.has_default_collector:
-                        results[index] = _degraded_job(
-                            record,
-                            provider,
-                            run,
-                            f"{identity}: workflow language {language_name!r} has no default collector; "
-                            "its package declares [workflow.collect]",
-                        )
-                        continue
-                    adapter = lang.collect
-                except Exception as exc:
+            fallback = False
+            if provider is not None and provider.collector_exec is not None:
+                if provider.directory is None:
+                    raise ValueError(f"{identity}: executable collector has no trusted package directory")
+                key = f"{provider.directory.resolve()}:{provider.collector_exec}"
+                executable_groups.setdefault(key, []).append((index, record, provider, run))
+                continue
+            try:
+                adapter = _collector(provider.collector if provider is not None else None)
+            except ImportError:
+                raise
+            except Exception as exc:
+                results[index] = _degraded_job(record, provider, run, f"{identity}: collector resolution failed: {exc}")
+                continue
+            if adapter is None:
+                parameters = record.job.get("parameters")
+                language_realization = False
+                language_name: object = None
+                if isinstance(parameters, Mapping):
+                    language_realization = parameters.get("workflow_realization") == "language"
+                    language_name = parameters.get("workflow_language")
+                package_collect = (
+                    language_realization
+                    and isinstance(parameters, Mapping)
+                    and parameters.get("workflow_collect") == "package"
+                )
+                if provider is None and package_collect:
                     results[index] = _degraded_job(
                         record,
                         provider,
                         run,
-                        f"{identity}: workflow language {language_name!r} collector unavailable: {exc}",
+                        f"{identity}: workflow package collect hook is unavailable without its registered provider; "
+                        "collect while the package is registered",
                     )
                     continue
-        if adapter is None:
-            if not allow_job_collector:
-                reason = (
-                    f"no provider for workflow {workflow_id!r}; pass allow_job_collector=True to use a pinned "
-                    "workspace workflow tree"
-                    if provider is None
-                    else f"no collector registered for workflow {workflow_id!r}; pass "
-                    "allow_job_collector=True to use a pinned workspace workflow tree"
-                )
-                results[index] = _degraded_job(record, provider, run, reason)
-                continue
-            adapter, fallback_provider, fallback_reason = _job_collector(workspace, record, workflow_id)
-            if fallback_provider is not None and fallback_provider.collector_exec is not None:
-                if fallback_provider.directory is None:
-                    raise ValueError(f"{identity}: executable collector has no trusted package directory")
-                key = f"{fallback_provider.directory.resolve()}:{fallback_provider.collector_exec}"
-                executable_groups.setdefault(key, []).append((index, record, fallback_provider, run))
-                continue
-            if adapter is None or fallback_provider is None:
-                results[index] = _degraded_job(
-                    record, fallback_provider or provider, run, fallback_reason or "job collector unavailable"
-                )
-                continue
-            provider = fallback_provider
-            fallback = True
-        try:
-            raw_outputs = adapter(record)
-            if not isinstance(raw_outputs, Mapping):
-                raise ValueError("collector must return a mapping of output roles")
-            results[index] = _assemble_collected(identity, record, provider, run, raw_outputs)
-        except Exception as exc:
-            from .packages import _PinnedTreeError
-
-            if fallback and isinstance(exc, _PinnedTreeError):
-                results[index] = _degraded_job(record, provider, run, f"pinned runner tree was modified: {exc}")
-                continue
-            if isinstance(exc, languages.LanguageOutputsMissingError):
-                # A missing/unreadable published outputs document is inherently a
-                # per-job condition whichever collector surfaced it — registered
-                # language package, language fallback, or pinned tree — so it
-                # degrades this one job and never aborts the sweep.
-                results[index] = _degraded_job(record, provider, run, str(exc))
-                continue
-            if str(exc).startswith(identity + ":"):
-                raise
-            raise ValueError(f"{identity}: collector failed: {exc}") from exc
-
-    for entries in executable_groups.values():
-        group_records = [entry[1] for entry in entries]
-        provider = entries[0][2]
-        assert provider.directory is not None
-        resolved, failures, exit_status = _run_executable_collector(
-            group_records, provider, provider.directory.resolve()
-        )
-        for local_index, (index, record, group_provider, run) in enumerate(entries):
-            identity = f"{record.workspace_id}:{record.job_id}"
-            failure_reason = failures.get(local_index)
-            if failure_reason is not None:
-                built = _degraded_job(record, group_provider, run, failure_reason)
-            else:
-                try:
-                    built = _assemble_collected(identity, record, group_provider, run, resolved[local_index])
-                except Exception as exc:
-                    built = _degraded_job(
-                        record, group_provider, run, f"{identity}: executable collector output failed: {exc}"
+                if provider is None and language_realization and isinstance(language_name, str):
+                    try:
+                        lang = languages.language(language_name)
+                        if not lang.has_default_collector:
+                            results[index] = _degraded_job(
+                                record,
+                                provider,
+                                run,
+                                f"{identity}: workflow language {language_name!r} has no default collector; "
+                                "its package declares [workflow.collect]",
+                            )
+                            continue
+                        adapter = lang.collect
+                    except ImportError:
+                        raise
+                    except Exception as exc:
+                        results[index] = _degraded_job(
+                            record,
+                            provider,
+                            run,
+                            f"{identity}: workflow language {language_name!r} collector unavailable: {exc}",
+                        )
+                        continue
+            if adapter is None:
+                if not allow_job_collector:
+                    reason = (
+                        f"no provider for workflow {workflow_id!r}; pass allow_job_collector=True to use a pinned "
+                        "workspace workflow tree"
+                        if provider is None
+                        else f"no collector registered for workflow {workflow_id!r}; pass "
+                        "allow_job_collector=True to use a pinned workspace workflow tree"
                     )
-            results[index] = built if exit_status is None else replace(built, collector_exit_status=exit_status)
+                    results[index] = _degraded_job(record, provider, run, reason)
+                    continue
+                adapter, fallback_provider, fallback_reason = _job_collector(workspace, record, workflow_id)
+                if fallback_provider is not None and fallback_provider.collector_exec is not None:
+                    if fallback_provider.directory is None:
+                        raise ValueError(f"{identity}: executable collector has no trusted package directory")
+                    key = f"{fallback_provider.directory.resolve()}:{fallback_provider.collector_exec}"
+                    executable_groups.setdefault(key, []).append((index, record, fallback_provider, run))
+                    continue
+                if adapter is None or fallback_provider is None:
+                    results[index] = _degraded_job(
+                        record, fallback_provider or provider, run, fallback_reason or "job collector unavailable"
+                    )
+                    continue
+                provider = fallback_provider
+                fallback = True
+            try:
+                raw_outputs = adapter(record)
+                if not isinstance(raw_outputs, Mapping):
+                    raise ValueError("collector must return a mapping of output roles")
+                results[index] = _assemble_collected(identity, record, provider, run, raw_outputs)
+            except (ImportError, _CollectEnvironmentError):
+                raise
+            except Exception as exc:
+                from .packages import _PinnedTreeError
 
-    for result in results:
-        assert result is not None
-        yield result
+                if fallback and isinstance(exc, _PinnedTreeError):
+                    results[index] = _degraded_job(record, provider, run, f"pinned runner tree was modified: {exc}")
+                elif isinstance(exc, languages.LanguageOutputsMissingError):
+                    results[index] = _degraded_job(record, provider, run, str(exc))
+                else:
+                    results[index] = _degraded_job(record, provider, run, f"{identity}: collector failed: {exc}")
+
+        for entries in executable_groups.values():
+            group_records = [entry[1] for entry in entries]
+            provider = entries[0][2]
+            assert provider.directory is not None
+            resolved, failures, exit_status = _run_executable_collector(
+                group_records, provider, provider.directory.resolve()
+            )
+            for local_index, (index, record, group_provider, run) in enumerate(entries):
+                identity = f"{record.workspace_id}:{record.job_id}"
+                failure_reason = failures.get(local_index)
+                if failure_reason is not None:
+                    built = _degraded_job(record, group_provider, run, failure_reason)
+                else:
+                    try:
+                        built = _assemble_collected(identity, record, group_provider, run, resolved[local_index])
+                    except (ImportError, _CollectEnvironmentError):
+                        raise
+                    except Exception as exc:
+                        built = _degraded_job(
+                            record, group_provider, run, f"{identity}: executable collector output failed: {exc}"
+                        )
+                results[index] = built if exit_status is None else replace(built, collector_exit_status=exit_status)
+
+        for result in results:
+            assert result is not None
+            if fail_fast and result.missing_collector is not None:
+                raise ValueError(result.missing_collector)
+            yield result

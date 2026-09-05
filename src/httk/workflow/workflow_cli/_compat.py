@@ -4,9 +4,10 @@ import argparse
 import json
 import sys
 
+from httk.workflow.collecting import _CollectEnvironmentError
 from httk.workflow.compat.v1 import collect_finished_tree
 
-from ._collect import _collected_mapping, _store_collected
+from ._collect import _collected_mapping, _positive_int, _store_collected
 from ._common import CLIContext, _group, _leaf
 
 
@@ -20,21 +21,36 @@ def handle_v1_collect(arguments: argparse.Namespace, context: CLIContext) -> int
     for root in arguments.roots:
         try:
             stats: dict[str, object] = {}
-            items = list(collect_finished_tree(root, workflow_dir=arguments.workflow_dir, stats=stats))
-            reports = (
-                _store_collected(items, arguments.into, id_base=arguments.id_base, id_series=arguments.id_series)
-                if arguments.into is not None
-                else [_collected_mapping(item) for item in items]
+            collected_items = collect_finished_tree(
+                root,
+                workflow_dir=arguments.workflow_dir,
+                stats=stats,
+                fail_fast=arguments.fail_fast,
+                batch_size=arguments.batch_size,
             )
-            for report in reports:
-                print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+            if arguments.into is not None:
+                # --into retains the root sweep for its provenance storage pass.
+                items = list(collected_items)
+                reports = _store_collected(
+                    items, arguments.into, id_base=arguments.id_base, id_series=arguments.id_series
+                )
+                for item, report in zip(items, reports):
+                    if not arguments.degraded or item.missing_collector is not None:
+                        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+                finished = len(items)
+            else:
+                finished = 0
+                for item in collected_items:
+                    finished += 1
+                    if not arguments.degraded or item.missing_collector is not None:
+                        print(json.dumps(_collected_mapping(item), sort_keys=True, separators=(",", ":")))
             unfinished = stats.get("unfinished_by_status")
             print(
                 json.dumps(
                     {
                         "format": "httk-workflow-v1-collect-summary",
                         "format_version": 2,
-                        "finished": len(items),
+                        "finished": finished,
                         "unfinished_by_status": dict(sorted(unfinished.items()))
                         if isinstance(unfinished, dict)
                         else {},
@@ -44,9 +60,13 @@ def handle_v1_collect(arguments: argparse.Namespace, context: CLIContext) -> int
                     separators=(",", ":"),
                 )
             )
+        except _CollectEnvironmentError:
+            raise
         except (OSError, ValueError, RuntimeError) as exc:
             failed = True
             print(f"{root}: {exc}", file=sys.stderr)
+            if arguments.fail_fast:
+                break
     return 1 if failed else 0
 
 
@@ -61,6 +81,15 @@ def add_v1_collect_arguments(parser: argparse.ArgumentParser) -> None:
         help="the directory workflow package providing the collect hook",
     )
     parser.add_argument("--into", metavar="PATH", help="save collected entries, runs, and products to SQLite")
+    parser.add_argument("--degraded", action="store_true", help="print only degraded per-task lines")
+    parser.add_argument("--fail-fast", action="store_true", help="stop at the first degraded task")
+    parser.add_argument(
+        "--batch-size",
+        type=_positive_int,
+        default=64,
+        metavar="N",
+        help="validated compatibility window size (default: 64)",
+    )
     parser.add_argument(
         "--id-base",
         metavar="BASE",

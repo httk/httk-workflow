@@ -728,7 +728,9 @@ def test_a_collection_can_select_only_named_categories(aged: _Fixture) -> None:
     assert [category.name for category in report.categories] == list(gc_module.GC_CATEGORIES)
     assert report.category("tmp_entries").removed == 2
     assert report.category("placement_directories").removed > 0
-    for name in set(gc_module.GC_CATEGORIES) - {"placement_directories", "tmp_entries"}:
+    for name in gc_module.GC_CATEGORIES:
+        if name in ("placement_directories", "tmp_entries"):
+            continue
         category = report.category(name)
         assert category.skipped and category.skip_reason == "not selected"
 

@@ -10,7 +10,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, replace
 from pathlib import Path, PurePosixPath
 from types import ModuleType, SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from httk.core import DataRecord, FileRecord
@@ -70,6 +70,145 @@ def _hook(root: Path, body: str) -> Path:
     path.write_text(f"#!/usr/bin/env python3\n{body}\n", encoding="utf-8")
     path.chmod(0o755)
     return path
+
+
+def _live_record(root: Path, job_id: str, workflow: str) -> JobRecord:
+    return replace(_record(root, job_id), job={"workflow": workflow})
+
+
+def _run(record: JobRecord) -> object:
+    return collecting_module._core().Run(
+        workflow_declaration_uri=None,
+        inputs=(),
+        artifacts=(),
+        outputs=(),
+        source_id=f"{record.workspace_id}:{record.job_id}",
+        last_modified=None,
+    )
+
+
+def test_python_collector_failure_degrades_and_fail_fast_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    records = [_live_record(workspace.root, name, "python") for name in ("good", "bad", "after")]
+    called = []
+
+    def collector(record):
+        called.append(record.job_id)
+        if record.job_id == "bad":
+            raise RuntimeError("boom")
+        return {}
+
+    provider = SimpleNamespace(
+        collector=collector,
+        collector_exec=None,
+    )
+    monkeypatch.setattr(collecting_module, "job_records", lambda *_args, **_kwargs: iter(records))
+    monkeypatch.setattr(scaffold_module, "workflow_provider", lambda _name: provider)
+    monkeypatch.setattr(__import__("httk.workflow.provenance", fromlist=["run_record"]), "run_record", _run)
+
+    collected = list(collecting_module.collect(workspace, batch_size=2))
+    assert [item.record.job_id for item in collected] == ["good", "bad", "after"]
+    assert collected[1].missing_collector == "workspace:bad: collector failed: boom"
+    called.clear()
+    with pytest.raises(ValueError, match="workspace:bad: collector failed: boom"):
+        list(collecting_module.collect(workspace, fail_fast=True, batch_size=64))
+    assert called == ["good", "bad"]
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, ImportError, collecting_module._CollectEnvironmentError])
+def test_python_collector_environment_failure_propagates(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, error: type[BaseException]
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    record = _live_record(workspace.root, "interrupted", "python")
+    provider = SimpleNamespace(
+        collector=lambda _record: (_ for _ in ()).throw(error()),
+        collector_exec=None,
+    )
+    monkeypatch.setattr(collecting_module, "job_records", lambda *_args, **_kwargs: iter((record,)))
+    monkeypatch.setattr(scaffold_module, "workflow_provider", lambda _name: provider)
+    monkeypatch.setattr(__import__("httk.workflow.provenance", fromlist=["run_record"]), "run_record", _run)
+
+    with pytest.raises(error):
+        list(collecting_module.collect(workspace))
+
+
+def test_collector_import_failure_is_fatal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    record = _live_record(workspace.root, "missing", "python")
+    provider = SimpleNamespace(collector="missing_test_collector_module:collect", collector_exec=None)
+    monkeypatch.setattr(collecting_module, "job_records", lambda *_args, **_kwargs: iter((record,)))
+    monkeypatch.setattr(scaffold_module, "workflow_provider", lambda _name: provider)
+    monkeypatch.setattr(__import__("httk.workflow.provenance", fromlist=["run_record"]), "run_record", _run)
+    with pytest.raises(ImportError, match="missing_test_collector_module"):
+        list(collecting_module.collect(workspace))
+
+
+def test_executable_unreadable_output_degrades_only_its_job(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    hook = _hook(
+        tmp_path,
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    request = json.loads(line)\n"
+        "    if 'record' not in request: continue\n"
+        "    print(json.dumps({'job_id': request['record']['job_id'], 'outputs': {'answer': {}}}), flush=True)\n",
+    )
+    provider = SimpleNamespace(collector_exec=hook.name, directory=tmp_path, outputs={})
+
+    def resolve(record, *_args):
+        if record.job_id == "bad":
+            raise PermissionError("unreadable output")
+        return 7
+
+    monkeypatch.setattr(collecting_module, "_resolve_executable_output", resolve)
+    resolved, failures, _ = _run_executable_collector(
+        [_record(tmp_path, "bad"), _record(tmp_path, "good")], provider, tmp_path
+    )
+    assert "unreadable output" in failures[0]
+    assert resolved == {1: {"answer": 7}}
+
+
+def test_collect_windows_input_and_keeps_mixed_collector_order(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    records = [
+        _live_record(workspace.root, name, workflow)
+        for name, workflow in (("exec-1", "exec"), ("python", "python"), ("exec-2", "exec"))
+    ]
+    executable = SimpleNamespace(collector_exec="collect", directory=workspace.root)
+    python = SimpleNamespace(collector=lambda _record: {}, collector_exec=None)
+    observed: list[list[str]] = []
+
+    def guarded_records() -> Iterator[JobRecord]:
+        yield records[0]
+        yield records[1]
+        raise AssertionError("the second window was consumed before the first result")
+
+    def executable_collect(group: Sequence[JobRecord], _provider: object, _root: Path):
+        observed.append([record.job_id for record in group])
+        return {index: {} for index in range(len(group))}, {}, None
+
+    monkeypatch.setattr(collecting_module, "job_records", lambda *_args, **_kwargs: guarded_records())
+    monkeypatch.setattr(scaffold_module, "workflow_provider", lambda name: executable if name == "exec" else python)
+    monkeypatch.setattr(__import__("httk.workflow.provenance", fromlist=["run_record"]), "run_record", _run)
+    monkeypatch.setattr(collecting_module, "_run_executable_collector", executable_collect)
+
+    first = next(collecting_module.collect(workspace, batch_size=2))
+    assert first.record.job_id == "exec-1"
+    assert observed == [["exec-1"]]
+
+    monkeypatch.setattr(collecting_module, "job_records", lambda *_args, **_kwargs: iter(records))
+    collected = list(collecting_module.collect(workspace, batch_size=3))
+    assert [item.record.job_id for item in collected] == ["exec-1", "python", "exec-2"]
+    assert observed[-1] == ["exec-1", "exec-2"]
+
+
+@pytest.mark.parametrize("batch_size", [0, -1, True, 1.5])
+def test_collect_rejects_non_positive_integer_batch_sizes(batch_size: object, tmp_path: Path) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(ValueError, match="batch_size must be a positive integer"):
+        list(collecting_module.collect(workspace, batch_size=cast(Any, batch_size)))
 
 
 def test_collect_main_emits_v1_jsonl(tmp_path: Path) -> None:

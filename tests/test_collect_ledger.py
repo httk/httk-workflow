@@ -34,9 +34,7 @@ def _ledger_records(path: Path) -> list[dict[str, str]]:
     """
 
     with sqlite3.connect(path) as connection:
-        rows = connection.execute(
-            "SELECT key, family, id, alias_of, supersedes FROM records ORDER BY seq"
-        ).fetchall()
+        rows = connection.execute("SELECT key, family, id, alias_of, supersedes FROM records ORDER BY seq").fetchall()
     fields = ("key", "family", "id", "alias_of", "supersedes")
     return [{name: value for name, value in zip(fields, row) if value is not None} for row in rows]
 

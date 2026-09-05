@@ -106,10 +106,10 @@ invokes the manager command on the owning machine; the remote is transport only.
 This is exactly how {doc}`manager run <workflow_cli>` behaves for a single
 workspace. Each target workspace supplies its own launcher and settings. A
 launcher or invocation failure fails the command. `campaign collect` chains `campaign_collect()` across the
-partitions
-lazily, one workspace after another in stable order, so a campaign spread over
-many workspaces streams as one collect without ever materializing more than the
-record in hand.
+partitions lazily, one workspace after another in stable order. `campaign
+collect` passes `--batch-size` (default 64) and `--fail-fast` to each local
+workspace collection; normal JSONL reports stream, while `--into` deliberately
+keeps the campaign sweep in memory for its cross-job provenance storage pass.
 
 Both take `--partition` to act on a subset, so a campaign can be managed and
 collected a few partitions at a time.

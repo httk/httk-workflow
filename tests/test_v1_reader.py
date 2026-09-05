@@ -13,6 +13,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 from httk.workflow import JobRecord
+from httk.workflow.collecting import _CollectEnvironmentError
 from httk.workflow.compat.v1 import code_of, collect_finished_tree, finished_tasks, task_file
 from httk.workflow.workflow_cli import command
 
@@ -151,6 +152,38 @@ def test_v1_collect_cli_json_lines(tmp_path: Path, capsys: pytest.CaptureFixture
     summary = json.loads(lines[-1])
     assert summary["format"] == "httk-workflow-v1-collect-summary"
     assert summary["finished"] == 1 and summary["skipped_no_rundir"] == 0
+
+
+@pytest.mark.parametrize("error", [ImportError, _CollectEnvironmentError])
+def test_v1_collector_environment_failure_is_fatal(tmp_path: Path, error: type[Exception]) -> None:
+    _task(tmp_path, "ht.task.default.bad.cleanup.0.unclaimed.3.finished", ("2021-01-01_00.00.00",))
+
+    def extract(_task):
+        raise error("dependency unavailable")
+
+    with pytest.raises(error, match="dependency unavailable"):
+        list(collect_finished_tree(tmp_path, extract=extract))
+
+
+@pytest.mark.parametrize("fail_fast", [False, True])
+def test_v1_cli_fail_fast_stops_before_later_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fail_fast: bool
+) -> None:
+    from httk.workflow.workflow_cli import _compat
+
+    visited = []
+
+    def collect_root(root, **_kwargs):
+        visited.append(root)
+        raise ValueError("broken result")
+
+    monkeypatch.setattr(_compat, "collect_finished_tree", collect_root)
+    flags = ["--fail-fast"] if fail_fast else []
+    assert (
+        command(["v1", "collect", "--workflow-dir", "package", *flags, "broken", "later"], CLIContext("httk", tmp_path))
+        == 1
+    )
+    assert visited == (["broken"] if fail_fast else ["broken", "later"])
 
 
 def test_synthesized_ids_are_canonical_and_path_distinct(tmp_path: Path) -> None:

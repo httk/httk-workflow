@@ -22,6 +22,15 @@ from ._common import _LOGGER, _leaf, _local_root
 _CONTENT_ID_RE = re.compile(r"[0-9a-f]{64}\Z")
 
 
+def _positive_int(value: str) -> int:
+    """Parse one positive CLI integer, rejecting bool-like API values elsewhere."""
+
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def _edge_counts(run: Run) -> dict[str, int]:
     return {side: len(getattr(run, side)) for side in ("inputs", "artifacts", "outputs")}
 
@@ -652,16 +661,20 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
         return _emit_collect_summary(
             collected=collected, degraded=0, unfulfilled_roles=0, storage_errors=0, skipped_unreadable=skipped
         )
-    items = list(
-        collect(
-            workspace,
-            states=arguments.state or DEFAULT_COLLECT_STATES,
-            placement=arguments.placement,
-            allow_job_collector=arguments.allow_job_collector,
-            on_skipped=_skip,
-        )
+    collected = degraded = unfulfilled_roles = storage_errors = 0
+    collected_items = collect(
+        workspace,
+        states=arguments.state or DEFAULT_COLLECT_STATES,
+        placement=arguments.placement,
+        allow_job_collector=arguments.allow_job_collector,
+        on_skipped=_skip,
+        fail_fast=arguments.fail_fast,
+        batch_size=arguments.batch_size,
     )
     if arguments.into is not None:
+        # --into resolves cross-job provenance in a second storage pass, so it
+        # deliberately retains the sweep; ordinary reporting does not.
+        items = list(collected_items)
         ledger_path, ledger_keys = _ledger_settings(arguments, workspace)
         reports = _store_collected(
             items,
@@ -671,20 +684,25 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             ledger_path=ledger_path,
             ledger_keys=ledger_keys,
         )
+        for item, report in zip(items, reports):
+            degraded += item.missing_collector is not None
+            collected += item.missing_collector is None
+            unfulfilled_roles += len(item.unfulfilled)
+            storage_errors += report.get("storage_error") is not None
+            if not arguments.degraded or item.missing_collector is not None:
+                print(json.dumps(report, sort_keys=True, separators=(",", ":")))
     else:
-        reports = [_collected_mapping(item) for item in items]
-    for item, report in zip(items, reports):
-        # --degraded prints only the degraded lines; the summary below still
-        # reflects the whole sweep, so the counts do not silently shrink.
-        if arguments.degraded and item.missing_collector is None:
-            continue
-        print(json.dumps(report, sort_keys=True, separators=(",", ":")))
-    degraded = sum(1 for item in items if item.missing_collector is not None)
+        for item in collected_items:
+            degraded += item.missing_collector is not None
+            collected += item.missing_collector is None
+            unfulfilled_roles += len(item.unfulfilled)
+            if not arguments.degraded or item.missing_collector is not None:
+                print(json.dumps(_collected_mapping(item), sort_keys=True, separators=(",", ":")))
     return _emit_collect_summary(
-        collected=len(items) - degraded,
+        collected=collected,
         degraded=degraded,
-        unfulfilled_roles=sum(len(item.unfulfilled) for item in items),
-        storage_errors=sum(1 for report in reports if report.get("storage_error") is not None),
+        unfulfilled_roles=unfulfilled_roles,
+        storage_errors=storage_errors,
         skipped_unreadable=skipped,
     )
 
@@ -720,6 +738,14 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
         "--allow-job-collector",
         action="store_true",
         help="allow collectors loaded and verified from a pinned workspace workflow tree",
+    )
+    parser.add_argument("--fail-fast", action="store_true", help="stop at the first degraded job")
+    parser.add_argument(
+        "--batch-size",
+        type=_positive_int,
+        default=64,
+        metavar="N",
+        help="records retained and executable requests grouped at once (default: 64)",
     )
     parser.add_argument(
         "--into",
