@@ -315,7 +315,10 @@ from running.
 
 `collect(..., batch_size=64)` consumes records in bounded windows. A matching
 executable hook runs once per window, and results remain in workspace scan
-order. Normal CLI output is JSONL streamed as each window completes;
+order. With `fail_fast=True` (`--fail-fast`), the window size is forced to one,
+so executable batching is disabled and each job starts its own collector
+process. `batch_size` (`--batch-size`) must still be positive but is otherwise
+ignored in this mode. Normal CLI output is JSONL streamed as each window completes;
 `--degraded` filters only those output lines while retaining whole-sweep
 summary counts. `--into` intentionally retains the complete sweep so its
 second storage pass can resolve cross-job provenance; use ordinary streaming

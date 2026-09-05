@@ -740,13 +740,17 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
         action="store_true",
         help="allow collectors loaded and verified from a pinned workspace workflow tree",
     )
-    parser.add_argument("--fail-fast", action="store_true", help="stop at the first degraded job")
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="stop at the first degraded job; disables executable batching (one collector process per job)",
+    )
     parser.add_argument(
         "--batch-size",
         type=_positive_int,
         default=64,
         metavar="N",
-        help="records retained and executable requests grouped at once (default: 64)",
+        help="records retained and executable requests grouped at once (default: 64; ignored with --fail-fast)",
     )
     parser.add_argument(
         "--into",

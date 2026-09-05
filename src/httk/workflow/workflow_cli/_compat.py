@@ -7,7 +7,7 @@ import sys
 from httk.workflow.collecting import _CollectEnvironmentError
 from httk.workflow.compat.v1 import collect_finished_tree
 
-from ._collect import _collected_mapping, _positive_int, _store_collected
+from ._collect import _collected_mapping, _store_collected
 from ._common import CLIContext, _group, _leaf
 
 
@@ -26,7 +26,6 @@ def handle_v1_collect(arguments: argparse.Namespace, context: CLIContext) -> int
                 workflow_dir=arguments.workflow_dir,
                 stats=stats,
                 fail_fast=arguments.fail_fast,
-                batch_size=arguments.batch_size,
             )
             if arguments.into is not None:
                 # --into retains the root sweep for its provenance storage pass.
@@ -83,13 +82,6 @@ def add_v1_collect_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--into", metavar="PATH", help="save collected entries, runs, and products to SQLite")
     parser.add_argument("--degraded", action="store_true", help="print only degraded per-task lines")
     parser.add_argument("--fail-fast", action="store_true", help="stop at the first degraded task")
-    parser.add_argument(
-        "--batch-size",
-        type=_positive_int,
-        default=64,
-        metavar="N",
-        help="validated compatibility window size (default: 64)",
-    )
     parser.add_argument(
         "--id-base",
         metavar="BASE",

@@ -30,7 +30,6 @@ from ...collecting import (
     _assemble_collected,
     _CollectEnvironmentError,
     _degraded_job,
-    _validate_batch_size,
 )
 from ...models import make_job_key
 from ...packages import load_workflow_package
@@ -301,7 +300,6 @@ def collect_finished_tree(
     workflow_id: str = "httk.v1.finished",
     stats: dict[str, object] | None = None,
     fail_fast: bool = False,
-    batch_size: int = 64,
 ) -> Iterator[CollectedJob]:
     """Collect old finished trees through a package hook or direct extractor.
 
@@ -316,14 +314,11 @@ def collect_finished_tree(
     :param stats: Receive the finished-tree counters from :func:`finished_tasks`.
     :param fail_fast: Raise the first per-task collection failure instead of
         yielding its degraded result.
-    :param batch_size: Validate the live-collection compatible positive window
-        size; v1 tasks already stream one at a time.
     :yields: One collected job per finished task, degraded ones included.
     :raises ValueError: If not exactly one of ``workflow_dir``/``extract`` is
         given, or the package declares no collector.
     """
 
-    _validate_batch_size(batch_size)
     if (workflow_dir is None) == (extract is None):
         raise ValueError("exactly one of workflow_dir or extract is required")
     provider: WorkflowProvider | None = None

@@ -154,6 +154,19 @@ def test_v1_collect_cli_json_lines(tmp_path: Path, capsys: pytest.CaptureFixture
     assert summary["finished"] == 1 and summary["skipped_no_rundir"] == 0
 
 
+def test_collection_batching_options(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(TypeError, match="unexpected keyword argument 'batch_size'"):
+        cast(Any, collect_finished_tree)(tmp_path, extract=lambda _task: {}, batch_size=64)
+    context = CLIContext("httk", tmp_path)
+    assert command(["v1", "collect", "--workflow-dir", "package", "root", "--batch-size", "64"], context) == 2
+    assert "unrecognized arguments: --batch-size 64" in capsys.readouterr().err
+    for prefix in ([], ["campaign"]):
+        assert command([*prefix, "collect", "--help"], context) == 0
+        help_text = " ".join(capsys.readouterr().out.split())
+        assert "disables executable batching (one collector process per job)" in help_text
+        assert "ignored with --fail-fast" in help_text
+
+
 @pytest.mark.parametrize("error", [ImportError, _CollectEnvironmentError])
 def test_v1_collector_environment_failure_is_fatal(tmp_path: Path, error: type[Exception]) -> None:
     _task(tmp_path, "ht.task.default.bad.cleanup.0.unclaimed.3.finished", ("2021-01-01_00.00.00",))
