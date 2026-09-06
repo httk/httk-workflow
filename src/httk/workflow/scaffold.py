@@ -1316,7 +1316,7 @@ def new_jobs(
     :param runner_name: Override the workspace runner-store name when publishing.
     :param name: Set the shared display name.
     :param provenance: Set the shared ``provenance`` document; a per-item
-        ``provenance`` in :class:`JobItem` replaces it entirely rather than
+        ``provenance`` in :class:`~httk.workflow.scaffold.JobItem` replaces it entirely rather than
         merging with it. See :func:`new_job` for the merge rule against a
         workflow-declared ``provenance`` and the entity-claim convention.
     :return: An iterator yielding each submitted job description.
