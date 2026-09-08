@@ -70,8 +70,8 @@ installation and strict docs build; this is a network check. The resulting
 package files are written to `dist/`.
 
 Versions on package indexes are immutable. Use a new development or release
-candidate version when repeating an upload, for example `0.1.0rc1` followed by
-`0.1.0`.
+candidate version when repeating an upload, for example `2.1.0rc1` followed by
+`2.1.0`.
 
 ## TestPyPI
 
@@ -87,11 +87,11 @@ in a fresh environment:
 python -m venv /tmp/httk-workflow-test
 /tmp/httk-workflow-test/bin/python -m pip install \
   --index-url https://test.pypi.org/simple/ \
-  --extra-index-url https://pypi.org/simple/ httk-workflow==0.1.0
+  --extra-index-url https://pypi.org/simple/ httk-workflow==2.1.0
 /tmp/httk-workflow-test/bin/python -c "import httk.atomistic"
 ```
 
-Replace `0.1.0` with the version being tested. Unlike `httk-core`, `httk-workflow`
+Replace `2.1.0` with the version being tested. Unlike `httk-core`, `httk-workflow`
 has a runtime dependency (`httk-core`), so `--no-deps` is not appropriate here:
 `import httk.atomistic` pulls in `httk.core` at import time. The
 `--extra-index-url` lets pip resolve that dependency (once it is published to the
@@ -101,7 +101,7 @@ real PyPI) while the package under test comes from TestPyPI.
 
 1. Confirm that `make release-check` succeeds on the exact commit to release.
 2. Push the commit and create a GitHub release whose tag is `v` followed by the
-   package version, for example `v0.1.0`.
+   package version, for example `v2.1.0`.
 3. Publish the GitHub release and approve the protected `pypi` environment.
 4. Verify the release from a fresh environment with `pip install httk-workflow`.
 
