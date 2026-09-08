@@ -31,7 +31,7 @@ docs-lock:
 # (network target; the lock installation and build are intentionally transparent).
 docs-lock-check: docs-clean
 	@set -eu; \
-	check_dir=$$(mktemp -d "${TMPDIR:-/tmp}/httk-workflow-docs-lock-check.XXXXXX"); \
+	check_dir=$$(mktemp -d "$${TMPDIR:-/tmp}/httk-workflow-docs-lock-check.XXXXXX"); \
 	trap 'rm -rf "$$check_dir"' EXIT; \
 	env -u PYTHONPATH -u PYTHONHOME $(PYTHON) -m venv "$$check_dir/venv"; \
 	env -u PYTHONPATH -u PYTHONHOME "$$check_dir/venv/bin/python" -m pip install -r docs/requirements.lock; \

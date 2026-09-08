@@ -65,8 +65,9 @@ myst_enable_extensions = [
 ]
 myst_heading_anchors = 3
 
-# myst-nb config: don't execute notebooks during docs build by default
-nb_execution_mode = "off"
+# Execute examples during strict builds; docs-clean also clears the cache.
+nb_execution_mode = "cache"
+nb_execution_raise_on_error = True
 
 html_theme = "furo"
 html_theme_options = {
