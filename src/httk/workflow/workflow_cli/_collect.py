@@ -272,7 +272,7 @@ def _open_id_ledger(
         be allocated through it (no id-settable output).
     """
 
-    from httk.store import IdLedger
+    from httk.store import IdLedger  # pyright: ignore[reportMissingImports]
 
     values = [value for item in items if item.missing_collector is None for value in (*item.outputs.values(), item.run)]
     families = sorted(
@@ -352,7 +352,7 @@ def _ledger_entry_id(
     :return: The ledger id to inject, or ``None`` to fall back to store minting.
     """
 
-    from httk.store import IdLedgerError
+    from httk.store import IdLedgerError  # pyright: ignore[reportMissingImports]
 
     if isinstance(original_id, str) and _CONTENT_ID_RE.fullmatch(original_id) is None:
         # The value already carries a user-assigned id (conforming or not); never
@@ -428,9 +428,9 @@ def _store_collected(
     """
 
     try:
-        from httk.store import Backend, EntryIdScheme, SqlStore
-        from httk.store.backend.schema import SchemaError
-        from httk.store.backend.sql import StorageLayoutUpgradeRequiredError
+        from httk.store import Backend, EntryIdScheme, SqlStore  # pyright: ignore[reportMissingImports]
+        from httk.store.backend.schema import SchemaError  # pyright: ignore[reportMissingImports]
+        from httk.store.backend.sql import StorageLayoutUpgradeRequiredError  # pyright: ignore[reportMissingImports]
     except ImportError as exc:
         raise ValueError("--into requires httk-store with its database dependencies") from exc
 

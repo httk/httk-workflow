@@ -20,7 +20,7 @@ Run it in an empty directory:
 
 It creates ``example-workflow-workspace`` beside the ``POSCAR`` it writes. Without
 VASP installed, the mock VASP beside this file is used; set ``HTTK_VASP_COMMAND``
-to use the real thing.
+to use the real thing. Install ``httk-atomistic`` to read the finished VASP results.
 """
 
 import os

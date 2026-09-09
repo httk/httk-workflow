@@ -1070,7 +1070,7 @@ def _resolve_executable_output(record: JobRecord, provider: object, role: str, v
         ref = declared.get("ref")
         if isinstance(ref, str):
             try:
-                from httk.store import validation
+                from httk.store import validation  # pyright: ignore[reportMissingImports]
             except ImportError as exc:
                 raise _CollectEnvironmentError(
                     "hard collect validation requires httk-store; install with `pip install httk-store`"

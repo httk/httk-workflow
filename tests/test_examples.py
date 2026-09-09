@@ -123,6 +123,8 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     work: Path,
     console_scripts: Path,
 ) -> None:
+    pytest.importorskip("httk.atomistic")
+    pytest.importorskip("httk.store.backend.sql.engine")
     commands = [line.replace(" --remote local", "") for line in _documented_commands(_QUICKSTART)]
 
     # The page really is eight commands, including identity and workspace setup.
@@ -162,6 +164,8 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
 
 
 def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) -> None:
+    pytest.importorskip("httk.atomistic")
+    pytest.importorskip("httk.store.backend.sql.engine")
     # No console scripts on PATH at all: the script's documented module fallback is
     # what runs, which is the form a checkout without an install uses.
     empty = tmp_path / "no-scripts"
@@ -185,6 +189,7 @@ def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) ->
 
 
 def test_the_python_api_tour_runs(work: Path, tmp_path: Path) -> None:
+    pytest.importorskip("httk.atomistic")
     empty = tmp_path / "no-scripts"
     empty.mkdir()
     completed = _run(

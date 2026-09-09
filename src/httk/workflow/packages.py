@@ -27,7 +27,7 @@ from .models import (
     validate_declarations,
     validate_resources,
 )
-from .scaffold import WorkflowProvider, payload_relative, register_workflow
+from .scaffold import DataMode, WorkdirMode, WorkflowProvider, payload_relative, register_workflow
 
 MANIFEST_NAME = "httk_workflow.toml"
 _LOGGER = logging.getLogger(__name__)
@@ -831,8 +831,8 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
         initial_step=initial_step,
         alias=alias,
         steps=steps,
-        data_mode=data_mode,  # type: ignore[arg-type]
-        workdir_mode=workdir_mode,  # type: ignore[arg-type]
+        data_mode=cast(DataMode, data_mode),
+        workdir_mode=cast(WorkdirMode, workdir_mode),
         summary=description,
         inputs=inputs,
         instantiate=lang is not None or instantiate_file is not None,

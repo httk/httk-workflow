@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from httk.core.cli import CLIContext
 from httk.core.digests import tree_digest
 
@@ -96,6 +97,7 @@ def _workspace(tmp_path: Path, context: CLIContext) -> str:
 
 
 def test_job_new_accepts_workflow_dir_and_batches_parameter_sources(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("httk.atomistic")
     context = _context(tmp_path)
     workspace = _workspace(tmp_path, context)
     package = _cli_package(tmp_path / "package")
@@ -140,6 +142,7 @@ def test_job_new_accepts_workflow_dir_and_batches_parameter_sources(tmp_path: Pa
 
 
 def test_job_new_batch_reconciles_structure_names_and_reports_skips_and_count(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("httk.atomistic")
     context = _context(tmp_path)
     workspace = _workspace(tmp_path, context)
     package = _cli_package(tmp_path / "package")
@@ -180,6 +183,7 @@ def test_job_new_batch_reconciles_structure_names_and_reports_skips_and_count(tm
 
 
 def test_job_new_batch_tag_prefixes_each_derived_tag(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("httk.atomistic")
     context = _context(tmp_path)
     workspace = _workspace(tmp_path, context)
     package = _cli_package(tmp_path / "package")
@@ -213,6 +217,7 @@ def test_job_new_batch_tag_prefixes_each_derived_tag(tmp_path: Path, capsys) -> 
 
 
 def test_job_new_batch_tag_prefix_stays_within_the_tag_syntax(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("httk.atomistic")
     context = _context(tmp_path)
     workspace = _workspace(tmp_path, context)
     package = _cli_package(tmp_path / "package")
@@ -251,6 +256,7 @@ def test_job_new_batch_tag_prefix_stays_within_the_tag_syntax(tmp_path: Path, ca
 
 
 def test_job_new_batch_reports_partial_progress_before_failing(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("httk.atomistic")
     context = _context(tmp_path)
     workspace = _workspace(tmp_path, context)
     package = _cli_package(tmp_path / "package")

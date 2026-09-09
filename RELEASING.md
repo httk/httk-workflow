@@ -88,12 +88,12 @@ python -m venv /tmp/httk-workflow-test
 /tmp/httk-workflow-test/bin/python -m pip install \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ httk-workflow==2.1.0
-/tmp/httk-workflow-test/bin/python -c "import httk.atomistic"
+/tmp/httk-workflow-test/bin/python -c "import httk.workflow"
 ```
 
 Replace `2.1.0` with the version being tested. Unlike `httk-core`, `httk-workflow`
 has a runtime dependency (`httk-core`), so `--no-deps` is not appropriate here:
-`import httk.atomistic` pulls in `httk.core` at import time. The
+`import httk.workflow` pulls in `httk.core` at import time. The
 `--extra-index-url` lets pip resolve that dependency (once it is published to the
 real PyPI) while the package under test comes from TestPyPI.
 

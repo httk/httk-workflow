@@ -15,7 +15,8 @@ to be declared.
 Every command below works without VASP installed: `examples/mock_vasp.py` writes
 the output files a finished run leaves behind, so the whole path — prepare, run,
 publish, collect — is exercised for real, with meaningless numbers. Install
-`httk-store` for `collect --into results.sqlite --id-base httk.quickstart`; without it, that command reports
+`httk-atomistic` to read the VASP results and `httk-store[db]` for
+`collect --into results.sqlite --id-base httk.quickstart`; without the store, that command reports
 a teaching error (the shell example skips storage and continues).
 
 The complete sequence of this page is also `examples/quickstart.sh`, which runs

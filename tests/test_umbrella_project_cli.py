@@ -1,7 +1,7 @@
 """The core-owned ``httk project`` command is extended by httk-workflow."""
 
 from httk.core.cli import main
-from httk.core.register import known_cli_commands
+from httk.core.register.cli import known_cli_commands
 
 import httk.workflow.workflow_cli  # noqa: F401  (importing registers the workflow CLI commands)
 

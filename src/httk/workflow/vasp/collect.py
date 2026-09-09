@@ -58,7 +58,7 @@ def _load(path: Path, *, raw: bool = False) -> Any:
 def _structure(record: JobRecord, path: Path) -> object:
     try:
         loaded = _load(path)
-        import httk.atomistic
+        import httk.atomistic  # pyright: ignore[reportMissingImports]
 
         return httk.atomistic.UnitcellStructureView(loaded)
     except (AttributeError, ImportError, TypeError, ValueError) as exc:

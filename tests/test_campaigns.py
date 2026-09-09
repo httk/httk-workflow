@@ -159,6 +159,7 @@ def test_campaign_submit_passes_creation_parameters_to_the_scaffold(tmp_path: Pa
 
 
 def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path, capsys) -> None:
+    pytest.importorskip("httk.atomistic")
     root, workspaces = _campaign_project(tmp_path, "round-robin")
     structures = tmp_path / "structures"
     structures.mkdir()

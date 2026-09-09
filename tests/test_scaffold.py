@@ -926,7 +926,7 @@ def test_structure_tags_are_derived_from_recognizable_names() -> None:
     assert structure_tag("...") is None
 
 
-def test_the_command_scaffolds_one_job_and_a_whole_directory(
+def test_the_command_scaffolds_one_job(
     tmp_path: Path,
     structure: Path,
     capsys: pytest.CaptureFixture[str],
@@ -985,6 +985,13 @@ def test_the_command_scaffolds_one_job_and_a_whole_directory(
     }
     assert (Path(payload) / "files" / "POSCAR").is_file()
 
+
+def test_the_command_scaffolds_a_whole_structure_directory(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    pytest.importorskip("httk.atomistic")
+    ws_name = "cli-workspace"
+    root = tmp_path / ws_name
+    assert command(["workspace", "init", str(root), "--name", ws_name], _context(tmp_path)) == 0
+    capsys.readouterr()
     directory = tmp_path / "structures"
     directory.mkdir()
     for name in ("a.vasp", "b.vasp"):
@@ -1836,9 +1843,10 @@ def test_the_command_reports_what_it_cannot_do(
     assert "no readable input files" in capsys.readouterr().err
 
 
-def test_parameter_from_single_file_and_two_batches_are_validated(
+def test_parameter_from_single_structure_file(
     tmp_path: Path, structure: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    pytest.importorskip("httk.atomistic")
     name = "parameter-cli"
     root = tmp_path / name
     assert command(["workspace", "init", str(root)], _context(tmp_path)) == 0
@@ -1865,6 +1873,14 @@ def test_parameter_from_single_file_and_two_batches_are_validated(
     assert report["tag"] == "poscar"
     assert (Path(report["payload_path"]) / "files" / "POSCAR").is_file()
 
+
+def test_parameter_from_generic_files_and_two_batches_are_validated(
+    tmp_path: Path, structure: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    name = "parameter-cli"
+    root = tmp_path / name
+    assert command(["workspace", "init", str(root)], _context(tmp_path)) == 0
+    capsys.readouterr()
     directory = tmp_path / "testfmt"
     directory.mkdir()
     for name_ in ("first.testfmt", "second.testfmt"):

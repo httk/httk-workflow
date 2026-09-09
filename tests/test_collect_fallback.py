@@ -112,10 +112,15 @@ def _stored_run_id(reports: list[dict[str, object]], index: int) -> str:
 def test_collect_into_remaps_a_structure_view_content_id(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
-    from httk.atomistic import Cell, Species, UnitcellStructure, UnitcellStructureView
-    from httk.atomistic.entries.structures import StructureEntry
+    from httk.atomistic import (  # pyright: ignore[reportMissingImports]
+        Cell,
+        Species,
+        UnitcellStructure,
+        UnitcellStructureView,
+    )
+    from httk.atomistic.entries.structures import StructureEntry  # pyright: ignore[reportMissingImports]
     from httk.core import RunEdge
-    from httk.store import Backend, SqlStore
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     from httk.workflow.workflow_cli._collect import _store_collected
 
@@ -156,7 +161,7 @@ def test_collect_into_remaps_a_structure_view_content_id(tmp_path: Path) -> None
 def test_collect_into_remaps_cross_job_edges_and_products(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
     from httk.core import DataRecord, DataRecordEntry, ProductLink, RunEdge
-    from httk.store import Backend, SqlStore
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     from httk.workflow.workflow_cli._collect import _store_collected
 
@@ -216,7 +221,7 @@ def test_collect_into_remaps_cross_job_edges_and_products(tmp_path: Path) -> Non
 def test_collect_into_resolves_cross_job_edges_from_an_earlier_invocation(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
     from httk.core import DataRecord, DataRecordEntry, RunEdge
-    from httk.store import Backend, SqlStore
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     from httk.workflow.workflow_cli._collect import _store_collected
 
@@ -257,7 +262,7 @@ def test_collect_into_resolves_cross_job_edges_from_an_earlier_invocation(tmp_pa
 def test_collect_into_preserves_an_existing_public_id_reference(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
     from httk.core import DataRecord, DataRecordEntry, RunEdge
-    from httk.store import Backend, SqlStore
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     from httk.workflow.workflow_cli._collect import _store_collected
 
@@ -298,7 +303,7 @@ def test_collect_into_preserves_an_existing_public_id_reference(tmp_path: Path) 
 def test_collect_into_preserves_a_loose_external_reference(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
     from httk.core import DataRecord, RunEdge
-    from httk.store import Backend, SqlStore
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     from httk.workflow.workflow_cli._collect import _store_collected
 
@@ -328,7 +333,7 @@ def test_collect_into_preserves_a_loose_external_reference(tmp_path: Path) -> No
 def test_collect_into_leaves_outputs_when_a_provenance_reference_is_unknown(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
     from httk.core import DataRecord, DataRecordEntry, RunEdge
-    from httk.store import Backend, SqlStore
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     from httk.workflow.workflow_cli._collect import _store_collected
 
@@ -545,7 +550,7 @@ def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_pa
     pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
     from httk.core import DataRecord, DataRecordEntry, Run
-    from httk.store import Backend, SqlStore
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     workspace, _ = _finished(tmp_path)
     context = CLIContext("httk", tmp_path)
@@ -596,7 +601,7 @@ def test_collect_into_twice_is_idempotent(tmp_path: Path, capsys) -> None:
     pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
     from httk.core import Run
-    from httk.store import Backend, SqlStore
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     workspace, _ = _finished(tmp_path)
     context = CLIContext("httk", tmp_path)
@@ -671,7 +676,7 @@ def test_collect_into_a_store_with_a_different_layout_teaches(tmp_path: Path, ca
     pytest.importorskip("httk.store")
     pytest.importorskip("httk.atomistic")
     from httk.core.register import resolve_entry_family, resolve_entry_record
-    from httk.store import Backend, SqlStore
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     workspace, _ = _finished(tmp_path)
     context = CLIContext("httk", tmp_path)

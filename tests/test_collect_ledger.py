@@ -121,7 +121,7 @@ def test_ledger_stabilizes_ids_across_fresh_stores_regardless_of_sweep_order(tmp
     )
 
     def _ids(store_path: Path) -> dict[str, str]:
-        from httk.store import Backend, SqlStore
+        from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
         with Backend.sqlite(store_path) as database:
             store = SqlStore(database)
@@ -152,7 +152,7 @@ def test_ledger_stabilizes_ids_across_fresh_stores_regardless_of_sweep_order(tmp
     # resolves to the output entry's id, in both stores.
     def _run_out_edge(store_path: Path, run_id: str) -> str:
         from httk.core import Run
-        from httk.store import Backend, SqlStore
+        from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
         with Backend.sqlite(store_path) as database:
             store = SqlStore(database)
@@ -169,7 +169,7 @@ def test_ledger_stabilizes_ids_across_fresh_stores_regardless_of_sweep_order(tmp
 def test_ledger_aliases_content_identical_outputs(tmp_path: Path) -> None:
     pytest.importorskip("httk.store")
     from httk.core import DataRecordEntry
-    from httk.store import Backend, SqlStore
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     from httk.workflow.workflow_cli._collect import _store_collected
 
@@ -407,7 +407,7 @@ def test_cross_sweep_content_dedup_aliases_without_bogus_assignment(tmp_path: Pa
     # alias onto A's id, not mint a fresh (bogus) one.
     pytest.importorskip("httk.store")
     from httk.core import DataRecordEntry
-    from httk.store import Backend, SqlStore
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
 
     from httk.workflow.workflow_cli._collect import _store_collected
 

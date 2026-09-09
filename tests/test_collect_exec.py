@@ -624,16 +624,28 @@ def test_executable_midstream_exit_degrades_only_unanswered_jobs(tmp_path: Path)
 
 
 def test_declared_ref_validates_and_uses_definition(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from httk.core.register import known_property_definitions, load_property_definition
+    pytest.importorskip("httk.store")
+    from httk.core import PropertyDefinition
 
-    reference = known_property_definitions()[0]
-    definition = load_property_definition(reference)
+    definition = PropertyDefinition.from_simple("_httk_answer", description="Test answers.", fulltype="list of integer")
+    reference = definition.definition_id
+
+    def load_definition(value: str) -> PropertyDefinition:
+        assert value == reference
+        return definition
+
+    monkeypatch.setattr("httk.core.load_property_definition", load_definition)
     provider = SimpleNamespace(outputs={"answer": {"role": "answer", "ref": reference}})
     record = _record(tmp_path)
     value = _resolve_executable_output(record, provider, "answer", {"value": []})
     assert isinstance(value, DataRecord) and value.definition_id == definition.definition_id
     with pytest.raises(ValueError, match=definition.name):
         _resolve_executable_output(record, provider, "answer", {"value": "invalid"})
+
+
+def test_declared_ref_requires_store_validation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    provider = SimpleNamespace(outputs={"answer": {"role": "answer", "ref": "https://example.org/answer"}})
+    record = _record(tmp_path)
 
     def blocked_import(
         name: str,

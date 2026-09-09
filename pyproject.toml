@@ -47,6 +47,8 @@ Issues = "https://github.com/httk/httk-workflow/issues"
 
 [project.optional-dependencies]
 dev = [
+  # Full-source type checks cover the optional workflow language integrations.
+  "httk-workflow[cwl,jobflow,atomate2]",
   "pytest>=8.0",
   "pytest-xdist>=3.6",
   "ruff>=0.16,<0.17",
@@ -203,6 +205,12 @@ warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
 module = ["yaml", "markdown", "docutils", "docutils.*"]
+ignore_missing_imports = true
+
+# Optional peer integrations remain type-checked whenever those distributions
+# are installed; their absence must not break this module's own release gates.
+[[tool.mypy.overrides]]
+module = ["httk.atomistic", "httk.atomistic.*", "httk.store", "httk.store.*"]
 ignore_missing_imports = true
 
 [tool.pydoclint]
