@@ -27,47 +27,45 @@ reserve the project name before then.
 
 ## Prepare and check a release
 
-Update `project.version` in `pyproject.toml`. After making dependency changes,
-regenerate and commit the documentation lock:
+Check that `project.version` in `pyproject.toml` is the intended release version,
+then run from this checkout with Python 3.12+, Git, make, curl, uv, and network
+access:
 
 ```console
-make docs-lock
+make release-prepare VERSION=v2.1.0
 ```
 
-`make docs-lock` requires every internal `httk-*` dependency to be published
-and resolvable on PyPI at a version satisfying this project's dependency floors.
-`make release-check` only verifies an existing lock offline, so it remains
-hard-gated until that lock has been generated and committed. Until the
-dependencies are published, the development docs workflow uses its explicit
-bootstrap-fallback mode: it clones internal dependencies first, emits a warning,
-installs those checkouts, and then performs fresh external docs dependency
-resolution. Releases remain impossible by design until the lock can be
-generated and committed.
+`VERSION` includes the leading `v` and must identify the same version as
+`project.version` before preparation starts. Internal
+`httk-*` dependencies must already be published on PyPI at versions satisfying
+this project's dependency requirements, with their matching release docs
+published as well. The checker is included in `tools/`; it needs no sibling
+checkout or newly published core tooling.
 
-Before tagging, refresh and commit the dependency inventories from the exact
-versions pinned by that lock:
+The command snapshots your current working tree, including uncommitted release
+edits, and verifies it in fresh environments. It installs the declared
+development dependencies from PyPI, regenerates the documentation lock and
+published inventories, and runs CI, the release checks, a clean locked-docs
+build, and a separate bare-wheel installation. Formatting, static analysis,
+tests, strict documentation, distribution builds, and package metadata checks
+must all pass.
+
+On success, the refreshed lock and inventories are copied back only if your
+working tree has remained unchanged during verification. Review those files
+and commit the prepared release. If you make further release edits, run
+preparation again. Logs, environments, built distributions, and the report
+remain in the printed verification directory. See [tools/README.md](tools/README.md)
+for prerequisites and the checks' scope.
+
+To verify an already committed, clean checkout again, use the local checker:
 
 ```console
-make docs-inventories
+python tools/check_release.py . --tag v2.1.0
 ```
 
-The dependency release documentation must already be published at those
-versions. `make release-check` validates lock freshness; the workflow's
-`check-release` validates the inventory headers against the lock pins. From a
-Python 3.12 environment,
-install the development tools and run the complete local check:
-
-```console
-python -m pip install -e ".[dev,docs,release]"
-make release-check
-```
-
-`make release-check` includes the offline documentation lock-freshness check,
-in addition to formatting, static analysis, tests, strict documentation, an
-isolated sdist/wheel build, and strict package-metadata checks. Before tagging,
-run `make docs-lock-check` for the required full clean-environment locked
-installation and strict docs build; this is a network check. The resulting
-package files are written to `dist/`.
+`make release-check` remains available for checks in the current environment
+and prints the next release steps after success. A shared workspace environment
+can hide undeclared dependencies; use `release-prepare` for release preparation.
 
 Versions on package indexes are immutable. Use a new development or release
 candidate version when repeating an upload, for example `2.1.0rc1` followed by
@@ -99,7 +97,8 @@ real PyPI) while the package under test comes from TestPyPI.
 
 ## PyPI
 
-1. Confirm that `make release-check` succeeds on the exact commit to release.
+1. Complete `make release-prepare VERSION=v2.1.0`, review the refreshed inputs,
+   and commit the prepared release.
 2. Push the commit and create a GitHub release whose tag is `v` followed by the
    package version, for example `v2.1.0`.
 3. Publish the GitHub release and approve the protected `pypi` environment.

@@ -5,7 +5,7 @@ DIST_DIR ?= dist
 # between httk repositories (read by docs/conf.py via HTTK_DOCS_BASE_URL).
 DOCS_BASE_URL ?= https://docs.httk.org
 
-.PHONY: docs docs-live docs-clean docs-inventories docs-lock docs-lock-check clean dist-clean dist dist-check release-check format format-check typecheck typecheck_pyright lint test test-extended test_fastfail test-extended-fastfail audit
+.PHONY: docs docs-live docs-clean docs-inventories docs-lock docs-lock-check clean dist-clean dist dist-check release-check release-prepare format format-check typecheck typecheck_pyright lint test test-extended test_fastfail test-extended-fastfail audit
 
 docs: docs-clean
 	HTTK_DOCS_BASE_URL=$(DOCS_BASE_URL) $(PYTHON) -m sphinx -E -a -b html -W --keep-going docs docs/_build/html
@@ -20,7 +20,7 @@ docs-clean:
 # network); docs builds themselves resolve against these vendored files offline.
 docs-inventories:
 	curl -fsSL https://docs.python.org/3/objects.inv -o docs/_inventories/python.inv
-	# Requires a committed, current docs/requirements.lock; dependency release docs must be published.
+	# Requires a current docs/requirements.lock; dependency release docs must be published.
 	$(PYTHON) -m httk.core.docs lock-check
 	$(PYTHON) -m httk.core.docs refresh-inventories --base-url $(DOCS_BASE_URL) --channel release .
 # Regenerate the portable documentation lock (network target).
@@ -48,18 +48,18 @@ clean: docs-clean dist-clean
 	find . -name "*~" -print0 | xargs -0 rm -f
 	find . -name "__pycache__" -print0 | xargs -0 rm -rf
 
-# ruff walks the same three roots recursively, so a new subpackage
+# ruff walks the same roots recursively, so a new subpackage
 # (runners/, integrations/, ...) is covered the day it is created rather than
 # the day someone remembers to extend a glob.
 format:
-	$(PYTHON) -m ruff check src examples tests --fix
-	$(PYTHON) -m ruff format src examples tests
+	$(PYTHON) -m ruff check src examples tests tools --fix
+	$(PYTHON) -m ruff format src examples tests tools
 
 format-check: lint
-	$(PYTHON) -m ruff format --check src examples tests
+	$(PYTHON) -m ruff format --check src examples tests tools
 
 lint:
-	$(PYTHON) -m ruff check src examples tests
+	$(PYTHON) -m ruff check src examples tests tools
 	pydoclint --quiet src
 
 typecheck_pyright:
@@ -94,5 +94,10 @@ dist: dist-clean
 dist-check: dist
 	$(PYTHON) -m twine check --strict $(DIST_DIR)/*
 
+release-prepare: export HTTK_RELEASE_VERSION := $(VERSION)
+release-prepare:
+	@$(PYTHON) tools/check_release.py . --prepare
+
 release-check: ci docs dist-check
 	$(PYTHON) -m httk.core.docs lock-check
+	@$(PYTHON) tools/check_release.py . --next-steps
