@@ -65,6 +65,8 @@ The everyday regression gate is the normal profile: `make test`. It runs a
 parallel pass (`PYTHONPATH=src python -m pytest -q -m "not timing"`) followed by
 a serial pass (`PYTHONPATH=src python -m pytest -q -m timing -n 0`). The default
 marker selection omits only full-depth `extended` parameter cases.
+Parallel workers follow pytest-xdist's detected CPU count, capped at 16;
+override with `-n N` or `PYTEST_XDIST_AUTO_NUM_WORKERS=N` when needed.
 Profiled tests keep one test body and reduce their input scale in normal mode;
 they still exercise every property with representative inputs.
 

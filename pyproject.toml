@@ -157,12 +157,10 @@ namespaces = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# The suite launches Python runner subprocesses, so 28 workers would multiply
-# their import-time native thread pools.  Sixteen workers complete the full
-# suite's assertion phase faster than eight while keeping that pressure bounded.
-# An
-# extended run overrides the marker selection with `-m ""`.
-addopts = "-n 16 --dist loadgroup -m 'not extended'"
+# Match the host CPU count: a fixed 16 workers starves runner subprocesses on
+# small CI hosts and causes manager deadlines to expire. Cap larger hosts at 16.
+# An extended run overrides the marker selection with `-m ""`.
+addopts = "-n auto --maxprocesses 16 --dist loadgroup -m 'not extended'"
 markers = [
   "slow: drives real processes and waits on them; deselect with -m 'not slow'",
   "extended: full-depth test case; selected only by the extended test profile",
