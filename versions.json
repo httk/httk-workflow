@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "project": "httk-workflow",
+  "url": "https://docs.httk.org/httk-workflow",
+  "source_commit": "6d6116d1dc46831b1cb08dffb6014c8e9c331044",
+  "default": {
+    "name": "v2.1.0",
+    "path": "latest/",
+    "channel": "release"
+  },
+  "versions": [
+    {
+      "name": "v2.1.0",
+      "path": "v2.1.0/",
+      "channel": "release"
+    },
+    {
+      "name": "dev:main",
+      "path": "dev/main/",
+      "channel": "dev"
+    }
+  ]
+}

@@ -1,0 +1,1214 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>httk.workflow.adapters - httk-workflow dev:main documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/copybutton.css?v=76b2166b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/mystnb.11b39860a7a0cbfd473a3ad8a317855267ff0bd372690045ca344a6b62be495e.css" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/graphviz.css?v=4ae1632d" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/selector.css?v=626bada3" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+<div class="announcement">
+  <aside class="announcement-content">
+     Development documentation (dev:main) — content may differ from any release. 
+  </aside>
+</div>
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../index.html"><div class="brand">httk-workflow dev:main documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
+  
+  <span class="sidebar-brand-text">httk-workflow dev:main documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">Documentation</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../quickstart.html">Quickstart</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_protocol_api.html">The filesystem protocol API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../runtime_helpers.html">Native runner helpers</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../sdks/index.html">Runner SDKs</a><input aria-label="Toggle navigation of Runner SDKs" class="toctree-checkbox" id="toctree-checkbox-1" name="toctree-checkbox-1" role="switch" type="checkbox"/><label for="toctree-checkbox-1"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2"><a class="reference internal" href="../../../sdks/sdk_parity.html">Python and Bash authoring parity</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../sdks/native_bash_api.html">Native Bash runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../sdks/native_c_api.html">Native C runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../sdks/native_fortran_api.html">Native modern-Fortran runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../sdks/native_rust_api.html">Native Rust runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../sdks/native_perl_api.html">Native Perl runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../sdks/native_ada_api.html">Native Ada runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../sdks/native_cpp_api.html">Native C++ runner API</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../sdks/native_java_api.html">Native Java runner API</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../vasp_runners.html">Packaged VASP runners</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_packages.html">Workflow packages</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../declarations.html">Workflow declarations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../provenance.html">Run provenance</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../collecting.html">Collecting results</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_languages.html">Workflow-language runner realizations</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../taskmanager.html">Task-manager usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_cli.html">Project and workflow command line</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../sealing.html">Sealing jobs, workspaces, and projects</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../stable_ids.html">Stable ids</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../campaigns.html">Campaigns</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../composing_workflows.html">Composing workflows</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../benchmarks.html">Scale benchmarks</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../remotes.html">Remotes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../launchers.html">Launchers</a></li>
+<li class="toctree-l1 has-children"><a class="reference internal" href="../../../reference/index.html">Reference</a><input aria-label="Toggle navigation of Reference" class="toctree-checkbox" id="toctree-checkbox-2" name="toctree-checkbox-2" role="switch" type="checkbox"/><label for="toctree-checkbox-2"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/index.html">httk.workflow</a><input aria-label="Toggle navigation of httk.workflow" class="toctree-checkbox" id="toctree-checkbox-3" name="toctree-checkbox-3" role="switch" type="checkbox"/><label for="toctree-checkbox-3"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/adapter_protocol/index.html">httk.workflow.adapter_protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/adapters/index.html">httk.workflow.adapters</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/collecting/index.html">httk.workflow.collecting</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/compat/index.html">httk.workflow.compat</a><input aria-label="Toggle navigation of httk.workflow.compat" class="toctree-checkbox" id="toctree-checkbox-4" name="toctree-checkbox-4" role="switch" type="checkbox"/><label for="toctree-checkbox-4"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/compat/v1/index.html">httk.workflow.compat.v1</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/configuration/index.html">httk.workflow.configuration</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/errors/index.html">httk.workflow.errors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/executors/index.html">httk.workflow.executors</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/hookapi/index.html">httk.workflow.hookapi</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/hygiene/index.html">httk.workflow.hygiene</a></li>
+<li class="toctree-l3 has-children"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-5" name="toctree-checkbox-5" role="switch" type="checkbox"/><label for="toctree-checkbox-5"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l4"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l4"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/manifests/index.html">httk.workflow.manifests</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/projects/index.html">httk.workflow.projects</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/protocol/index.html">httk.workflow.protocol</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/provenance/index.html">httk.workflow.provenance</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/runtime/index.html">httk.workflow.runtime</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/runtime_utils/index.html">httk.workflow.runtime_utils</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/scaffold/index.html">httk.workflow.scaffold</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/sdk/index.html">httk.workflow.sdk</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/shell_bridge/index.html">httk.workflow.shell_bridge</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/supervision/index.html">httk.workflow.supervision</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/transfers/index.html">httk.workflow.transfers</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/vasp/index.html">httk.workflow.vasp</a></li>
+</ul>
+</li>
+<li class="toctree-l2 has-children"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/index.html">httk.workflow.languages</a><input aria-label="Toggle navigation of httk.workflow.languages" class="toctree-checkbox" id="toctree-checkbox-6" name="toctree-checkbox-6" role="switch" type="checkbox"/><label for="toctree-checkbox-6"><span class="icon"><svg><use href="#svg-arrow-right"></use></svg></span></label><ul>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l3"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+</ul>
+</li>
+<li class="toctree-l2"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/cwl/index.html">httk.workflow.languages.cwl</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/pwd/index.html">httk.workflow.languages.pwd</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/jobflow/index.html">httk.workflow.languages.jobflow</a></li>
+<li class="toctree-l2"><a class="reference internal" href="../../../reference/autoapi/httk/workflow/languages/httk_v1/index.html">httk.workflow.languages.httk_v1</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="../../../notebooks/examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../workflow_filesystem_api.html">Workflow filesystem API</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em></a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Details</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/runtime_helpers.html">Native runner helpers in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/taskmanager.html">Task-manager usage in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_packages.html">Workflow packages in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_cli.html">Project and workflow command line in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/monitor.html">Workflow monitor</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/adapter_authoring.html">Writing a remote adapter in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/launcher_authoring.html">Writing a manager launcher in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/workflow_filesystem_api.html">Workflow filesystem API in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../details/httk_v1_migration_guide.html">Migrating an <em>httk</em> v1 workflow to <em>httk₂</em> in detail</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../v1_compatibility.html"><em>httk</em> v1 task compatibility</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for httk.workflow.adapters</h1><div class="highlight"><pre>
+<span></span><span class="sd">"""Versioned JSON remote-adapter bundles."""</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">importlib.resources</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">re</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">shlex</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">shutil</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">subprocess</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">tempfile</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">uuid</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">collections.abc</span><span class="w"> </span><span class="kn">import</span> <span class="n">Callable</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">,</span> <span class="n">Sequence</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">dataclasses</span><span class="w"> </span><span class="kn">import</span> <span class="n">dataclass</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">typing</span><span class="w"> </span><span class="kn">import</span> <span class="n">Any</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">._util</span><span class="w"> </span><span class="kn">import</span> <span class="n">write_json_atomic</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.configuration</span><span class="w"> </span><span class="kn">import</span> <span class="n">remotes_home</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.errors</span><span class="w"> </span><span class="kn">import</span> <span class="n">ResolutionMiss</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.models</span><span class="w"> </span><span class="kn">import</span> <span class="n">CORE_PROFILE</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">.projects</span><span class="w"> </span><span class="kn">import</span> <span class="n">PROJECT_DIRECTORY</span><span class="p">,</span> <span class="n">discover_project</span>
+
+<span class="n">_LOGGER</span> <span class="o">=</span> <span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="vm">__name__</span><span class="p">)</span>
+
+<span class="n">__all__</span> <span class="o">=</span> <span class="p">[</span>
+    <span class="s2">"ADAPTER_EXECUTABLE"</span><span class="p">,</span>
+    <span class="s2">"ADAPTER_FORMAT"</span><span class="p">,</span>
+    <span class="s2">"ADAPTER_OPERATIONS"</span><span class="p">,</span>
+    <span class="s2">"CREDENTIALS_FILE"</span><span class="p">,</span>
+    <span class="s2">"METADATA_FILE"</span><span class="p">,</span>
+    <span class="s2">"PERSISTABLE_REMOTE_SETTINGS"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_JOB_DELETE_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_JOB_LIST_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_JOB_LOG_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_JOB_PUBLISH_REQUESTS_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_JOB_REQUEST_ENVELOPES_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_JOB_SHOW_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_JOB_WHY_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_MANAGER_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_OFFER_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_RECEIVE_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_RETIRE_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_STATUS_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_WORKSPACE_DELETE_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_WORKSPACE_FSCK_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_WORKSPACE_GC_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_WORKSPACE_INIT_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_WORKSPACE_LIST_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_WORKSPACE_MOVE_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_WORKSPACE_SETTINGS_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND"</span><span class="p">,</span>
+    <span class="s2">"REQUEST_FORMAT"</span><span class="p">,</span>
+    <span class="s2">"RESULT_FORMAT"</span><span class="p">,</span>
+    <span class="s2">"SEED_SETTING_MAP"</span><span class="p">,</span>
+    <span class="s2">"RemoteTarget"</span><span class="p">,</span>
+    <span class="s2">"add_remote"</span><span class="p">,</span>
+    <span class="s2">"import_v1_remote"</span><span class="p">,</span>
+    <span class="s2">"list_remotes"</span><span class="p">,</span>
+    <span class="s2">"metadata_path"</span><span class="p">,</span>
+    <span class="s2">"probe_remote_workspace"</span><span class="p">,</span>
+    <span class="s2">"project_remote_roots"</span><span class="p">,</span>
+    <span class="s2">"read_credentials"</span><span class="p">,</span>
+    <span class="s2">"read_metadata"</span><span class="p">,</span>
+    <span class="s2">"remote_settings"</span><span class="p">,</span>
+    <span class="s2">"resolve_remote"</span><span class="p">,</span>
+    <span class="s2">"run_adapter"</span><span class="p">,</span>
+    <span class="s2">"seed_application_settings"</span><span class="p">,</span>
+    <span class="s2">"split_settings"</span><span class="p">,</span>
+    <span class="s2">"store_credentials"</span><span class="p">,</span>
+    <span class="s2">"valid_remote_name"</span><span class="p">,</span>
+    <span class="s2">"validate_adapter_bundle"</span><span class="p">,</span>
+<span class="p">]</span>
+
+<div class="viewcode-block" id="ADAPTER_OPERATIONS">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.ADAPTER_OPERATIONS">[docs]</a>
+<span class="n">ADAPTER_OPERATIONS</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="s2">"configure"</span><span class="p">,</span>
+    <span class="s2">"install"</span><span class="p">,</span>
+    <span class="s2">"invoke"</span><span class="p">,</span>
+    <span class="s2">"push"</span><span class="p">,</span>
+    <span class="s2">"pull"</span><span class="p">,</span>
+    <span class="s2">"status"</span><span class="p">,</span>
+<span class="p">)</span></div>
+
+
+<span class="c1">#: The single dispatcher executable every bundle carries. One program serves</span>
+<span class="c1">#: every operation; the operation name travels inside the request JSON, so the</span>
+<span class="c1">#: six maintained per-operation wrappers collapsed into this one file.</span>
+<div class="viewcode-block" id="ADAPTER_EXECUTABLE">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.ADAPTER_EXECUTABLE">[docs]</a>
+<span class="n">ADAPTER_EXECUTABLE</span> <span class="o">=</span> <span class="s2">"adapter"</span></div>
+
+
+<div class="viewcode-block" id="CREDENTIALS_FILE">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.CREDENTIALS_FILE">[docs]</a>
+<span class="n">CREDENTIALS_FILE</span> <span class="o">=</span> <span class="s2">"credentials.json"</span></div>
+
+
+<span class="c1">#: The metadata file of one adapter bundle.</span>
+<div class="viewcode-block" id="METADATA_FILE">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.METADATA_FILE">[docs]</a>
+<span class="n">METADATA_FILE</span> <span class="o">=</span> <span class="s2">"remote.json"</span></div>
+
+
+<span class="c1">#: The format of the metadata file, and of the request and result documents that</span>
+<span class="c1">#: cross the adapter boundary. These three names are *protocol* and deliberately</span>
+<span class="c1">#: keep their historical spelling: a bundle or an adapter implementation written</span>
+<span class="c1">#: against an earlier release is still a valid one, and renaming the identifier</span>
+<span class="c1">#: would refuse it for no reason. Only the file *name* changed.</span>
+<div class="viewcode-block" id="ADAPTER_FORMAT">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.ADAPTER_FORMAT">[docs]</a>
+<span class="n">ADAPTER_FORMAT</span> <span class="o">=</span> <span class="s2">"httk-computer-adapter"</span></div>
+
+<div class="viewcode-block" id="REQUEST_FORMAT">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REQUEST_FORMAT">[docs]</a>
+<span class="n">REQUEST_FORMAT</span> <span class="o">=</span> <span class="s2">"httk-computer-request"</span></div>
+
+<div class="viewcode-block" id="RESULT_FORMAT">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.RESULT_FORMAT">[docs]</a>
+<span class="n">RESULT_FORMAT</span> <span class="o">=</span> <span class="s2">"httk-computer-result"</span></div>
+
+
+<span class="c1">#: Remote settings that may be persisted in the signed, shareable</span>
+<span class="c1">#: ``remote.json``. Everything else is treated as a credential and is written</span>
+<span class="c1">#: to the manifest-excluded ``credentials.json`` instead.</span>
+<div class="viewcode-block" id="PERSISTABLE_REMOTE_SETTINGS">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.PERSISTABLE_REMOTE_SETTINGS">[docs]</a>
+<span class="n">PERSISTABLE_REMOTE_SETTINGS</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">(</span>
+    <span class="p">{</span>
+        <span class="s2">"check_connectivity"</span><span class="p">,</span>
+        <span class="s2">"host"</span><span class="p">,</span>
+        <span class="s2">"httk_command"</span><span class="p">,</span>
+        <span class="s2">"legacy_settings"</span><span class="p">,</span>
+        <span class="s2">"port"</span><span class="p">,</span>
+        <span class="s2">"prelude"</span><span class="p">,</span>
+        <span class="s2">"username"</span><span class="p">,</span>
+        <span class="s2">"vasp_command"</span><span class="p">,</span>
+        <span class="s2">"vasp_pseudo_library"</span><span class="p">,</span>
+    <span class="p">}</span>
+<span class="p">)</span></div>
+
+
+<span class="n">_RETIRED_REMOTE_SETTINGS</span> <span class="o">=</span> <span class="nb">frozenset</span><span class="p">(</span>
+    <span class="p">{</span>
+        <span class="s2">"account"</span><span class="p">,</span>
+        <span class="s2">"bootstrap"</span><span class="p">,</span>
+        <span class="s2">"constraint"</span><span class="p">,</span>
+        <span class="s2">"cpus_per_task"</span><span class="p">,</span>
+        <span class="s2">"nodes"</span><span class="p">,</span>
+        <span class="s2">"partition"</span><span class="p">,</span>
+        <span class="s2">"reservation"</span><span class="p">,</span>
+        <span class="s2">"time_limit"</span><span class="p">,</span>
+        <span class="s2">"workers"</span><span class="p">,</span>
+        <span class="s2">"workspace_root"</span><span class="p">,</span>
+    <span class="p">}</span>
+<span class="p">)</span>
+
+<div class="viewcode-block" id="REMOTE_WORKSPACE_INIT_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_WORKSPACE_INIT_COMMAND">[docs]</a>
+<span class="n">REMOTE_WORKSPACE_INIT_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">,</span> <span class="s2">"init"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_WORKSPACE_DELETE_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_WORKSPACE_DELETE_COMMAND">[docs]</a>
+<span class="n">REMOTE_WORKSPACE_DELETE_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">,</span> <span class="s2">"delete"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_WORKSPACE_FSCK_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_WORKSPACE_FSCK_COMMAND">[docs]</a>
+<span class="n">REMOTE_WORKSPACE_FSCK_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">,</span> <span class="s2">"fsck"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_WORKSPACE_GC_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_WORKSPACE_GC_COMMAND">[docs]</a>
+<span class="n">REMOTE_WORKSPACE_GC_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">,</span> <span class="s2">"gc"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_WORKSPACE_LIST_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_WORKSPACE_LIST_COMMAND">[docs]</a>
+<span class="n">REMOTE_WORKSPACE_LIST_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">,</span> <span class="s2">"list"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_WORKSPACE_MOVE_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_WORKSPACE_MOVE_COMMAND">[docs]</a>
+<span class="n">REMOTE_WORKSPACE_MOVE_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">,</span> <span class="s2">"move"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_RECEIVE_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_RECEIVE_COMMAND">[docs]</a>
+<span class="n">REMOTE_RECEIVE_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workflow"</span><span class="p">,</span> <span class="s2">"transfer"</span><span class="p">,</span> <span class="s2">"receive"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_OFFER_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_OFFER_COMMAND">[docs]</a>
+<span class="n">REMOTE_OFFER_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workflow"</span><span class="p">,</span> <span class="s2">"transfer"</span><span class="p">,</span> <span class="s2">"offer"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_RETIRE_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_RETIRE_COMMAND">[docs]</a>
+<span class="n">REMOTE_RETIRE_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workflow"</span><span class="p">,</span> <span class="s2">"transfer"</span><span class="p">,</span> <span class="s2">"retire"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_STATUS_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_STATUS_COMMAND">[docs]</a>
+<span class="n">REMOTE_STATUS_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">,</span> <span class="s2">"status"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_WORKSPACE_SETTINGS_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_WORKSPACE_SETTINGS_COMMAND">[docs]</a>
+<span class="n">REMOTE_WORKSPACE_SETTINGS_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">,</span> <span class="s2">"settings"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND">[docs]</a>
+<span class="n">REMOTE_WORKSPACE_WORKFLOW_PRELUDE_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workspace"</span><span class="p">,</span> <span class="s2">"workflow-prelude"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_MANAGER_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_MANAGER_COMMAND">[docs]</a>
+<span class="n">REMOTE_MANAGER_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"workflow"</span><span class="p">,</span> <span class="s2">"manager"</span><span class="p">,</span> <span class="s2">"run"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_JOB_REQUEST_ENVELOPES_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_JOB_REQUEST_ENVELOPES_COMMAND">[docs]</a>
+<span class="n">REMOTE_JOB_REQUEST_ENVELOPES_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"job"</span><span class="p">,</span> <span class="s2">"request-envelopes"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_JOB_PUBLISH_REQUESTS_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_JOB_PUBLISH_REQUESTS_COMMAND">[docs]</a>
+<span class="n">REMOTE_JOB_PUBLISH_REQUESTS_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"job"</span><span class="p">,</span> <span class="s2">"publish-requests"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_JOB_LIST_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_JOB_LIST_COMMAND">[docs]</a>
+<span class="n">REMOTE_JOB_LIST_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"job"</span><span class="p">,</span> <span class="s2">"list"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_JOB_DELETE_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_JOB_DELETE_COMMAND">[docs]</a>
+<span class="n">REMOTE_JOB_DELETE_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"job"</span><span class="p">,</span> <span class="s2">"delete"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_JOB_SHOW_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_JOB_SHOW_COMMAND">[docs]</a>
+<span class="n">REMOTE_JOB_SHOW_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"job"</span><span class="p">,</span> <span class="s2">"show"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_JOB_LOG_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_JOB_LOG_COMMAND">[docs]</a>
+<span class="n">REMOTE_JOB_LOG_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"job"</span><span class="p">,</span> <span class="s2">"log"</span><span class="p">)</span></div>
+
+<div class="viewcode-block" id="REMOTE_JOB_WHY_COMMAND">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.REMOTE_JOB_WHY_COMMAND">[docs]</a>
+<span class="n">REMOTE_JOB_WHY_COMMAND</span> <span class="o">=</span> <span class="p">(</span><span class="s2">"httk"</span><span class="p">,</span> <span class="s2">"job"</span><span class="p">,</span> <span class="s2">"why"</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="probe_remote_workspace">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.probe_remote_workspace">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">probe_remote_workspace</span><span class="p">(</span>
+    <span class="n">target</span><span class="p">:</span> <span class="s2">"RemoteTarget"</span><span class="p">,</span>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">timeout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">noun</span><span class="p">:</span> <span class="nb">str</span> <span class="o">=</span> <span class="s2">"workspace"</span><span class="p">,</span>
+    <span class="n">adapter</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[</span><span class="o">...</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Return the UUID and current root reported for a remote workspace name.</span>
+
+<span class="sd">    :param target: The resolved remote adapter bundle.</span>
+<span class="sd">    :param name: The remote workspace name.</span>
+<span class="sd">    :param timeout: The adapter operation timeout.</span>
+<span class="sd">    :param noun: The noun used in diagnostic messages.</span>
+<span class="sd">    :param adapter: The adapter callable, or :func:`run_adapter` when omitted.</span>
+<span class="sd">    :return: The remote workspace identifier and root.</span>
+<span class="sd">    :raises RuntimeError: If the remote status operation fails.</span>
+<span class="sd">    :raises ValueError: If the remote returns an incompatible status document.</span>
+<span class="sd">    """</span>
+
+    <span class="n">runner</span> <span class="o">=</span> <span class="n">run_adapter</span> <span class="k">if</span> <span class="n">adapter</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">adapter</span>
+    <span class="n">status</span> <span class="o">=</span> <span class="n">runner</span><span class="p">(</span>
+        <span class="n">target</span><span class="o">.</span><span class="n">bundle</span><span class="p">,</span>
+        <span class="s2">"status"</span><span class="p">,</span>
+        <span class="p">{</span><span class="s2">"argv"</span><span class="p">:</span> <span class="p">[</span><span class="o">*</span><span class="n">REMOTE_STATUS_COMMAND</span><span class="p">,</span> <span class="s2">"--json"</span><span class="p">,</span> <span class="n">name</span><span class="p">]},</span>
+        <span class="n">timeout</span><span class="o">=</span><span class="n">timeout</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="k">if</span> <span class="n">status</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"returncode"</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">noun</span><span class="si">}</span><span class="s2"> workspace compatibility check failed: </span><span class="si">{</span><span class="n">status</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'stderr'</span><span class="p">,</span><span class="w"> </span><span class="s1">''</span><span class="p">)</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">documents</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">status</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"stdout"</span><span class="p">,</span> <span class="s2">""</span><span class="p">)))</span>
+    <span class="k">except</span> <span class="n">json</span><span class="o">.</span><span class="n">JSONDecodeError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">noun</span><span class="si">}</span><span class="s2"> did not return a compatible workspace status"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">documents</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+            <span class="s2">"remote httk-workflow is older than this client: upgrade the remote "</span>
+            <span class="s2">"(workspace status --json returned a single document)"</span>
+        <span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">documents</span><span class="p">,</span> <span class="nb">list</span><span class="p">)</span> <span class="ow">or</span> <span class="nb">len</span><span class="p">(</span><span class="n">documents</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span>
+        <span class="n">document</span> <span class="o">=</span> <span class="n">documents</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
+        <span class="k">if</span> <span class="p">(</span>
+            <span class="n">document</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format"</span><span class="p">)</span> <span class="o">!=</span> <span class="s2">"httk-workflow-status"</span>
+            <span class="ow">or</span> <span class="n">document</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format_version"</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">2</span>
+            <span class="ow">or</span> <span class="n">document</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"core_profile"</span><span class="p">)</span> <span class="o">!=</span> <span class="n">CORE_PROFILE</span>
+        <span class="p">):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span>
+        <span class="n">workspace_id</span> <span class="o">=</span> <span class="n">document</span><span class="p">[</span><span class="s2">"workspace_id"</span><span class="p">]</span>
+        <span class="n">root</span> <span class="o">=</span> <span class="n">document</span><span class="p">[</span><span class="s2">"root"</span><span class="p">]</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">workspace_id</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">root</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">root</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span>
+        <span class="n">uuid</span><span class="o">.</span><span class="n">UUID</span><span class="p">(</span><span class="n">workspace_id</span><span class="p">)</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">AttributeError</span><span class="p">,</span> <span class="n">json</span><span class="o">.</span><span class="n">JSONDecodeError</span><span class="p">,</span> <span class="ne">KeyError</span><span class="p">,</span> <span class="ne">ValueError</span><span class="p">,</span> <span class="ne">TypeError</span><span class="p">)</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">noun</span><span class="si">}</span><span class="s2"> did not return a compatible workspace status"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">return</span> <span class="n">workspace_id</span><span class="p">,</span> <span class="n">root</span></div>
+
+
+
+<span class="c1">#: How a remote definition's settings seed the application settings of a</span>
+<span class="c1">#: workspace created against it. A workspace bound to a remote should not make</span>
+<span class="c1">#: every operator restate the remote's VASP command, so the whitelisted remote</span>
+<span class="c1">#: settings on the left become the dotted application settings on the right when</span>
+<span class="c1">#: the workspace is created. The map is deliberately small and explicit: a</span>
+<span class="c1">#: remote setting only becomes an application setting when it is named here.</span>
+<div class="viewcode-block" id="SEED_SETTING_MAP">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.SEED_SETTING_MAP">[docs]</a>
+<span class="n">SEED_SETTING_MAP</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+    <span class="s2">"vasp_command"</span><span class="p">:</span> <span class="s2">"vasp.command"</span><span class="p">,</span>
+    <span class="s2">"vasp_pseudo_library"</span><span class="p">:</span> <span class="s2">"vasp.pseudo_library"</span><span class="p">,</span>
+<span class="p">}</span></div>
+
+
+
+<div class="viewcode-block" id="seed_application_settings">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.seed_application_settings">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">seed_application_settings</span><span class="p">(</span><span class="n">bundle</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Return the application settings a remote seeds a workspace with.</span>
+
+<span class="sd">    :param bundle: The adapter bundle path.</span>
+<span class="sd">    :return: The whitelisted application settings derived from the bundle.</span>
+<span class="sd">    """</span>
+
+    <span class="n">configured</span> <span class="o">=</span> <span class="n">remote_settings</span><span class="p">(</span><span class="n">bundle</span><span class="p">)</span>
+    <span class="n">seeds</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">source</span><span class="p">,</span> <span class="n">target</span> <span class="ow">in</span> <span class="n">SEED_SETTING_MAP</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="n">value</span> <span class="o">=</span> <span class="n">configured</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">source</span><span class="p">)</span>
+        <span class="c1"># Only a JSON scalar seeds a setting; a container remote setting is never</span>
+        <span class="c1"># an application setting, which is a flat scalar map by construction.</span>
+        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="nb">int</span><span class="p">,</span> <span class="nb">float</span><span class="p">)):</span>
+            <span class="n">seeds</span><span class="p">[</span><span class="n">target</span><span class="p">]</span> <span class="o">=</span> <span class="n">value</span>
+    <span class="k">return</span> <span class="n">seeds</span></div>
+
+
+
+<span class="nd">@dataclass</span><span class="p">(</span><span class="n">frozen</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<div class="viewcode-block" id="RemoteTarget">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.RemoteTarget">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">RemoteTarget</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Resolved remote bundle.</span>
+
+<span class="sd">    :param name: The remote name.</span>
+<span class="sd">    :param bundle: The resolved adapter bundle path.</span>
+<span class="sd">    :param project_local: Whether the bundle came from project data.</span>
+<span class="sd">    """</span>
+
+<div class="viewcode-block" id="RemoteTarget.name">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.RemoteTarget.name">[docs]</a>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span></div>
+
+<div class="viewcode-block" id="RemoteTarget.bundle">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.RemoteTarget.bundle">[docs]</a>
+    <span class="n">bundle</span><span class="p">:</span> <span class="n">Path</span></div>
+
+<div class="viewcode-block" id="RemoteTarget.project_local">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.RemoteTarget.project_local">[docs]</a>
+    <span class="n">project_local</span><span class="p">:</span> <span class="nb">bool</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="metadata_path">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.metadata_path">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">metadata_path</span><span class="p">(</span><span class="n">bundle</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Return the metadata file of one adapter bundle.</span>
+
+<span class="sd">    :param bundle: The adapter bundle path.</span>
+<span class="sd">    :return: The bundle metadata path.</span>
+<span class="sd">    """</span>
+
+    <span class="k">return</span> <span class="n">Path</span><span class="p">(</span><span class="n">bundle</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span> <span class="o">/</span> <span class="n">METADATA_FILE</span></div>
+
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_read_object</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">value</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">path</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">"utf-8"</span><span class="p">))</span>
+    <span class="k">except</span> <span class="p">(</span><span class="ne">OSError</span><span class="p">,</span> <span class="ne">UnicodeError</span><span class="p">,</span> <span class="n">json</span><span class="o">.</span><span class="n">JSONDecodeError</span><span class="p">)</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"cannot read adapter JSON </span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">value</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"adapter JSON must be an object: </span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">value</span>
+
+
+<div class="viewcode-block" id="read_metadata">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.read_metadata">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">read_metadata</span><span class="p">(</span><span class="n">bundle</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Read the metadata of one adapter bundle.</span>
+
+<span class="sd">    :param bundle: The adapter bundle path.</span>
+<span class="sd">    :return: The decoded metadata document.</span>
+<span class="sd">    :raises ValueError: If the metadata cannot be read as an object.</span>
+<span class="sd">    """</span>
+
+    <span class="k">return</span> <span class="n">_read_object</span><span class="p">(</span><span class="n">metadata_path</span><span class="p">(</span><span class="n">bundle</span><span class="p">))</span></div>
+
+
+
+<div class="viewcode-block" id="validate_adapter_bundle">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.validate_adapter_bundle">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">validate_adapter_bundle</span><span class="p">(</span><span class="n">bundle</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Validate static adapter metadata and the single dispatcher executable.</span>
+
+<span class="sd">    :param bundle: The adapter bundle path.</span>
+<span class="sd">    :return: The validated metadata document.</span>
+<span class="sd">    :raises ValueError: If metadata, the dispatcher, or a required binary is invalid or unavailable.</span>
+<span class="sd">    """</span>
+
+    <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">bundle</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="n">metadata</span> <span class="o">=</span> <span class="n">read_metadata</span><span class="p">(</span><span class="n">root</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">metadata</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format"</span><span class="p">)</span> <span class="o">!=</span> <span class="n">ADAPTER_FORMAT</span> <span class="ow">or</span> <span class="n">metadata</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format_version"</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">METADATA_FILE</span><span class="si">}</span><span class="s2"> must use </span><span class="si">{</span><span class="n">ADAPTER_FORMAT</span><span class="si">}</span><span class="s2"> format version 2"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">metadata</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"adapter_version"</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"unsupported remote adapter version: </span><span class="si">{</span><span class="n">metadata</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s1">'adapter_version'</span><span class="p">)</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="c1"># One executable dispatches every operation; the operation name travels in the</span>
+    <span class="c1"># request JSON, so there is nothing per-operation to resolve or validate here.</span>
+    <span class="n">executable</span> <span class="o">=</span> <span class="n">root</span> <span class="o">/</span> <span class="n">ADAPTER_EXECUTABLE</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">executable</span><span class="o">.</span><span class="n">is_file</span><span class="p">()</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">access</span><span class="p">(</span><span class="n">executable</span><span class="p">,</span> <span class="n">os</span><span class="o">.</span><span class="n">X_OK</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"adapter executable is not runnable: </span><span class="si">{</span><span class="n">executable</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="n">settings</span> <span class="o">=</span> <span class="n">metadata</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"settings"</span><span class="p">,</span> <span class="p">{})</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">settings</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"remote adapter settings must be an object"</span><span class="p">)</span>
+    <span class="n">timeout</span> <span class="o">=</span> <span class="n">metadata</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"timeout_seconds"</span><span class="p">,</span> <span class="mf">60.0</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">timeout</span><span class="p">,</span> <span class="p">(</span><span class="nb">int</span><span class="p">,</span> <span class="nb">float</span><span class="p">))</span> <span class="ow">or</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">timeout</span><span class="p">,</span> <span class="nb">bool</span><span class="p">)</span> <span class="ow">or</span> <span class="n">timeout</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"adapter timeout_seconds must be positive"</span><span class="p">)</span>
+    <span class="n">binaries</span> <span class="o">=</span> <span class="n">metadata</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"required_binaries"</span><span class="p">,</span> <span class="p">[])</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">binaries</span><span class="p">,</span> <span class="n">Sequence</span><span class="p">)</span> <span class="ow">or</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">binaries</span><span class="p">,</span> <span class="p">(</span><span class="nb">str</span><span class="p">,</span> <span class="nb">bytes</span><span class="p">)):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"required_binaries must be an array"</span><span class="p">)</span>
+    <span class="k">for</span> <span class="n">binary</span> <span class="ow">in</span> <span class="n">binaries</span><span class="p">:</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">binary</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">binary</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"required_binaries entries must be nonempty strings"</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">shutil</span><span class="o">.</span><span class="n">which</span><span class="p">(</span><span class="n">binary</span><span class="p">)</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"required adapter binary is unavailable: </span><span class="si">{</span><span class="n">binary</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">metadata</span></div>
+
+
+
+<div class="viewcode-block" id="valid_remote_name">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.valid_remote_name">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">valid_remote_name</span><span class="p">(</span><span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Validate and return one remote name.</span>
+
+<span class="sd">    :param name: The remote name to validate.</span>
+<span class="sd">    :return: The validated remote name.</span>
+<span class="sd">    :raises httk.workflow.errors.ResolutionMiss: If the name is not valid for remote resolution.</span>
+<span class="sd">    """</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">name</span> <span class="ow">or</span> <span class="s2">"/"</span> <span class="ow">in</span> <span class="n">name</span> <span class="ow">or</span> <span class="s2">":"</span> <span class="ow">in</span> <span class="n">name</span> <span class="ow">or</span> <span class="n">name</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">"."</span><span class="p">,</span> <span class="s2">".."</span><span class="p">}:</span>
+        <span class="k">raise</span> <span class="n">ResolutionMiss</span><span class="p">(</span><span class="sa">f</span><span class="s2">"invalid remote name: </span><span class="si">{</span><span class="n">name</span><span class="si">!r}</span><span class="s2">; ':' is reserved for workspace bindings"</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">name</span></div>
+
+
+
+<div class="viewcode-block" id="resolve_remote">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.resolve_remote">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">resolve_remote</span><span class="p">(</span>
+    <span class="n">value</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">project</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">RemoteTarget</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Resolve project-local before global remote definitions.</span>
+
+<span class="sd">    :param value: The remote name to resolve.</span>
+<span class="sd">    :param project: The project path, or the discovered project when omitted.</span>
+<span class="sd">    :return: The resolved remote target.</span>
+<span class="sd">    :raises httk.workflow.errors.ResolutionMiss: If the name is invalid or no bundle is found.</span>
+<span class="sd">    """</span>
+
+    <span class="n">name</span> <span class="o">=</span> <span class="n">valid_remote_name</span><span class="p">(</span><span class="n">value</span><span class="p">)</span>
+    <span class="n">project_root</span> <span class="o">=</span> <span class="n">discover_project</span><span class="p">(</span><span class="n">project</span><span class="p">)</span>
+    <span class="n">candidates</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="nb">tuple</span><span class="p">[</span><span class="n">Path</span><span class="p">,</span> <span class="nb">bool</span><span class="p">]]</span> <span class="o">=</span> <span class="p">[]</span>
+    <span class="k">if</span> <span class="n">project_root</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">candidates</span><span class="o">.</span><span class="n">extend</span><span class="p">((</span><span class="n">root</span> <span class="o">/</span> <span class="n">name</span><span class="p">,</span> <span class="kc">True</span><span class="p">)</span> <span class="k">for</span> <span class="n">root</span> <span class="ow">in</span> <span class="n">project_remote_roots</span><span class="p">(</span><span class="n">project_root</span><span class="p">))</span>
+    <span class="n">candidates</span><span class="o">.</span><span class="n">append</span><span class="p">((</span><span class="n">remotes_home</span><span class="p">()</span> <span class="o">/</span> <span class="n">name</span><span class="p">,</span> <span class="kc">False</span><span class="p">))</span>
+    <span class="k">for</span> <span class="n">bundle</span><span class="p">,</span> <span class="n">local</span> <span class="ow">in</span> <span class="n">candidates</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">bundle</span><span class="o">.</span><span class="n">is_dir</span><span class="p">():</span>
+            <span class="n">validate_adapter_bundle</span><span class="p">(</span><span class="n">bundle</span><span class="p">)</span>
+            <span class="k">return</span> <span class="n">RemoteTarget</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="n">bundle</span><span class="p">,</span> <span class="n">local</span><span class="p">)</span>
+    <span class="k">raise</span> <span class="n">ResolutionMiss</span><span class="p">(</span><span class="sa">f</span><span class="s2">"unknown remote: </span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="project_remote_roots">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.project_remote_roots">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">project_remote_roots</span><span class="p">(</span><span class="n">project_root</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">Path</span><span class="p">,</span> <span class="o">...</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Return where one project keeps its remotes.</span>
+
+<span class="sd">    :param project_root: The project root.</span>
+<span class="sd">    :return: The project remote roots in precedence order.</span>
+<span class="sd">    """</span>
+
+    <span class="k">return</span> <span class="p">(</span><span class="n">project_root</span> <span class="o">/</span> <span class="n">PROJECT_DIRECTORY</span> <span class="o">/</span> <span class="s2">"remotes"</span><span class="p">,)</span></div>
+
+
+
+<div class="viewcode-block" id="list_remotes">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.list_remotes">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">list_remotes</span><span class="p">(</span><span class="n">project</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]]:</span>
+<span class="w">    </span><span class="sd">"""List definitions with project entries shadowing global entries.</span>
+
+<span class="sd">    :param project: The project path, or the discovered project when omitted.</span>
+<span class="sd">    :return: Remote definitions with scope and bundle path.</span>
+<span class="sd">    """</span>
+
+    <span class="n">rows</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="n">global_root</span> <span class="o">=</span> <span class="n">remotes_home</span><span class="p">()</span>
+    <span class="k">if</span> <span class="n">global_root</span><span class="o">.</span><span class="n">is_dir</span><span class="p">():</span>
+        <span class="k">for</span> <span class="n">path</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">global_root</span><span class="o">.</span><span class="n">iterdir</span><span class="p">()):</span>
+            <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">is_dir</span><span class="p">():</span>
+                <span class="n">rows</span><span class="p">[</span><span class="n">path</span><span class="o">.</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"name"</span><span class="p">:</span> <span class="n">path</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s2">"scope"</span><span class="p">:</span> <span class="s2">"global"</span><span class="p">,</span> <span class="s2">"path"</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">path</span><span class="p">)}</span>
+    <span class="n">project_root</span> <span class="o">=</span> <span class="n">discover_project</span><span class="p">(</span><span class="n">project</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">project_root</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">for</span> <span class="n">local_root</span> <span class="ow">in</span> <span class="nb">reversed</span><span class="p">(</span><span class="n">project_remote_roots</span><span class="p">(</span><span class="n">project_root</span><span class="p">)):</span>
+            <span class="k">if</span> <span class="n">local_root</span><span class="o">.</span><span class="n">is_dir</span><span class="p">():</span>
+                <span class="k">for</span> <span class="n">path</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">local_root</span><span class="o">.</span><span class="n">iterdir</span><span class="p">()):</span>
+                    <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">is_dir</span><span class="p">():</span>
+                        <span class="n">rows</span><span class="p">[</span><span class="n">path</span><span class="o">.</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"name"</span><span class="p">:</span> <span class="n">path</span><span class="o">.</span><span class="n">name</span><span class="p">,</span> <span class="s2">"scope"</span><span class="p">:</span> <span class="s2">"project"</span><span class="p">,</span> <span class="s2">"path"</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">path</span><span class="p">)}</span>
+    <span class="k">return</span> <span class="p">[</span><span class="n">rows</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="k">for</span> <span class="n">name</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">rows</span><span class="p">)]</span></div>
+
+
+
+<div class="viewcode-block" id="add_remote">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.add_remote">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">add_remote</span><span class="p">(</span>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">template</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">global_scope</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">project</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Copy one maintained adapter template into user/project data.</span>
+
+<span class="sd">    :param name: The remote name to create.</span>
+<span class="sd">    :param template: The maintained adapter template name.</span>
+<span class="sd">    :param global_scope: Whether to create the remote in global data.</span>
+<span class="sd">    :param project: The project path for a project-local remote.</span>
+<span class="sd">    :return: The newly created adapter bundle path.</span>
+<span class="sd">    :raises ValueError: If the name, template, or scope is invalid.</span>
+<span class="sd">    :raises FileExistsError: If the destination already exists.</span>
+<span class="sd">    """</span>
+
+    <span class="n">valid_remote_name</span><span class="p">(</span><span class="n">name</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">name</span> <span class="o">==</span> <span class="s2">"local"</span><span class="p">:</span>
+        <span class="c1"># `local` is the built-in remote every workspace registry resolves as</span>
+        <span class="c1"># "this machine". Defining one would make a binding to `local` ambiguous,</span>
+        <span class="c1"># so the name is reserved.</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"the remote name 'local' is reserved for the built-in local remote"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">template</span> <span class="ow">not</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">"local"</span><span class="p">,</span> <span class="s2">"ssh"</span><span class="p">}:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"unknown maintained remote template: </span><span class="si">{</span><span class="n">template</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">global_scope</span><span class="p">:</span>
+        <span class="n">destination</span> <span class="o">=</span> <span class="n">remotes_home</span><span class="p">()</span> <span class="o">/</span> <span class="n">name</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">project_root</span> <span class="o">=</span> <span class="n">discover_project</span><span class="p">(</span><span class="n">project</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">project_root</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"a project is required unless --global is used"</span><span class="p">)</span>
+        <span class="n">destination</span> <span class="o">=</span> <span class="n">project_remote_roots</span><span class="p">(</span><span class="n">project_root</span><span class="p">)[</span><span class="mi">0</span><span class="p">]</span> <span class="o">/</span> <span class="n">name</span>
+    <span class="k">if</span> <span class="n">destination</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+        <span class="k">raise</span> <span class="ne">FileExistsError</span><span class="p">(</span><span class="n">destination</span><span class="p">)</span>
+    <span class="n">source</span> <span class="o">=</span> <span class="n">importlib</span><span class="o">.</span><span class="n">resources</span><span class="o">.</span><span class="n">files</span><span class="p">(</span><span class="s2">"httk.workflow"</span><span class="p">)</span><span class="o">.</span><span class="n">joinpath</span><span class="p">(</span><span class="s2">"adapter_templates"</span><span class="p">,</span> <span class="n">template</span><span class="p">)</span>
+    <span class="k">with</span> <span class="n">importlib</span><span class="o">.</span><span class="n">resources</span><span class="o">.</span><span class="n">as_file</span><span class="p">(</span><span class="n">source</span><span class="p">)</span> <span class="k">as</span> <span class="n">template_path</span><span class="p">:</span>
+        <span class="n">validate_adapter_bundle</span><span class="p">(</span><span class="n">template_path</span><span class="p">)</span>
+        <span class="n">destination</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">shutil</span><span class="o">.</span><span class="n">copytree</span><span class="p">(</span><span class="n">template_path</span><span class="p">,</span> <span class="n">destination</span><span class="p">)</span>
+    <span class="n">validate_adapter_bundle</span><span class="p">(</span><span class="n">destination</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">destination</span></div>
+
+
+
+<div class="viewcode-block" id="split_settings">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.split_settings">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">split_settings</span><span class="p">(</span><span class="n">settings</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">],</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]:</span>
+<span class="w">    </span><span class="sd">"""Partition ``--set`` values into persistable settings and credentials.</span>
+
+<span class="sd">    :param settings: The settings supplied by the caller.</span>
+<span class="sd">    :return: Persistable settings followed by manifest-excluded credentials.</span>
+<span class="sd">    :raises ValueError: If a setting name is retired or unsupported.</span>
+<span class="sd">    """</span>
+
+    <span class="n">retired</span> <span class="o">=</span> <span class="nb">sorted</span><span class="p">(</span><span class="nb">set</span><span class="p">(</span><span class="n">settings</span><span class="p">)</span> <span class="o">&amp;</span> <span class="n">_RETIRED_REMOTE_SETTINGS</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">retired</span><span class="p">:</span>
+        <span class="n">names</span> <span class="o">=</span> <span class="s2">", "</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">retired</span><span class="p">)</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"unknown remote setting </span><span class="si">{</span><span class="n">names</span><span class="si">!r}</span><span class="s2">; set scheduler values in the workspace settings"</span><span class="p">)</span>
+    <span class="n">persistable</span> <span class="o">=</span> <span class="p">{</span><span class="n">key</span><span class="p">:</span> <span class="n">value</span> <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">settings</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">PERSISTABLE_REMOTE_SETTINGS</span><span class="p">}</span>
+    <span class="n">credentials</span> <span class="o">=</span> <span class="p">{</span><span class="n">key</span><span class="p">:</span> <span class="n">value</span> <span class="k">for</span> <span class="n">key</span><span class="p">,</span> <span class="n">value</span> <span class="ow">in</span> <span class="n">settings</span><span class="o">.</span><span class="n">items</span><span class="p">()</span> <span class="k">if</span> <span class="n">key</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">PERSISTABLE_REMOTE_SETTINGS</span><span class="p">}</span>
+    <span class="k">return</span> <span class="n">persistable</span><span class="p">,</span> <span class="n">credentials</span></div>
+
+
+
+<div class="viewcode-block" id="read_credentials">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.read_credentials">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">read_credentials</span><span class="p">(</span><span class="n">bundle</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Read remote credentials that never enter a project manifest.</span>
+
+<span class="sd">    :param bundle: The adapter bundle path.</span>
+<span class="sd">    :return: The stored credential document, or an empty mapping when absent.</span>
+<span class="sd">    :raises ValueError: If the credentials file is not a JSON object.</span>
+<span class="sd">    """</span>
+
+    <span class="n">path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">bundle</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span> <span class="o">/</span> <span class="n">CREDENTIALS_FILE</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">path</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+        <span class="k">return</span> <span class="p">{}</span>
+    <span class="k">return</span> <span class="n">_read_object</span><span class="p">(</span><span class="n">path</span><span class="p">)</span></div>
+
+
+
+<div class="viewcode-block" id="store_credentials">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.store_credentials">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">store_credentials</span><span class="p">(</span>
+    <span class="n">bundle</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="n">settings</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">],</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Merge *settings* into the manifest-excluded remote credentials.</span>
+
+<span class="sd">    :param bundle: The adapter bundle path.</span>
+<span class="sd">    :param settings: Credential members to merge.</span>
+<span class="sd">    :return: The credentials file path.</span>
+<span class="sd">    :raises ValueError: If the existing credentials file is invalid.</span>
+<span class="sd">    """</span>
+
+    <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">bundle</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="n">path</span> <span class="o">=</span> <span class="n">root</span> <span class="o">/</span> <span class="n">CREDENTIALS_FILE</span>
+    <span class="n">document</span> <span class="o">=</span> <span class="n">_read_object</span><span class="p">(</span><span class="n">path</span><span class="p">)</span> <span class="k">if</span> <span class="n">path</span><span class="o">.</span><span class="n">is_file</span><span class="p">()</span> <span class="k">else</span> <span class="p">{}</span>
+    <span class="n">document</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">settings</span><span class="p">)</span>
+    <span class="n">write_json_atomic</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="n">document</span><span class="p">)</span>
+    <span class="n">os</span><span class="o">.</span><span class="n">chmod</span><span class="p">(</span><span class="n">path</span><span class="p">,</span> <span class="mo">0o600</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">path</span></div>
+
+
+
+<div class="viewcode-block" id="remote_settings">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.remote_settings">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">remote_settings</span><span class="p">(</span><span class="n">bundle</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Return persisted remote settings with credentials merged back in.</span>
+
+<span class="sd">    :param bundle: The adapter bundle path.</span>
+<span class="sd">    :return: Persisted settings and manifest-excluded credentials.</span>
+<span class="sd">    :raises ValueError: If adapter metadata or credentials are invalid.</span>
+<span class="sd">    """</span>
+
+    <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">bundle</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="n">configured</span> <span class="o">=</span> <span class="n">read_metadata</span><span class="p">(</span><span class="n">root</span><span class="p">)</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"settings"</span><span class="p">,</span> <span class="p">{})</span>
+    <span class="n">settings</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">configured</span><span class="p">)</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">configured</span><span class="p">,</span> <span class="n">Mapping</span><span class="p">)</span> <span class="k">else</span> <span class="p">{}</span>
+    <span class="n">settings</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">read_credentials</span><span class="p">(</span><span class="n">root</span><span class="p">))</span>
+    <span class="k">return</span> <span class="n">settings</span></div>
+
+
+
+<span class="n">_LEGACY_SETTING</span> <span class="o">=</span> <span class="n">re</span><span class="o">.</span><span class="n">compile</span><span class="p">(</span><span class="sa">r</span><span class="s2">"[A-Z][A-Z0-9_]*"</span><span class="p">)</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_legacy_settings</span><span class="p">(</span><span class="n">path</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]:</span>
+    <span class="n">settings</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">number</span><span class="p">,</span> <span class="n">raw</span> <span class="ow">in</span> <span class="nb">enumerate</span><span class="p">(</span><span class="n">path</span><span class="o">.</span><span class="n">read_text</span><span class="p">(</span><span class="n">encoding</span><span class="o">=</span><span class="s2">"utf-8"</span><span class="p">)</span><span class="o">.</span><span class="n">splitlines</span><span class="p">(),</span> <span class="mi">1</span><span class="p">):</span>
+        <span class="n">stripped</span> <span class="o">=</span> <span class="n">raw</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">stripped</span> <span class="ow">or</span> <span class="n">stripped</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"#"</span><span class="p">):</span>
+            <span class="k">continue</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">parts</span> <span class="o">=</span> <span class="n">shlex</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="n">stripped</span><span class="p">,</span> <span class="n">comments</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">posix</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="k">except</span> <span class="ne">ValueError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"unsafe legacy adapter configuration at </span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="n">number</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+        <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">parts</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">1</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"legacy adapter configuration is not a simple assignment at </span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="n">number</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">name</span><span class="p">,</span> <span class="n">separator</span><span class="p">,</span> <span class="n">value</span> <span class="o">=</span> <span class="n">parts</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span><span class="o">.</span><span class="n">partition</span><span class="p">(</span><span class="s2">"="</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">separator</span> <span class="ow">or</span> <span class="n">_LEGACY_SETTING</span><span class="o">.</span><span class="n">fullmatch</span><span class="p">(</span><span class="n">name</span><span class="p">)</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"legacy adapter configuration is not a simple assignment at </span><span class="si">{</span><span class="n">path</span><span class="si">}</span><span class="s2">:</span><span class="si">{</span><span class="n">number</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">settings</span><span class="p">[</span><span class="n">name</span><span class="p">]</span> <span class="o">=</span> <span class="n">value</span>
+    <span class="k">return</span> <span class="n">settings</span>
+
+
+<div class="viewcode-block" id="import_v1_remote">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.import_v1_remote">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">import_v1_remote</span><span class="p">(</span>
+    <span class="n">source</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">name</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">global_scope</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="n">project</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">"""Map a recognizable legacy executable bundle to the versioned contract.</span>
+
+<span class="sd">    Legacy shell programs are never copied or executed. Only their simple</span>
+<span class="sd">    assignment-only ``config`` files are read, and the result uses a maintained</span>
+<span class="sd">    v2 adapter implementation. What is read is an *httk v1* computer definition,</span>
+<span class="sd">    so the legacy names below are the names that tree really uses.</span>
+
+<span class="sd">    :param source: The legacy executable bundle path.</span>
+<span class="sd">    :param name: The imported remote name, or the source directory name when omitted.</span>
+<span class="sd">    :param global_scope: Whether to create the imported remote in global data.</span>
+<span class="sd">    :param project: The project path for a project-local import.</span>
+<span class="sd">    :return: The created versioned adapter bundle path.</span>
+<span class="sd">    :raises ValueError: If the legacy bundle cannot be recognized or imported.</span>
+<span class="sd">    """</span>
+
+    <span class="n">legacy</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">source</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="n">required</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"command"</span><span class="p">,</span> <span class="s2">"install"</span><span class="p">,</span> <span class="s2">"push"</span><span class="p">,</span> <span class="s2">"pull"</span><span class="p">,</span> <span class="s2">"start-taskmgr"</span><span class="p">,</span> <span class="s2">"config"</span><span class="p">}</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">legacy</span><span class="o">.</span><span class="n">is_dir</span><span class="p">()</span> <span class="ow">or</span> <span class="ow">not</span> <span class="nb">all</span><span class="p">((</span><span class="n">legacy</span> <span class="o">/</span> <span class="n">item</span><span class="p">)</span><span class="o">.</span><span class="n">is_file</span><span class="p">()</span> <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="n">required</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">"legacy computer definition does not contain the recognized executable set"</span><span class="p">)</span>
+    <span class="n">base</span> <span class="o">=</span> <span class="n">_legacy_settings</span><span class="p">(</span><span class="n">legacy</span> <span class="o">/</span> <span class="s2">"config"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="s2">"REMOTE_HOST"</span> <span class="ow">in</span> <span class="n">base</span><span class="p">:</span>
+        <span class="n">template</span> <span class="o">=</span> <span class="s2">"ssh"</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">template</span> <span class="o">=</span> <span class="s2">"local"</span>
+
+    <span class="n">legacy_profiles</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]]</span> <span class="o">=</span> <span class="p">{}</span>
+    <span class="k">for</span> <span class="n">queue_file</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">legacy</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="s2">"config.*"</span><span class="p">)):</span>
+        <span class="n">queue</span> <span class="o">=</span> <span class="n">queue_file</span><span class="o">.</span><span class="n">name</span><span class="o">.</span><span class="n">removeprefix</span><span class="p">(</span><span class="s2">"config."</span><span class="p">)</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">queue</span> <span class="ow">or</span> <span class="s2">"/"</span> <span class="ow">in</span> <span class="n">queue</span> <span class="ow">or</span> <span class="n">queue</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">"."</span><span class="p">,</span> <span class="s2">".."</span><span class="p">}:</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"invalid legacy queue name: </span><span class="si">{</span><span class="n">queue</span><span class="si">!r}</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">legacy_profiles</span><span class="p">[</span><span class="n">queue</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="o">**</span><span class="n">base</span><span class="p">,</span> <span class="o">**</span><span class="n">_legacy_settings</span><span class="p">(</span><span class="n">queue_file</span><span class="p">)}</span>
+
+    <span class="n">selected</span> <span class="o">=</span> <span class="nb">next</span><span class="p">(</span><span class="nb">iter</span><span class="p">(</span><span class="n">legacy_profiles</span><span class="o">.</span><span class="n">values</span><span class="p">()),</span> <span class="n">base</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="n">legacy_profiles</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+        <span class="n">skipped</span> <span class="o">=</span> <span class="s2">", "</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="nb">sorted</span><span class="p">(</span><span class="n">legacy_profiles</span><span class="p">)[</span><span class="mi">1</span><span class="p">:])</span>
+        <span class="nb">print</span><span class="p">(</span>
+            <span class="sa">f</span><span class="s2">"warning: imported the first v1 submission profile; skipped </span><span class="si">{</span><span class="n">skipped</span><span class="si">}</span><span class="s2">. "</span>
+            <span class="s2">"Per-queue submission profiles are now per-workspace settings."</span><span class="p">,</span>
+            <span class="n">file</span><span class="o">=</span><span class="n">sys</span><span class="o">.</span><span class="n">stderr</span><span class="p">,</span>
+        <span class="p">)</span>
+
+    <span class="n">remote_name</span> <span class="o">=</span> <span class="n">legacy</span><span class="o">.</span><span class="n">name</span> <span class="k">if</span> <span class="n">name</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">name</span>
+    <span class="n">destination</span> <span class="o">=</span> <span class="n">add_remote</span><span class="p">(</span>
+        <span class="n">remote_name</span><span class="p">,</span>
+        <span class="n">template</span><span class="o">=</span><span class="n">template</span><span class="p">,</span>
+        <span class="n">global_scope</span><span class="o">=</span><span class="n">global_scope</span><span class="p">,</span>
+        <span class="n">project</span><span class="o">=</span><span class="n">project</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">metadata</span> <span class="o">=</span> <span class="n">read_metadata</span><span class="p">(</span><span class="n">destination</span><span class="p">)</span>
+    <span class="n">legacy_settings</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">selected</span><span class="p">)</span>
+    <span class="n">settings</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span><span class="s2">"legacy_settings"</span><span class="p">:</span> <span class="n">legacy_settings</span><span class="p">}</span>
+    <span class="k">if</span> <span class="n">template</span> <span class="o">==</span> <span class="s2">"local"</span> <span class="ow">and</span> <span class="s2">"LOCAL_HTTK_DIR"</span> <span class="ow">in</span> <span class="n">selected</span><span class="p">:</span>
+        <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">selected</span><span class="p">[</span><span class="s2">"LOCAL_HTTK_DIR"</span><span class="p">])</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">root</span><span class="o">.</span><span class="n">is_absolute</span><span class="p">():</span>
+            <span class="n">root</span> <span class="o">=</span> <span class="p">(</span><span class="n">legacy</span> <span class="o">/</span> <span class="n">root</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+        <span class="n">legacy_settings</span><span class="p">[</span><span class="s2">"workspace_root"</span><span class="p">]</span> <span class="o">=</span> <span class="nb">str</span><span class="p">(</span><span class="n">root</span> <span class="o">/</span> <span class="s2">"Runs"</span><span class="p">)</span>
+    <span class="k">elif</span> <span class="n">template</span> <span class="o">==</span> <span class="s2">"ssh"</span> <span class="ow">and</span> <span class="s2">"REMOTE_HTTK_DIR"</span> <span class="ow">in</span> <span class="n">selected</span><span class="p">:</span>
+        <span class="n">legacy_settings</span><span class="p">[</span><span class="s2">"workspace_root"</span><span class="p">]</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">"</span><span class="si">{</span><span class="n">selected</span><span class="p">[</span><span class="s1">'REMOTE_HTTK_DIR'</span><span class="p">]</span><span class="o">.</span><span class="n">rstrip</span><span class="p">(</span><span class="s1">'/'</span><span class="p">)</span><span class="si">}</span><span class="s2">/Runs"</span>
+        <span class="n">settings</span><span class="p">[</span><span class="s2">"host"</span><span class="p">]</span> <span class="o">=</span> <span class="n">selected</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"REMOTE_HOST"</span><span class="p">,</span> <span class="s2">""</span><span class="p">)</span>
+        <span class="n">settings</span><span class="p">[</span><span class="s2">"username"</span><span class="p">]</span> <span class="o">=</span> <span class="n">selected</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"USERNAME"</span><span class="p">,</span> <span class="s2">""</span><span class="p">)</span>
+    <span class="k">if</span> <span class="nb">any</span><span class="p">(</span><span class="n">key</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">"SLURM_"</span><span class="p">)</span> <span class="k">for</span> <span class="n">key</span> <span class="ow">in</span> <span class="n">selected</span><span class="p">):</span>
+        <span class="nb">print</span><span class="p">(</span>
+            <span class="s2">"notice: scheduler settings belong to the workspace: `httk workflow launcher add --template slurm NAME` "</span>
+            <span class="s2">"and `httk workspace settings set --key manager.launch --value NAME`"</span><span class="p">,</span>
+            <span class="n">file</span><span class="o">=</span><span class="n">sys</span><span class="o">.</span><span class="n">stderr</span><span class="p">,</span>
+        <span class="p">)</span>
+    <span class="n">metadata</span><span class="p">[</span><span class="s2">"settings"</span><span class="p">]</span> <span class="o">=</span> <span class="n">settings</span>
+    <span class="c1"># The provenance format keeps its historical name: it records that this</span>
+    <span class="c1"># bundle was mapped from an httk v1 *computer* definition, which is what</span>
+    <span class="c1"># that tree calls the thing.</span>
+    <span class="n">metadata</span><span class="p">[</span><span class="s2">"legacy_import"</span><span class="p">]</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">"format"</span><span class="p">:</span> <span class="s2">"httk-v1-computer-import"</span><span class="p">,</span>
+        <span class="s2">"source"</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">legacy</span><span class="p">),</span>
+        <span class="s2">"legacy_executables_copied"</span><span class="p">:</span> <span class="kc">False</span><span class="p">,</span>
+    <span class="p">}</span>
+    <span class="n">write_path</span> <span class="o">=</span> <span class="n">metadata_path</span><span class="p">(</span><span class="n">destination</span><span class="p">)</span>
+    <span class="n">descriptor</span><span class="p">,</span> <span class="n">temporary_name</span> <span class="o">=</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">mkstemp</span><span class="p">(</span><span class="n">prefix</span><span class="o">=</span><span class="sa">f</span><span class="s2">".</span><span class="si">{</span><span class="n">write_path</span><span class="o">.</span><span class="n">name</span><span class="si">}</span><span class="s2">."</span><span class="p">,</span> <span class="nb">dir</span><span class="o">=</span><span class="n">destination</span><span class="p">)</span>
+    <span class="n">temporary</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">temporary_name</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">with</span> <span class="n">os</span><span class="o">.</span><span class="n">fdopen</span><span class="p">(</span><span class="n">descriptor</span><span class="p">,</span> <span class="s2">"w"</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s2">"utf-8"</span><span class="p">)</span> <span class="k">as</span> <span class="n">stream</span><span class="p">:</span>
+            <span class="n">json</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">metadata</span><span class="p">,</span> <span class="n">stream</span><span class="p">,</span> <span class="n">sort_keys</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">separators</span><span class="o">=</span><span class="p">(</span><span class="s2">","</span><span class="p">,</span> <span class="s2">":"</span><span class="p">))</span>
+            <span class="n">stream</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">os</span><span class="o">.</span><span class="n">replace</span><span class="p">(</span><span class="n">temporary</span><span class="p">,</span> <span class="n">write_path</span><span class="p">)</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">temporary</span><span class="o">.</span><span class="n">unlink</span><span class="p">(</span><span class="n">missing_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="n">validate_adapter_bundle</span><span class="p">(</span><span class="n">destination</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">destination</span></div>
+
+
+
+<div class="viewcode-block" id="run_adapter">
+<a class="viewcode-back" href="../../../reference/autoapi/httk/workflow/adapters/index.html#httk.workflow.adapters.run_adapter">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">run_adapter</span><span class="p">(</span>
+    <span class="n">bundle</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="n">os</span><span class="o">.</span><span class="n">PathLike</span><span class="p">[</span><span class="nb">str</span><span class="p">],</span>
+    <span class="n">operation</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+    <span class="n">request</span><span class="p">:</span> <span class="n">Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">],</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">timeout</span><span class="p">:</span> <span class="nb">float</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="n">Any</span><span class="p">]:</span>
+<span class="w">    </span><span class="sd">"""Execute one JSON adapter operation without invoking a shell.</span>
+
+<span class="sd">    :param bundle: The adapter bundle path.</span>
+<span class="sd">    :param operation: The adapter operation name.</span>
+<span class="sd">    :param request: The operation request members.</span>
+<span class="sd">    :param timeout: The operation timeout, or the bundle default when omitted.</span>
+<span class="sd">    :return: The adapter result document.</span>
+<span class="sd">    :raises TimeoutError: If the adapter exceeds its timeout.</span>
+<span class="sd">    :raises ValueError: If the request or result violates the adapter protocol.</span>
+<span class="sd">    :raises RuntimeError: If the adapter refuses or fails the operation.</span>
+<span class="sd">    """</span>
+
+    <span class="k">if</span> <span class="n">operation</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">ADAPTER_OPERATIONS</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"unknown adapter operation: </span><span class="si">{</span><span class="n">operation</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="n">root</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">bundle</span><span class="p">)</span><span class="o">.</span><span class="n">expanduser</span><span class="p">()</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+    <span class="n">metadata</span> <span class="o">=</span> <span class="n">validate_adapter_bundle</span><span class="p">(</span><span class="n">root</span><span class="p">)</span>
+    <span class="n">executable</span> <span class="o">=</span> <span class="n">root</span> <span class="o">/</span> <span class="n">ADAPTER_EXECUTABLE</span>
+    <span class="n">payload</span> <span class="o">=</span> <span class="p">{</span>
+        <span class="s2">"format"</span><span class="p">:</span> <span class="n">REQUEST_FORMAT</span><span class="p">,</span>
+        <span class="s2">"format_version"</span><span class="p">:</span> <span class="mi">2</span><span class="p">,</span>
+        <span class="s2">"operation"</span><span class="p">:</span> <span class="n">operation</span><span class="p">,</span>
+        <span class="s2">"adapter_dir"</span><span class="p">:</span> <span class="nb">str</span><span class="p">(</span><span class="n">root</span><span class="p">),</span>
+        <span class="c1"># Persisted settings and their manifest-excluded credentials reach the</span>
+        <span class="c1"># adapter together, so splitting the two storage locations is invisible.</span>
+        <span class="o">**</span><span class="nb">dict</span><span class="p">(</span><span class="n">request</span><span class="p">),</span>
+        <span class="s2">"remote_settings"</span><span class="p">:</span> <span class="n">remote_settings</span><span class="p">(</span><span class="n">root</span><span class="p">),</span>
+    <span class="p">}</span>
+    <span class="n">descriptor</span><span class="p">,</span> <span class="n">temporary_name</span> <span class="o">=</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">mkstemp</span><span class="p">(</span><span class="n">prefix</span><span class="o">=</span><span class="s2">"httk-adapter-"</span><span class="p">,</span> <span class="n">suffix</span><span class="o">=</span><span class="s2">".json"</span><span class="p">)</span>
+    <span class="n">request_path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">temporary_name</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="k">with</span> <span class="n">os</span><span class="o">.</span><span class="n">fdopen</span><span class="p">(</span><span class="n">descriptor</span><span class="p">,</span> <span class="s2">"w"</span><span class="p">,</span> <span class="n">encoding</span><span class="o">=</span><span class="s2">"utf-8"</span><span class="p">)</span> <span class="k">as</span> <span class="n">stream</span><span class="p">:</span>
+            <span class="n">json</span><span class="o">.</span><span class="n">dump</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span> <span class="n">stream</span><span class="p">,</span> <span class="n">sort_keys</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">separators</span><span class="o">=</span><span class="p">(</span><span class="s2">","</span><span class="p">,</span> <span class="s2">":"</span><span class="p">))</span>
+            <span class="n">stream</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="s2">"</span><span class="se">\n</span><span class="s2">"</span><span class="p">)</span>
+        <span class="n">limit</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">metadata</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"timeout_seconds"</span><span class="p">,</span> <span class="mf">60.0</span><span class="p">)</span> <span class="k">if</span> <span class="n">timeout</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">timeout</span><span class="p">)</span>
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">completed</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+                <span class="p">[</span><span class="nb">str</span><span class="p">(</span><span class="n">executable</span><span class="p">),</span> <span class="nb">str</span><span class="p">(</span><span class="n">request_path</span><span class="p">)],</span>
+                <span class="n">text</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+                <span class="n">capture_output</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+                <span class="n">timeout</span><span class="o">=</span><span class="n">limit</span><span class="p">,</span>
+                <span class="n">check</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+            <span class="p">)</span>
+        <span class="k">except</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">TimeoutExpired</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">TimeoutError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"adapter </span><span class="si">{</span><span class="n">operation</span><span class="si">}</span><span class="s2"> exceeded </span><span class="si">{</span><span class="n">limit</span><span class="si">:</span><span class="s2">g</span><span class="si">}</span><span class="s2"> seconds"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">finally</span><span class="p">:</span>
+        <span class="n">request_path</span><span class="o">.</span><span class="n">unlink</span><span class="p">(</span><span class="n">missing_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">completed</span><span class="o">.</span><span class="n">returncode</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span>
+        <span class="n">detail</span> <span class="o">=</span> <span class="n">completed</span><span class="o">.</span><span class="n">stderr</span><span class="o">.</span><span class="n">strip</span><span class="p">()</span>
+        <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"adapter </span><span class="si">{</span><span class="n">operation</span><span class="si">}</span><span class="s2"> failed (</span><span class="si">{</span><span class="n">completed</span><span class="o">.</span><span class="n">returncode</span><span class="si">}</span><span class="s2">): </span><span class="si">{</span><span class="n">detail</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">result</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">loads</span><span class="p">(</span><span class="n">completed</span><span class="o">.</span><span class="n">stdout</span><span class="p">)</span>
+    <span class="k">except</span> <span class="n">json</span><span class="o">.</span><span class="n">JSONDecodeError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"adapter </span><span class="si">{</span><span class="n">operation</span><span class="si">}</span><span class="s2"> did not emit exactly one JSON result"</span><span class="p">)</span> <span class="kn">from</span><span class="w"> </span><span class="nn">exc</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="nb">dict</span><span class="p">):</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"adapter </span><span class="si">{</span><span class="n">operation</span><span class="si">}</span><span class="s2"> result must be a JSON object"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format"</span><span class="p">)</span> <span class="o">!=</span> <span class="n">RESULT_FORMAT</span> <span class="ow">or</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"format_version"</span><span class="p">)</span> <span class="o">!=</span> <span class="mi">2</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"adapter </span><span class="si">{</span><span class="n">operation</span><span class="si">}</span><span class="s2"> returned an unsupported result"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"operation"</span><span class="p">)</span> <span class="o">!=</span> <span class="n">operation</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">"adapter result operation disagrees with request: </span><span class="si">{</span><span class="n">operation</span><span class="si">}</span><span class="s2">"</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"ok"</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">True</span><span class="p">:</span>
+        <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="nb">str</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">"error"</span><span class="p">,</span> <span class="sa">f</span><span class="s2">"adapter </span><span class="si">{</span><span class="n">operation</span><span class="si">}</span><span class="s2"> reported failure"</span><span class="p">)))</span>
+    <span class="k">if</span> <span class="n">completed</span><span class="o">.</span><span class="n">stderr</span><span class="p">:</span>
+        <span class="n">result</span><span class="p">[</span><span class="s2">"diagnostics"</span><span class="p">]</span> <span class="o">=</span> <span class="n">completed</span><span class="o">.</span><span class="n">stderr</span>
+    <span class="k">return</span> <span class="n">result</span></div>
+
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2026, The httk-workflow AUTHORS
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../_static/documentation_options.js?v=fe42cd0d"></script>
+    <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    <script src="../../../_static/clipboard.min.js?v=a7894cd8"></script>
+    <script src="../../../_static/copybutton.js?v=fd10adb8"></script>
+    <script src="../../../_static/selector.js?v=e591e119"></script>
+    <script>window.HTTK_DOCS_VERSIONING = {"channel":"dev","version":"dev:main","versionPathDepth":2};</script>
+    </body>
+</html>
