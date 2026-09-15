@@ -17,6 +17,13 @@ import tempfile
 import tomllib
 from pathlib import Path
 
+_SUPPORTED_PYTHON_VERSIONS = ("3.12", "3.13", "3.14")
+
+
+def _normal_test_command(version: str) -> list[str]:
+    """Run the repository's normal tests in an isolated uv environment."""
+    return ["uv", "run", "--isolated", "--python", version, "--extra", "dev", "make", "test"]
+
 
 def _environment(work: Path) -> dict[str, str]:
     """Remove workspace Python, package-index, and test-selection overrides."""
@@ -57,6 +64,7 @@ def _environment(work: Path) -> dict[str, str]:
         UV_CONFIG_FILE=os.devnull,
         UV_DEFAULT_INDEX="https://pypi.org/simple",
         UV_CACHE_DIR=str(work / "cache/uv"),
+        UV_PYTHON_INSTALL_DIR=str(work / "python"),
         npm_config_cache=str(work / "cache/npm"),
         TMPDIR=str(work / "tmp"),
     )
@@ -241,7 +249,8 @@ def main() -> int:
         "repository": str(repo),
         "status": "failed",
         "checker_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        "scope": "Declared CI/release targets, locked docs, and configured bare-wheel imports; "
+        "scope": "Declared CI/release targets, normal tests on Python 3.12-3.14, locked docs, "
+        "and configured bare-wheel imports; "
         "does not add browser or live-database gates, or reproduce the GitHub OS image.",
     }
     passed: list[str] = []
@@ -285,6 +294,8 @@ def main() -> int:
         if (source / "package-lock.json").exists():
             gate("npm", ["npm", "ci"])
         gate("ci", ["make", "ci"])
+        for version in _SUPPORTED_PYTHON_VERSIONS:
+            gate(f"python-{version}-tests", _normal_test_command(version))
         gate("install-release", [python, "-I", "-m", "pip", "install", "-e", ".[dev,docs,release]"])
         gate("dependencies", [python, "-I", "-m", "pip", "check"])
         gate("environment", [python, "-I", "-m", "pip", "freeze"])

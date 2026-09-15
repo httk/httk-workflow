@@ -45,10 +45,10 @@ checkout or newly published core tooling.
 The command snapshots your current working tree, including uncommitted release
 edits, and verifies it in fresh environments. It installs the declared
 development dependencies from PyPI, regenerates the documentation lock and
-published inventories, and runs CI, the release checks, a clean locked-docs
-build, and a separate bare-wheel installation. Formatting, static analysis,
-tests, strict documentation, distribution builds, and package metadata checks
-must all pass.
+published inventories, and runs CI, the normal tests on Python 3.12, 3.13, and
+3.14, the release checks, a clean locked-docs build, and a separate bare-wheel
+installation. Formatting, static analysis, tests, strict documentation,
+distribution builds, and package metadata checks must all pass.
 
 On success, the refreshed lock and inventories are copied back only if your
 working tree has remained unchanged during verification. Review those files

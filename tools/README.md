@@ -30,11 +30,14 @@ The following gates run in the isolated snapshot and stop on failure:
 2. Run `make docs-lock` and `make docs-inventories`, refreshing the published
    dependency inputs, then install JavaScript dependencies with `npm ci` if
    applicable and run `make ci`.
-3. Add `.[dev,docs,release]`, validate dependencies and the release preflight,
+3. Run each repository's normal `make test` target in uv-isolated Python 3.12,
+   3.13, and 3.14 environments with its `dev` extra. Extended profiles and
+   benchmark targets are not part of this compatibility matrix.
+4. Add `.[dev,docs,release]`, validate dependencies and the release preflight,
    then run `HTTK_DOCS_VERSION=<VERSION> make release-check`. CI runs again
    because docs dependencies can change what is installed.
-4. Run `make docs-lock-check`, including its separate locked-docs environment.
-5. Install the built wheel without extras into another fresh venv, check its
+5. Run `make docs-lock-check`, including its separate locked-docs environment.
+6. Install the built wheel without extras into another fresh venv, check its
    dependencies and version, and import its primary package and the public
    roots from `docs/versioning.toml`, outside the source tree.
 
