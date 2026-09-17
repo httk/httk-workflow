@@ -75,6 +75,15 @@ jobs:
               exit 1
             fi
           fi
+          # Release docs are immutable once the distribution is on PyPI. Until then
+          # a release may be re-tagged, and its earlier docs are replaced.
+          PYPI_STATUS=$(curl -sS --retry 3 -o /dev/null -w '%{http_code}' \
+            "https://pypi.org/pypi/httk-workflow/${GITHUB_REF_NAME#v}/json")
+          case "$PYPI_STATUS" in
+            200) PUBLISHED=true ;;
+            404) PUBLISHED=false ;;
+            *) echo "cannot tell whether httk-workflow ${GITHUB_REF_NAME#v} is on PyPI (HTTP $PYPI_STATUS)" >&2; exit 1 ;;
+          esac
           for attempt in 1 2 3 4 5 6 7 8; do
             if [ "$REMOTE_SITE_EXISTS" = true ]; then
               LEASE_SHA=$(git rev-parse origin/docs-site 2>/dev/null || echo "")
@@ -86,8 +95,13 @@ jobs:
             if git show-ref --verify --quiet refs/remotes/origin/docs-site; then
               git archive origin/docs-site | tar -x -C "$SITE_DIR"
             fi
+            COMPOSE_MODE=--release
+            if [ "$PUBLISHED" = false ] && [ -d "$SITE_DIR/${GITHUB_REF_NAME}" ]; then
+              echo "::warning::${GITHUB_REF_NAME} is not on PyPI yet; replacing its earlier release docs"
+              COMPOSE_MODE=--repair
+            fi
             python -m httk.core.docs compose \
-              --site "$SITE_DIR" --build docs/_build/html --release "${GITHUB_REF_NAME}" \
+              --site "$SITE_DIR" --build docs/_build/html "$COMPOSE_MODE" "${GITHUB_REF_NAME}" \
               --slug httk-workflow --url https://docs.httk.org/httk-workflow \
               --source-commit "$SOURCE_COMMIT"
             python -m httk.core.docs commit-site \
