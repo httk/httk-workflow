@@ -96,6 +96,54 @@ $ httk workflow remote add --template local local-tree
 $ httk workspace init --name scratch local-tree:/tmp/me/httk/scratch
 ```
 
+### A mounted filesystem with a separate executor
+
+Use the `mount` template when the remote filesystem is available locally as a
+mount (sshfs, NFS, any shared mount) but commands must run on the remote through
+a separate execution channel — for example a login node reachable only through a
+tunnelled wrapper, with neither `ssh` nor `rsync` available for transfers. Files
+move as bytes over the mount; every `httk` command about the workspace runs on
+the remote through the executor.
+
+Three settings describe it: `mount_root` is the local path where the remote tree
+is mounted, `remote_root` is the same tree as the *remote* machine spells it
+(keep it to the project subtree you transfer into — `remote_root=/` maps every
+absolute remote path onto the mount and is not recommended), and `exec_command`
+is an executor prefix (parsed once with `shlex.split`) that runs one shell command
+line on the remote and relays its stdout, stderr and exit status.
+
+```console
+$ httk workflow remote add --template mount sigma
+$ httk workflow remote configure \
+      --set mount_root=/home/me/work/mounts/sigma \
+      --set remote_root=/proj/x/users/me/httk \
+      --set exec_command="/home/me/bin/hpc run" sigma
+```
+
+`configure` refuses unless `mount_root` is an existing directory (set
+`check_mount=no` to configure the remote before the filesystem is mounted) and
+unless the executor can run a cheap `true` on the remote (set
+`check_connectivity=no` to configure it anyway). The `prelude` and `httk_command`
+settings mean the same as for `ssh`.
+
+A transfer also refuses when `mount_root` does not exist, but an empty, unmounted
+mount point cannot be told apart from a mounted-but-empty one, so run
+`httk workflow remote check sigma` before transfers as the operator's safeguard
+that the filesystem is actually mounted and `httk` answers on the far side.
+
+The mount is for transfers only. Never `httk workspace init` on the mount as a
+local workspace, and never run `status`, `collect`, `fsck` or any analysis
+against the mounted tree: the remote machine owns the workspace, so every `httk`
+command about it goes through the executor (`sigma:runs`), exactly as with an
+`ssh` remote:
+
+```console
+$ httk workspace init --name runs sigma:/proj/x/users/me/httk/runs
+$ httk workflow transfer --job JOB default sigma:runs
+$ httk workflow run --workspace sigma:runs --count 4
+$ httk workspace status sigma:runs
+```
+
 ## From Python
 
 The low-level adapter API is in `httk.workflow.adapters`. This example uses the

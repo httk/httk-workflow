@@ -219,23 +219,39 @@ class Remote:
         return [str(json.loads(line)["command"]) for line in self.log.read_text(encoding="utf-8").splitlines()]
 
 
-@pytest.fixture
-def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
-    if shutil.which("rsync") is None:  # pragma: no cover - depends on the host
-        pytest.skip("rsync is unavailable, so no honest transfer can be exercised")
+def install_httk_toolchain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Put an ``httk`` shim first on ``PATH`` and expose the package on ``PYTHONPATH``.
+
+    This is the part of the stand-in cluster the ``mount`` kind also needs: that
+    kind requires neither ssh nor rsync, so its tests reuse this directly without
+    the ``remote`` fixture's rsync gate or its ssh/sbatch stand-ins.
+
+    :param tmp_path: The per-test temporary directory the binaries are rooted in.
+    :param monkeypatch: The fixture that scopes the ``PATH``/``PYTHONPATH`` edits.
+    :return: The binaries directory now first on ``PATH``.
+    """
+
     binaries = tmp_path / "bin"
     binaries.mkdir()
-    root = tmp_path / "remote"
-    root.mkdir()
-    cluster = Remote(root=root, binaries=binaries, spool=tmp_path / "spool", log=tmp_path / "ssh.log")
-    cluster.install("ssh", FAKE_SSH)
-    cluster.install("sbatch", FAKE_SBATCH)
     (binaries / "httk").write_text(f'#!/bin/sh\nexec {sys.executable} -m httk.core.cli "$@"\n', encoding="utf-8")
     (binaries / "httk").chmod(0o755)
     source_root = Path(__file__).resolve().parents[1] / "src"
     existing = os.environ.get("PYTHONPATH", "")
     monkeypatch.setenv("PYTHONPATH", f"{source_root}{os.pathsep}{existing}" if existing else str(source_root))
     monkeypatch.setenv("PATH", f"{binaries}{os.pathsep}{os.environ['PATH']}")
+    return binaries
+
+
+@pytest.fixture
+def remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Remote:
+    if shutil.which("rsync") is None:  # pragma: no cover - depends on the host
+        pytest.skip("rsync is unavailable, so no honest transfer can be exercised")
+    binaries = install_httk_toolchain(tmp_path, monkeypatch)
+    root = tmp_path / "remote"
+    root.mkdir()
+    cluster = Remote(root=root, binaries=binaries, spool=tmp_path / "spool", log=tmp_path / "ssh.log")
+    cluster.install("ssh", FAKE_SSH)
+    cluster.install("sbatch", FAKE_SBATCH)
     monkeypatch.setenv("HTTK_FAKE_SSH_ROOT", str(root))
     monkeypatch.setenv("HTTK_FAKE_SSH_LOG", str(cluster.log))
     monkeypatch.setenv("HTTK_FAKE_SBATCH_SPOOL", str(cluster.spool))

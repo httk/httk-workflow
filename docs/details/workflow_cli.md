@@ -530,9 +530,11 @@ unambiguous.
 | `remote show [--json] NAME...` | describe remotes and their settings | |
 | `remote remove [--force] NAME...` | remove remote bundles | |
 
-`remote add --template` accepts `local` (same-machine transport) or `ssh`
-(rsync plus command execution over SSH). These templates describe how to reach
-a machine; they do not describe how that machine starts managers. Configure
+`remote add --template` accepts `local` (same-machine transport), `ssh`
+(rsync plus command execution over SSH), or `mount` (a locally mounted remote
+filesystem for transfers plus a configurable executor for commands). These
+templates describe how to reach a machine; they do not describe how that machine
+starts managers. Configure
 manager launch separately in the target workspace with `manager.launch`, such
 as a packaged `slurm` launcher.
 
@@ -1190,7 +1192,7 @@ for writing one of your own: the bundle layout, the exact request and result
 document of the six operations (`configure`, `install`, `invoke`, `push`, `pull`,
 and `status`), and the rules for a custom adapter.
 
-Maintained `local` and `ssh` templates are packaged with
+Maintained `local`, `ssh` and `mount` templates are packaged with
 the module. Project definitions shadow global definitions. `REMOTE:NAME` names
 a workspace on a remote. `remote import-v1` maps recognized legacy *httk* v1 computer bundles
 by reading assignment-only configuration; legacy shell executables are never
@@ -1207,9 +1209,9 @@ never copied or executed. Review the imported `legacy_settings` and initialize
 the workspace path explicitly before transferring jobs.
 
 `remote configure --set KEY=VALUE` persists only the machine-level keys
-`check_connectivity`, `host`, `httk_command`, `legacy_settings`,
-`port`, `username`, `vasp_command`, and `vasp_pseudo_library`
-in the shareable `remote.json`. Scheduler profile values are workspace
+`check_connectivity`, `check_mount`, `exec_command`, `host`, `httk_command`,
+`legacy_settings`, `mount_root`, `port`, `prelude`, `remote_root`, `username`,
+`vasp_command`, and `vasp_pseudo_library` in the shareable `remote.json`. Scheduler profile values are workspace
 settings: use `slurm.account`, `slurm.partition`, `slurm.time_limit`,
 `slurm.nodes`, `slurm.cpus_per_task`, `slurm.ntasks`,
 `slurm.ntasks_per_node`, `slurm.mem`, `slurm.gres`, `slurm.reservation`, and
@@ -1227,16 +1229,23 @@ credential.
 Manager launch policy is selected by each workspace's `manager.launch` setting.
 
 `ssh` moves files with `rsync` over `ssh` and runs every command on the
-configured host. Only `ssh` and `rsync` are required locally. Both kinds
-implement the same six operations:
+configured host. Only `ssh` and `rsync` are required locally.
 
-| Operation | `local` behaviour | `ssh` behaviour |
-| --- | --- | --- |
-| `configure` | validates pending machine settings | verifies the host answers with a cheap remote `true` |
-| `install` (the `remote check` verb) | checks that local `httk` answers | checks that `httk` answers on the far side and reports its version |
-| `invoke` | runs the argument vector as a child process | runs it on the configured host and returns status, stdout, and stderr |
-| `push` / `pull` | copies the requested tree or relative file batch locally | transfers it with `rsync --archive` over SSH |
-| `status` | runs the workspace status command locally | runs `httk workspace status --json NAME` remotely |
+`mount` moves files through a locally mounted view of the remote filesystem
+(sshfs, NFS, any shared mount) and runs every command through an executor
+(`exec_command`, an argv prefix such as `ssh -o BatchMode=yes host` or
+`/abs/path/bin/hpc run`). `mount_root` is the local mount, `remote_root` is the
+same tree as the remote spells it; a transfer path outside `remote_root` is
+refused rather than copied somewhere local. Neither `ssh` nor `rsync` is
+required. All three kinds implement the same six operations:
+
+| Operation | `local` behaviour | `ssh` behaviour | `mount` behaviour |
+| --- | --- | --- | --- |
+| `configure` | validates pending machine settings | verifies the host answers with a cheap remote `true` | validates the roots and executor, and (unless disabled) that the mount exists and the executor answers |
+| `install` (the `remote check` verb) | checks that local `httk` answers | checks that `httk` answers on the far side and reports its version | checks that `httk` answers through the executor and reports its version |
+| `invoke` | runs the argument vector as a child process | runs it on the configured host and returns status, stdout, and stderr | runs it through the executor and returns status, stdout, and stderr |
+| `push` / `pull` | copies the requested tree or relative file batch locally | transfers it with `rsync --archive` over SSH | copies it through the mount, mapping the remote path onto `mount_root` |
+| `status` | runs the workspace status command locally | runs `httk workspace status --json NAME` remotely | runs `httk workspace status --json NAME` through the executor |
 
 `httk_command` overrides how `httk` is spelled on the far side, for example
 `httk_command="/proj/venv/bin/httk"`; without it the plain `httk` on the remote

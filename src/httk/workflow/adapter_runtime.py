@@ -10,18 +10,28 @@ selected by the ``kind`` recorded in the bundle's ``remote.json``:
 ``ssh``
     Files move with ``rsync`` over ``ssh`` and commands run on the configured
     host.
+``mount``
+    Files are copied through a locally mounted view of the remote filesystem
+    (sshfs, NFS, any shared mount) and commands run on the remote through a
+    configurable executor command (an argv prefix such as
+    ``ssh -o BatchMode=yes host`` or ``/abs/path/bin/hpc run``). A ``files`` batch
+    is copied entry by entry, recursing into a directory entry and dereferencing a
+    symlinked file, unlike rsync's ``--files-from``; no caller sends ``files``
+    today.
 
 Any other kind is refused rather than silently executed in the wrong place.
 
 Every subprocess started here is an argument vector; no shell is ever handed an
-interpolated string. ``ssh`` is the one unavoidable exception, because it always
-concatenates its command words and lets a login shell on the far side parse the
-result. All remote command strings are therefore built by ``_shell_command``,
-which quotes element-wise. Nothing else in this module may compose a command
-string from request or settings values.
+interpolated string. ``ssh`` and the ``mount`` executor are the two unavoidable
+exceptions, because each always concatenates its command words and lets a shell
+on the far side parse the result. All remote command strings are therefore built by
+``_shell_command``, which quotes element-wise; the executor is split once with
+``shlex.split`` and never interpolated. Nothing else in this module may compose a
+command string from request or settings values.
 """
 
 import json
+import os
 import re
 import shlex
 import shutil
@@ -33,7 +43,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Protocol
 
-SUPPORTED_KINDS = ("local", "ssh")
+SUPPORTED_KINDS = ("local", "ssh", "mount")
 
 #: The bundle metadata file.
 METADATA_FILE = "remote.json"
@@ -274,24 +284,40 @@ def _remote_prelude(settings: Mapping[str, object]) -> str:
     return prelude.strip() if prelude else ""
 
 
+def _remote_command(settings: Mapping[str, object], argv: Sequence[str], *, cwd: str | None = None) -> str:
+    """Build the single shell command string a remote transport parses.
+
+    Both the ``ssh`` transport and the ``mount`` executor concatenate their words
+    and hand the result to a shell on the far side, so ``ssh`` and ``mount`` share
+    this one composition: the argument vector quoted element-wise by
+    :func:`_shell_command`, prefixed by the optional ``prelude`` run under
+    ``set -e`` (a failing setup line -- a bad module, a missing venv -- then
+    aborts before the command instead of running it in a half-configured shell).
+
+    :param settings: The persisted remote settings and their credentials.
+    :param argv: The command to run on the far side.
+    :param cwd: The remote working directory, or the login default when omitted.
+    :return: One command string for a single remote shell.
+    """
+
+    command = _shell_command(_remote_httk(argv, settings), cwd=cwd)
+    prelude = _remote_prelude(settings)
+    if prelude:
+        command = "set -e\n" + prelude + "\n" + command
+    return command
+
+
 def _ssh_run(
     settings: Mapping[str, object],
     argv: Sequence[str],
     *,
     cwd: str | None = None,
 ) -> "subprocess.CompletedProcess[str]":
-    remote_command = _shell_command(_remote_httk(argv, settings), cwd=cwd)
-    prelude = _remote_prelude(settings)
-    if prelude:
-        # Run the prelude under ``set -e`` so a failing setup line (a bad module,
-        # a missing venv) aborts before the command instead of running it in a
-        # half-configured shell. Both are one string to a single remote shell.
-        remote_command = "set -e\n" + prelude + "\n" + remote_command
     command = [
         *_ssh_transport(settings),
         "--",
         _ssh_destination(settings),
-        remote_command,
+        _remote_command(settings, argv, cwd=cwd),
     ]
     return subprocess.run(
         command,
@@ -302,6 +328,103 @@ def _ssh_run(
     )
 
 
+def _exec_command(settings: Mapping[str, object]) -> list[str]:
+    """Split the ``mount`` executor prefix into an argument vector.
+
+    The value is parsed once, here, exactly like ``httk_command``; the adapter
+    appends the single remote command string built by :func:`_remote_command`
+    and never interpolates the executor into a command line.
+
+    :param settings: The persisted remote settings and their credentials.
+    :return: The executor argument vector.
+    :raises ValueError: If the executor is missing or empty.
+    """
+
+    command = _text(settings, "exec_command")
+    if command is None:
+        raise ValueError("the mount adapter needs an exec_command=... that runs one shell command line on the remote")
+    prefix = shlex.split(command)
+    if not prefix:
+        raise ValueError("remote setting exec_command must not be empty")
+    return prefix
+
+
+def _absolute_root(settings: Mapping[str, object], key: str) -> Path:
+    """Return an absolute, lexically normalised ``mount`` path setting.
+
+    :param settings: The persisted remote settings and their credentials.
+    :param key: The setting name to read (``mount_root`` or ``remote_root``).
+    :return: The normalised absolute path.
+    :raises ValueError: If the setting is missing or is not absolute.
+    """
+
+    value = _text(settings, key)
+    if value is None or not Path(value).is_absolute():
+        raise ValueError(f"the mount adapter needs an absolute remote setting {key}=PATH")
+    return Path(os.path.normpath(value))
+
+
+def _mounted_path(settings: Mapping[str, object], remote_path: str) -> Path:
+    """Map a remote-spelled path onto the local mount, refusing an escape.
+
+    A path outside the mounted tree is a refusal, never a local copy: the mount is
+    required to actually exist (so a push cannot silently create a local tree when
+    the filesystem is not mounted), the remote-spelled path is normalised (so
+    ``..`` cannot climb out), required to lie inside ``remote_root``, and
+    rewritten to the same location under ``mount_root``. The mapped path is
+    finally resolved with ``realpath`` and required to stay under the mount, so a
+    symlink inside the tree cannot lead a copy out onto the local filesystem.
+
+    :param settings: The persisted remote settings and their credentials.
+    :param remote_path: The path as the remote machine spells it.
+    :return: The local path on the mount that names the same tree.
+    :raises ValueError: If the mount is absent or the path escapes the mount.
+    """
+
+    mount_root = _absolute_root(settings, "mount_root")
+    if not mount_root.is_dir():
+        raise ValueError(f"mount_root is not an existing directory (is the filesystem mounted?): {mount_root}")
+    remote_root = _absolute_root(settings, "remote_root")
+    resolved = Path(os.path.normpath(remote_path))
+    if not resolved.is_absolute() or not resolved.is_relative_to(remote_root):
+        raise ValueError(f"remote path is outside the mounted tree (remote_root={remote_root}): {remote_path}")
+    mapped = mount_root / resolved.relative_to(remote_root)
+    if not Path(os.path.realpath(mapped)).is_relative_to(Path(os.path.realpath(mount_root))):
+        raise ValueError(f"remote path leaves the mount through a symlink: {remote_path}")
+    return mapped
+
+
+def _mount_run(
+    settings: Mapping[str, object],
+    argv: Sequence[str],
+    *,
+    cwd: str | None = None,
+) -> "subprocess.CompletedProcess[str]":
+    command = [*_exec_command(settings), _remote_command(settings, argv, cwd=cwd)]
+    return subprocess.run(
+        command,
+        text=True,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def _mount_transfer(source: Path, destination: Path, *, files: list[str] | None) -> None:
+    """Copy one tree, or one explicit batch of files, across the mount.
+
+    :param source: The tree or file to copy from (already mapped to the mount).
+    :param destination: The tree or file to copy to (already mapped to the mount).
+    :param files: The optional workspace-relative batch, or ``None`` for the tree.
+    """
+
+    if files is None:
+        _copy(source, destination)
+        return
+    for relative in files:
+        _copy(source / relative, destination / relative)
+
+
 def _runner(kind: str, settings: Mapping[str, object]) -> _Runner:
     if kind == "ssh":
 
@@ -309,6 +432,13 @@ def _runner(kind: str, settings: Mapping[str, object]) -> _Runner:
             return _ssh_run(settings, argv, cwd=cwd)
 
         return remote
+
+    if kind == "mount":
+
+        def mounted(argv: Sequence[str], *, cwd: str | None = None) -> "subprocess.CompletedProcess[str]":
+            return _mount_run(settings, argv, cwd=cwd)
+
+        return mounted
 
     def local(argv: Sequence[str], *, cwd: str | None = None) -> "subprocess.CompletedProcess[str]":
         return subprocess.run(
@@ -394,7 +524,7 @@ def _rsync(
 def _probe_httk(kind: str, run: _Runner, settings: Mapping[str, object]) -> tuple[list[str], str] | None:
     """Return the working httk argument vector and its version, if any."""
 
-    resolve = _remote_httk if kind == "ssh" else _local_httk
+    resolve = _local_httk if kind == "local" else _remote_httk
     candidates: list[list[str]] = [resolve(["httk"], settings)]
     if _httk_prefix(settings) is None:
         candidates.append(["python3", "-m", "httk.core.cli"])
@@ -420,6 +550,15 @@ def _install(kind: str, request: Mapping[str, object]) -> None:
         if reachable.returncode != 0:
             _refusal("install", f"cannot reach {_ssh_destination(settings)}: {reachable.stderr.strip()}")
             return
+    elif kind == "mount":
+        reachable = run(["true"])
+        if reachable.returncode != 0:
+            _refusal(
+                "install",
+                f"cannot reach the mount remote through exec_command ({_exec_command(settings)[0]!r}): "
+                f"{reachable.stderr.strip() or reachable.returncode}",
+            )
+            return
     found = _probe_httk(kind, run, settings)
     if found is None:
         _refusal("install", _MISSING_HTTK)
@@ -429,7 +568,7 @@ def _install(kind: str, request: Mapping[str, object]) -> None:
 
 
 def _configure(kind: str, request: Mapping[str, object]) -> None:
-    if kind != "ssh":
+    if kind == "local":
         _result("configure", configured=True)
         return
     # The command line stores settings only after this operation succeeds, so the
@@ -439,6 +578,9 @@ def _configure(kind: str, request: Mapping[str, object]) -> None:
     pending = request.get("settings")
     if isinstance(pending, Mapping):
         settings.update({str(key): value for key, value in pending.items()})
+    if kind == "mount":
+        _configure_mount(settings)
+        return
     if _text(settings, "host") is None or not _flag(settings, "check_connectivity", default=True):
         _result("configure", configured=True, connectivity="skipped")
         return
@@ -453,12 +595,60 @@ def _configure(kind: str, request: Mapping[str, object]) -> None:
     _result("configure", configured=True, connectivity="ok")
 
 
+def _configure_mount(settings: Mapping[str, object]) -> None:
+    """Validate a ``mount`` remote and, unless disabled, prove it is usable.
+
+    :param settings: The stored settings merged with the pending ones.
+    """
+
+    for key in ("mount_root", "remote_root"):
+        value = _text(settings, key)
+        if value is None:
+            _refusal("configure", f"the mount adapter needs a remote setting {key}=PATH")
+            return
+        if not Path(value).is_absolute():
+            _refusal("configure", f"remote setting {key} must be an absolute path: {value!r}")
+            return
+    try:
+        program = _exec_command(settings)[0]
+    except ValueError as exc:
+        _refusal("configure", str(exc))
+        return
+    if shutil.which(program) is None and not Path(program).is_file():
+        _refusal("configure", f"exec_command program is neither on PATH nor an existing file: {program!r}")
+        return
+    connectivity = "skipped"
+    if _flag(settings, "check_connectivity", default=True):
+        completed = _mount_run(settings, ["true"])
+        if completed.returncode != 0:
+            _refusal(
+                "configure",
+                f"cannot reach the mount remote through exec_command ({program!r}): "
+                f"{completed.stderr.strip() or completed.returncode}; "
+                "set check_connectivity=no to configure the remote anyway",
+            )
+            return
+        connectivity = "ok"
+    mount = "skipped"
+    if _flag(settings, "check_mount", default=True):
+        mount_root = _absolute_root(settings, "mount_root")
+        if not mount_root.is_dir():
+            _refusal(
+                "configure",
+                f"mount_root is not an existing directory: {mount_root}; "
+                "set check_mount=no to configure the remote before the filesystem is mounted",
+            )
+            return
+        mount = "ok"
+    _result("configure", configured=True, connectivity=connectivity, mount=mount)
+
+
 def _transfer(kind: str, operation: str, request: Mapping[str, object]) -> None:
     source, destination = _paths(request)
+    push = operation == "push"
     if kind == "ssh":
         settings = _settings(request)
         raw = request.get("directory")
-        push = operation == "push"
         if isinstance(raw, bool):
             directory = raw
         else:
@@ -472,6 +662,18 @@ def _transfer(kind: str, operation: str, request: Mapping[str, object]) -> None:
             files=_files(request),
             push=push,
         )
+        _result(operation, path=destination)
+        return
+    if kind == "mount":
+        # The remote-spelled path is the destination on push, the source on pull;
+        # it is mapped onto the mount before any byte is copied, so a path outside
+        # the mounted tree is refused rather than copied somewhere local.
+        settings = _settings(request)
+        files = _files(request)
+        if push:
+            _mount_transfer(Path(source).expanduser(), _mounted_path(settings, destination), files=files)
+        else:
+            _mount_transfer(_mounted_path(settings, source), Path(destination).expanduser(), files=files)
         _result(operation, path=destination)
         return
     resolved = Path(destination).expanduser().resolve()

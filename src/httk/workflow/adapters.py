@@ -107,11 +107,15 @@ RESULT_FORMAT = "httk-computer-result"
 PERSISTABLE_REMOTE_SETTINGS = frozenset(
     {
         "check_connectivity",
+        "check_mount",
+        "exec_command",
         "host",
         "httk_command",
         "legacy_settings",
+        "mount_root",
         "port",
         "prelude",
+        "remote_root",
         "username",
         "vasp_command",
         "vasp_pseudo_library",
@@ -419,7 +423,7 @@ def add_remote(
         # "this machine". Defining one would make a binding to `local` ambiguous,
         # so the name is reserved.
         raise ValueError("the remote name 'local' is reserved for the built-in local remote")
-    if template not in {"local", "ssh"}:
+    if template not in {"local", "ssh", "mount"}:
         raise ValueError(f"unknown maintained remote template: {template}")
     if global_scope:
         destination = remotes_home() / name

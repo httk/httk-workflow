@@ -1,7 +1,7 @@
 # Writing a remote adapter in detail
 
 *For operators and integrators who need to reach a machine the packaged
-`local` and `ssh` templates do not cover.* This page is the
+`local`, `ssh` and `mount` templates do not cover.* This page is the
 normative reference for the adapter contract: the six
 operations and their exact JSON request and result documents, how settings and
 credentials reach an adapter, and the rules an implementation must follow. The
@@ -94,7 +94,7 @@ refuses a bundle whose `adapter` is missing or not runnable.
 `kind` is *not* interpreted by the loader. It is read only by
 {py:mod}`httk.workflow.adapter_protocol` — the packaged implementation the
 maintained templates execute — which dispatches on it and refuses any value
-outside `local` and `ssh` rather than running the wrong code in
+outside `local`, `ssh` and `mount` rather than running the wrong code in
 the wrong place. A custom adapter whose `adapter` executes your own program may
 put whatever it likes there; setting a distinctive value is still worth doing,
 because an `adapter` accidentally repointed at the packaged implementation then

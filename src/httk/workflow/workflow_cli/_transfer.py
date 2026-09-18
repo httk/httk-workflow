@@ -325,7 +325,7 @@ def build_remote_parser(
     add.add_argument(
         "--template",
         metavar="TEMPLATE",
-        help="local or ssh (default: local)",
+        help="local, ssh or mount (default: local)",
     )
     add.add_argument(
         "--global",
