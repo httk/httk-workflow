@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "httk-workflow"
-version = "2.1.0"
+version = "2.1.1"
 description = "Filesystem-native workflow execution for httk₂."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
@@ -12,8 +12,8 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 authors = [{ name = "Rickard Armiento", email = "gitcommits@armiento.net" }]
 dependencies = [
-  # 2.1.0 is the release that adds httk.core.FileRecord for first-class file outputs.
-  "httk-core>=2.1.0,<3",
+  # Collection attaches the DataRecord.product_of provenance edges added in 2.1.2.
+  "httk-core>=2.1.2,<3",
 ]
 keywords = [
   "Materials Discovery",
