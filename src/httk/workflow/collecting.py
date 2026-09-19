@@ -1412,6 +1412,42 @@ def _job_collector(
     )
 
 
+def _attach_product_of(
+    identity: str,
+    outputs: dict[str, object],
+    roles: Mapping[str, Mapping[str, object]],
+    run: httk.core.Run,
+    provider: object | None,
+) -> dict[str, object]:
+    """Write each ``product_of`` curation into its data-record output as a ``product_of`` edge.
+
+    The edge is record content (a :class:`~httk.core.storage.StrongLink`), so it is attached
+    before the run's output edges are derived from the outputs' content ids. The source is the
+    run input or sibling output the curation names; a source absent from the observed provenance
+    leaves the record untouched and is reported through ``products_unlinked`` as before. The edge
+    holds the source's pre-store identifier; ``--into`` rewrites it to the store-minted id.
+    """
+    core = _core()
+    input_edges = {edge.label: edge for edge in run.inputs}
+    for role, curation in _provider_output_roles(provider).items():
+        source_role = curation.get("product_of")
+        value = outputs.get(role)
+        if not isinstance(source_role, str) or not isinstance(value, core.DataRecord):
+            continue
+        source_edge = input_edges.get(source_role)
+        if source_edge is None and source_role in outputs:
+            # ponytail: a sibling source is read as it is now; a data-record sibling amended
+            # later in this loop would be named by its pre-amendment content id and fail
+            # loudly at `--into` ("unresolved provenance reference"). Order-aware chains
+            # of record-of-record products are the upgrade path if that ever matters.
+            source_edge = _entry_edge(identity, source_role, outputs[source_role], roles[source_role])
+        if source_edge is None or any(edge.label == source_role for edge in value.product_of):
+            continue
+        edge = core.RunEdge(source_role, source_edge.entry_type, source_edge.entry_id)
+        outputs[role] = replace(value, product_of=(*value.product_of, edge))
+    return outputs
+
+
 def _assemble_collected(
     identity: str,
     record: JobRecord,
@@ -1428,8 +1464,9 @@ def _assemble_collected(
     if unknown:
         raise ValueError(f"{identity}: unknown output role {unknown[0]!r}")
     unfulfilled = tuple(role for role in roles if role not in outputs)
-    owned = tuple(_entry_edge(identity, role, value, roles[role]) for role, value in outputs.items())
     core = _core()
+    outputs = _attach_product_of(identity, dict(outputs), roles, run, provider)
+    owned = tuple(_entry_edge(identity, role, value, roles[role]) for role, value in outputs.items())
     run = core.Run(
         workflow_declaration_uri=run.workflow_declaration_uri,
         inputs=run.inputs,

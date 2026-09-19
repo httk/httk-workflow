@@ -441,6 +441,64 @@ role = "total_energy"
     assert product.target_type == "records"
     assert product.target_id == content_id(item.outputs["total_energy"])
     assert product.label == "total_energy"
+    # The same curation is record content: the energy record carries a ``product_of`` edge
+    # naming the relaxed structure, and the run's output edge names the record as amended.
+    from httk.core import DataRecord
+
+    energy = item.outputs["total_energy"]
+    assert isinstance(energy, DataRecord)
+    assert [(edge.label, edge.entry_type) for edge in energy.product_of] == [("relaxed_structure", "records")]
+    assert energy.product_of[0].entry_id == content_id(item.outputs["relaxed_structure"])
+    assert any(edge.entry_id == content_id(energy) for edge in item.run.outputs)
+
+
+def test_collect_into_stores_product_of_edges_with_minted_ids_and_they_join(tmp_path: Path) -> None:
+    pytest.importorskip("httk.store")
+    from httk.core import DataRecord, DataRecordEntry, RunEdge
+    from httk.store import Backend, SqlStore  # pyright: ignore[reportMissingImports]
+
+    from httk.workflow.workflow_cli._collect import _store_collected
+
+    workspace, _ = _finished(tmp_path)
+    record = next(job_records(workspace))
+    structure = DataRecord.from_value("https://example.test/structure", "structure", {"formula": "Ca"})
+    structure_content_id = content_id(structure)
+    energy = DataRecord.from_value(
+        "https://example.test/energy",
+        "energy",
+        -1.5,
+        product_of=[RunEdge("structure", "records", structure_content_id)],
+    )
+    item = _synthetic_item(
+        record,
+        "product",
+        {"structure": structure, "energy": energy},
+        Run(
+            outputs=(
+                RunEdge("structure", "records", structure_content_id),
+                RunEdge("energy", "records", content_id(energy)),
+            ),
+            source_id="ws:product",
+        ),
+    )
+    path = tmp_path / "product-of.sqlite"
+    reports = _store_collected([item], str(path), id_base="httk.probe", id_series="1")
+    assert "storage_error" not in reports[0], reports[0]
+    with Backend.sqlite(path) as database:
+        store = SqlStore(database)
+        stored_structure = store.fetch_entry(DataRecordEntry, structure_content_id, eager=True)
+        assert stored_structure is not None and isinstance(stored_structure.id, str)
+        search = store.searcher()
+        subject = search.variable(DataRecord)
+        product = search.variable(DataRecord)
+        search.add(product.links.product_of == subject)
+        search.add(subject.name == "structure")
+        rows = list(search.results(subject=subject, product=product))
+        assert [(row.subject.id, row.product.value) for row in rows] == [(stored_structure.id, -1.5)]
+        # The edge holds the store-minted id, not the pre-store content id.
+        assert rows[0].product.product_of[0].entry_id == stored_structure.id
+        run = _stored_run(store, _stored_run_id(reports, 0))
+        assert {edge.entry_id for edge in run.outputs} == {stored_structure.id, rows[0].product.id}
 
 
 def test_collect_degrades_a_tampered_pinned_tree_loudly(tmp_path: Path) -> None:

@@ -19,12 +19,21 @@ their role record.
 
 The job-embedded declaration governs the Run (immutable facts per job). The
 collected Run carries the executing system's job identity in `source_id`; its
-store-owned `immutable_id` is left for `httk-store` to mint. ProductLinks
-come from the live registered provider's manifest and therefore apply today's
-curation; otherwise, for the job-pinned fallback, they come from that job's
-own verified pinned manifest and preserve its historical curation,
-not today's. The workflow collect hook is the workflow-owned substep of collecting. If no
-provider or pinned manifest is reachable, no products are emitted.
+store-owned `immutable_id` is left for `httk-store` to mint. Product curation
+(`product_of` on an output role) comes from the live registered provider's
+manifest and therefore applies today's curation; otherwise, for the job-pinned
+fallback, it comes from that job's own verified pinned manifest and preserves
+its historical curation, not today's. A data-record output whose role is
+`product_of` another role receives that source as a `product_of` edge on the
+record itself (a `StrongLink`, same `(label, entry_type, entry_id)` scheme as
+run edges, so it is record content and searchable as
+`record.links.product_of == structure`); every curation is also emitted as a
+`ProductLink`. The workflow collect hook is the workflow-owned substep of
+collecting. If no provider or pinned manifest is reachable, no products are
+emitted. Because `product_of` is record content, every `DataRecord` content id
+and the record layout changed when it was introduced: a store created before
+that and holding data records must be rebuilt (`--into` a new file) rather
+than reopened.
 
 `JobRecord` is the layering boundary of *httk₂*. *httk-workflow* has no
 database dependency: it produces records, and something else — `httk-store` —
@@ -252,7 +261,8 @@ stores it.
 workflow id through `workflow_provider()`, calls that provider's callable or
 lazy `module:function` collector, validates role names against declared
 `outputs` in the job's embedded workflow declaration, and assembles the
-`Run` and `ProductLink` values. Product curation is read from the live
+`Run`, the data records' `product_of` edges, and the `ProductLink` values.
+Product curation is read from the live
 registered provider's manifest, or from the job's own verified pinned manifest
 when the fallback is enabled; the embedded declaration supplies only the
 immutable Run facts. Old jobs without that declaration fall back to

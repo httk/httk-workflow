@@ -80,6 +80,15 @@ def _resolve_entry_id(store: Any, remap: dict[str, str], entry_type: str, entry_
     return entry_id
 
 
+def _rewrite_product_of(value: Any, store: Any, remap: dict[str, str]) -> Any:
+    """Rewrite a data record's ``product_of`` edges to ids minted by the destination store."""
+    edges = tuple(
+        RunEdge(edge.label, edge.entry_type, _resolve_entry_id(store, remap, edge.entry_type, edge.entry_id))
+        for edge in value.product_of
+    )
+    return value if edges == tuple(value.product_of) else replace(value, product_of=edges)
+
+
 def _rewrite_run_edges(run: Run, store: Any, remap: dict[str, str]) -> Run:
     """Rewrite content-id references to ids minted by the destination store."""
 
@@ -198,6 +207,9 @@ def _storage_layout(items: list[CollectedJob]) -> tuple[dict[type, tuple[type, .
             required_types.add(entry_type)
         for edge in (*item.run.inputs, *item.run.artifacts, *item.run.outputs):
             required_types.add(edge.entry_type)
+        for value in item.outputs.values():
+            for edge in getattr(value, "product_of", ()):
+                required_types.add(edge.entry_type)
         for product in item.products:
             required_types.add(product.source_type)
             required_types.add(product.target_type)
@@ -428,7 +440,7 @@ def _store_collected(
     """
 
     try:
-        from httk.store import Backend, EntryIdScheme, SqlStore  # pyright: ignore[reportMissingImports]
+        from httk.store import EntryIdScheme, SqliteStore  # pyright: ignore[reportMissingImports]
         from httk.store.backend.schema import SchemaError  # pyright: ignore[reportMissingImports]
         from httk.store.backend.sql import StorageLayoutUpgradeRequiredError  # pyright: ignore[reportMissingImports]
     except ImportError as exc:
@@ -452,14 +464,15 @@ def _store_collected(
         )
         if ledger is not None:
             stack.enter_context(ledger)
-        database = stack.enter_context(Backend.sqlite(target))
         content_to_ledger: dict[str, str] = {}
         warned_unstable: set[str] = set()
         type_to_family: dict[str, type] = {
             str(getattr(family, "type", "")): family for family in layout if getattr(family, "type", None)
         }
         try:
-            store = SqlStore(database, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series))
+            store = stack.enter_context(
+                SqliteStore(target, entry_records=layout, entry_ids=EntryIdScheme(id_base, id_series))
+            )
         except StorageLayoutUpgradeRequiredError as exc:
             needs = ", ".join(requested) or "no entry types"
             raise ValueError(
@@ -468,11 +481,67 @@ def _store_collected(
                 "Collect into a new store file."
             ) from exc
         stored_output_ids: dict[int, list[str]] = {}
+        deferred_outputs: dict[int, list[tuple[str, Any]]] = {}
         remap: dict[str, str] = {}
+
+        def _save_output(
+            item: CollectedJob,
+            role: str,
+            value: Any,
+            *,
+            original_key: str,
+            pending_remap: dict[str, str],
+            entry_ids: list[str],
+        ) -> None:
+            """Store one output, recording its minted id under ``original_key`` and any prior id."""
+            original_id = getattr(value, "id", None)
+            chosen = (
+                _ledger_entry_id(
+                    ledger,
+                    store,
+                    type_to_family,
+                    item,
+                    role,
+                    value,
+                    original_id,
+                    content_to_ledger,
+                    warned_unstable,
+                )
+                if ledger is not None
+                else None
+            )
+            # Only an id-settable dataclass reaches a non-None id, so
+            # this replace never lands on the view-fallback branch.
+            saved = replace(cast(Any, value), id=chosen) if chosen is not None else value
+            sid = store.save(saved)
+            try:
+                fetched = store.fetch(type(saved), sid)
+            except (SchemaError, TypeError) as exc:
+                # Structure-family collectors may return a view over
+                # a storable record; fetch the record backing that
+                # view when the view class itself is not a dataclass.
+                try:
+                    record_type = resolve_storage_record(saved)
+                except (SchemaError, TypeError):
+                    raise exc
+                fetched = store.fetch(record_type, sid)
+            fetched_id = getattr(fetched, "id", None)
+            if not isinstance(fetched_id, str):
+                raise ValueError(f"stored output {type(value).__name__} has no string entry id")
+            # A ledger-chosen id always matches what the store stores
+            # under it: the pre-check in _ledger_entry_id aliases onto
+            # already-stored content rather than minting a colliding id,
+            # so the store never deduplicates onto a different id here.
+            entry_ids.append(fetched_id)
+            pending_remap[original_key] = fetched_id
+            if isinstance(original_id, str) and original_id != fetched_id:
+                pending_remap[original_id] = fetched_id
 
         # Pass one stores every output and builds a sweep-wide map.  The map is
         # published only after each job transaction commits, so rolled-back
-        # outputs cannot be referenced by a later job.
+        # outputs cannot be referenced by a later job.  Data records carrying
+        # ``product_of`` edges wait for pass two: the edge is record content and
+        # must hold the store-minted id of the entry it describes.
         for index, item in enumerate(items):
             report = reports[index]
             if item.missing_collector is not None:
@@ -490,53 +559,21 @@ def _store_collected(
                     pending_remap: dict[str, str] = {}
                     entry_ids: list[str] = []
                     for role, value in item.outputs.items():
-                        original_id = getattr(value, "id", None)
-                        chosen = (
-                            _ledger_entry_id(
-                                ledger,
-                                store,
-                                type_to_family,
-                                item,
-                                role,
-                                value,
-                                original_id,
-                                content_to_ledger,
-                                warned_unstable,
-                            )
-                            if ledger is not None
-                            else None
+                        if getattr(value, "product_of", ()):
+                            deferred_outputs.setdefault(index, []).append((role, value))
+                            continue
+                        _save_output(
+                            item,
+                            role,
+                            value,
+                            original_key=content_id(value),
+                            pending_remap=pending_remap,
+                            entry_ids=entry_ids,
                         )
-                        # Only an id-settable dataclass reaches a non-None id, so
-                        # this replace never lands on the view-fallback branch.
-                        saved = replace(cast(Any, value), id=chosen) if chosen is not None else value
-                        sid = store.save(saved)
-                        try:
-                            fetched = store.fetch(type(saved), sid)
-                        except (SchemaError, TypeError) as exc:
-                            # Structure-family collectors may return a view over
-                            # a storable record; fetch the record backing that
-                            # view when the view class itself is not a dataclass.
-                            try:
-                                record_type = resolve_storage_record(saved)
-                            except (SchemaError, TypeError):
-                                raise exc
-                            fetched = store.fetch(record_type, sid)
-                        fetched_id = getattr(fetched, "id", None)
-                        if not isinstance(fetched_id, str):
-                            raise ValueError(f"stored output {type(value).__name__} has no string entry id")
-                        # A ledger-chosen id always matches what the store stores
-                        # under it: the pre-check in _ledger_entry_id aliases onto
-                        # already-stored content rather than minting a colliding id,
-                        # so the store never deduplicates onto a different id here.
-                        entry_ids.append(fetched_id)
-                        pending_remap[content_id(value)] = fetched_id
-                        if isinstance(original_id, str) and original_id != fetched_id:
-                            pending_remap[original_id] = fetched_id
                 remap.update(pending_remap)
                 stored_output_ids[index] = entry_ids
             except Exception as exc:
                 report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
-
         # Pass two resolves all run and product references after every output
         # in the sweep has contributed to the shared remap.
         for index, item in enumerate(items):
@@ -546,12 +583,29 @@ def _store_collected(
             entry_ids = stored_output_ids[index]
             try:
                 with store.transaction():
-                    rewritten_run = _rewrite_run_edges(item.run, store, remap)
+                    pending_remap = {}
+                    for role, value in deferred_outputs.get(index, ()):
+                        # The run's output edge names the record by its pre-rewrite
+                        # content id, so that is the key the remap must carry.
+                        rewritten = _rewrite_product_of(value, store, remap)
+                        _save_output(
+                            item,
+                            role,
+                            rewritten,
+                            original_key=content_id(value),
+                            pending_remap=pending_remap,
+                            entry_ids=entry_ids,
+                        )
+                    # Resolve against the committed map plus this job's pending ids, but
+                    # publish the pending ids only after the transaction commits (as in
+                    # pass one), so a rolled-back record is never referenced by a later job.
+                    job_remap = {**remap, **pending_remap}
+                    rewritten_run = _rewrite_run_edges(item.run, store, job_remap)
                     rewritten_products = tuple(
                         replace(
                             product,
-                            source_id=_resolve_entry_id(store, remap, product.source_type, product.source_id),
-                            target_id=_resolve_entry_id(store, remap, product.target_type, product.target_id),
+                            source_id=_resolve_entry_id(store, job_remap, product.source_type, product.source_id),
+                            target_id=_resolve_entry_id(store, job_remap, product.target_type, product.target_id),
                         )
                         for product in item.products
                     )
@@ -583,6 +637,7 @@ def _store_collected(
                         raise ValueError("stored run has no string entry id")
                     for product in rewritten_products:
                         store.save(product)
+                remap.update(pending_remap)
                 report["stored"] = {"entries": entry_ids, "run": run_id}
             except Exception as exc:
                 report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"

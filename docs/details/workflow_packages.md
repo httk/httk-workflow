@@ -542,9 +542,10 @@ def collect(record):
 
 An instantiate hook runs during scaffolding and may write the payload or update
 parameters. A collect hook runs during `collect`; it returns role-keyed outputs.
-The framework validates those roles, derives unfulfilled roles, overlays output
-edges onto the `Run`, and emits `ProductLink` values from manifest/provider
-`product_of`. A direct
+The framework validates those roles, derives unfulfilled roles, writes each
+manifest/provider `product_of` curation into its data-record output as a
+`product_of` edge (record content, `--into` rewrites it to the store-minted id),
+overlays output edges onto the `Run`, and emits `ProductLink` values. A direct
 package path's instantiate hook and the job-pinned collect fallback execute
 from the published, digest-pinned tree; registered-directory collectors
 instead execute current source bytes by explicit registration consent.
@@ -650,8 +651,9 @@ different: an exception from a registered Python collector aborts collection
 iteration, while an executable collector's malformed, errored, missing, or
 unresolvable response degrades only its job and lets the sweep continue.
 
-The job-embedded declaration governs the Run (immutable facts per job). ProductLinks
-come from the live registered provider's manifest and therefore apply today's
+The job-embedded declaration governs the Run (immutable facts per job). Product
+curation (`product_of` edges on data records and `ProductLink`s)
+comes from the live registered provider's manifest and therefore applies today's
 curation; if collection uses the job-pinned fallback instead, they come from
 that job's own verified pinned manifest and preserve its historical curation,
 not today's. If no provider or pinned manifest is reachable, no products are
