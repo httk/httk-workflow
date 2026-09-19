@@ -53,11 +53,10 @@ def _stored_entry_id(store: Any, entry_type: str, entry_id: str) -> str | None:
         searcher = store.searcher()
         variable = searcher.variable(record_type)
         searcher.add(variable.id == entry_id)
-        searcher.output(variable, "entry")
-        try:
-            fetched = next(iter(searcher)).values[0]
-        except StopIteration:
+        row = searcher.results(entry=variable).first()
+        if row is None:
             continue
+        fetched = row.entry
         if isinstance(getattr(fetched, "id", None), str):
             return entry_id
 

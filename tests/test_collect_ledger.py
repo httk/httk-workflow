@@ -159,8 +159,7 @@ def test_ledger_stabilizes_ids_across_fresh_stores_regardless_of_sweep_order(tmp
             searcher = store.searcher()
             variable = searcher.variable(Run)
             searcher.add(variable.id == run_id)
-            searcher.output(variable, "run")
-            return next(iter(searcher)).values[0].outputs[0].entry_id
+            return next(iter(searcher.results(run=variable))).run.outputs[0].entry_id
 
     assert _run_out_edge(tmp_path / "one.sqlite", first_runs[a.record.job_id]) == first[content_id(ea)]
     assert _run_out_edge(tmp_path / "two.sqlite", second_runs[a.record.job_id]) == second[content_id(ea)]

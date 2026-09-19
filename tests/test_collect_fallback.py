@@ -97,8 +97,7 @@ def _stored_run(store: Any, entry_id: str) -> Run:
     searcher = store.searcher()
     variable = searcher.variable(Run)
     searcher.add(variable.id == entry_id)
-    searcher.output(variable, "run")
-    return next(iter(searcher)).values[0]
+    return next(iter(searcher.results(run=variable))).run
 
 
 def _stored_run_id(reports: list[dict[str, object]], index: int) -> str:
@@ -208,8 +207,7 @@ def test_collect_into_remaps_cross_job_edges_and_products(tmp_path: Path) -> Non
         product_variable = product_searcher.variable(ProductLink)
         product_searcher.add(product_variable.source_id == first_fetched.id)
         product_searcher.add(product_variable.target_id == second_fetched.id)
-        product_searcher.output(product_variable, "product")
-        product = next(iter(product_searcher)).values[0]
+        product = next(iter(product_searcher.results(product=product_variable))).product
     assert first_fetched is not None and second_fetched is not None
     assert second_run.inputs[0].entry_id == first_fetched.id
     assert second_run.outputs[0].entry_id == second_fetched.id
@@ -647,8 +645,7 @@ def test_collect_into_round_trips_records_and_runs_when_data_is_available(tmp_pa
         searcher = store.searcher()
         variable = searcher.variable(Run)
         searcher.add(variable.id == report["stored"]["run"])
-        searcher.output(variable, "run")
-        run = next(iter(searcher)).values[0]
+        run = next(iter(searcher.results(run=variable))).run
     assert isinstance(entry, DataRecord)
     assert run is not None
     assert run.id == report["stored"]["run"]
@@ -690,8 +687,7 @@ def test_collect_into_twice_is_idempotent(tmp_path: Path, capsys) -> None:
         searcher = store.searcher()
         variable = searcher.variable(Run)
         searcher.add(variable.id == first["run"])
-        searcher.output(variable, "run")
-        run = next(iter(searcher)).values[0]
+        run = next(iter(searcher.results(run=variable))).run
     assert run is not None
 
 
