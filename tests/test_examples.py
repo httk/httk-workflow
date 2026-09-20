@@ -4,7 +4,7 @@ The quickstart of ``docs/quickstart.md`` is not paraphrased here: its commands a
 read out of the document itself and run verbatim, with the ``httk`` console
 script on ``PATH``.
 What the assertions then read is the workspace those commands produced — a
-succeeded job whose published data holds a real OUTCAR and CONTCAR — so the page
+succeeded job whose persistent workdir holds a real OUTCAR and CONTCAR — so the page
 cannot drift from what works.
 """
 
@@ -141,11 +141,12 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
 
     kind, payload, postprocess_svg = _finished(work)
     assert kind == "succeeded"
-    # The published result is a real VASP result, produced by the documented run.
-    published = payload / "data" / "vasp"
-    assert (published / "OUTCAR").read_text(encoding="utf-8").startswith(" fake vasp")
-    assert (published / "CONTCAR").read_text(encoding="utf-8").splitlines()[0] == "relaxed by the mock vasp"
-    assert (published / "INCAR").is_file() and (published / "KPOINTS").is_file()
+    # The result lives once in the persistent workdir, with no data copy.
+    assert not (payload / "data").exists()
+    result = payload / "run"
+    assert (result / "OUTCAR").read_text(encoding="utf-8").startswith(" fake vasp")
+    assert (result / "CONTCAR").read_text(encoding="utf-8").splitlines()[0] == "relaxed by the mock vasp"
+    assert (result / "INCAR").is_file() and (result / "KPOINTS").is_file()
     assert (payload / "files" / "POSCAR").read_text(encoding="utf-8").splitlines()[0] == "silicon"
 
     # And the last documented command printed one collected record and the sweep summary.
@@ -154,6 +155,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     assert records[0]["format"] == "httk-workflow-collected"
     assert records[0]["workflow"] == "httk.vasp.relax"
     assert records[0]["missing_collector"] is None
+    assert set(records[0]["outputs"]) == {"relaxed_structure", "total_energy"}
     assert records[0]["job_key"].startswith("silicon--")
     assert records[1]["format"] == "httk-workflow-collect-summary"
     assert records[1]["collected"] == 1 and records[1]["degraded"] == 0
@@ -181,7 +183,8 @@ def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) ->
 
     kind, payload, postprocess_svg = _finished(work)
     assert kind == "succeeded"
-    assert (payload / "data" / "vasp" / "OUTCAR").is_file()
+    assert not (payload / "data").exists()
+    assert (payload / "run" / "OUTCAR").is_file()
     assert (work / "results.sqlite").is_file()
     assert postprocess_svg.is_file()
     assert not postprocess_svg.is_relative_to(payload)
@@ -200,11 +203,12 @@ def test_the_python_api_tour_runs(work: Path, tmp_path: Path) -> None:
 
     kind, payload, _svg = _finished(work / "example-workflow-workspace")
     assert kind == "succeeded"
-    assert (payload / "data" / "vasp" / "CONTCAR").is_file()
+    assert not (payload / "data").exists()
+    assert (payload / "run" / "CONTCAR").is_file()
     lines = completed.stdout.splitlines()
     assert lines[0].startswith("workspace ")
     assert any(line.startswith("succeeded silicon--") for line in lines)
-    assert "  published vasp/OUTCAR" in lines
+    assert "  workdir OUTCAR" in lines
 
 
 @pytest.mark.parametrize("runner", ["defect_campaign.py", "defect_campaign.sh"])

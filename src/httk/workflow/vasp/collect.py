@@ -41,6 +41,25 @@ def _data_file(record: JobRecord, relative: str) -> Path:
     return path
 
 
+def _result_file(record: JobRecord, published: str, workdir: str) -> Path:
+    """Read committed data when enabled, otherwise the persistent workdir.
+
+    The published layout can differ from the workdir layout. A transactional
+    job with missing or uncommitted data must still fail instead of silently
+    collecting unpublished files from its workdir.
+    """
+
+    if record.data is not None:
+        return _data_file(record, published)
+    root = record.workdir
+    if root is None:
+        raise ValueError(f"{_identity(record)}: expected workdir file {workdir!r}, but the job has no workdir")
+    path = root / workdir
+    if not path.is_file():
+        raise ValueError(f"{_identity(record)}: expected workdir file {path}")
+    return path
+
+
 def _load(path: Path, *, raw: bool = False) -> Any:
     try:
         importlib.import_module("httk.atomistic")
@@ -87,9 +106,10 @@ def collect_vasp_relax(record: JobRecord) -> Mapping[str, object]:
     """
 
     prefix = _parameter(record, "data_prefix", "vasp")
+    root = f"{prefix}/" if prefix else ""
     return {
-        "relaxed_structure": _structure(record, _data_file(record, f"{prefix}/CONTCAR" if prefix else "CONTCAR")),
-        "total_energy": _energy(record, _data_file(record, f"{prefix}/OUTCAR" if prefix else "OUTCAR")),
+        "relaxed_structure": _structure(record, _result_file(record, f"{root}CONTCAR", "CONTCAR")),
+        "total_energy": _energy(record, _result_file(record, f"{root}OUTCAR", "OUTCAR")),
     }
 
 
@@ -101,7 +121,7 @@ def collect_vasp_static(record: JobRecord) -> Mapping[str, object]:
     """
 
     prefix = _parameter(record, "data_prefix", "vasp")
-    return {"total_energy": _energy(record, _data_file(record, f"{prefix}/OUTCAR" if prefix else "OUTCAR"))}
+    return {"total_energy": _energy(record, _result_file(record, f"{prefix}/OUTCAR" if prefix else "OUTCAR", "OUTCAR"))}
 
 
 def collect_vasp_relax_static(record: JobRecord) -> Mapping[str, object]:
@@ -114,6 +134,6 @@ def collect_vasp_relax_static(record: JobRecord) -> Mapping[str, object]:
     prefix = _parameter(record, "data_prefix", "")
     root = f"{prefix}/" if prefix else ""
     return {
-        "relaxed_structure": _structure(record, _data_file(record, f"{root}relax/CONTCAR")),
-        "total_energy": _energy(record, _data_file(record, f"{root}static/OUTCAR")),
+        "relaxed_structure": _structure(record, _result_file(record, f"{root}relax/CONTCAR", "relax/CONTCAR")),
+        "total_energy": _energy(record, _result_file(record, f"{root}static/OUTCAR", "OUTCAR")),
     }

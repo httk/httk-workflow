@@ -41,6 +41,7 @@ _FAKE_VASP = '''#!/usr/bin/env python3
 """A fake VASP that writes plausible outputs, optionally failing once first."""
 
 import sys
+import re
 from pathlib import Path
 
 FAIL_ONCE = {fail_once}
@@ -80,16 +81,19 @@ Path("vasprun.xml").write_text(
     '<modeling><structure name="finalpos"><crystal>'
     '<i name="volume">      8.00000000 </i></crystal></structure></modeling>\\n'
 )
+if re.search(r"^NSW\\s*=\\s*0\\s*$", Path("INCAR").read_text(), re.MULTILINE):
+    outcar = Path("OUTCAR")
+    outcar.write_text(outcar.read_text().replace("-10.50000000", "{static_energy:.8f}"))
 '''
 
 _COLLECTED = ("INCAR", "KPOINTS", "OUTCAR", "CONTCAR", "OSZICAR", "vasprun.xml", "vasp-run-report.json")
 
 
-def _fake_vasp(root: Path, *, fail_once: bool) -> Path:
+def _fake_vasp(root: Path, *, fail_once: bool, static_energy: float = -10.5) -> Path:
     """Install the fake VASP executable and return its path."""
 
     path = root / ("fail-once-vasp" if fail_once else "fake-vasp")
-    path.write_text(_FAKE_VASP.format(fail_once=fail_once), encoding="utf-8")
+    path.write_text(_FAKE_VASP.format(fail_once=fail_once, static_energy=static_energy), encoding="utf-8")
     path.chmod(0o755)
     return path
 
@@ -322,18 +326,120 @@ def test_the_bash_runner_and_the_python_runner_publish_the_same_result(
     assert observed["vasp_relax.py"] == observed["vasp_relax.sh"]
 
 
-def test_a_job_without_transactional_data_keeps_its_result_in_the_workdir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("workflow", ("vasp-relax", "vasp-relax-bash", "vasp-static", "vasp-relax-static"))
+@pytest.mark.parametrize("data_mode", (None, "transactional"), ids=("default-none", "transactional-opt-in"))
+def test_vasp_cli_runs_and_collects_default_workdir_or_transactional_results(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    workflow: str,
+    data_mode: str | None,
 ) -> None:
-    workspace, job_id = _campaign(tmp_path / "nodata", monkeypatch, "vasp_relax.py", data_mode="none")
+    pytest.importorskip("httk.atomistic")
+    pytest.importorskip("httk.store")
+    from httk.atomistic import UnitcellStructureView
+    from httk.atomistic.entries.structures import StructureEntry
+    from httk.core import DataRecord
+    from httk.core.cli import CLIContext
+    from httk.core.storage import content_id
+    from httk.store import Backend, SqlStore
 
-    kind, payload = _payload_of(workspace, job_id)
+    from conftest import register_ws
+    from httk.workflow import collect
+    from httk.workflow.models import JobDefinition
+    from httk.workflow.postprocessing import run_postprocess_script
+    from httk.workflow.scaffold import registered_workflow
+    from httk.workflow.workflow_cli import command
+
+    executable = _fake_vasp(tmp_path, fail_once=False, static_energy=-11.5)
+    monkeypatch.setenv("HTTK_VASP_COMMAND", str(executable))
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root)
+    structure = tmp_path / "POSCAR"
+    structure.write_text(_POSCAR, encoding="utf-8")
+    args = ["job", "new", "--workspace", name, "--workflow", workflow, "--input", f"structure={structure}"]
+    if data_mode is not None:
+        args += ["--data-mode", data_mode]
+    assert command(args, context) == 0
+    key, path = capsys.readouterr().out.strip().split("\t")
+    payload = Path(path)
+    definition = JobDefinition.from_path(payload / "job.json")
+    assert definition.data_mode == (data_mode or "none")
+    assert definition.workdir_mode == "persistent"
+    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
+        manager.run_until_idle(timeout=300.0)
+
+    kind, actual_payload = _payload_of(workspace, definition.id)
     assert kind == "succeeded"
-    # Nothing was copied and nothing was deleted: the persistent workdir is the
-    # result, and the job state still says what happened.
-    assert not (payload / "data").exists()
+    assert actual_payload == payload
+    assert (payload / "data").exists() == (data_mode == "transactional")
     assert set(_COLLECTED) <= set(_files(payload / "run"))
     assert _job_state(payload)["classification"] == "completed"
+    if data_mode is None and workflow in ("vasp-relax", "vasp-relax-bash", "vasp-static"):
+        # The result files occur exactly once in the whole payload.
+        for filename in _COLLECTED:
+            assert list(payload.rglob(filename)) == [payload / "run" / filename]
+    if data_mode == "transactional":
+        prefixes = ("relax", "static") if workflow == "vasp-relax-static" else ("vasp",)
+        assert _files(payload / "data") == sorted(f"{prefix}/{file}" for prefix in prefixes for file in _COLLECTED)
+
+    (item,) = collect(workspace, fail_fast=True)
+    roles = {"total_energy"} if workflow == "vasp-static" else {"relaxed_structure", "total_energy"}
+    energy = -11.5 if workflow in ("vasp-static", "vasp-relax-static") else -10.5
+    assert set(item.outputs) == roles
+    assert not item.unfulfilled
+    collected_energy = item.outputs["total_energy"]
+    assert isinstance(collected_energy, DataRecord)
+    assert collected_energy.value == pytest.approx(energy)
+    assert item.record.workdir == payload / "run"
+    assert (item.record.data is None) == (data_mode is None)
+    if "relaxed_structure" in roles:
+        relaxed = item.outputs["relaxed_structure"]
+        assert isinstance(relaxed, UnitcellStructureView)
+        assert float(relaxed.sites.reduced_coords[1][0]) == pytest.approx(0.51)
+
+    for into in (False, True):
+        args = ["collect", "--workspace", name]
+        if into:
+            args += ["--into", str(tmp_path / "results.sqlite"), "--id-base", "httk.test", "--no-id-ledger"]
+        assert command(args, context) == 0
+        report, summary = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert report["job_key"] == key
+        assert set(report["outputs"]) == roles
+        assert report["unfulfilled"] == []
+        assert report["missing_collector"] is None
+        if into:
+            assert len(report["stored"]["entries"]) == len(roles)
+            assert report["stored"]["run"]
+        assert summary["format"] == "httk-workflow-collect-summary"
+
+    with Backend.sqlite(tmp_path / "results.sqlite") as database:
+        store = SqlStore(database)
+        # Storing rewrites product_of links to public structure IDs, which also
+        # changes the energy's content ID. Query the stored records instead.
+        searcher = store.searcher()
+        variable = searcher.variable(DataRecord)
+        energies = [row.energy for row in searcher.results(energy=variable)]
+        assert len(energies) == 1
+        assert energies[0].value == pytest.approx(energy)
+        assert energies[0].id in report["stored"]["entries"]
+        if "relaxed_structure" in roles:
+            assert (
+                store.fetch_entry(StructureEntry, content_id(item.outputs["relaxed_structure"]), eager=True) is not None
+            )
+
+    if "relaxed_structure" in roles:
+        provider = registered_workflow(workflow)
+        assert provider is not None
+        for script in ("relaxation-report", "relaxation-plot"):
+            result = run_postprocess_script(provider, script, item.record)
+            assert result.returncode == 0, result.stderr
+            if script == "relaxation-report":
+                report = json.loads((result.output_dir / "relaxation_report.json").read_text())
+                assert report["final_energy"] == pytest.approx(energy)
+            else:
+                assert f"{energy:.8f} eV" in (result.output_dir / "relaxation_energies.svg").read_text()
 
 
 def test_the_bash_vasp_runner_uses_the_workspace_command_setting(

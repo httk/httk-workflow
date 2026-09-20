@@ -42,7 +42,7 @@ job = prepare_job_payload(
         runner_source="installed",
         runner_sha256=str(reference["sha256"]),
         initial_step="prepare",
-        data_mode="transactional",
+        data_mode="none",
         parameters={"kpoint_density": 30.0, "incar_tags": {"ENCUT": 520}},
     ),
 )
@@ -108,10 +108,19 @@ reference of {py:mod}`httk.workflow.vasp.runners`. The ones a campaign normally 
 `poscar`, `incar_tags`, `kpoint_density`, `pseudopotential_library`, `timeout`, and
 `collect`.
 
-Two job members are not parameters but requirements: `workdir.mode` must be
-`persistent`, because the inputs a remedy rewrites have to be the inputs the next
-attempt reads, and `data.mode` must be `transactional` for the collected files to
-be published. With `data.mode` `none` the results simply stay in the workdir.
+`workdir.mode` must be `persistent` (the global default), because the inputs a
+remedy rewrites have to be the inputs the next attempt reads. All four packaged
+VASP workflows default to `data.mode="none"`: the workdir is the result, no
+`data/` tree is created, and collection reads the workdir directly.
+
+To also copy the curated outputs into transactional data, opt in explicitly:
+
+```console
+httk job new --workflow vasp-relax --input structure=POSCAR --data-mode transactional
+```
+
+The Python equivalent is `new_job(..., data_mode="transactional")`. This override
+wins over the workflow default, and collection supports both modes.
 
 ## What a run does
 
@@ -137,10 +146,25 @@ registers a policy and names it in the job parameters rather than editing a runn
 ladder position is recorded in the job state directory, so it survives every attempt
 of the job, and `maximum_remedies` bounds how many a single job may apply.
 
-The `publish` step publishes the files named by the `collect` parameter into the
-job's transactional data, under `data_prefix`. `vasp_relax_static.py` archives the relaxation inside the
-workdir before the single point overwrites it, and publishes the two stages side by
-side as `relax/` and `static/`.
+The `publish` step leaves outputs in the workdir by default. With transactional
+data enabled, it copies the files named by `collect` into `data/`, under
+`data_prefix`. This duplicates those files already retained in the workdir.
+
+Relaxation (Python and Bash) collects `run/CONTCAR` and `run/OUTCAR`; static
+collects `run/OUTCAR`. The chained workflow archives the relaxation before the
+single point overwrites the workdir: it collects the relaxed structure from
+`run/relax/CONTCAR` and the final static energy from `run/OUTCAR`. With
+transactional data, those paths become `data/relax/CONTCAR` and
+`data/static/OUTCAR` (under `data_prefix` when supplied). Single-stage
+transactional results default to `data/vasp/`. `data_prefix` does not change
+workdir paths.
+
+No result information is removed by the default change. Custom postprocessing
+that hard-codes `data/` paths must use the workdir layout or opt into
+transactional data. The packaged report and plot scripts support both layouts
+and select the final static energy for the chained workflow. The `collect`
+parameter filters transactional copies and the chained relaxation archive; it
+does not prune the persistent workdir. Keep that workdir to retain the results.
 
 ## relaxation-report
 

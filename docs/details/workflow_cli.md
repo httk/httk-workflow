@@ -672,6 +672,12 @@ httk job new --from-runner ./my_runner.py --step characterize --parameter sites=
 httk job new --from-command 'srun --ntasks=10 my_executable {input}' --file input=input_files/a.dat --tag a
 ```
 
+Packaged VASP workflows default to `--data-mode none`: results remain in the
+persistent workdir and `collect` reads them there, with no `data/` copy. Add
+`--data-mode transactional` to copy curated outputs into `data/` as well; this
+explicit option overrides the workflow default. See {doc}`/vasp_runners` for
+single-stage and chained result layouts.
+
 `--parameter NAME=VALUE` supplies an opaque implementation knob;
 `--environment NAME=VALUE` overrides one declared workflow environment entry;
 and `--format LANG` selects the language of a bare document.

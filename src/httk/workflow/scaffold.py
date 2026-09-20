@@ -1191,9 +1191,10 @@ def new_job(
     it is used verbatim. *inputs* stages the workflow's declared objects into
     the payload; *parameters* is the job's opaque implementation mapping.
 
-    *data_mode* defaults to what the workflow needs — ``transactional`` for a
-    workflow whose runner publishes collected results, and ``none`` for a runner
-    that said nothing. *publish* ``workspace`` publishes the runner
+    *data_mode* defaults to the workflow's declared mode, or ``none`` when
+    unspecified. Packaged VASP workflows default to ``none``: their persistent
+    workdir holds the results. Pass ``transactional`` to copy their curated
+    outputs into ``data/`` as well. *publish* ``workspace`` publishes the runner
     file into the workspace runner store and pins its digest; ``installed``
     references a packaged runner through the reserved ``pkg:`` form instead and
     copies nothing. It is ignored for language workflows, whose realization

@@ -70,8 +70,10 @@ unchanged.
 **`project init`** created the project anchor. The next command initialized and
 registered the workspace at the project root as `default`; project creation
 does not create or contain a workspace.
-The workspace is the state of the work, and transactional data makes a finished
-calculation readable without looking inside a workdir.
+The workspace is the state of the work. Packaged VASP workflows default to
+`data.mode="none"`: the persistent `run/` workdir holds the results, and no
+`data/` copy is created. Add `--data-mode transactional` to `job new` to also
+publish a curated copy into `data/vasp/`.
 
 **`job new`** built and submitted one job. `--workflow vasp-relax` is the packaged
 relaxation runner — one file, three steps, the reviewed remedy ladder — so no
@@ -104,7 +106,7 @@ The stored results are readable with `httk-store`; the collection record is the
 boundary to that data layer — see {doc}`collecting`.
 
 **`postprocess`** ran the registered `relaxation-plot` script against the
-published OUTCAR and wrote
+workdir OUTCAR and wrote
 `postprocess/<placement>/<job_key>/relaxation-plot/relaxation_energies.svg`
 under the workspace root. Postprocess output never lands in the payload, so a
 finished job can be sealed and still be postprocessed; change the root with the
@@ -130,8 +132,8 @@ Any job UUID, complete `tag--uuid` key, or unique prefix of either names a job.
 `job show` describes it from its authoritative state, and `job why` explains a job
 that is *not* progressing — an unmet capability, a paused job, no manager
 running. When something did go wrong, the finished job's results and logs are in
-the payload directory `job new` printed: `run/` is the workdir, `data/` holds the
-published files, and `job log` prints the transitions.
+the payload directory `job new` printed: `run/` holds the results; `data/`
+exists only when transactional data is enabled. `job log` prints the transitions.
 
 `job debug --workspace WORKSPACE JOB` drives one job in the foreground and prints every
 transition, which is the fastest loop while a runner is still being written.

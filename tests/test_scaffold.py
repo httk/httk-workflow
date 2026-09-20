@@ -276,7 +276,7 @@ def test_every_packaged_runner_has_a_workflow_that_says_what_it_implements() -> 
     workflow = resolve_workflow("vasp-relax")
     assert workflow.source == runner_path("vasp_relax.py")
     assert workflow.workflow_id == "httk.vasp.relax" and workflow.initial_step == "prepare"
-    assert workflow.data_mode == "transactional"
+    assert workflow.data_mode == "none"
     with pytest.raises(ValueError, match="no such file: vasp_relax.py"):
         resolve_workflow("vasp_relax.py")
     assert resolve_workflow("vasp-relax-static", step="static").initial_step == "static"
@@ -490,7 +490,7 @@ def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, 
     definition = JobDefinition.from_path(job.payload / "job.json")
     assert definition.workflow == "httk.vasp.relax" and definition.initial_step == "prepare"
     assert json.loads((job.payload / "job.json").read_text(encoding="utf-8"))["runner"]["executor"] == "path"
-    assert definition.data_mode == "transactional" and definition.workdir_mode == "persistent"
+    assert definition.data_mode == "none" and definition.workdir_mode == "persistent"
     assert definition.parameters == {"kpoint_density": 30.0}
     assert workspace.find_marker_by_id(job.job_id) is not None
 
@@ -828,14 +828,16 @@ def test_an_undescribable_workflow_is_refused_by_name(tmp_path: Path, workspace:
         new_job(workspace, mystery)
 
 
-def test_a_transactional_workflow_works_in_a_core_workspace(tmp_path: Path, structure: Path) -> None:
+@pytest.mark.parametrize("workflow", ("vasp-relax", "vasp-relax-bash", "vasp-static", "vasp-relax-static"))
+def test_vasp_defaults_to_workdir_results_with_transactional_opt_in(
+    tmp_path: Path, structure: Path, workflow: str
+) -> None:
     plain = Workspace.initialize(tmp_path / "plain")
-    job = new_job(plain, "vasp-relax", files={"POSCAR": structure})
-    assert JobDefinition.from_path(job.payload / "job.json").data_mode == "transactional"
-
-    # The same workflow can leave results in the workdir when requested.
-    job = new_job(plain, "vasp-relax", files={"POSCAR": structure}, data_mode="none")
+    job = new_job(plain, workflow, files={"POSCAR": structure})
     assert JobDefinition.from_path(job.payload / "job.json").data_mode == "none"
+
+    job = new_job(plain, workflow, files={"POSCAR": structure}, data_mode="transactional")
+    assert JobDefinition.from_path(job.payload / "job.json").data_mode == "transactional"
 
 
 def test_a_campaign_publishes_one_runner_and_yields_jobs_lazily(workspace: Workspace, tmp_path: Path) -> None:

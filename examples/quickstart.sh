@@ -82,7 +82,7 @@ else
     httk_workflow collect
 fi
 
-# 6. Make a plot from the published OUTCAR.
+# 6. Make a plot from the workdir OUTCAR.
 httk_workflow postprocess --script relaxation-plot
 
-printf '\nthe published result is in jobs/*/data/vasp/\n'
+printf '\nthe result is in jobs/*/run/ (no data/ copy)\n'

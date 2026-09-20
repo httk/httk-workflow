@@ -50,8 +50,8 @@ def main() -> int:
     # beside this file writes plausible outputs when no real command is configured.
     os.environ.setdefault("HTTK_VASP_COMMAND", str(Path(__file__).with_name("mock_vasp.py")))
 
-    # One workspace is the whole state of the work; its jobs may publish
-    # results as transactional data.
+    # One workspace is the whole state of the work. VASP results stay in the
+    # persistent workdir by default; data_mode="transactional" opts into a copy.
     workspace = Workspace.initialize(Path("example-workflow-workspace"))
     print(f"workspace {workspace.workspace_id} at {workspace.root}")
 
@@ -80,12 +80,13 @@ def main() -> int:
         print(f"{record.state} {record.job_key} ({record.job['workflow']})")
         if record.failure is not None:
             print(f"  failure {record.failure.code}: {record.failure.message}")
-        data = record.data
-        if data is None:
+        result = record.data if record.data is not None else record.workdir
+        if result is None:
             continue
-        for path in sorted(data.rglob("*")):
+        label = "published" if record.data is not None else "workdir"
+        for path in sorted(result.rglob("*")):
             if path.is_file():
-                print(f"  published {path.relative_to(data)}")
+                print(f"  {label} {path.relative_to(result)}")
     return 0
 
 

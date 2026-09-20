@@ -71,19 +71,24 @@ strings, so a Bash runner and a Python runner read one contract.
   so two retries never repeat one structure.
 * ``collect`` (default ``INCAR KPOINTS OUTCAR CONTCAR OSZICAR vasprun.xml
   vasp-run-report.json POTCAR.provenance.json``) — space-separated file names
-  published to the job's transactional data. Names that were never produced are
-  skipped.
+  copied to transactional data only when opted in. The default ``data.mode``
+  ``none`` keeps outputs in the workdir. The chained runner also uses this list
+  to archive the relaxation before the static stage. Missing files are skipped.
 * ``data_prefix`` (default ``vasp``) — directory below the job's data the
-  collected files are published under.
+  collected files are published under when transactional data is enabled;
+  ignored for workdir results. The chained workflow defaults to an empty prefix
+  and publishes its stages under ``relax/`` and ``static/``.
 * ``vasp_command`` (default empty) — the VASP command as one argv string, split
   the way a shell splits it. The environment variable ``HTTK_VASP_COMMAND``
   overrides it, which is how a deployment — or a test — chooses the executable
   without touching any job.
 
 A job running one of these runners needs ``workdir.mode`` ``persistent``: the
-inputs a remedy rewrites have to be the inputs the next attempt reads. Publishing
-collected files needs ``data.mode`` ``transactional``; with ``data.mode`` ``none``
-the results simply stay in the workdir.
+inputs a remedy rewrites have to be the inputs the next attempt reads. All four
+workflows default to ``data.mode`` ``none``: the persistent workdir is the result,
+with no ``data/`` copy. Collectors read it directly. Pass ``--data-mode
+transactional`` to ``httk job new`` (or ``data_mode="transactional"`` to
+``new_job``) to also publish the curated files into ``data/``.
 """
 
 #: The module the reserved ``pkg:`` runner form names for these runners.

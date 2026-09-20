@@ -27,6 +27,9 @@ def _energies(path: Path) -> list[float]:
 def _preferred_outcar(data_root: Path) -> Path | None:
     if not data_root.is_dir():
         return None
+    # With no transactional data the final stage is at the workdir root.
+    if (data_root / "OUTCAR").is_file():
+        return data_root / "OUTCAR"
     outcars = sorted(data_root.rglob("OUTCAR"))
     preferred = [path for path in outcars if "static" in path.parts]
     return (preferred or outcars)[-1] if (preferred or outcars) else None

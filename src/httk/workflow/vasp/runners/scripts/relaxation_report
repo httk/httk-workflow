@@ -34,7 +34,10 @@ def main() -> None:
         else []
     )
     preferred = [path for path in outcars if "static" in path.parts]
-    energy_file = (preferred or outcars)[-1] if (preferred or outcars) else None
+    # A persistent workdir holds the final stage at its root; relax/ is history.
+    current = [data_root / "OUTCAR"] if (data_root / "OUTCAR").is_file() else []
+    candidates = current or preferred or outcars
+    energy_file = candidates[-1] if candidates else None
     report = {
         "job_dir": job_dir,
         "data_dir": str(data_root),

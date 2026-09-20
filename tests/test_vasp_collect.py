@@ -1,4 +1,4 @@
-"""VASP collectors and their packaged postprocess script use published data."""
+"""VASP collectors support persistent workdirs and opted-in published data."""
 
 import importlib.resources
 import json
@@ -37,8 +37,10 @@ _OUTCAR = """ vasp.5.2.12 synthetic
    FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)
    free  energy   TOTEN  =       -26.00000000 eV
    energy  without entropy=      -26.00000000  energy(sigma->0) =      -26.00000000
+   FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)
    free  energy   TOTEN  =       -27.00000000 eV
    energy  without entropy=      -27.00000000  energy(sigma->0) =      -27.00000000
+   FREE ENERGIE OF THE ION-ELECTRON SYSTEM (eV)
    free  energy   TOTEN  =       -27.09328752 eV
    energy  without entropy=      -27.09328752  energy(sigma->0) =      -27.09328752
   General timing and accounting informations for this job:
@@ -98,6 +100,62 @@ def test_missing_file_names_job_identity(tmp_path: Path) -> None:
     _write(tmp_path / "data", "vasp", "CONTCAR")
     with pytest.raises(ValueError, match=r"ws:12345678-1234-4234-8234-123456789abc.*OUTCAR"):
         collect_vasp_relax(_record(tmp_path, "httk.vasp.relax"))
+
+
+@pytest.mark.parametrize("data_mode", ("none", "transactional"))
+@pytest.mark.parametrize("prefix", ("", "custom/results"))
+@pytest.mark.parametrize("workflow", ("relax", "relax-bash", "static", "relax-static"))
+def test_result_layouts_respect_data_mode_and_prefix(
+    tmp_path: Path, data_mode: str, prefix: str, workflow: str
+) -> None:
+    collectors = {
+        "relax": collect_vasp_relax,
+        "relax-bash": collect_vasp_relax,
+        "static": collect_vasp_static,
+        "relax-static": collect_vasp_relax_static,
+    }
+    record = replace(
+        _record(tmp_path, f"httk.vasp.{workflow}"),
+        job={"workflow": f"httk.vasp.{workflow}", "parameters": {"data_prefix": prefix}},
+        workdir_path=PurePosixPath("run"),
+        data_path=PurePosixPath("data") if data_mode == "transactional" else None,
+        data_generation=1 if data_mode == "transactional" else None,
+    )
+    root = tmp_path / "data" / prefix if data_mode == "transactional" else tmp_path / "run"
+    structure_root = root / "relax" if workflow == "relax-static" else root
+    energy_root = root / "static" if workflow == "relax-static" and data_mode == "transactional" else root
+    _write(structure_root, "CONTCAR")
+    _write(energy_root, "OUTCAR")
+    if workflow == "relax-static":
+        # The archived relaxation energy must not become the static result.
+        _write(root / "relax", "OUTCAR")
+        (root / "relax" / "OUTCAR").write_text(_OUTCAR.replace("-27.09328752", "-20.0"))
+    outputs = collectors[workflow](record)
+    roles = {"total_energy"} if workflow == "static" else {"relaxed_structure", "total_energy"}
+    assert set(outputs) == roles
+    energy = outputs["total_energy"]
+    assert isinstance(energy, httk.core.DataRecord)
+    assert energy.value == pytest.approx(-27.09328752)
+
+
+@pytest.mark.parametrize("generation", (None, 1))
+def test_transactional_collector_does_not_fall_back_to_unpublished_workdir(
+    tmp_path: Path, generation: int | None
+) -> None:
+    _write(tmp_path / "run", "CONTCAR")
+    _write(tmp_path / "run", "OUTCAR")
+    record = replace(
+        _record(tmp_path, "httk.vasp.relax"), workdir_path=PurePosixPath("run"), data_generation=generation
+    )
+    with pytest.raises(ValueError, match="expected published data file"):
+        collect_vasp_relax(record)
+
+
+@pytest.mark.parametrize("workdir", (None, PurePosixPath("run")))
+def test_missing_workdir_result_names_job_identity(tmp_path: Path, workdir: PurePosixPath | None) -> None:
+    record = replace(_record(tmp_path, "httk.vasp.relax"), workdir_path=workdir, data_path=None, data_generation=None)
+    with pytest.raises(ValueError, match=r"ws:12345678-1234-4234-8234-123456789abc.*CONTCAR"):
+        collect_vasp_relax(record)
 
 
 def test_packaged_relaxation_report_runs_from_published_data(tmp_path: Path) -> None:
