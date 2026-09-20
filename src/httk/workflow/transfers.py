@@ -487,6 +487,7 @@ def detach_job(
     writer = workspace.open_journal_writer()
     try:
         with writer:
+            receipts.fencing(workspace, destination_id, identifier)
             transferring = workspace.transition(
                 writer,
                 marker,
@@ -688,7 +689,11 @@ def _import_one(
         elif receipts.epoch_of(manifest) is None:
             # Pre-epoch compact ranges cannot distinguish a replay from a
             # reused allocator. Never fabricate an acknowledgement for them.
-            raise WorkspaceCorruptionError("legacy receipt has no epoch or live job; cannot safely acknowledge replay")
+            raise WorkspaceCorruptionError(
+                "legacy receipt has no epoch or live job; cannot safely acknowledge replay; "
+                "after verifying destination delivery, retire it by job id from the source workspace: "
+                f"httk workflow transfer retire . {manifest['job_id']}"
+            )
     else:
         _import_bundle(workspace, bundle, known_marker=marker)
         receipts.remember(workspace, manifest)

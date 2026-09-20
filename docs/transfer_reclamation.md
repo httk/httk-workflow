@@ -1,35 +1,44 @@
 # Transfer completion and bounded metadata
 
 New detached transfers carry a random UUID `transfer_epoch` and a positive
-`transfer_sequence`, allocated monotonically within each source/destination epoch. The workspace's
-`transfers/protocol/issued.json` holds a counter per destination, plus reservations
-for detach operations that have not yet published their source ledger. Reserving
-before the fencing transition and reusing a reservation on retry prevents sequence
-gaps when a process stops before fencing. A reservation is forgotten only after
-the sealed ledger is durable. Reservations are keyed and removed by exact
-transfer UUID, so completion of an older transfer cannot remove a newer
-reservation for the same job.
+`transfer_sequence`. Each process allocates a fresh epoch per workspace/destination
+stream, with its counter and pending reservations held in process memory. A
+restart never adopts an epoch from disk. The session key includes the PID (so a
+fork cannot inherit an allocator), host, canonical workspace path, and control
+directory device/inode. A login-node switch or new process session therefore
+starts a fresh epoch; this is harmless and adds one coalesced receipt range per
+session, not one per job. Interleaved processes keep their own volatile streams.
+
+`transfers/protocol/issued.json` and its `issued-checkpoint.json` write-ahead copy
+remain durable diagnostic/retry state, but **neither copy authorizes reuse of an
+epoch**. A reset, missing copy, or mismatch with the current session's remembered
+stream rotates the epoch. Restoring both files consistently in place cannot
+reuse a ticket: a restarted process generates a new epoch, while a running
+process retains its counter in memory and detects rollback of its own stream.
+A disk entry belonging to another epoch cannot replace that volatile counter.
+The guarantee assumes fresh UUID randomness and filesystem restore, not rollback
+of the entire running process and its random-number source.
+
+A reservation may be reused before fencing is attempted. Before invoking the
+fencing transition, the allocator forgets the reusable in-memory reservation:
+another process could finish that transfer, so even restoring its old pending
+disk entry must not reuse it when the job returns. An interrupted attempt or
+process restart may reissue an unfenced reservation under a fresh epoch because
+it has never been offered.
+Once the fencing transition is durable, recovery uses the epoch and sequence in
+that state. A SEALED transfer always resumes from its immutable manifest/ledger,
+even when newer allocations have started in another session. Reservations are
+removed by exact transfer UUID, so an old completion cannot remove a newer
+reservation for the same job. An interrupted allocator publication may waste a
+reservation or epoch but cannot reissue an accepted ticket.
 
 The destination's `transfers/protocol/received.json` holds merged inclusive
-sequence ranges keyed by `source_workspace_id/transfer_epoch`. Receiving 1 through N leaves just `[[1, N]]`: no job
-UUIDs, transfer UUIDs, digests, or payload paths. Out-of-order imports retain
-separate ranges until the intervening transfers arrive. The range state is the
-durable replay fence, including after an imported job has left this workspace.
-`issued-checkpoint.json` is a separate, durable, write-ahead copy of the allocator
-state, including its host, canonical workspace path, and control-directory
-filesystem identity. Deleting/resetting `issued.json`, restoring an older copy
-of it, or copying the workspace to another path/inode causes **new** allocations
-to receive fresh random epochs. Existing sealed bundles retain their original
-epoch and remain resumable. Old evidence is never used to reissue a sequence in
-an existing epoch when the allocator is missing. A crash between checkpoint and
-allocator writes may rotate an otherwise usable epoch; it cannot reuse a ticket.
-
-This checkpoint detects **allocator-only** rollback. It cannot detect a rollback
-of both copies and their complete surrounding filesystem identity to an identical
-old snapshot. Before resuming writers after such a whole-workspace restore,
-remove `transfers/protocol/issued.json` to force a new epoch. Never roll back or
-delete destination receipt state independently of its actual jobs. No local
-nonce/checkpoint scheme can infer history that was rolled back everywhere.
+sequence ranges keyed by `source_workspace_id/transfer_epoch`. Receiving 1 through
+N within one session leaves just `[[1, N]]`: no job UUIDs, transfer UUIDs, digests,
+or payload paths. Out-of-order imports retain separate ranges until intervening
+transfers arrive. The range state is the durable replay fence, including after
+an imported job has left this workspace. Never roll back or delete destination
+receipt state independently of its actual jobs.
 
 Import first validates the sealed bundle, publishes the durable payload and state,
 and writes its ordinary acknowledgement. It then durably records the sequence
@@ -45,7 +54,8 @@ a matching source ledger alone would not prevent silent loss here.
 
 Pre-epoch compact receipts from the earlier implementation cannot safely certify
 a replay after their job has left. Such a replay fails closed with
-`WorkspaceCorruptionError`, rather than signing an unbound acknowledgement. Sequenced
+`WorkspaceCorruptionError`, with a remedy to verify delivery and explicitly run
+`httk workflow transfer retire . <JOB_ID>` from the source workspace. Sequenced
 acknowledgements omit the historical `acknowledged_at` timestamp; their signature
 attributes the returned receipt, not a permanently retained original importer.
 The source still checks the acknowledgement signature, job/workspace identity,
@@ -56,7 +66,8 @@ reclaiming anything. After reclamation it prunes the ledger. A missing ledger is
 terminal no-op, including when a newer transfer of that job exists. Journal
 segments protected by other jobs or managers are recorded once per segment in
 `transfers/protocol/journal.json`, rather than retaining one ledger per retired job.
-An actual retirement or explicit cleanup retries this inventory. Missing-ledger
+An actual retirement or explicit cleanup retries this inventory;
+`recover_transfers` alone does not retry it when there is no retired ledger. Missing-ledger
 acknowledgements and idle recovery never trigger journal GC; an empty inventory
 is not created and is removed once drained. No cleanup journal writer
 is opened. Existing marker-chain, live-manager, retention, and quarantine
@@ -112,7 +123,10 @@ The file count is independent of job count. JSON counters and range endpoints
 need logarithmically more digits as the sequence increases. Summary entries scale
 with workspace peers and historical epochs, unfinished reservations/sequence holes, and protected
 journal segments, rather than completed job identities. Once every issued
-transfer has arrived, each peer's receipt ranges coalesce to one interval.
+transfer in a session has arrived, that session's receipt ranges coalesce to one
+interval. Metadata bytes grow with historical sessions; fixed file count does
+not mean fixed byte count. Batch jobs within a process/session to amortize this
+state as well as scan cost.
 
 Unsequenced bundles already in flight retain their individual destination
 receipts: without an ordered sequence, removing those receipts would allow an old
@@ -144,22 +158,32 @@ not have solved the problem.
 A retirement batch scans current markers and sealed ledgers once. It records
 segment protection counts and the references owned by each sealed transfer.
 Retiring that transfer removes just its protection counts; subsequent collection
-queries only the candidate segments. Unrelated marker history remains protected
-for the entire batch (including complete terminal chains, conservatively, in
-case another actor resumes one). Shared segments are freed only when all sealed
-owners have retired. The duplicate GC call is removed. No-op acknowledgements do
-not build this index or touch an empty journal inventory.
+queries only the candidate segments. As in ordinary GC, a terminal marker
+protects its head segment without reading any frames; only non-terminal marker
+chains are walked. Terminal historical references do not pin retired candidate
+segments. Shared segments are freed only when all live heads, non-terminal
+chains, and sealed owners no longer protect them. The duplicate GC call is
+removed. No-op acknowledgements do not build this index or touch an empty
+journal inventory.
 
 For J transfers, U unrelated markers, and H journal references examined, a sweep
-costs O(U + J + H) metadata work (plus its payload I/O). Initial indexing is O(U),
+costs O(U + J + H) metadata work (plus its payload I/O), where H excludes
+unrelated terminal history entirely. Initial marker enumeration is still O(U),
 and steady-state retirement is O(the retiring transfer's candidate references),
 independent of U. Thus this is **amortized sweep complexity**, not a claim that
 one isolated, cold single-job call is O(1). The timing regression includes the
 initial scan in its batch mean and also reports the warm median. Repeatedly
 issuing single-job commands forfeits batching; use one multi-job transfer/sweep.
 
-The epoch regression covers delete/reset, allocator rollback, clone, and the
-job-already-left case; conflicting live-job transfer IDs and payload digests are
-also rejected. The 0/1,000/4,000-marker timing test asserts one protection scan
-per 128-job batch, measures its cost, and bounds the observed amortized slowdown.
-All original interruption and file-residual tests remain in place.
+The epoch regressions cover delete/reset, allocator-only and consistent two-file
+in-place rollback, clone, inherited fork memory, interleaved processes, and both
+live-destination and job-already-left cases. Restart tests cover sealed resume
+and unfenced pending reissue, including a second process completing a fenced
+transfer and a subsequent consistent restore of its old pending reservation
+before the job is sent again. Conflicting live-job transfer IDs and payload
+digests are rejected. The 0/1,000/4,000-marker timing test asserts one protection
+scan per 128-job batch. A separate terminal-history test counts protection-chain
+frame reads for 4 and 4,000 terminal jobs, including six-frame histories: counts
+must be identical. Another test verifies that old terminal references do not
+prevent eager collection while terminal heads remain protected. All original
+interruption and file-residual tests remain in place.

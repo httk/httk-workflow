@@ -152,7 +152,7 @@ def test_out_of_order_imports_compact_only_after_holes_are_filled(tmp_path):
     _no_transfer_files(destination)
 
 
-def test_reservation_interrupted_before_fencing_reuses_sequence(tmp_path, monkeypatch):
+def test_reservation_interrupted_before_fencing_reissues_fresh_epoch(tmp_path, monkeypatch):
     source, destination = _pair(tmp_path)
     payload, job_id = _payload(tmp_path)
     source.submit(payload, 'jobs')
@@ -164,9 +164,13 @@ def test_reservation_interrupted_before_fencing_reuses_sequence(tmp_path, monkey
     monkeypatch.setattr(source, 'transition', interrupt)
     with pytest.raises(OSError, match='before fence'):
         source.detach(job_id, destination_workspace_id=destination.workspace_id)
+    interrupted = json.loads((source.control / 'transfers/protocol/issued.json').read_text())[destination.workspace_id]
     monkeypatch.setattr(source, 'transition', original)
     bundle = source.detach(job_id, destination_workspace_id=destination.workspace_id)
-    assert transfers.validate_bundle(bundle)['transfer_sequence'] == 1
+    manifest = transfers.validate_bundle(bundle)
+    assert manifest['transfer_sequence'] == 1
+    assert manifest['transfer_epoch'] != interrupted['epoch']
+    assert manifest['transfer_id'] not in interrupted['pending']
     source.acknowledge_transfer(destination.import_bundle(bundle))
     issued = json.loads((source.control / 'transfers/protocol/issued.json').read_text())
     assert issued == {

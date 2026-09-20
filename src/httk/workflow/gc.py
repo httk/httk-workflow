@@ -530,7 +530,7 @@ class _Collection:
         for marker in markers:
             reference = _marker_record_ref(marker.path.name)
             if reference is not None:
-                protect(reference, walk=marker.kind not in TERMINAL_KINDS or self._retirement_owners is not None)
+                protect(reference, walk=marker.kind not in TERMINAL_KINDS)
 
         if self._retirement_owners is not None:
             self._retirement_counts.update(referenced)

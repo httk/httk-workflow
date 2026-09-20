@@ -8,6 +8,7 @@ ranges are necessary only while lower sequence numbers remain unreceived.
 """
 
 import fcntl
+import os
 import socket
 import uuid
 from collections.abc import Callable, Mapping
@@ -17,6 +18,12 @@ from typing import Any
 from ._util import fsync_directory, read_json, write_json_atomic
 from .errors import FormatError
 from .workspace import Workspace
+
+# Never reconstruct a session from disk. A restart (including fork) must mint a
+# new epoch, even if every allocator file was consistently restored in place.
+# Retaining the last published stream in memory also detects rollback while the
+# process stays alive. Entries scale with workspace peers, not transfers.
+_session_streams: dict[tuple[object, ...], dict[str, Any]] = {}
 
 
 def serialized[**P, T](function: Callable[P, T]) -> Callable[P, T]:
@@ -56,12 +63,7 @@ def _origin(workspace: Workspace) -> list[object]:
 
 
 def _publish_issued(workspace: Workspace, streams: dict[str, Any]) -> None:
-    """Write-ahead checkpoint prevents an interrupted two-file update looking like rollback.
-
-    The checkpoint is authoritative. A stale/missing issued copy rotates epochs
-    on the next reservation; an interrupted write may waste an epoch, never
-    reissue a sequence in one. Both files are fixed-size per peer at rest.
-    """
+    """Publish diagnostic/retry state; neither disk copy can authorize an epoch."""
 
     snapshot = {"origin": _origin(workspace), "streams": streams}
     _write(workspace, "issued-checkpoint", snapshot)
@@ -69,17 +71,35 @@ def _publish_issued(workspace: Workspace, streams: dict[str, Any]) -> None:
 
 
 def reserve(workspace: Workspace, peer: str, job_id: str, transfer_id: str) -> tuple[str, int, str]:
-    """Reserve in a fresh epoch after allocator reset, rollback, or workspace copy."""
+    """Allocate only in this process's volatile stream, never a restored epoch.
+
+    Reservations can be reused before fencing is attempted. Once fencing may
+    have published, only its state/manifest can authorize reuse. A new process
+    reissues unfenced reservations without adopting an old epoch.
+    """
 
     streams = _read(workspace, "issued")
     checkpoint = _read(workspace, "issued-checkpoint")
+    key = (os.getpid(), *_origin(workspace), peer)
     if checkpoint.get("origin") != _origin(workspace) or checkpoint.get("streams") != streams:
         # Never recover old counters into a new stream. Existing sealed bundles
         # keep their immutable epoch; only newly allocated transfers rotate.
         streams = {}
-    stream = streams.setdefault(peer, {"epoch": str(uuid.uuid4()), "last": 0, "pending": {}})
-    if "epoch" not in stream:
+    stream = streams.get(peer)
+    current = _session_streams.get(key)
+    if current is None or stream is None or (stream.get("epoch") == current["epoch"] and stream != current):
         stream = streams[peer] = {"epoch": str(uuid.uuid4()), "last": 0, "pending": {}}
+    else:
+        # Another process may have published its own epoch since our last call.
+        # Keep our volatile counter; never adopt theirs, or rotate on every
+        # interleaved job. A same-epoch disk rollback above starts a new stream.
+        if stream.get("epoch") != current["epoch"]:
+            # A different process may also have sealed/completed a reservation
+            # we still remember. Without its disk evidence it cannot be reused,
+            # even if that job has since returned to this workspace.
+            current["pending"].clear()
+        stream = streams[peer] = current
+    _session_streams[key] = stream
     pending = stream["pending"]
     reservation = next((value for value in pending.values() if value[0] == job_id), None)
     if reservation is None:
@@ -91,11 +111,26 @@ def reserve(workspace: Workspace, peer: str, job_id: str, transfer_id: str) -> t
     return str(identifier), int(reservation[1]), str(stream["epoch"])
 
 
+def fencing(workspace: Workspace, peer: str, transfer_id: str) -> None:
+    """Forget reusable memory before fencing could publish or raise.
+
+    Another process can subsequently seal and finish this transfer. Even if the
+    pending disk reservation is then restored, it must never be reused for a
+    new detach of the returned job. The disk reservation stays until sealing;
+    an interrupted fencing attempt may conservatively waste an epoch.
+    """
+
+    current = _session_streams.get((os.getpid(), *_origin(workspace), peer))
+    if current is not None:
+        current["pending"].pop(transfer_id, None)
+
+
 def sealed(workspace: Workspace, peer: str, transfer_id: str) -> None:
     """Pop only this exact transfer's reservation, never a later one for its job."""
 
     streams = _read(workspace, "issued")
     checkpoint = _read(workspace, "issued-checkpoint")
+    fencing(workspace, peer, transfer_id)
     if checkpoint.get("origin") != _origin(workspace) or checkpoint.get("streams") != streams:
         return  # reserve() will rotate; do not certify a stale allocator here.
     stream = streams.get(peer)
