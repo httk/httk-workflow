@@ -1,5 +1,5 @@
 # httk-docs-lock-schema: 1
-# input-hash: sha256:1a83be495272f10c8ae4c44115507d3baccbe007f9f53d59d69d1105a8d37584
+# input-hash: sha256:b30ba5771c75cfd6f13a04889ccd23769bee90b47a669a26b630580d89bd58a7
 # python: 3.12
 # platform: linux
 accessible-pygments==0.0.5
@@ -13,14 +13,14 @@ certifi==2026.7.22
 charset-normalizer==3.5.1
 click==8.5.0
 comm==0.2.3
-debugpy==1.8.21
+debugpy==1.8.22
 docutils==0.22.4
 executing==2.2.1
 fastjsonschema==2.22.2
 furo==2025.12.19
-greenlet==3.5.5
-httk-core==2.1.0
-idna==3.19
+greenlet==3.5.6
+httk-core==2.1.2
+idna==3.20
 imagesize==2.0.1
 importlib-metadata==9.0.1
 ipykernel==7.3.0
@@ -46,7 +46,7 @@ nest-asyncio2==1.7.2
 packaging==26.3
 parso==0.8.7
 pexpect==4.9.0
-platformdirs==4.11.8
+platformdirs==4.11.11
 prompt-toolkit==3.0.53
 psutil==7.2.2
 ptyprocess==0.7.0
@@ -65,7 +65,7 @@ snowballstemmer==3.1.1
 soupsieve==2.9.2
 sphinx==9.1.0
 sphinx-autoapi==3.8.1
-sphinx-autodoc-typehints==3.13.6
+sphinx-autodoc-typehints==3.13.7
 sphinx-basic-ng==1.0.0b2
 sphinx-copybutton==0.5.2
 sphinxcontrib-applehelp==2.0.0
@@ -74,13 +74,13 @@ sphinxcontrib-htmlhelp==2.1.0
 sphinxcontrib-jsmath==1.0.1
 sphinxcontrib-qthelp==2.0.0
 sphinxcontrib-serializinghtml==2.0.0
-sqlalchemy==2.0.52
+sqlalchemy==2.0.54
 stack-data==0.6.3
 tabulate==0.10.0
-tornado==6.5.8
+tornado==6.5.10
 traitlets==5.16.1
 typing-extensions==4.16.0
-urllib3==2.7.0
-wcwidth==0.8.3
+urllib3==2.8.0
+wcwidth==0.8.4
 wheel==0.48.0
 zipp==4.1.0
