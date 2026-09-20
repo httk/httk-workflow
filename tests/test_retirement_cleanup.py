@@ -39,8 +39,7 @@ def test_completed_transfers_leave_no_source_journal_or_retired_payload(tmp_path
         assert source.acknowledge_transfer(acknowledgement) == retired
         assert not _segments(source)
         assert not list((source.control / "journal").iterdir())
-        ledger = json.loads((source.control / "transfers" / f"{acknowledgement['transfer_id']}.json").read_text())
-        assert ledger["status"] == "retired" and ledger["retired_bundle"] == str(retired)
+        assert not (source.control / "transfers" / f"{acknowledgement['transfer_id']}.json").exists()
     assert not list((source.control / "transfers" / "retired").iterdir())
     assert source.check().ok and destination.check().ok
 

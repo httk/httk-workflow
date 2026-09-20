@@ -525,7 +525,10 @@ def _resolve_transfer_jobs(workspace: Workspace, cwd: Path, selectors: Sequence[
             if str(exc) != f"no job in {workspace.root} matches {selector!r}":
                 raise
             try:
-                _, job_id = parse_job_key(selector)
+                try:
+                    job_id = canonical_uuid(selector)
+                except (WorkflowError, ValueError, TypeError):
+                    _, job_id = parse_job_key(selector)
             except (WorkflowError, ValueError, TypeError):
                 raise exc from None
             resolved_ids = [job_id]
@@ -627,6 +630,8 @@ def _send_jobs_to_remote(
                 f"cannot resume job {job_id}: sealed transfer ledger {ledger_path} is ambiguous; "
                 "retire it or fetch the job from the destination"
             )
+        if not candidates and source.find_marker_by_id(job_id) is None:
+            continue
         transfer_id = str(candidates[0][1]["transfer_id"]) if candidates else str(uuid.uuid4())
         if candidates and destination_placement:
             requested = str(destination_placement).strip("/")
@@ -712,6 +717,9 @@ def handle_transfer_receive(arguments: argparse.Namespace, context: CLIContext) 
 
     workspace = _protocol_workspace(arguments.workspace, context)
     acknowledgement = workspace.import_bundle(arguments.bundle)
+    staging = Path(arguments.bundle).expanduser().resolve()
+    if staging.parent == (workspace.control / "transfers" / "incoming").resolve():
+        discard_staged_bundle(workspace, staging)
     print(json.dumps(acknowledgement, sort_keys=True, separators=(",", ":")))
     _print_build_reminder(workspace, acknowledgement)
     return 0
@@ -774,11 +782,34 @@ def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) ->
 def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Retire the sealed source bundles of jobs another workspace has imported."""
 
-    retired = retire_transfers(
-        _protocol_workspace(arguments.workspace, context),
-        arguments.jobs,
-        destination_workspace_id=arguments.destination_workspace_id,
-    )
+    workspace = _protocol_workspace(arguments.workspace, context)
+    envelopes = getattr(arguments, "acknowledgements_json", None)
+    if envelopes is None:
+        retired = retire_transfers(
+            workspace,
+            arguments.jobs,
+            destination_workspace_id=arguments.destination_workspace_id,
+        )
+    else:
+        acknowledgements = json.loads(envelopes)
+        if not isinstance(acknowledgements, list) or not all(isinstance(ack, dict) for ack in acknowledgements):
+            raise ValueError("retirement acknowledgements must be an array of objects")
+        if {ack.get("job_id") for ack in acknowledgements} != set(arguments.jobs):
+            raise ValueError("retirement acknowledgements disagree with requested jobs")
+        retired = []
+        for ack in acknowledgements:
+            if ack.get("destination_workspace_id") != arguments.destination_workspace_id:
+                raise ValueError("retirement acknowledgement names another destination")
+            path = workspace.acknowledge_transfer(ack)
+            retired.append(
+                {
+                    "transfer_id": ack["transfer_id"],
+                    "job_id": ack["job_id"],
+                    "job_key": ack["job_key"],
+                    "status": "retired",
+                    "retired_bundle": str(path),
+                }
+            )
     if arguments.json:
         document = {
             "format": TRANSFER_RETIREMENT_FORMAT,
@@ -862,12 +893,9 @@ def _require_offers_for_jobs(offers: Sequence[Mapping[str, object]], jobs: Seque
         return
     requested = set(jobs)
     offered = {str(offer.get("job_id")) for offer in offers}
-    missing = sorted(requested - offered)
     unexpected = sorted(offered - requested)
-    if missing or unexpected:
+    if unexpected:
         details = []
-        if missing:
-            details.append(f"missing: {', '.join(missing)}")
         if unexpected:
             details.append(f"unexpected: {', '.join(unexpected)}")
         raise ValueError(f"remote offer did not exactly match requested jobs ({'; '.join(details)})")
@@ -880,6 +908,7 @@ def _remote_retire(
     destination_workspace_id: str,
     *,
     timeout: float | None,
+    acknowledgements: Sequence[Mapping[str, object]] | None = None,
 ) -> list[object]:
     """Tell a remote the sources of imported jobs are no longer needed there."""
 
@@ -893,6 +922,8 @@ def _remote_retire(
         remote_name,
         *job_ids,
     ]
+    if acknowledgements is not None:
+        argv += ["--acknowledgements-json", json.dumps(list(acknowledgements), separators=(",", ":"))]
     response = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=timeout)
     if response.get("returncode") != 0:
         raise RuntimeError(f"remote retirement failed: {response.get('stderr', '')}")
@@ -966,6 +997,7 @@ def _fetch_jobs_from_remote(
         [str(acknowledgement["job_id"]) for acknowledgement in acknowledgements],
         local.workspace_id,
         timeout=timeout,
+        acknowledgements=acknowledgements,
     )
     return acknowledgements, retired
 
@@ -1005,13 +1037,23 @@ def _transfer_local_to_local(
     known_by_id = {} if known_markers is None else {marker.job_id: marker for marker in known_markers}
     for job_id in jobs:
         source.recover_transfers()
-        bundle = source.detach(
-            job_id,
-            marker=known_by_id.get(job_id),
-            waiting_parent_map=waiting_parent_map,
+        resumable = select_transfer_jobs(
+            source,
             destination_workspace_id=destination.workspace_id,
-            transfer_id=str(uuid.uuid4()),
+            states=QUIESCENT_KINDS,
+            job_ids=(job_id,),
         )
+        if not resumable and source.find_marker_by_id(job_id) is None:
+            continue
+        bundle = resumable[0].bundle if resumable else None
+        if bundle is None:
+            bundle = source.detach(
+                job_id,
+                marker=known_by_id.get(job_id),
+                waiting_parent_map=waiting_parent_map,
+                destination_workspace_id=destination.workspace_id,
+                transfer_id=str(uuid.uuid4()),
+            )
         acknowledgement = destination.import_bundle(str(bundle))
         source.acknowledge_transfer(acknowledgement)
         if not quiet:
@@ -1122,6 +1164,7 @@ def _transfer_remote_to_remote(
         [str(acknowledgement["job_id"]) for acknowledgement in acknowledgements],
         destination_workspace_id,
         timeout=timeout,
+        acknowledgements=acknowledgements,
     )
     return acknowledgements, retired
 
@@ -1306,6 +1349,7 @@ def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> i
     retire.add_argument("jobs", metavar="JOB_ID", nargs="+")
     retire.add_argument("--destination-workspace-id", metavar="UUID")
     retire.add_argument("--json", action="store_true")
+    retire.add_argument("--acknowledgements-json")
     retire.set_defaults(handler=handle_transfer_retire)
 
     try:

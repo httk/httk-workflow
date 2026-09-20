@@ -14,9 +14,10 @@ from typing import Any
 from httk.core.digests import sha256_file, tree_digest
 from httk.core.identity import identity_seed, sign_document, verify_document
 
-from ._util import fsync_directory, read_json, utc_now, write_json_atomic
+from . import _transfer_receipts as receipts
+from ._util import fsync_directory, fsync_tree, read_json, utc_now, write_json_atomic
 from .errors import FormatError, WorkflowError, WorkspaceCorruptionError
-from .journal import iter_record_chain, parse_record_ref
+from .journal import SEGMENT_HEADER, encode_record_ref, iter_record_chain, parse_record_ref
 from .models import (
     CORE_PROFILE,
     QUIESCENT_KINDS,
@@ -405,6 +406,8 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
         "source_generation": marker.generation,
         "sealed_marker": marker.path.name,
     }
+    if "transfer_sequence" in state:
+        manifest["transfer_sequence"] = state["transfer_sequence"]
     manifest_path = transfer_dir / TRANSFER_MANIFEST
     if manifest_path.exists():
         existing = read_json(manifest_path)
@@ -419,9 +422,11 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
         raise WorkspaceCorruptionError("transfer marker exists in neither state tree nor sealed bundle")
     ledger = {**manifest, "status": "sealed", "bundle": str(payload), "updated_at": utc_now()}
     write_json_atomic(_ledger_path(workspace, transfer_id), ledger, durable=workspace.durable)
+    receipts.sealed(workspace, destination_workspace_id, marker.job_id)
     return payload
 
 
+@receipts.serialized
 def detach_job(
     workspace: Workspace,
     job_id: str,
@@ -473,26 +478,41 @@ def detach_job(
         raise ValueError("job participates in an unresolved join and cannot transfer")
     target_placement = normalize_placement(destination_placement or marker.placement)
     prior_state = workspace.read_state(marker)
-    with workspace.open_journal_writer() as writer:
-        transferring = workspace.transition(
-            writer,
-            marker,
-            "transferring",
-            {
-                "transfer_id": identifier,
-                "source_workspace_id": workspace.workspace_id,
-                "destination_workspace_id": destination_id,
-                "destination_remote": destination_remote,
-                "destination_placement": target_placement.as_posix(),
-                "prior_kind": marker.kind,
-                "prior_state": prior_state,
-                "reason": "detached_transfer",
-            },
-            # A sealed job may be transferred: its seal travels in the bundle and
-            # is restored at the destination, so the marker move is not a mutation
-            # the enforcement guard should refuse.
-            allow_sealed=True,
-        )
+    _finish_incoming_receipt(workspace, marker, prior_state)
+    identifier, sequence = receipts.reserve(workspace, destination_id, job_id, identifier)
+    writer = workspace.open_journal_writer()
+    try:
+        with writer:
+            transferring = workspace.transition(
+                writer,
+                marker,
+                "transferring",
+                {
+                    "transfer_id": identifier,
+                    "transfer_sequence": sequence,
+                    "source_workspace_id": workspace.workspace_id,
+                    "destination_workspace_id": destination_id,
+                    "destination_remote": destination_remote,
+                    "destination_placement": target_placement.as_posix(),
+                    "prior_kind": marker.kind,
+                    "prior_state": prior_state,
+                    "reason": "detached_transfer",
+                },
+                # A sealed job may be transferred: its seal travels in the bundle and
+                # is restored at the destination, so the marker move is not a mutation
+                # the enforcement guard should refuse.
+                allow_sealed=True,
+            )
+    except BaseException:
+        # A failed transition can leave a header-only operation writer. Use
+        # the usual reference protection, including damaged/live markers.
+        from .gc import collect_retired_journal
+
+        directory = workspace.control / "journal" / writer.writer_id
+        if (directory / "0.hwj").is_file() and (directory / "0.hwj").stat().st_size == len(SEGMENT_HEADER):
+            reference = encode_record_ref(writer.writer_id, 0, len(SEGMENT_HEADER), 1, b"0" * 32)
+            collect_retired_journal(workspace, [reference])
+        raise
     return _seal_transferring(workspace, transferring, workspace.read_state(transferring))
 
 
@@ -544,7 +564,87 @@ def _ack_path(workspace: Workspace, transfer_id: str) -> Path:
     return workspace.control / "transfers" / "acks" / f"{transfer_id}.json"
 
 
+def _prune_import_receipts(workspace: Workspace, transfer_id: str) -> None:
+    """The durable sequence receipt replaces these per-transfer records."""
+
+    for directory in ("acks", "imported"):
+        path = workspace.control / "transfers" / directory / f"{transfer_id}.json"
+        path.unlink(missing_ok=True)
+        if workspace.durable and path.parent.exists():
+            fsync_directory(path.parent)
+
+
+def _finish_incoming_receipt(workspace: Workspace, marker: Marker, state: Mapping[str, Any]) -> None:
+    """Finish a published import before allowing its job to leave again.
+
+    A crashed receiver may have published the marker but not its compact
+    receipt. Preserve that import fact even if the original sender has not yet
+    retried. The state provenance is authoritative once its marker exists.
+    """
+
+    provenance = state.get("transfer")
+    if not isinstance(provenance, Mapping) or receipts.sequence_of(provenance) is None:
+        return
+    transfer_dir = workspace.payload_path(marker.placement, marker.job_key) / TRANSFER_DIRECTORY
+    if transfer_dir.exists():
+        manifest = read_json(transfer_dir / TRANSFER_MANIFEST)
+        _install_bundled_seal(workspace, transfer_dir, manifest)
+        _remove_tree(transfer_dir)
+    if not receipts.received(workspace, provenance):
+        receipts.remember(workspace, provenance)
+    _prune_import_receipts(workspace, str(provenance["transfer_id"]))
+
+
+def _sequence_ack(workspace: Workspace, manifest: Mapping[str, Any]) -> dict[str, object]:
+    """Reconstruct a receipt from an intact replay, even after the job moved on.
+
+    Sequenced receipts intentionally have no per-job wall-clock timestamp: the
+    durable range is the acknowledgement fact, and this signed envelope binds
+    it to the replay's validated manifest. Source retirement still compares the
+    complete envelope identity and digest against its own immutable ledger.
+    """
+
+    return sign_document(
+        {
+            "format": "httk-workflow-transfer-acknowledgement",
+            "format_version": 2,
+            "transfer_id": manifest["transfer_id"],
+            "transfer_sequence": manifest["transfer_sequence"],
+            "source_workspace_id": manifest["source_workspace_id"],
+            "destination_workspace_id": workspace.workspace_id,
+            "payload_sha256": manifest["payload_sha256"],
+            "job_id": manifest["job_id"],
+            "job_key": manifest["job_key"],
+            "placement": manifest["destination_placement"],
+            "state": manifest["prior_kind"],
+        }
+    )
+
+
+@receipts.serialized
 def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
+    """Import once, recording a compact durable receipt before pruning metadata.
+
+    Legacy bundles have no sequence and must retain their individual receipts.
+    :param workspace: The destination workspace.
+    :param bundle: The intact sealed bundle to import or replay.
+    :return: A destination acknowledgement safe for source retirement.
+    """
+
+    manifest = validate_bundle(bundle)
+    if manifest["destination_workspace_id"] != workspace.workspace_id:
+        raise ValueError("bundle names a different destination workspace")
+    if receipts.sequence_of(manifest) is None:
+        return _import_bundle(workspace, bundle)
+    identity_seed()
+    if not receipts.received(workspace, manifest):
+        _import_bundle(workspace, bundle)
+        receipts.remember(workspace, manifest)
+    _prune_import_receipts(workspace, str(manifest["transfer_id"]))
+    return _sequence_ack(workspace, manifest)
+
+
+def _import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
     """Idempotently import a sealed bundle and publish its prior state.
 
     Runners are installed and verified before the imported job becomes schedulable;
@@ -624,6 +724,8 @@ def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[
             raise FormatError("copied transfer payload digest mismatch")
         target.parent.mkdir(parents=True, exist_ok=True)
         workspace._publish_path(staging, target)
+    if workspace.durable:
+        fsync_tree(target)
     transfer_dir = target / TRANSFER_DIRECTORY
     embedded = transfer_dir / str(manifest["sealed_marker"])
     prior = manifest.get("prior_state")
@@ -661,6 +763,7 @@ def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[
         "priority": int(manifest["priority"]),
         "transfer": {
             "transfer_id": transfer_id,
+            **({"transfer_sequence": manifest["transfer_sequence"]} if "transfer_sequence" in manifest else {}),
             "source_workspace_id": manifest["source_workspace_id"],
             "payload_sha256": digest,
         },
@@ -685,6 +788,8 @@ def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[
         embedded,
     )
     imported = workspace._verified_marker_rename(embedded_marker, destination)
+    if workspace.durable:
+        fsync_directory(workspace.control / "journal")
     imported_record = {**manifest, "status": "imported", "marker": str(imported.path), "imported_at": utc_now()}
     write_json_atomic(
         workspace.control / "transfers" / "imported" / f"{transfer_id}.json",
@@ -749,6 +854,36 @@ def _reclaim_retired_transfer(workspace: Workspace, ledger: Mapping[str, Any]) -
     collect_retired_journal(workspace, ledger.get("retired_journal_refs", []))
 
 
+def _remember_pending_journal(workspace: Workspace, references: Sequence[str]) -> None:
+    """Keep shared-segment recovery once per segment, never once per job."""
+
+    from .gc import collect_retired_journal
+    from .journal import segment_path
+
+    path = workspace.control / "transfers" / "protocol" / "journal.json"
+    pending = read_json(path) if path.exists() else {}
+    for reference in references:
+        writer, segment, *_ = parse_record_ref(reference)
+        pending[f"{writer}/{segment}"] = reference
+    # Inventory publication precedes removal of the last per-job ledger. A
+    # killed collector can always retry from this shared recovery inventory.
+    write_json_atomic(path, pending, durable=workspace.durable)
+    collect_retired_journal(workspace, list(pending.values()))
+    if workspace.durable:
+        for reference in pending.values():
+            directory = segment_path(workspace.control, *parse_record_ref(reference)[:2]).parent
+            if directory.exists():
+                fsync_directory(directory)
+        fsync_directory(workspace.control / "journal")
+        retired_root = workspace.control / "transfers" / "retired"
+        if retired_root.exists():
+            fsync_directory(retired_root)
+    pending = {
+        key: ref for key, ref in pending.items() if segment_path(workspace.control, *parse_record_ref(ref)[:2]).exists()
+    }
+    write_json_atomic(path, pending, durable=workspace.durable)
+
+
 def _retire_sealed_bundle(
     workspace: Workspace,
     transfer_id: str,
@@ -764,7 +899,10 @@ def _retire_sealed_bundle(
     """
 
     ledger_path = _ledger_path(workspace, transfer_id)
+    if not ledger_path.exists():
+        return workspace.control / "transfers" / "retired" / transfer_id / "bundle"
     ledger = read_json(ledger_path)
+    receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["job_id"]))
     if ledger.get("status") != "retired":
         bundle = Path(str(ledger["bundle"]))
         retired = workspace.control / "transfers" / "retired" / transfer_id / "bundle"
@@ -798,9 +936,15 @@ def _retire_sealed_bundle(
         ledger["retired_journal_refs"] = _retired_journal_refs(workspace, ledger)
         write_json_atomic(ledger_path, ledger, durable=workspace.durable)
     _reclaim_retired_transfer(workspace, ledger)
+    if workspace.policy.retention.trash_days is not None:
+        _remember_pending_journal(workspace, ledger.get("retired_journal_refs", []))
+        ledger_path.unlink(missing_ok=True)
+        if workspace.durable:
+            fsync_directory(ledger_path.parent)
     return Path(str(ledger["retired_bundle"]))
 
 
+@receipts.serialized
 def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, object]) -> Path:
     """Validate an acknowledgement and retire the sealed source bundle.
 
@@ -822,7 +966,17 @@ def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, obj
     if signature.present and not signature.valid:
         raise FormatError(f"transfer acknowledgement signature is invalid: {signature.reason}")
     transfer_id = canonical_uuid(acknowledgement.get("transfer_id"), "transfer_id")
-    ledger = read_json(_ledger_path(workspace, transfer_id))
+    ledger_path = _ledger_path(workspace, transfer_id)
+    if not ledger_path.exists():
+        _remember_pending_journal(workspace, [])
+        # No ledger is also the terminal state after successful reclamation.
+        # Do not inspect or mutate a newer incarnation of the same job.
+        return workspace.control / "transfers" / "retired" / transfer_id / "bundle"
+    ledger = read_json(ledger_path)
+    if "transfer_sequence" in acknowledgement and acknowledgement["transfer_sequence"] != ledger.get(
+        "transfer_sequence"
+    ):
+        raise FormatError("transfer acknowledgement disagrees on transfer_sequence")
     for name in ("source_workspace_id", "destination_workspace_id", "payload_sha256", "job_id", "job_key"):
         if acknowledgement.get(name) != ledger.get(name):
             raise FormatError(f"transfer acknowledgement disagrees on {name}")
@@ -836,6 +990,7 @@ def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, obj
     return _retire_sealed_bundle(workspace, transfer_id, provenance={"acknowledgement": dict(acknowledgement)})
 
 
+@receipts.serialized
 def recover_transfers(workspace: Workspace) -> list[dict[str, object]]:
     """Finish source sealing and inventory every retained bundle.
 
@@ -844,6 +999,13 @@ def recover_transfers(workspace: Workspace) -> list[dict[str, object]]:
     """
 
     results: list[dict[str, object]] = []
+    if (workspace.control / "transfers" / "protocol" / "journal.json").exists():
+        _remember_pending_journal(workspace, [])
+    for ledger in _ledgers(workspace):
+        if ledger.get("status") == "retired":
+            _retire_sealed_bundle(workspace, str(ledger["transfer_id"]), provenance={})
+        else:
+            receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["job_id"]))
     for marker in list(workspace.scan_markers(("transferring",))):
         state = workspace.read_state(marker)
         bundle = _seal_transferring(workspace, marker, state)
@@ -1089,8 +1251,8 @@ def _offer_selection_errors(
                 reasons[job_id] = "filtered by placement"
             else:
                 reasons[job_id] = "sealed bundle is unavailable"
-        else:
-            reasons[job_id] = "not found"
+        # A missing exact UUID may already have completed and been pruned.
+        # Live but ineligible jobs and broken sealed bundles still fail above.
     for candidate in candidates:
         if candidate.job_id in requested_ids and candidate.problem:
             reasons[candidate.job_id] = candidate.problem
@@ -1222,6 +1384,7 @@ def offer_transfers(
     return sorted(offers.values(), key=lambda item: (str(item["placement"]), str(item["job_key"])))
 
 
+@receipts.serialized
 def retire_transfers(
     workspace: Workspace,
     job_ids: Sequence[str],
@@ -1258,7 +1421,9 @@ def retire_transfers(
             and (destination_id is None or ledger.get("destination_workspace_id") == destination_id)
         ]
         if not matches:
-            raise ValueError(f"no detached transfer of this workspace names job: {identifier}")
+            if workspace.find_marker_by_id(identifier) is not None:
+                raise ValueError(f"no detached transfer of this workspace names job: {identifier}")
+            continue
         live = [ledger for ledger in matches if ledger.get("status") != "retired"]
         if len(live) > 1:
             raise WorkspaceCorruptionError(f"job {identifier} has several sealed transfers to retire")

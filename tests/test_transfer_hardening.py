@@ -139,6 +139,7 @@ def test_resuming_a_transfer_requires_the_destination_remote_to_match(
         calls.append(kwargs)
         return bundle
 
+    monkeypatch.setattr(source, "find_marker_by_id", lambda _job_id: object())
     monkeypatch.setattr(source, "detach", detach)
     monkeypatch.setattr(source, "acknowledge_transfer", lambda _acknowledgement: None)
 
@@ -213,6 +214,7 @@ def test_transfer_adapter_requests_are_exact_argv(tmp_path: Path, monkeypatch: p
         detached.append(kwargs)
         return bundle
 
+    monkeypatch.setattr(source, "find_marker_by_id", lambda _job_id: object())
     monkeypatch.setattr(source, "detach", detach)
     monkeypatch.setattr(source, "acknowledge_transfer", lambda _acknowledgement: None)
 
@@ -494,7 +496,7 @@ def test_a_source_bundle_already_moved_aside_is_retired_without_a_second_move(tm
     assert json.loads(ledger.read_text(encoding="utf-8"))["status"] == "sealed"
 
     assert source.acknowledge_transfer(acknowledgement) == retired
-    assert json.loads(ledger.read_text(encoding="utf-8"))["status"] == "retired"
+    assert not ledger.exists()
     assert not retired.exists()
 
 

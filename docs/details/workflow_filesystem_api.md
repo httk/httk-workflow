@@ -2631,8 +2631,8 @@ The remaining categories are gated as follows.
 | --- | --- | --- |
 | Attempt-control directory | `attempt_control_days` | Failed and cancelled jobs retain their newest; other quiescent jobs' leftovers (including succeeded) must be older than both this limit and one workspace `lease_seconds` grace. |
 | Transaction trash | `trash_days` | The job's marker has reached a quiescent kind, so the destination transition has happened and no replay consults the trash again. |
-| Retired transfer bundle | `trash_days` | Below `transfers/retired/`; the ledger describing it is kept. |
-| Import acknowledgement and import record | `trash_days` | Below `transfers/acks/` and `transfers/imported/`. |
+| Retired transfer bundle | `trash_days` | Below `transfers/retired/`; normal retirement eagerly reclaims the bundle and ledger unless retention is unlimited. |
+| Import acknowledgement and import record | `trash_days` | Legacy receipts below `transfers/acks/` and `transfers/imported/`; sequenced imports replace these immediately with compact durable receipt ranges. |
 | Journal segment | `journal_days` | No current terminal marker, nor sealed marker of a bundle awaiting handover, references it; no frame chain of a current non-terminal marker contains it; and its writer belongs to no manager heartbeating within its lease. |
 | Manager directory | `journal_days` | The manager's heartbeat is expired and none of its writer's segments were retained. |
 

@@ -199,3 +199,6 @@ malformed or unsuccessful result documents.
 
 The complete bundle layout, operation request and result documents, settings and
 credential handling, and refusal rules are in {doc}`details/adapter_authoring`.
+
+For the transfer completion protocol, crash recovery, and metadata bounds on
+quota-limited filesystems, see {doc}`transfer_reclamation`.

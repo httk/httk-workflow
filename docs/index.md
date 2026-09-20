@@ -121,6 +121,7 @@ campaigns
 composing_workflows
 benchmarks
 remotes
+transfer_reclamation
 launchers
 reference/index
 notebooks/examples

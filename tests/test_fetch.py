@@ -887,7 +887,7 @@ def test_retire_is_idempotent_and_refuses_a_job_it_never_sealed(
     assert not Path(str(retired[0]["retired_bundle"])).exists()
 
     assert command(argv, pair.context) == 0
-    assert json.loads(capsys.readouterr().out) == first
+    assert json.loads(capsys.readouterr().out) == {**first, "retired": []}
 
     # The pending job was never sealed, so retiring it is an error rather than a
     # silent success.
