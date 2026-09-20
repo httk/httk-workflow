@@ -37,7 +37,7 @@ from httk.workflow.adapters import add_remote
 from httk.workflow.models import StateFrame
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
-from httk.workflow.transfers import TRANSFER_DIRECTORY, _payload_digest
+from httk.workflow.transfers import TRANSFER_DIRECTORY, _payload_digest, validate_bundle
 from httk.workflow.workflow_cli import _job as job_cli
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
@@ -680,29 +680,30 @@ def test_fetch_resumes_after_an_interruption_between_pull_and_import(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    real_import = Workspace.import_bundle
+    real_import = transfer_cli.import_bundles
     interrupted = False
 
-    def interrupt(self: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
+    def interrupt(self: Workspace, bundles: list[str]) -> list[dict[str, object]]:
         nonlocal interrupted
         if not interrupted:
             interrupted = True
             raise RuntimeError("simulated interruption after the bundle was pulled")
-        return real_import(self, bundle)
+        return real_import(self, bundles)
 
-    monkeypatch.setattr(Workspace, "import_bundle", interrupt)
+    monkeypatch.setattr(transfer_cli, "import_bundles", interrupt)
     argv = ["transfer", "--json", "cluster:station", "home"]
     assert command(argv, pair.context) == 2
     assert interrupted
 
     local = pair.local
-    # The pulled bundle is staged and no job was published from it.
+    # The entire pull batch is staged; neither job was published before the interruption.
     staged = sorted((local.control / "transfers" / "incoming").iterdir())
-    assert len(staged) == 1
+    assert len(staged) == 2
+    assert {validate_bundle(bundle)["job_id"] for bundle in staged} == {pair.ids["succeeded"], pair.ids["failed"]}
     assert local.find_marker_by_id(pair.ids["succeeded"]) is None
     assert local.find_marker_by_id(pair.ids["failed"]) is None
 
-    monkeypatch.setattr(Workspace, "import_bundle", real_import)
+    monkeypatch.setattr(transfer_cli, "import_bundles", real_import)
     report = _fetch(pair, capsys)
     assert {str(entry["job_id"]) for entry in list(report["moved"])} == {
         pair.ids["succeeded"],
@@ -887,7 +888,11 @@ def test_retire_is_idempotent_and_refuses_a_job_it_never_sealed(
     assert not Path(str(retired[0]["retired_bundle"])).exists()
 
     assert command(argv, pair.context) == 0
-    assert json.loads(capsys.readouterr().out) == {**first, "retired": []}
+    assert json.loads(capsys.readouterr().out) == {
+        **first,
+        "retired": [],
+        "skipped": [{"job_id": pair.ids["succeeded"], "reason": "not found or already completed"}],
+    }
 
     # The pending job was never sealed, so retiring it is an error rather than a
     # silent success.

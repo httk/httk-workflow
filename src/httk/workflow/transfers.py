@@ -408,6 +408,8 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
     }
     if "transfer_sequence" in state:
         manifest["transfer_sequence"] = state["transfer_sequence"]
+    if "transfer_epoch" in state:
+        manifest["transfer_epoch"] = state["transfer_epoch"]
     manifest_path = transfer_dir / TRANSFER_MANIFEST
     if manifest_path.exists():
         existing = read_json(manifest_path)
@@ -422,7 +424,7 @@ def _seal_transferring(workspace: Workspace, marker: Marker, state: Mapping[str,
         raise WorkspaceCorruptionError("transfer marker exists in neither state tree nor sealed bundle")
     ledger = {**manifest, "status": "sealed", "bundle": str(payload), "updated_at": utc_now()}
     write_json_atomic(_ledger_path(workspace, transfer_id), ledger, durable=workspace.durable)
-    receipts.sealed(workspace, destination_workspace_id, marker.job_id)
+    receipts.sealed(workspace, destination_workspace_id, transfer_id)
     return payload
 
 
@@ -461,10 +463,12 @@ def detach_job(
             raise WorkspaceCorruptionError("transfer UUID was reused for a different destination")
         return Path(str(ledger["bundle"]))
     if marker is None:
-        matches = [candidate for candidate in _all_markers(workspace) if candidate.job_id == job_id]
-        if len(matches) != 1:
-            raise ValueError(f"job must have exactly one source marker: {job_id}")
-        marker = matches[0]
+        marker = workspace.find_marker_by_id(job_id)
+        if marker is None:
+            interrupted = [item for item in workspace.scan_markers(("transferring",)) if item.job_id == job_id]
+            if len(interrupted) != 1:
+                raise ValueError(f"job must have exactly one source marker: {job_id}")
+            marker = interrupted[0]
     elif marker.job_id != job_id:
         raise ValueError(f"known source marker does not identify job: {job_id}")
     if marker.kind == "transferring":
@@ -479,7 +483,7 @@ def detach_job(
     target_placement = normalize_placement(destination_placement or marker.placement)
     prior_state = workspace.read_state(marker)
     _finish_incoming_receipt(workspace, marker, prior_state)
-    identifier, sequence = receipts.reserve(workspace, destination_id, job_id, identifier)
+    identifier, sequence, epoch = receipts.reserve(workspace, destination_id, job_id, identifier)
     writer = workspace.open_journal_writer()
     try:
         with writer:
@@ -490,6 +494,7 @@ def detach_job(
                 {
                     "transfer_id": identifier,
                     "transfer_sequence": sequence,
+                    "transfer_epoch": epoch,
                     "source_workspace_id": workspace.workspace_id,
                     "destination_workspace_id": destination_id,
                     "destination_remote": destination_remote,
@@ -610,6 +615,7 @@ def _sequence_ack(workspace: Workspace, manifest: Mapping[str, Any]) -> dict[str
             "format_version": 2,
             "transfer_id": manifest["transfer_id"],
             "transfer_sequence": manifest["transfer_sequence"],
+            **({"transfer_epoch": manifest["transfer_epoch"]} if "transfer_epoch" in manifest else {}),
             "source_workspace_id": manifest["source_workspace_id"],
             "destination_workspace_id": workspace.workspace_id,
             "payload_sha256": manifest["payload_sha256"],
@@ -621,8 +627,41 @@ def _sequence_ack(workspace: Workspace, manifest: Mapping[str, Any]) -> dict[str
     )
 
 
+_UNKNOWN_MARKER = object()
+
+
 @receipts.serialized
 def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
+    """Import one sealed bundle, or validate and acknowledge its replay."""
+
+    return _import_one(workspace, bundle)
+
+
+@receipts.serialized
+def import_bundles(workspace: Workspace, bundles: Sequence[str | os.PathLike[str]]) -> list[dict[str, object]]:
+    """Import a batch under one protocol lock and one destination identity scan."""
+
+    if len(bundles) <= 1:
+        return [_import_one(workspace, bundle) for bundle in bundles]
+    markers: dict[str, Marker] = {}
+    for marker in workspace.scan_markers(STATE_KINDS):
+        if marker.job_id in markers:
+            raise WorkspaceCorruptionError(f"destination has multiple markers for job UUID {marker.job_id}")
+        markers[marker.job_id] = marker
+    results = []
+    seen: set[str] = set()
+    for bundle in bundles:
+        manifest = validate_bundle(bundle)
+        job_id = str(manifest["job_id"])
+        known = _UNKNOWN_MARKER if job_id in seen else markers.get(job_id)
+        results.append(_import_one(workspace, bundle, known_marker=known))
+        seen.add(job_id)
+    return results
+
+
+def _import_one(
+    workspace: Workspace, bundle: str | os.PathLike[str], *, known_marker: object = _UNKNOWN_MARKER
+) -> dict[str, object]:
     """Import once, recording a compact durable receipt before pruning metadata.
 
     Legacy bundles have no sequence and must retain their individual receipts.
@@ -634,17 +673,32 @@ def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[
     manifest = validate_bundle(bundle)
     if manifest["destination_workspace_id"] != workspace.workspace_id:
         raise ValueError("bundle names a different destination workspace")
+    marker = workspace.find_marker_by_id(str(manifest["job_id"])) if known_marker is _UNKNOWN_MARKER else known_marker
+    assert marker is None or isinstance(marker, Marker)
     if receipts.sequence_of(manifest) is None:
-        return _import_bundle(workspace, bundle)
+        return _import_bundle(workspace, bundle, known_marker=marker)
     identity_seed()
-    if not receipts.received(workspace, manifest):
-        _import_bundle(workspace, bundle)
+    if receipts.received(workspace, manifest):
+        if marker is not None:
+            provenance = workspace.read_state(marker).get("transfer")
+            if not isinstance(provenance, Mapping) or any(
+                provenance.get(key) != manifest.get(key) for key in ("transfer_id", "payload_sha256", "transfer_epoch")
+            ):
+                raise WorkspaceCorruptionError("received sequence conflicts with destination job provenance")
+        elif receipts.epoch_of(manifest) is None:
+            # Pre-epoch compact ranges cannot distinguish a replay from a
+            # reused allocator. Never fabricate an acknowledgement for them.
+            raise WorkspaceCorruptionError("legacy receipt has no epoch or live job; cannot safely acknowledge replay")
+    else:
+        _import_bundle(workspace, bundle, known_marker=marker)
         receipts.remember(workspace, manifest)
     _prune_import_receipts(workspace, str(manifest["transfer_id"]))
     return _sequence_ack(workspace, manifest)
 
 
-def _import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[str, object]:
+def _import_bundle(
+    workspace: Workspace, bundle: str | os.PathLike[str], *, known_marker: object = _UNKNOWN_MARKER
+) -> dict[str, object]:
     """Idempotently import a sealed bundle and publish its prior state.
 
     Runners are installed and verified before the imported job becomes schedulable;
@@ -677,11 +731,12 @@ def _import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict
     # Runners are installed before anything about the job is published, because
     # an imported job must never become schedulable without the runner it pins.
     _install_bundled_runners(workspace, source, manifest)
-    duplicates = [marker for marker in _all_markers(workspace) if marker.job_id == manifest["job_id"]]
-    if duplicates:
-        if len(duplicates) != 1:
-            raise WorkspaceCorruptionError(f"destination has multiple markers for job UUID {manifest['job_id']}")
-        duplicate_state = workspace.read_state(duplicates[0])
+    duplicate = (
+        workspace.find_marker_by_id(str(manifest["job_id"])) if known_marker is _UNKNOWN_MARKER else known_marker
+    )
+    assert duplicate is None or isinstance(duplicate, Marker)
+    if duplicate is not None:
+        duplicate_state = workspace.read_state(duplicate)
         provenance = duplicate_state.get("transfer")
         if not isinstance(provenance, Mapping) or provenance.get("transfer_id") != transfer_id:
             raise FileExistsError(f"destination already contains job UUID {manifest['job_id']}")
@@ -698,11 +753,11 @@ def _import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict
                 "job_id": manifest["job_id"],
                 "job_key": manifest["job_key"],
                 "placement": duplicate_state["placement"],
-                "state": duplicates[0].kind,
+                "state": duplicate.kind,
                 "acknowledged_at": utc_now(),
             }
         )
-        transfer_dir = workspace.payload_path(duplicates[0].placement, duplicates[0].job_key) / TRANSFER_DIRECTORY
+        transfer_dir = workspace.payload_path(duplicate.placement, duplicate.job_key) / TRANSFER_DIRECTORY
         if transfer_dir.exists():
             _install_bundled_seal(workspace, transfer_dir, manifest)
             _remove_tree(transfer_dir)
@@ -764,6 +819,7 @@ def _import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict
         "transfer": {
             "transfer_id": transfer_id,
             **({"transfer_sequence": manifest["transfer_sequence"]} if "transfer_sequence" in manifest else {}),
+            **({"transfer_epoch": manifest["transfer_epoch"]} if "transfer_epoch" in manifest else {}),
             "source_workspace_id": manifest["source_workspace_id"],
             "payload_sha256": digest,
         },
@@ -849,12 +905,11 @@ def _reclaim_retired_transfer(workspace: Workspace, ledger: Mapping[str, Any]) -
         retired.parent.rmdir()
     except OSError:
         pass
-    from .gc import collect_retired_journal
-
-    collect_retired_journal(workspace, ledger.get("retired_journal_refs", []))
 
 
-def _remember_pending_journal(workspace: Workspace, references: Sequence[str]) -> None:
+def _remember_pending_journal(
+    workspace: Workspace, references: Sequence[str], *, transfer_id: str | None = None
+) -> None:
     """Keep shared-segment recovery once per segment, never once per job."""
 
     from .gc import collect_retired_journal
@@ -865,10 +920,12 @@ def _remember_pending_journal(workspace: Workspace, references: Sequence[str]) -
     for reference in references:
         writer, segment, *_ = parse_record_ref(reference)
         pending[f"{writer}/{segment}"] = reference
+    if not pending:
+        return
     # Inventory publication precedes removal of the last per-job ledger. A
     # killed collector can always retry from this shared recovery inventory.
     write_json_atomic(path, pending, durable=workspace.durable)
-    collect_retired_journal(workspace, list(pending.values()))
+    collect_retired_journal(workspace, list(pending.values()), transfer_id=transfer_id)
     if workspace.durable:
         for reference in pending.values():
             directory = segment_path(workspace.control, *parse_record_ref(reference)[:2]).parent
@@ -881,7 +938,12 @@ def _remember_pending_journal(workspace: Workspace, references: Sequence[str]) -
     pending = {
         key: ref for key, ref in pending.items() if segment_path(workspace.control, *parse_record_ref(ref)[:2]).exists()
     }
-    write_json_atomic(path, pending, durable=workspace.durable)
+    if pending:
+        write_json_atomic(path, pending, durable=workspace.durable)
+    else:
+        path.unlink(missing_ok=True)
+        if workspace.durable:
+            fsync_directory(path.parent)
 
 
 def _retire_sealed_bundle(
@@ -902,7 +964,7 @@ def _retire_sealed_bundle(
     if not ledger_path.exists():
         return workspace.control / "transfers" / "retired" / transfer_id / "bundle"
     ledger = read_json(ledger_path)
-    receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["job_id"]))
+    receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["transfer_id"]))
     if ledger.get("status") != "retired":
         bundle = Path(str(ledger["bundle"]))
         retired = workspace.control / "transfers" / "retired" / transfer_id / "bundle"
@@ -937,7 +999,7 @@ def _retire_sealed_bundle(
         write_json_atomic(ledger_path, ledger, durable=workspace.durable)
     _reclaim_retired_transfer(workspace, ledger)
     if workspace.policy.retention.trash_days is not None:
-        _remember_pending_journal(workspace, ledger.get("retired_journal_refs", []))
+        _remember_pending_journal(workspace, ledger.get("retired_journal_refs", []), transfer_id=transfer_id)
         ledger_path.unlink(missing_ok=True)
         if workspace.durable:
             fsync_directory(ledger_path.parent)
@@ -946,6 +1008,22 @@ def _retire_sealed_bundle(
 
 @receipts.serialized
 def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, object]) -> Path:
+    """Validate one destination receipt and retire its exact source transfer."""
+
+    return _acknowledge_transfer(workspace, acknowledgement)
+
+
+@receipts.serialized
+def acknowledge_transfers(workspace: Workspace, acknowledgements: Sequence[Mapping[str, object]]) -> list[Path]:
+    """Retire a sweep using one journal-protection scan, rather than one per job."""
+
+    from .gc import retirement_batch
+
+    with retirement_batch(workspace):
+        return [_acknowledge_transfer(workspace, acknowledgement) for acknowledgement in acknowledgements]
+
+
+def _acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, object]) -> Path:
     """Validate an acknowledgement and retire the sealed source bundle.
 
     An acknowledgement that carries an identity signature must carry a valid
@@ -968,7 +1046,6 @@ def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, obj
     transfer_id = canonical_uuid(acknowledgement.get("transfer_id"), "transfer_id")
     ledger_path = _ledger_path(workspace, transfer_id)
     if not ledger_path.exists():
-        _remember_pending_journal(workspace, [])
         # No ledger is also the terminal state after successful reclamation.
         # Do not inspect or mutate a newer incarnation of the same job.
         return workspace.control / "transfers" / "retired" / transfer_id / "bundle"
@@ -977,7 +1054,14 @@ def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, obj
         "transfer_sequence"
     ):
         raise FormatError("transfer acknowledgement disagrees on transfer_sequence")
-    for name in ("source_workspace_id", "destination_workspace_id", "payload_sha256", "job_id", "job_key"):
+    for name in (
+        "source_workspace_id",
+        "destination_workspace_id",
+        "payload_sha256",
+        "job_id",
+        "job_key",
+        "transfer_epoch",
+    ):
         if acknowledgement.get(name) != ledger.get(name):
             raise FormatError(f"transfer acknowledgement disagrees on {name}")
     if signature.present:
@@ -999,13 +1083,11 @@ def recover_transfers(workspace: Workspace) -> list[dict[str, object]]:
     """
 
     results: list[dict[str, object]] = []
-    if (workspace.control / "transfers" / "protocol" / "journal.json").exists():
-        _remember_pending_journal(workspace, [])
     for ledger in _ledgers(workspace):
         if ledger.get("status") == "retired":
             _retire_sealed_bundle(workspace, str(ledger["transfer_id"]), provenance={})
         else:
-            receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["job_id"]))
+            receipts.sealed(workspace, str(ledger["destination_workspace_id"]), str(ledger["transfer_id"]))
     for marker in list(workspace.scan_markers(("transferring",))):
         state = workspace.read_state(marker)
         bundle = _seal_transferring(workspace, marker, state)

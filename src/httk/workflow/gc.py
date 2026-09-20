@@ -36,7 +36,10 @@ import logging
 import os
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -422,6 +425,9 @@ class _Collection:
         # is what decides whether the manager directory naming it is still
         # worth keeping.
         self._surviving_segments: dict[str, int] = {}
+        self._retirement_owners: dict[str, set[tuple[str, int]]] | None = None
+        self._retirement_counts: Counter[tuple[str, int]] = Counter()
+        self._retirement_scanned = False
 
     # -- shared observations -------------------------------------------------
 
@@ -475,7 +481,7 @@ class _Collection:
             return None
         return writer_id if isinstance(writer_id, str) and writer_id else None
 
-    def referenced_segments(self) -> set[tuple[str, int]]:
+    def referenced_segments(self, candidates: set[tuple[str, int]] | None = None) -> set[tuple[str, int]]:
         """Return every journal segment protected by current history.
 
         A terminal marker protects only its current segment. A non-terminal
@@ -488,6 +494,10 @@ class _Collection:
         as well and their segments are protected identically.
         """
 
+        if self._retirement_owners is not None and self._retirement_scanned:
+            if candidates is None:
+                return set(self._retirement_counts)
+            return {segment for segment in candidates if self._retirement_counts[segment] > 0}
         referenced: set[tuple[str, int]] = set()
         markers = self.markers()
 
@@ -520,8 +530,10 @@ class _Collection:
         for marker in markers:
             reference = _marker_record_ref(marker.path.name)
             if reference is not None:
-                protect(reference, walk=marker.kind not in TERMINAL_KINDS)
+                protect(reference, walk=marker.kind not in TERMINAL_KINDS or self._retirement_owners is not None)
 
+        if self._retirement_owners is not None:
+            self._retirement_counts.update(referenced)
         for ledger_path in _iterdir(self.control / "transfers"):
             if not ledger_path.is_file() or ledger_path.suffix != ".json":
                 continue
@@ -532,7 +544,18 @@ class _Collection:
             if ledger.get("status") == "sealed" and isinstance(ledger.get("sealed_marker"), str):
                 reference = _marker_record_ref(str(ledger["sealed_marker"]))
                 if reference is not None:
-                    protect(reference, walk=True)
+                    if self._retirement_owners is None:
+                        protect(reference, walk=True)
+                    else:
+                        earlier = referenced
+                        referenced = set()
+                        protect(reference, walk=True)
+                        self._retirement_owners[str(ledger["transfer_id"])] = referenced
+                        self._retirement_counts.update(referenced)
+                        earlier.update(referenced)
+                        referenced = earlier
+        if self._retirement_owners is not None:
+            self._retirement_scanned = True
         return referenced
 
     # -- bookkeeping ---------------------------------------------------------
@@ -851,17 +874,19 @@ class _Collection:
         cutoff = self._cutoff(self.retention.journal_days)
         if cutoff is None:
             self._skip("journal_segments", "retention.journal_days is not configured")
-            self._count_all_segments(journal)
+            if retired_segments is None:
+                self._count_all_segments(journal)
             return
         live = self.live_managers()
         if self._opaque_live_manager:
             self._skip("journal_segments", "a live manager does not name its journal writer")
-            self._count_all_segments(journal)
+            if retired_segments is None:
+                self._count_all_segments(journal)
             return
         live_writers = {writer_id for writer_id in live.values() if writer_id is not None}
         if self.journal_writer is not None:
             live_writers.add(self.journal_writer.writer_id)
-        referenced = self.referenced_segments()
+        referenced = self.referenced_segments(retired_segments)
         writer_dirs = (
             _iterdir(journal)
             if retired_segments is None
@@ -1087,7 +1112,28 @@ def _segment_number(path: Path) -> int | None:
         return None
 
 
-def collect_retired_journal(workspace: "Workspace", references: Sequence[str]) -> None:
+_retirement_collections: ContextVar[dict[str, "_Collection"] | None] = ContextVar(
+    "retirement_collections", default=None
+)
+
+
+@contextmanager
+def retirement_batch(workspace: "Workspace") -> Iterator[None]:
+    """Share one protection scan across a batch of already sealed sources."""
+
+    collection = _Collection(workspace, dry_run=False, now=time.time(), sizes=False)
+    collection._retirement_owners = {}
+    collection._retirement_counts = Counter()
+    token = _retirement_collections.set({**(_retirement_collections.get() or {}), str(workspace.control): collection})
+    try:
+        yield
+    finally:
+        _retirement_collections.reset(token)
+
+
+def collect_retired_journal(
+    workspace: "Workspace", references: Sequence[str], *, transfer_id: str | None = None
+) -> None:
     """Reclaim a retired transfer's unprotected source segments without aging.
 
     The retired ledger supplies the candidate references and is the cleanup
@@ -1103,7 +1149,14 @@ def collect_retired_journal(workspace: "Workspace", references: Sequence[str]) -
     if retention.trash_days is None or retention.journal_days is None or not references:
         return
     segments = {parse_record_ref(reference)[:2] for reference in references}
-    collection = _Collection(workspace, dry_run=False, now=time.time(), sizes=False)
+    collection = (_retirement_collections.get() or {}).get(str(workspace.control))
+    if collection is None:
+        collection = _Collection(workspace, dry_run=False, now=time.time(), sizes=False)
+    if transfer_id is not None and collection._retirement_owners is not None:
+        for segment in collection._retirement_owners.pop(transfer_id, set()):
+            collection._retirement_counts[segment] -= 1
+            if collection._retirement_counts[segment] == 0:
+                del collection._retirement_counts[segment]
     collection.collect_journal_segments(retired_segments=segments)
 
 

@@ -146,7 +146,8 @@ def test_out_of_order_imports_compact_only_after_holes_are_filled(tmp_path):
         assert destination.import_bundle(bundle) == first
         source.acknowledge_transfer(first)
     received = json.loads((destination.control / 'transfers/protocol/received.json').read_text())
-    assert received == {source.workspace_id: [[1, 8]]}
+    epoch = first["transfer_epoch"]
+    assert received == {f"{source.workspace_id}/{epoch}": [[1, 8]]}
     _no_transfer_files(source)
     _no_transfer_files(destination)
 
@@ -168,7 +169,10 @@ def test_reservation_interrupted_before_fencing_reuses_sequence(tmp_path, monkey
     assert transfers.validate_bundle(bundle)['transfer_sequence'] == 1
     source.acknowledge_transfer(destination.import_bundle(bundle))
     issued = json.loads((source.control / 'transfers/protocol/issued.json').read_text())
-    assert issued == {destination.workspace_id: {'last': 1, 'pending': {}}}
+    assert issued == {
+        destination.workspace_id: {'epoch': issued[destination.workspace_id]['epoch'], 'last': 1, 'pending': {}}
+    }
+    assert len(issued[destination.workspace_id]['epoch']) == 36
 
     assert not list((source.control / 'journal').iterdir())
 

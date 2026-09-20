@@ -139,7 +139,6 @@ def test_resuming_a_transfer_requires_the_destination_remote_to_match(
         calls.append(kwargs)
         return bundle
 
-    monkeypatch.setattr(source, "find_marker_by_id", lambda _job_id: object())
     monkeypatch.setattr(source, "detach", detach)
     monkeypatch.setattr(source, "acknowledge_transfer", lambda _acknowledgement: None)
 
@@ -151,9 +150,13 @@ def test_resuming_a_transfer_requires_the_destination_remote_to_match(
         return {"returncode": 0, "stdout": json.dumps({"transfer_id": str(uuid.uuid4())})}
 
     monkeypatch.setattr(transfer_cli, "run_adapter", adapter)
-    transfer_cli._send_jobs_to_remote(source, target, "destination", [job_id], destination_placement=None, timeout=None)
-    assert calls and calls[0]["destination_remote"] == "cluster"
-    assert calls[0]["transfer_id"] != foreign_id
+    moved = transfer_cli._send_jobs_to_remote(
+        source, target, "destination", [job_id], destination_placement=None, timeout=None
+    )
+    assert moved == [] and calls == []  # No live job; a foreign ledger cannot be resumed here.
+    assert transfer_cli._skipped_report([job_id], moved)["skipped"] == [
+        {"job_id": job_id, "reason": "not found or already completed"}
+    ]
 
 
 def test_a_sealed_ledger_without_destination_remote_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -190,7 +193,8 @@ def test_transfer_adapter_requests_are_exact_argv(tmp_path: Path, monkeypatch: p
     detached: list[dict[str, object]] = []
     bundle = tmp_path / "bundle"
     bundle.mkdir()
-    job_id = str(uuid.uuid4())
+    payload, job_id = _payload(tmp_path / "real-job")
+    source.submit(payload, "jobs")
 
     def adapter(
         _bundle: Path, operation: str, request: dict[str, object], *, timeout: float | None
@@ -214,9 +218,8 @@ def test_transfer_adapter_requests_are_exact_argv(tmp_path: Path, monkeypatch: p
         detached.append(kwargs)
         return bundle
 
-    monkeypatch.setattr(source, "find_marker_by_id", lambda _job_id: object())
     monkeypatch.setattr(source, "detach", detach)
-    monkeypatch.setattr(source, "acknowledge_transfer", lambda _acknowledgement: None)
+    monkeypatch.setattr(transfer_cli, "acknowledge_transfers", lambda _source, _acks: [])
 
     transfer_cli._remote_offer(
         target,
@@ -625,10 +628,14 @@ def test_receive_does_not_remind_for_buildless_runner_trees(tmp_path: Path, caps
 # ---------------------------------------------------------------------------
 
 
-def test_every_transfer_ledger_write_is_durability_aware() -> None:
+@pytest.mark.parametrize("module_name", ["httk.workflow.transfers", "httk.workflow._transfer_receipts"])
+def test_every_transfer_ledger_write_is_durability_aware(module_name: str) -> None:
     """No write of the transfer protocol may quietly ignore workspace durability."""
 
-    tree = ast.parse(Path(str(transfers_module.__file__)).read_text(encoding="utf-8"))
+    import importlib
+
+    module = importlib.import_module(module_name)
+    tree = ast.parse(Path(str(module.__file__)).read_text(encoding="utf-8"))
     calls = [
         node
         for node in ast.walk(tree)

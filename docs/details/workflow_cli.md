@@ -1127,7 +1127,8 @@ A `null` or `"keep"` retention member means *keep*. On a fresh workspace,
 `attempt_control_days` stays unlimited. Completed transfers are an exception:
 after acknowledgement, retirement durably records the handover, then immediately
 removes the retired payload and its unprotected source journal segments, ignoring
-numeric retention ages. The small transfer ledger remains for idempotency. Set
+numeric retention ages. The transfer ledger is then pruned; durable epoch-scoped
+receipt ranges provide replay protection at the destination. Set
 `retention.trash_days` to `"keep"` (or `null`) **before retirement** to keep both
 at retirement; `retention.journal_days: "keep"` independently keeps the journal.
 Ordinary GC still applies each category's own limit, so set both members to

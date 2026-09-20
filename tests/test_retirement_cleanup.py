@@ -103,6 +103,10 @@ def test_retirement_keeps_live_manager_segments(tmp_path, opaque):
         assert _segments(source) == before
     (manager / "heartbeat.json").unlink()
     source.acknowledge_transfer(acknowledgement)
+    # A completed-transfer no-op must not trigger unrelated collection. An
+    # explicit cleanup retries the retained, segment-scoped inventory.
+    assert protected.exists()
+    transfers._remember_pending_journal(source, [])
     assert not _segments(source)
 
 

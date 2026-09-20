@@ -50,7 +50,9 @@ from ..transfers import (
     TRANSFER_RETIREMENT_FORMAT,
     TransferCandidate,
     _waiting_parent_map,
+    acknowledge_transfers,
     discard_staged_bundle,
+    import_bundles,
     offer_transfers,
     retire_transfers,
     select_transfer_jobs,
@@ -66,6 +68,23 @@ from ._common import (
     _settings,
     confirm,
 )
+
+
+def _skipped_report(job_ids: Sequence[str], records: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    completed = {str(record.get("job_id")) for record in records}
+    skipped = [
+        {"job_id": job_id, "reason": "not found or already completed"}
+        for job_id in dict.fromkeys(job_ids)
+        if job_id not in completed
+    ]
+    return {"skipped": skipped} if skipped else {}
+
+
+def _print_skipped(report: Mapping[str, object]) -> None:
+    entries = report.get("skipped", [])
+    assert isinstance(entries, list)
+    for entry in entries:
+        print(f"skipped {entry['job_id']}: {entry['reason']}", file=sys.stderr)
 
 
 def _print_build_reminder(
@@ -564,6 +583,31 @@ def _remote_workspace_settings(target: Any, name: str, *, timeout: float | None)
     return value
 
 
+def _receive_remote(
+    target: Any, name: str, bundles: Sequence[str], *, timeout: float | None, quiet: bool
+) -> list[dict[str, object]]:
+    if not bundles:
+        return []
+    argv = [*REMOTE_RECEIVE_COMMAND, "--workspace", name]
+    for bundle in bundles:
+        argv += ["--bundle", bundle]
+    response = run_adapter(target.bundle, "invoke", {"argv": argv}, timeout=timeout)
+    if response.get("returncode") != 0:
+        raise RuntimeError(f"destination import failed: {response.get('stderr', '')}")
+    if not quiet:
+        _relay_success_stderr(response)
+    try:
+        document = json.loads(str(response.get("stdout", "")))
+        acknowledgements = [document] if len(bundles) == 1 else document["acknowledgements"]
+        if not isinstance(acknowledgements, list) or len(acknowledgements) != len(bundles):
+            raise ValueError
+        if not all(isinstance(ack, dict) for ack in acknowledgements):
+            raise ValueError
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ValueError("destination import did not return the requested acknowledgements") from exc
+    return acknowledgements
+
+
 def _send_jobs_to_remote(
     source: Workspace,
     target: Any,
@@ -607,13 +651,20 @@ def _send_jobs_to_remote(
             quiet=quiet,
         )
     source.recover_transfers()
-    acknowledgements: list[dict[str, object]] = []
-    known_by_id = {} if known_markers is None else {marker.job_id: marker for marker in known_markers}
+    remote_bundles: list[str] = []
+    ledger_paths = list((source.control / "transfers").glob("*.json"))
+    ledgers_by_job: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
+    for path in ledger_paths:
+        ledger = read_json(path)
+        ledgers_by_job.setdefault(str(ledger.get("job_id")), []).append((path, ledger))
+    known_by_id = {
+        candidate.job_id: candidate.marker for candidate in precheck_candidates if candidate.marker is not None
+    }
+    if known_markers is not None:
+        known_by_id.update({marker.job_id: marker for marker in known_markers})
     for job_id in jobs:
-        source.recover_transfers()
         candidates: list[tuple[Path, dict[str, object]]] = []
-        for ledger_path in (source.control / "transfers").glob("*.json"):
-            ledger = read_json(ledger_path)
+        for ledger_path, ledger in ledgers_by_job.get(job_id, []):
             if ledger.get("job_id") != job_id or ledger.get("status") != "sealed":
                 continue
             if ledger.get("destination_workspace_id") != destination_workspace_id:
@@ -630,7 +681,7 @@ def _send_jobs_to_remote(
                 f"cannot resume job {job_id}: sealed transfer ledger {ledger_path} is ambiguous; "
                 "retire it or fetch the job from the destination"
             )
-        if not candidates and source.find_marker_by_id(job_id) is None:
+        if not candidates and job_id not in known_by_id and source.find_marker_by_id(job_id) is None:
             continue
         transfer_id = str(candidates[0][1]["transfer_id"]) if candidates else str(uuid.uuid4())
         if candidates and destination_placement:
@@ -654,32 +705,9 @@ def _send_jobs_to_remote(
             timeout=timeout,
         )
         remote_bundle = str(push.get("path", incoming))
-        invoked = run_adapter(
-            target.bundle,
-            "invoke",
-            {
-                "argv": [
-                    *REMOTE_RECEIVE_COMMAND,
-                    "--workspace",
-                    destination_name,
-                    "--bundle",
-                    remote_bundle,
-                ],
-            },
-            timeout=timeout,
-        )
-        if invoked.get("returncode") != 0:
-            raise RuntimeError(f"destination import failed: {invoked.get('stderr', '')}")
-        if not quiet:
-            _relay_success_stderr(invoked)
-        try:
-            acknowledgement = json.loads(str(invoked.get("stdout", "")))
-        except json.JSONDecodeError as exc:
-            raise ValueError("destination import did not return an acknowledgement") from exc
-        if not isinstance(acknowledgement, dict):
-            raise ValueError("destination acknowledgement is not an object")
-        source.acknowledge_transfer(acknowledgement)
-        acknowledgements.append(acknowledgement)
+        remote_bundles.append(remote_bundle)
+    acknowledgements = _receive_remote(target, destination_name, remote_bundles, timeout=timeout, quiet=quiet)
+    acknowledge_transfers(source, acknowledgements)
     return acknowledgements
 
 
@@ -716,12 +744,15 @@ def handle_transfer_receive(arguments: argparse.Namespace, context: CLIContext) 
     """
 
     workspace = _protocol_workspace(arguments.workspace, context)
-    acknowledgement = workspace.import_bundle(arguments.bundle)
-    staging = Path(arguments.bundle).expanduser().resolve()
-    if staging.parent == (workspace.control / "transfers" / "incoming").resolve():
-        discard_staged_bundle(workspace, staging)
-    print(json.dumps(acknowledgement, sort_keys=True, separators=(",", ":")))
-    _print_build_reminder(workspace, acknowledgement)
+    bundles = arguments.bundle if isinstance(arguments.bundle, list) else [arguments.bundle]
+    acknowledgements = import_bundles(workspace, bundles)
+    for bundle, acknowledgement in zip(bundles, acknowledgements, strict=True):
+        staging = Path(bundle).expanduser().resolve()
+        if staging.parent == (workspace.control / "transfers" / "incoming").resolve():
+            discard_staged_bundle(workspace, staging)
+        _print_build_reminder(workspace, acknowledgement)
+    document = acknowledgements[0] if len(bundles) == 1 else {"acknowledgements": acknowledgements}
+    print(json.dumps(document, sort_keys=True, separators=(",", ":")))
     return 0
 
 
@@ -771,9 +802,11 @@ def handle_transfer_offer(arguments: argparse.Namespace, context: CLIContext) ->
             "workspace_id": workspace.workspace_id,
             "destination_workspace_id": arguments.destination_workspace_id,
             "offers": offers,
+            **_skipped_report(arguments.jobs, offers),
         }
         print(json.dumps(document, sort_keys=True, separators=(",", ":")))
         return 0
+    _print_skipped(_skipped_report(arguments.jobs, offers))
     for offer in offers:
         print(f"{offer['job_key']}\t{offer['state']}\t{offer['bundle_path']}")
     return 0
@@ -800,7 +833,8 @@ def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -
         for ack in acknowledgements:
             if ack.get("destination_workspace_id") != arguments.destination_workspace_id:
                 raise ValueError("retirement acknowledgement names another destination")
-            path = workspace.acknowledge_transfer(ack)
+        paths = acknowledge_transfers(workspace, acknowledgements)
+        for ack, path in zip(acknowledgements, paths, strict=True):
             retired.append(
                 {
                     "transfer_id": ack["transfer_id"],
@@ -815,9 +849,11 @@ def handle_transfer_retire(arguments: argparse.Namespace, context: CLIContext) -
             "format": TRANSFER_RETIREMENT_FORMAT,
             "format_version": 2,
             "retired": retired,
+            **_skipped_report(arguments.jobs, retired),
         }
         print(json.dumps(document, sort_keys=True, separators=(",", ":")))
         return 0
+    _print_skipped(_skipped_report(arguments.jobs, retired))
     for entry in retired:
         print(f"{entry['job_key']}\t{entry['status']}\t{entry['retired_bundle']}")
     return 0
@@ -970,7 +1006,8 @@ def _fetch_jobs_from_remote(
     )
     _require_offers_for_jobs(offers, jobs)
     staging_root = local.control / "transfers" / "incoming"
-    acknowledgements: list[dict[str, object]] = []
+    staged: list[Path] = []
+    pulled_paths: list[str] = []
     for offer in offers:
         transfer_id = canonical_uuid(offer.get("transfer_id"), "transfer_id")
         staging = staging_root / transfer_id
@@ -983,14 +1020,13 @@ def _fetch_jobs_from_remote(
             },
             timeout=timeout,
         )
-        acknowledgement = local.import_bundle(str(pulled.get("path", staging)))
+        pulled_paths.append(str(pulled.get("path", staging)))
+        staged.append(staging)
+    acknowledgements = import_bundles(local, pulled_paths)
+    for acknowledgement, staging in zip(acknowledgements, staged, strict=True):
         if not quiet:
             _print_build_reminder(local, acknowledgement)
-        # The payload now lives at its placement in this workspace, so the
-        # staged copy is dropped through a rename rather than left to be
-        # re-imported by the next fetch.
         discard_staged_bundle(local, staging)
-        acknowledgements.append(acknowledgement)
     retired = _remote_retire(
         target,
         remote_name,
@@ -1033,32 +1069,37 @@ def _transfer_local_to_local(
         candidates=candidates,
         quiet=quiet,
     )
-    acknowledgements: list[dict[str, object]] = []
-    known_by_id = {} if known_markers is None else {marker.job_id: marker for marker in known_markers}
-    for job_id in jobs:
-        source.recover_transfers()
-        resumable = select_transfer_jobs(
+    source.recover_transfers()
+    if any(candidate.marker is not None and candidate.marker.kind == "transferring" for candidate in candidates):
+        candidates = select_transfer_jobs(
             source,
             destination_workspace_id=destination.workspace_id,
             states=QUIESCENT_KINDS,
-            job_ids=(job_id,),
+            job_ids=jobs,
+            waiting_parent_map=waiting_parent_map,
         )
+    bundles: list[Path] = []
+    known_by_id = {} if known_markers is None else {marker.job_id: marker for marker in known_markers}
+    selected = {candidate.job_id: candidate for candidate in candidates}
+    for job_id in jobs:
+        resumable = [selected[job_id]] if job_id in selected else []
         if not resumable and source.find_marker_by_id(job_id) is None:
             continue
         bundle = resumable[0].bundle if resumable else None
         if bundle is None:
             bundle = source.detach(
                 job_id,
-                marker=known_by_id.get(job_id),
+                marker=known_by_id.get(job_id) or (resumable[0].marker if resumable else None),
                 waiting_parent_map=waiting_parent_map,
                 destination_workspace_id=destination.workspace_id,
                 transfer_id=str(uuid.uuid4()),
             )
-        acknowledgement = destination.import_bundle(str(bundle))
-        source.acknowledge_transfer(acknowledgement)
-        if not quiet:
+        bundles.append(bundle)
+    acknowledgements = import_bundles(destination, bundles)
+    if not quiet:
+        for acknowledgement in acknowledgements:
             _print_build_reminder(destination, acknowledgement)
-        acknowledgements.append(acknowledgement)
+    acknowledge_transfers(source, acknowledgements)
     return acknowledgements
 
 
@@ -1107,7 +1148,7 @@ def _transfer_remote_to_remote(
         quiet=quiet,
     )
     _require_offers_for_jobs(offers, jobs)
-    acknowledgements: list[dict[str, object]] = []
+    remote_bundles: list[str] = []
     with tempfile.TemporaryDirectory(prefix="httk-relay-") as relay:
         for offer in offers:
             transfer_id = canonical_uuid(offer.get("transfer_id"), "transfer_id")
@@ -1133,31 +1174,10 @@ def _transfer_remote_to_remote(
                 timeout=timeout,
             )
             remote_bundle = str(pushed.get("path", incoming))
-            imported = run_adapter(
-                destination_target.bundle,
-                "invoke",
-                {
-                    "argv": [
-                        *REMOTE_RECEIVE_COMMAND,
-                        "--workspace",
-                        destination_name,
-                        "--bundle",
-                        remote_bundle,
-                    ],
-                },
-                timeout=timeout,
-            )
-            if imported.get("returncode") != 0:
-                raise RuntimeError(f"destination import failed: {imported.get('stderr', '')}")
-            if not quiet:
-                _relay_success_stderr(imported)
-            try:
-                acknowledgement = json.loads(str(imported.get("stdout", "")))
-            except json.JSONDecodeError as exc:
-                raise ValueError("destination import did not return an acknowledgement") from exc
-            if not isinstance(acknowledgement, dict):
-                raise ValueError("destination acknowledgement is not an object")
-            acknowledgements.append(acknowledgement)
+            remote_bundles.append(remote_bundle)
+    acknowledgements = _receive_remote(
+        destination_target, destination_name, remote_bundles, timeout=timeout, quiet=quiet
+    )
     retired = _remote_retire(
         source_target,
         source_name,
@@ -1248,7 +1268,7 @@ def run_transfer_verb_result(
             quiet=quiet,
             known_markers=known_markers,
         )
-        return {"moved": acknowledgements}
+        return {"moved": acknowledgements, **_skipped_report(arguments.jobs, acknowledgements)}
     if destination_local and not source_local:
         assert destination_binding.path is not None
         target = resolve_remote(source_binding.remote, project=context.cwd)
@@ -1264,7 +1284,7 @@ def run_transfer_verb_result(
             strict_environment=arguments.strict_environment,
             quiet=quiet,
         )
-        return {"moved": acknowledgements, "retired": retired}
+        return {"moved": acknowledgements, "retired": retired, **_skipped_report(arguments.jobs, acknowledgements)}
     if source_local and destination_local:
         assert source_binding.path is not None and destination_binding.path is not None
         acknowledgements = _transfer_local_to_local(
@@ -1275,7 +1295,7 @@ def run_transfer_verb_result(
             quiet=quiet,
             known_markers=known_markers,
         )
-        return {"moved": acknowledgements}
+        return {"moved": acknowledgements, **_skipped_report(arguments.jobs, acknowledgements)}
     destination_target = resolve_remote(destination_binding.remote, project=context.cwd)
     try:
         destination_settings = _remote_workspace_settings(
@@ -1305,7 +1325,7 @@ def run_transfer_verb_result(
         strict_environment=arguments.strict_environment,
         quiet=quiet,
     )
-    return {"moved": acknowledgements, "retired": retired}
+    return {"moved": acknowledgements, "retired": retired, **_skipped_report(arguments.jobs, acknowledgements)}
 
 
 def _report_transfer(arguments: argparse.Namespace, report: Mapping[str, object]) -> int:
@@ -1314,6 +1334,7 @@ def _report_transfer(arguments: argparse.Namespace, report: Mapping[str, object]
     if arguments.json:
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
+    _print_skipped(report)
     moved = report.get("moved", [])
     assert isinstance(moved, list)
     for acknowledgement in moved:
@@ -1330,7 +1351,7 @@ def _dispatch_transfer_protocol(tokens: Sequence[str], context: CLIContext) -> i
 
     receive = protocol.add_parser("receive")
     receive.add_argument("--workspace", metavar="WORKSPACE", required=True)
-    receive.add_argument("--bundle", metavar="BUNDLE", required=True)
+    receive.add_argument("--bundle", metavar="BUNDLE", required=True, action="append")
     receive.set_defaults(handler=handle_transfer_receive)
 
     offer = protocol.add_parser("offer")
