@@ -453,8 +453,9 @@ def test_transfer_acknowledgement_is_signed_and_a_forged_one_is_refused(tmp_path
     with pytest.raises(FormatError, match="signature is invalid"):
         source.acknowledge_transfer(forged)
 
+    assert bundle.is_dir()  # A rejected acknowledgement cannot reclaim the source.
     retired = source.acknowledge_transfer(acknowledgement)
-    assert retired.is_dir()
+    assert not retired.exists()
 
 
 # ---------------------------------------------------------------------------

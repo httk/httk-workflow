@@ -233,8 +233,9 @@ def test_transfer_round_trip_is_idempotent(tmp_path: Path) -> None:
     )
     assert source.recover_transfers()[0]["transfer_id"] == transfer_id
     acknowledgement = destination.import_bundle(bundle)
+    assert destination.import_bundle(bundle) == acknowledgement
     retired = source.acknowledge_transfer(acknowledgement)
-    assert destination.import_bundle(retired) == acknowledgement
+    assert not retired.exists()
     assert source.acknowledge_transfer(acknowledgement) == retired
     marker = destination.find_marker_by_id(job_id)
     assert marker is not None and marker.kind == "submitted"

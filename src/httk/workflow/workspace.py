@@ -935,7 +935,7 @@ class Workspace:
         """Retire a source bundle after destination acknowledgement.
 
         :param acknowledgement: Supply the destination acknowledgement.
-        :return: The retired source bundle path.
+        :return: The retired source bundle identity path (normally already removed).
         """
 
         from .transfers import acknowledge_transfer

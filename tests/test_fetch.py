@@ -659,11 +659,8 @@ def test_fetch_retires_the_remote_sources_and_repeating_it_does_nothing(
     assert {str(entry["status"]) for entry in list(first["retired"])} == {"retired"}
 
     remote = pair.remote
-    # Every source bundle moved under retired/ whole; none is left in the tree.
-    retired = sorted((remote.control / "transfers" / "retired").iterdir())
-    assert len(retired) == 2
-    for entry in retired:
-        assert (entry / "bundle" / TRANSFER_DIRECTORY / "manifest.json").is_file()
+    # Every acknowledged source is retired and its redundant payload reclaimed.
+    assert list((remote.control / "transfers" / "retired").iterdir()) == []
     assert _live_bundles(remote) == []
     for name in ("succeeded", "failed"):
         assert remote.find_marker_by_id(pair.ids[name]) is None
@@ -887,7 +884,7 @@ def test_retire_is_idempotent_and_refuses_a_job_it_never_sealed(
     assert first["format"] == "httk-workflow-transfer-retirement"
     retired = list(first["retired"])
     assert len(retired) == 1 and retired[0]["status"] == "retired"
-    assert Path(str(retired[0]["retired_bundle"]), TRANSFER_DIRECTORY, "manifest.json").is_file()
+    assert not Path(str(retired[0]["retired_bundle"])).exists()
 
     assert command(argv, pair.context) == 0
     assert json.loads(capsys.readouterr().out) == first

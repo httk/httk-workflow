@@ -14,8 +14,9 @@ from typing import Any
 from httk.core.digests import sha256_file, tree_digest
 from httk.core.identity import identity_seed, sign_document, verify_document
 
-from ._util import read_json, utc_now, write_json_atomic
+from ._util import fsync_directory, read_json, utc_now, write_json_atomic
 from .errors import FormatError, WorkflowError, WorkspaceCorruptionError
+from .journal import iter_record_chain, parse_record_ref
 from .models import (
     CORE_PROFILE,
     QUIESCENT_KINDS,
@@ -714,40 +715,90 @@ def import_bundle(workspace: Workspace, bundle: str | os.PathLike[str]) -> dict[
     return acknowledgement
 
 
+def _retired_journal_refs(workspace: Workspace, ledger: Mapping[str, Any]) -> list[str]:
+    """Remember one reference per source-chain segment before reclaiming any.
+
+    Persisting these in the retired ledger lets a retry finish collection even
+    if a crash already removed the segment linking to older source history.
+    """
+
+    references: dict[tuple[str, int], str] = {}
+    reference = str(ledger.get("sealed_marker", "init")).rsplit(".", 1)[-1]
+    for current, frame in iter_record_chain(workspace.control, reference, deadline_seconds=0):
+        if frame is None:
+            break
+        writer_id, segment, *_ = parse_record_ref(current)
+        references[(writer_id, segment)] = current
+    return list(references.values())
+
+
+def _reclaim_retired_transfer(workspace: Workspace, ledger: Mapping[str, Any]) -> None:
+    """Reclaim only after the retired ledger is published; retries are safe."""
+
+    if workspace.policy.retention.trash_days is None:
+        return
+    retired = Path(str(ledger["retired_bundle"]))
+    if retired.exists():
+        _remove_tree(retired)
+    try:
+        retired.parent.rmdir()
+    except OSError:
+        pass
+    from .gc import collect_retired_journal
+
+    collect_retired_journal(workspace, ledger.get("retired_journal_refs", []))
+
+
 def _retire_sealed_bundle(
     workspace: Workspace,
     transfer_id: str,
     *,
     provenance: Mapping[str, object],
 ) -> Path:
-    """Move one sealed source bundle aside and record the move in its ledger.
+    """Atomically retire a sealed source, then reclaim its redundant history.
 
-    Retirement is a rename and never a delete: the whole bundle lands under
-    ``transfers/retired/`` intact, so a source is only ever fully retired or
-    fully live and no interrupted retirement can leave a half-removed payload
-    behind. Recognizing an already-moved bundle before validating one makes the
-    step resumable across a crash between the rename and the ledger write.
+    The whole bundle is renamed before the retired ledger is durably written.
+    Only then may deletion begin: interrupted deletion leaves a retired source,
+    never a partially live bundle. Repeating retirement finishes cleanup. The
+    returned path identifies the retired bundle even after its bytes are gone.
     """
 
     ledger_path = _ledger_path(workspace, transfer_id)
     ledger = read_json(ledger_path)
-    if ledger.get("status") == "retired":
-        return Path(str(ledger["retired_bundle"]))
-    bundle = Path(str(ledger["bundle"]))
-    retired = workspace.control / "transfers" / "retired" / transfer_id / "bundle"
-    if retired.exists():
-        if bundle.exists():
-            raise WorkspaceCorruptionError("both active and retired source bundles exist")
-    else:
-        validate_bundle(bundle)
-        retired.parent.mkdir(parents=True, exist_ok=True)
-        os.rename(bundle, retired)
-    # The seal travelled to the destination with the bundle; once the source is
-    # retired for good its own copy is an orphan, so drop it here and only here.
-    job_seal_path(workspace, str(ledger["job_key"])).unlink(missing_ok=True)
-    ledger.update({"status": "retired", "retired_bundle": str(retired), "updated_at": utc_now(), **provenance})
-    write_json_atomic(ledger_path, ledger, durable=workspace.durable)
-    return retired
+    if ledger.get("status") != "retired":
+        bundle = Path(str(ledger["bundle"]))
+        retired = workspace.control / "transfers" / "retired" / transfer_id / "bundle"
+        if retired.exists():
+            if bundle.exists():
+                raise WorkspaceCorruptionError("both active and retired source bundles exist")
+        else:
+            validate_bundle(bundle)
+            retired.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(bundle, retired)
+        if workspace.durable:
+            # Persist both sides of the rename and the newly created parents
+            # before a ledger can durably declare the source retired.
+            for directory in (bundle.parent, retired.parent, retired.parent.parent):
+                fsync_directory(directory)
+        # The seal travelled to the destination with the bundle.
+        job_seal_path(workspace, str(ledger["job_key"])).unlink(missing_ok=True)
+        ledger.update(
+            {
+                "status": "retired",
+                "retired_bundle": str(retired),
+                "retired_journal_refs": _retired_journal_refs(workspace, ledger),
+                "updated_at": utc_now(),
+                **provenance,
+            }
+        )
+        write_json_atomic(ledger_path, ledger, durable=workspace.durable)
+    elif "retired_journal_refs" not in ledger:
+        # Older retired ledgers predate eager cleanup; inventory their history
+        # before a retry can remove the links needed to find it.
+        ledger["retired_journal_refs"] = _retired_journal_refs(workspace, ledger)
+        write_json_atomic(ledger_path, ledger, durable=workspace.durable)
+    _reclaim_retired_transfer(workspace, ledger)
+    return Path(str(ledger["retired_bundle"]))
 
 
 def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, object]) -> Path:
@@ -761,7 +812,7 @@ def acknowledge_transfer(workspace: Workspace, acknowledgement: Mapping[str, obj
 
     :param workspace: Provide the source workspace.
     :param acknowledgement: Supply the destination acknowledgement.
-    :return: The retired source bundle path.
+    :return: The retired source bundle identity path (normally already removed).
     :raises httk.workflow.errors.FormatError: If the acknowledgement format, signature, or identity is invalid.
     """
 
@@ -1182,9 +1233,9 @@ def retire_transfers(
     A fetch retires at the source only once the destination holds an
     acknowledgement, so the identity of the job is all this side needs; naming
     the destination as well refuses to retire a bundle that was sealed for
-    somebody else. Retirement moves the bundle rather than deleting it, and a
-    bundle already retired is reported as such, so calling this twice is the
-    same as calling it once.
+    somebody else. Retirement renames the bundle, publishes its retired ledger,
+    then reclaims the bundle and unprotected source journal segments unless
+    retention says to keep them. Repeated retirement also retries cleanup.
 
     :param workspace: Provide the source workspace.
     :param job_ids: Identify the jobs whose bundles to retire.

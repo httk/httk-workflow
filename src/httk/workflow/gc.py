@@ -9,7 +9,9 @@ Over a long campaign that costs
 real space — one control directory per attempt, one journal writer directory
 and one manager directory per process start, a full copy of every tree a
 transaction replaced, an intact bundle for every transfer already acknowledged
-— and on a quota'd HPC filesystem that is what fails first.
+— and on a quota'd HPC filesystem that is what fails first. Completed transfers
+now eagerly reclaim their bundles and unprotected source journal segments,
+unless retention says to keep them; this collector handles remaining history.
 
 This module is the separate, explicit collector the specification asks for. It
 is driven by ``policy.retention`` for aged categories: ``journal_days`` and
@@ -530,7 +532,7 @@ class _Collection:
             if ledger.get("status") == "sealed" and isinstance(ledger.get("sealed_marker"), str):
                 reference = _marker_record_ref(str(ledger["sealed_marker"]))
                 if reference is not None:
-                    protect(reference, walk=False)
+                    protect(reference, walk=True)
         return referenced
 
     # -- bookkeeping ---------------------------------------------------------
@@ -833,7 +835,7 @@ class _Collection:
             if entry.is_file() and self._aged(entry, cutoff):
                 self._collect("retired_requests", entry, size=self._entry_size(entry))
 
-    def collect_journal_segments(self) -> None:
+    def collect_journal_segments(self, *, retired_segments: set[tuple[str, int]] | None = None) -> None:
         """Collect aged journal segments outside protected frame chains.
 
         Three conditions must hold together: the segment is older than
@@ -841,7 +843,8 @@ class _Collection:
         awaiting handover protects it, and the writer that produced it belongs
         to no manager still heartbeating. Terminal jobs protect only their
         current segment; non-terminal jobs protect every segment in their
-        frame chain.
+        frame chain. A retirement pass selects only its recorded source-chain
+        segments and bypasses age, retaining every other safety check.
         """
 
         journal = self.control / "journal"
@@ -859,7 +862,12 @@ class _Collection:
         if self.journal_writer is not None:
             live_writers.add(self.journal_writer.writer_id)
         referenced = self.referenced_segments()
-        for writer_dir in _iterdir(journal):
+        writer_dirs = (
+            _iterdir(journal)
+            if retired_segments is None
+            else [journal / writer_id for writer_id in sorted({writer for writer, _ in retired_segments})]
+        )
+        for writer_dir in writer_dirs:
             writer_id = _writer_id_of(writer_dir)
             if writer_id is None:
                 continue
@@ -870,7 +878,12 @@ class _Collection:
             surviving = 0
             for path in segments:
                 number = _segment_number(path)
-                if number is None or (writer_id, number) in referenced or not self._aged(path, cutoff):
+                if (
+                    number is None
+                    or (writer_id, number) in referenced
+                    or (retired_segments is None and not self._aged(path, cutoff))
+                    or (retired_segments is not None and (writer_id, number) not in retired_segments)
+                ):
                     surviving += 1
                     continue
                 self._collect("journal_segments", path, size=self._entry_size(path))
@@ -1072,6 +1085,26 @@ def _segment_number(path: Path) -> int | None:
         return int(path.stem, 36)
     except ValueError:
         return None
+
+
+def collect_retired_journal(workspace: "Workspace", references: Sequence[str]) -> None:
+    """Reclaim a retired transfer's unprotected source segments without aging.
+
+    The retired ledger supplies the candidate references and is the cleanup
+    record; this pass deliberately writes no new per-transfer journal stream.
+    Marker chains, sealed transfers, live managers and unlimited journal
+    retention are protected exactly as in ordinary collection.
+
+    :param workspace: The retired transfer's source workspace.
+    :param references: One saved record reference per candidate segment.
+    """
+
+    retention = workspace.policy.retention
+    if retention.trash_days is None or retention.journal_days is None or not references:
+        return
+    segments = {parse_record_ref(reference)[:2] for reference in references}
+    collection = _Collection(workspace, dry_run=False, now=time.time(), sizes=False)
+    collection.collect_journal_segments(retired_segments=segments)
 
 
 def collect_garbage(

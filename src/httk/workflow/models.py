@@ -611,7 +611,10 @@ class RetentionPolicy:
     ``attempt_control_days`` likewise remains unlimited. The collector that
     acts on these numbers is a separate concern; the workspace only carries
     them so that every implementation attaching to it agrees on what may be
-    removed and when.
+    removed and when. Completed transfers are reclaimed eagerly, ignoring
+    numeric ages: set ``trash_days`` to ``null`` or ``"keep"`` to retain both
+    retired bundles and their source journals at retirement. ``journal_days``
+    set to ``null`` or ``"keep"`` independently preserves source journals.
 
     :param attempt_control_days: The retention period for attempt controls.
     :param journal_days: The retention period for journal history.

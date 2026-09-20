@@ -495,7 +495,7 @@ def test_a_source_bundle_already_moved_aside_is_retired_without_a_second_move(tm
 
     assert source.acknowledge_transfer(acknowledgement) == retired
     assert json.loads(ledger.read_text(encoding="utf-8"))["status"] == "retired"
-    assert (retired / TRANSFER_DIRECTORY / TRANSFER_MANIFEST).is_file()
+    assert not retired.exists()
 
 
 @pytest.mark.skipif(shutil.which("javac") is None or shutil.which("java") is None, reason="javac and java are required")

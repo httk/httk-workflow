@@ -1124,7 +1124,28 @@ the workspace's durable history.
 
 A `null` or `"keep"` retention member means *keep*. On a fresh workspace,
 `journal_days` and `trash_days` default to one day while
-`attempt_control_days` stays unlimited. The command always prunes what cannot
+`attempt_control_days` stays unlimited. Completed transfers are an exception:
+after acknowledgement, retirement durably records the handover, then immediately
+removes the retired payload and its unprotected source journal segments, ignoring
+numeric retention ages. The small transfer ledger remains for idempotency. Set
+`retention.trash_days` to `"keep"` (or `null`) **before retirement** to keep both
+at retirement; `retention.journal_days: "keep"` independently keeps the journal.
+Ordinary GC still applies each category's own limit, so set both members to
+`"keep"` to preserve both indefinitely:
+
+```console
+httk workspace policy set --key retention.trash_days --value keep WORKSPACE
+httk workspace policy set --key retention.journal_days --value keep WORKSPACE
+```
+
+Retirement protects current markers, non-terminal chains, sealed transfers and
+live manager writers. It deletes only eligible source-chain segments and empty
+writer directories, without creating a replacement journal stream. Shared or
+protected segments remain for a later retirement retry or ordinary GC. Repeating
+retirement resumes cleanup after an interruption. The reported `retired_bundle`
+is an identity path and normally no longer exists.
+
+The command always prunes what cannot
 carry information, plus removable markers that are quiescent and unowned by any
 manager (`succeeded`, `failed`, `cancelled`, `submitted`, and `ready`) whose
 payloads the operator removed;
@@ -1377,9 +1398,12 @@ httk workflow transfer retire --destination-workspace-id UUID PATH JOB_ID ...
 per bundle; it requires `--destination-workspace-id`, because a bundle is sealed
 for exactly one destination. `--job` is repeatable, accepts any quiescent state
 when no `--state` is supplied, and fails all-or-nothing if an id is missing or
-filtered. `retire` moves the sealed source of an already
-imported job under `.httk-workspace/transfers/retired/` — a rename, never a
-delete, so a source is only ever whole or moved whole; its
+filtered. `retire` first moves the sealed source of an already
+imported job under `.httk-workspace/transfers/retired/` and durably records
+retirement before reclaiming the bundle and eligible source journal history.
+A crash leaves the source wholly live or wholly retired; a retry finishes any
+interrupted cleanup. Set `retention.trash_days` to `"keep"` or `null` to retain
+recovery copies. The caller must already hold a destination acknowledgement; its
 `--destination-workspace-id` is optional and, when given, refuses a bundle that
 was sealed for somebody else. `offer` narrows what it seals with the same
 `--state` and `--placement` `fetch` passes through; both print their report as

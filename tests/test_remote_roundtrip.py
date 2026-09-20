@@ -26,7 +26,6 @@ from httk.workflow import (
 )
 from httk.workflow.projects import initialize_project
 from httk.workflow.protocol import JobSpec, prepare_job_payload
-from httk.workflow.transfers import TRANSFER_DIRECTORY
 from httk.workflow.workflow_cli import command
 
 _SRC = str(Path(__file__).parents[1] / "src")
@@ -208,8 +207,7 @@ def test_a_job_goes_out_over_ssh_runs_there_and_is_fetched_home(
     # The remote retired its source whole, keeps no live bundle, and a second
     # fetch therefore has nothing to do.
     retired = _retired(campaign.station)
-    assert len(retired) == 1
-    assert (retired[0] / "bundle" / TRANSFER_DIRECTORY / "manifest.json").is_file()
+    assert retired == []
     assert campaign.station.find_marker_by_id(campaign.job_id) is None
     assert _staged(campaign.local) == []
     assert _fetch(campaign, capsys) == {"moved": [], "retired": []}
@@ -259,4 +257,4 @@ def test_a_banner_on_the_remote_stdout_stops_the_fetch_before_anything_is_import
     assert [str(entry["job_id"]) for entry in list(report["moved"])] == [campaign.job_id]
     marker = campaign.local.find_marker_by_id(campaign.job_id)
     assert marker is not None and marker.kind == "succeeded"
-    assert len(_retired(campaign.station)) == 1
+    assert _retired(campaign.station) == []
