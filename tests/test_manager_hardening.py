@@ -187,8 +187,8 @@ def test_serve_drains_and_exits_zero_on_sigterm(tmp_path: Path) -> None:
     def stop_once_running() -> None:
         deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline:
-            marker = workspace.find_marker_by_id(job_id)
-            if marker is not None and marker.kind == "running":
+            # Watch one state so a concurrent transition cannot be counted twice.
+            if any(marker.job_id == job_id for marker in workspace.scan_markers(("running",))):
                 break
             time.sleep(0.02)
         os.kill(os.getpid(), signal.SIGTERM)

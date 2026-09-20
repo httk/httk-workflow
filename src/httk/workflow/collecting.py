@@ -1427,12 +1427,13 @@ def _attach_product_of(
     leaves the record untouched and is reported through ``products_unlinked`` as before. The edge
     holds the source's pre-store identifier; ``--into`` rewrites it to the store-minted id.
     """
-    core = _core()
+    from httk.core import DataRecord, RunEdge
+
     input_edges = {edge.label: edge for edge in run.inputs}
     for role, curation in _provider_output_roles(provider).items():
         source_role = curation.get("product_of")
         value = outputs.get(role)
-        if not isinstance(source_role, str) or not isinstance(value, core.DataRecord):
+        if not isinstance(source_role, str) or not isinstance(value, DataRecord):
             continue
         source_edge = input_edges.get(source_role)
         if source_edge is None and source_role in outputs:
@@ -1443,7 +1444,7 @@ def _attach_product_of(
             source_edge = _entry_edge(identity, source_role, outputs[source_role], roles[source_role])
         if source_edge is None or any(edge.label == source_role for edge in value.product_of):
             continue
-        edge = core.RunEdge(source_role, source_edge.entry_type, source_edge.entry_id)
+        edge = RunEdge(source_role, source_edge.entry_type, source_edge.entry_id)
         outputs[role] = replace(value, product_of=(*value.product_of, edge))
     return outputs
 

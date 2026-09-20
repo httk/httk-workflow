@@ -133,7 +133,7 @@ def test_ready_hardlink_forgery_requires_payload_provenance(tmp_path, monkeypatc
 
         manager.tick()
         current = workspace.find_marker_by_id(job_id)
-        assert current is not None and current.kind in {"running", "succeeded"}
+        assert current is not None and current.kind in {"running", "committing", "succeeded"}
 
 
 def test_symlinked_payload_directory_is_refused(tmp_path) -> None:

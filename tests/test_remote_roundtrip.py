@@ -10,6 +10,7 @@ the shipped ones, and every command really crosses the transport.
 
 import json
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -130,6 +131,13 @@ def _fetch(campaign: Campaign, capsys: pytest.CaptureFixture[str]) -> dict[str, 
 def _run_there(campaign: Campaign) -> None:
     with TaskManager(campaign.station, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=180.0)
+    # A detached manager may own the job after this local manager becomes idle.
+    deadline = time.monotonic() + 180.0
+    while time.monotonic() < deadline:
+        if any(marker.job_id == campaign.job_id for marker in campaign.station.scan_markers(("succeeded",))):
+            return
+        time.sleep(0.02)
+    pytest.fail("remote job did not reach succeeded")
 
 
 def _retired(workspace: Workspace) -> list[Path]:
