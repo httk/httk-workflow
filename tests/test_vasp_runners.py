@@ -280,6 +280,57 @@ def test_a_diagnosed_failure_is_remedied_and_the_rerun_succeeds(
     assert not (workdir / ".httk-vasp").exists()
 
 
+@pytest.mark.parametrize("recovery", ("decomposition", "bands", "never"))
+def test_zhegv_manager_retries_each_rung_and_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recovery: str
+) -> None:
+    # Simulate acceptance of the edited inputs, not VASP's eigensolver physics.
+    executable = tmp_path / "zhegv-vasp"
+    source = _FAKE_VASP.format(fail_once=False, static_energy=-10.5)
+    condition = (
+        f"{recovery == 'never'!r} or tags.get('NPAR') != '1' or ({recovery == 'bands'!r} and int(tags['NBANDS']) < 8)"
+    )
+    source = source.replace(
+        "if FAIL_ONCE and count == 0:",
+        "from httk.workflow.vasp import read_incar\n"
+        "tags = read_incar('INCAR')\n"
+        "import json\n"
+        "with Path('fake-inputs.jsonl').open('a') as stream:\n"
+        "    stream.write(json.dumps(tags) + '\\n')\n"
+        f"if {condition}:",
+    ).replace(
+        'print("LAPACK: Routine ZPOTRF failed! " + str(count))',
+        'print("| EDDAV: Call to ZHEGV failed. Returncode = 42 2 64 |")\n'
+        '    print("| I REFUSE TO CONTINUE WITH THIS SICK JOB ... BYE!!! |")',
+    )
+    executable.write_text(source, encoding="utf-8")
+    executable.chmod(0o755)
+    workspace, job_id = _campaign(
+        tmp_path / "zhegv",
+        monkeypatch,
+        "vasp_relax.py",
+        command=str(executable),
+        parameters={"incar_tags": {"NPAR": 32, "NCORE": 1, "NBANDS": 6}},
+    )
+    kind, payload = _payload_of(workspace, job_id)
+    assert kind == ("failed" if recovery == "never" else "succeeded")
+    inputs = [json.loads(line) for line in (payload / "run" / "fake-inputs.jsonl").read_text().splitlines()]
+    expected = [("32", "6"), ("1", "6")]
+    if recovery != "decomposition":
+        expected.append(("1", "8"))
+    assert [(tags["NPAR"], tags["NBANDS"]) for tags in inputs] == expected
+    history = json.loads((payload / ".httk-job" / "vasp-remedies.json").read_text())
+    assert history["attempts"] == {"edddav_zhegv": len(expected) - 1}
+    assert [event["step"] for event in history["events"]] == list(range(len(expected) - 1))
+    assert all(event["files"][0]["path"] == "INCAR" for event in history["events"])
+    if recovery == "never":
+        failure = _failure(workspace, job_id)
+        assert failure["code"] == "vasp.failed"
+        assert failure["details"]["problem"] == "edddav_zhegv"
+        assert failure["details"]["give_up"]
+        assert failure["details"]["step"] == 2
+
+
 @pytest.mark.parametrize(
     ("label", "fail_once"),
     (

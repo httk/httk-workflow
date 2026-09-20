@@ -86,6 +86,16 @@ _REVIEWED_SEQUENCES: dict[str, RemedySequence] = {
     "zbrent_bracketing": ((("scale_ediff", 0.1),), (("scale_ediff", 0.1),)),
     "real_optlay": ((("incar.LREAL", ".FALSE."),),),
     "too_few_bands": ((("bump_bands", 2),),),
+    # ZHEGV is a symptom, not proof of too few bands. For CPU MPI runs, first
+    # remove band over-decomposition without guessing a rank-dependent NCORE:
+    # NPAR=1 divides any rank count and takes precedence over inherited NCORE.
+    # Then reuse the bounded extra-empty-band edit, if NBANDS is explicit.
+    # No ALGO change: Normal uses Davidson; All can start with Davidson too
+    # and is not valid for every functional. See docs/details/runtime_helpers.md.
+    "edddav_zhegv": (
+        (("incar.NPAR", 1),),
+        (("bump_bands", 2),),
+    ),
     "ionic_nonconvergence": ((("contcar_to_poscar", True),),),
     "zpotrf": (
         (("scale_lattice", 1.05),),
@@ -104,6 +114,7 @@ _REVIEWED_PRECEDENCE = (
     "real_optlay",
     "ions_too_close",
     "nonlr_alloc",
+    "edddav_zhegv",
     "kpoints_class",
     "dentet",
     "kpoint_shifts",

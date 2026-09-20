@@ -222,7 +222,14 @@ _VASP_PATTERNS: tuple[tuple[re.Pattern[str], str, str, bool], ...] = (
     (re.compile(r"number of cells and number of vectors did not agree", re.IGNORECASE), "pricell", "error", True),
     (re.compile(r"internal error in RAD_INT", re.IGNORECASE), "radint", "fatal", True),
     (re.compile(r"internal ERROR in NONLR_ALLOC", re.IGNORECASE), "nonlr_alloc", "fatal", True),
-    (re.compile(r"Error EDDDAV: Call to ZHEGV failed", re.IGNORECASE), "edddav_zhegv", "error", False),
+    # VASP 5/6 use EDDDAV or EDDAV, with or without "Error", also inside a box.
+    # Keep the historical diagnostic code so existing consumers/history work.
+    (
+        re.compile(r"\b(?:Error\s+)?EDD?DAV\s*:\s*Call\s+to\s+ZHEGV\s+failed\b", re.IGNORECASE),
+        "edddav_zhegv",
+        "error",
+        False,
+    ),
     (re.compile(r"CNORMN: search vector ill defined", re.IGNORECASE), "cnormn", "warning", False),
     (re.compile(r"ZBRENT: fatal error in bracketing", re.IGNORECASE), "zbrent_bracketing", "error", False),
     (re.compile(r"One of the lattice vectors is very long", re.IGNORECASE), "lattice_vector_too_long", "fatal", True),

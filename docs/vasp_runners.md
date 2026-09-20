@@ -146,6 +146,12 @@ registers a policy and names it in the job parameters rather than editing a runn
 ladder position is recorded in the job state directory, so it survives every attempt
 of the job, and `maximum_remedies` bounds how many a single job may apply.
 
+`reviewed-v1` handles the `edddav_zhegv` diagnostic from both `EDDAV` and
+`EDDDAV: Call to ZHEGV failed` messages. Its CPU MPI recovery first sets
+`NPAR=1`, then increases an explicit `NBANDS` by two, then gives up. These
+are INCAR edits within the existing allocation, not a reduction in MPI ranks.
+See the [review and limitations](details/runtime_helpers.md#zhegv-recovery).
+
 The `publish` step leaves outputs in the workdir by default. With transactional
 data enabled, it copies the files named by `collect` into `data/`, under
 `data_prefix`. This duplicates those files already retained in the workdir.

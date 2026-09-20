@@ -8,6 +8,7 @@ and a policy that could not be extended without editing the module.
 """
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ from httk.workflow.vasp import (
     register_remedy_policy,
     remedy_policy,
     remedy_policy_names,
+    run_vasp,
     update_incar,
     write_automatic_kpoints,
 )
@@ -136,6 +138,87 @@ def test_a_preclean_keeps_the_evidence_the_remedy_machinery_reads(tmp_path: Path
     removed = clean_vasp_outputs(tmp_path, keep=("WAVECAR",), also_remove=VASP_RESTART_ARTIFACTS)
     assert {path.name for path in removed} == set(VASP_RESTART_ARTIFACTS)
     assert (tmp_path / "WAVECAR").is_file()
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "| EDDAV: Call to ZHEGV failed. Returncode = 42 2 64 |",
+        "Error EDDAV: Call to ZHEGV failed. Returncode = 1 1 128",
+        "Error EDDDAV: Call to ZHEGV failed. Returncode = 12 2 16",
+        "| EDDDAV: Call to ZHEGV failed. Returncode = 52 2 64 |",
+        "| error eddav :  Call\tto ZHEGV   failed. |",
+    ),
+)
+def test_zhegv_output_variants_are_diagnosed(tmp_path: Path, message: str) -> None:
+    report = run_vasp([sys.executable, "-c", f"print({message!r}); raise SystemExit(1)"], directory=tmp_path)
+    diagnostic = next(item for item in report.diagnostics if item.code == "edddav_zhegv")
+    assert diagnostic.severity == "error"
+    assert diagnostic.evidence == message
+    assert report.classification == "process_failure"
+
+
+def test_other_eigensolver_errors_are_not_zhegv(tmp_path: Path) -> None:
+    report = run_vasp(
+        [sys.executable, "-c", "print('EDDAV: Call to ZHEEV failed.'); raise SystemExit(1)"],
+        directory=tmp_path,
+    )
+    assert "edddav_zhegv" not in {item.code for item in report.diagnostics}
+    assert plan_vasp_remedy(report.diagnostics, directory=tmp_path).give_up
+
+
+@pytest.mark.parametrize("nbands", (None, 6))
+def test_zhegv_ladder_applies_escalates_and_stays_exhausted(tmp_path: Path, nbands: int | None) -> None:
+    workdir = tmp_path / "run"
+    workdir.mkdir()
+    incar = workdir / "INCAR"
+    original = "NPAR = 32\nNCORE = 4\nALGO = Fast\nENCUT = 520\nEDIFF = 1e-6\n"
+    incar.write_text(original + (f"NBANDS = {nbands}\n" if nbands is not None else ""), encoding="utf-8")
+    history = job_remedy_history_path(tmp_path)
+    diagnostics = (
+        Diagnostic("too_few_bands", "error", "bands", "stdout"),
+        Diagnostic("electronic_nonconvergence", "error", "SCF", "OUTCAR"),
+        Diagnostic("edddav_zhegv", "error", "ZHEGV failed", "stdout"),
+    )
+    first = plan_vasp_remedy(diagnostics, directory=workdir, history_path=history)
+    assert first.problem == "edddav_zhegv"
+    assert first.step == 0 and not first.give_up
+    assert first.changes == (("incar.NPAR", 1),)
+    apply_vasp_remedy(first, directory=workdir, history_path=history)
+    assert read_incar(incar)["NPAR"] == "1"
+
+    second = plan_vasp_remedy(diagnostics, directory=workdir, history_path=history)
+    if nbands is not None:
+        assert second.step == 1 and not second.give_up
+        assert second.changes == (("bump_bands", 2),)
+        apply_vasp_remedy(second, directory=workdir, history_path=history)
+        assert read_incar(incar)["NBANDS"] == "8"
+    else:
+        assert second.give_up
+        assert "needs NBANDS in INCAR" in second.reason
+        assert "NBANDS" not in read_incar(incar)
+
+    for _ in range(2):
+        exhausted = plan_vasp_remedy(diagnostics, directory=workdir, history_path=history)
+        assert exhausted.problem == "edddav_zhegv"
+        assert exhausted.step == 2 and exhausted.give_up
+        assert exhausted.changes == ()
+        with pytest.raises(ValueError, match="cannot apply give-up decision"):
+            apply_vasp_remedy(exhausted, directory=workdir, history_path=history)
+    recorded = json.loads(history.read_text(encoding="utf-8"))
+    assert recorded["attempts"] == {"edddav_zhegv": 2 if nbands is not None else 1}
+    assert len(recorded["events"]) == (2 if nbands is not None else 1)
+    for tag, value in {"NCORE": "4", "ALGO": "Fast", "ENCUT": "520", "EDIFF": "1e-6"}.items():
+        assert read_incar(incar)[tag] == value
+
+
+@pytest.mark.parametrize("code", ("ions_too_close", "nonlr_alloc"))
+def test_zhegv_does_not_preempt_geometry_or_memory_diagnostics(tmp_path: Path, code: str) -> None:
+    decision = plan_vasp_remedy(
+        (Diagnostic("edddav_zhegv", "error", "ZHEGV", "stdout"), Diagnostic(code, "fatal", code, "stdout")),
+        directory=tmp_path,
+    )
+    assert decision.problem == code
 
 
 def test_planning_skips_a_remedy_the_workdir_cannot_execute(tmp_path: Path) -> None:
