@@ -1143,6 +1143,7 @@ def collect_retired_journal(
 
     :param workspace: The retired transfer's source workspace.
     :param references: One saved record reference per candidate segment.
+    :param transfer_id: Identify the retired transfer within a shared batch scan.
     """
 
     retention = workspace.policy.retention

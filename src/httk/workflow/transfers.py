@@ -668,6 +668,7 @@ def _import_one(
     Legacy bundles have no sequence and must retain their individual receipts.
     :param workspace: The destination workspace.
     :param bundle: The intact sealed bundle to import or replay.
+    :param known_marker: Reuse a previously resolved destination marker.
     :return: A destination acknowledgement safe for source retirement.
     """
 
@@ -711,6 +712,7 @@ def _import_bundle(
 
     :param workspace: Provide the destination workspace.
     :param bundle: Locate the sealed source bundle.
+    :param known_marker: Reuse a previously resolved destination marker.
     :return: The destination acknowledgement.
     :raises httk.workflow.errors.FormatError: If the bundle or copied payload fails validation.
     :raises ValueError: If the bundle names another destination workspace.

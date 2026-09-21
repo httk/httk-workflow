@@ -137,10 +137,11 @@ def test_ledger_failure_after_rename_preserves_complete_bundle_and_history(tmp_p
     monkeypatch.setattr(transfers, "write_json_atomic", fail_ledger)
     with pytest.raises(OSError, match="ledger publication interrupted"):
         source.acknowledge_transfer(acknowledgement)
-    retired = source.control / "transfers" / "retired" / acknowledgement["transfer_id"] / "bundle"
+    transfer_id = str(acknowledgement["transfer_id"])
+    retired = source.control / "transfers" / "retired" / transfer_id / "bundle"
     assert transfers.validate_bundle(retired)["payload_sha256"] == acknowledgement["payload_sha256"]
     assert _segments(source) == before
-    ledger = source.control / "transfers" / f"{acknowledgement['transfer_id']}.json"
+    ledger = source.control / "transfers" / f"{transfer_id}.json"
     assert json.loads(ledger.read_text())["status"] == "sealed"
     monkeypatch.setattr(transfers, "write_json_atomic", original)
     source.acknowledge_transfer(acknowledgement)

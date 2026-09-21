@@ -111,7 +111,7 @@ def test_sealed_transfer_resumes_across_process_restart(tmp_path, monkeypatch, b
         source, destination_workspace_id=destination.workspace_id, states=('submitted',), job_ids=[job_id]
     )
     assert len(offers) == 1
-    assert transfers.validate_bundle(offers[0]['bundle_path']) == manifest
+    assert transfers.validate_bundle(str(offers[0]['bundle_path'])) == manifest
     _transfer_local_to_local(source, destination, [job_id], quiet=True)
     ack = destination.import_bundle(saved)
     source.acknowledge_transfer(ack)
@@ -167,14 +167,14 @@ def test_fenced_unsealed_transfer_keeps_epoch_across_restart(tmp_path, monkeypat
     monkeypatch.setattr(transfers, '_seal_transferring', interrupt)
     with pytest.raises(OSError, match='after fence'):
         source.detach(job_id, destination_workspace_id=destination.workspace_id)
-    fenced = source.read_state(next(source.scan_markers(('transferring',))))
+    fenced = source.read_state(next(iter(source.scan_markers(('transferring',)))))
     monkeypatch.setattr(receipts, '_session_streams', {})
     monkeypatch.setattr(transfers, '_seal_transferring', original_seal)
     source.recover_transfers()
     offers = transfers.offer_transfers(
         source, destination_workspace_id=destination.workspace_id, states=('submitted',), job_ids=[job_id]
     )
-    manifest = transfers.validate_bundle(offers[0]['bundle_path'])
+    manifest = transfers.validate_bundle(str(offers[0]['bundle_path']))
     for field in ('transfer_id', 'transfer_epoch', 'transfer_sequence'):
         assert manifest[field] == fenced[field]
     _transfer_local_to_local(source, destination, [job_id], quiet=True)
@@ -230,7 +230,7 @@ def test_other_process_completion_cannot_reuse_cached_reservation_for_returned_j
     monkeypatch.setattr(transfers, '_seal_transferring', interrupt)
     with pytest.raises(OSError, match='after fence'):
         source.detach(job_id, destination_workspace_id=destination.workspace_id)
-    old = source.read_state(next(source.scan_markers(('transferring',))))
+    old = source.read_state(next(iter(source.scan_markers(('transferring',)))))
     allocator = source.control / 'transfers/protocol/issued.json'
     checkpoint = allocator.with_name('issued-checkpoint.json')
     old_files = (allocator.read_bytes(), checkpoint.read_bytes())
