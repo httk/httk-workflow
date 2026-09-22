@@ -12,7 +12,7 @@ published workspace runner, and in Bash as well as in Python.
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -386,14 +386,16 @@ def test_vasp_cli_runs_and_collects_default_workdir_or_transactional_results(
     workflow: str,
     data_mode: str | None,
 ) -> None:
-    pytest.importorskip("httk.atomistic")
-    pytest.importorskip("httk.store")
-    from httk.atomistic import UnitcellStructureView
-    from httk.atomistic.entries.structures import StructureEntry
+    atomistic = cast(Any, pytest.importorskip("httk.atomistic"))
+    atomistic_structures = cast(Any, pytest.importorskip("httk.atomistic.entries.structures"))
+    store_module = cast(Any, pytest.importorskip("httk.store"))
+    UnitcellStructureView = atomistic.UnitcellStructureView
+    StructureEntry = atomistic_structures.StructureEntry
+    Backend = store_module.Backend
+    SqlStore = store_module.SqlStore
     from httk.core import DataRecord
     from httk.core.cli import CLIContext
     from httk.core.storage import content_id
-    from httk.store import Backend, SqlStore
 
     from conftest import register_ws
     from httk.workflow import collect
@@ -448,7 +450,7 @@ def test_vasp_cli_runs_and_collects_default_workdir_or_transactional_results(
     if "relaxed_structure" in roles:
         relaxed = item.outputs["relaxed_structure"]
         assert isinstance(relaxed, UnitcellStructureView)
-        assert float(relaxed.sites.reduced_coords[1][0]) == pytest.approx(0.51)
+        assert float(cast(Any, relaxed).sites.reduced_coords[1][0]) == pytest.approx(0.51)
 
     for into in (False, True):
         args = ["collect", "--workspace", name]
