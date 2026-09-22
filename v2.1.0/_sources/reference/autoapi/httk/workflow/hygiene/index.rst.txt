@@ -1,0 +1,139 @@
+httk.workflow.hygiene
+=====================
+
+.. py:module:: httk.workflow.hygiene
+
+.. autoapi-nested-parse::
+
+   Describe and repair a project's remotes, and check its workspace health.
+
+   Everything here answers an operator question about state that already exists:
+   *what is this remote configured to do*, *what is wrong with this workspace and
+   can it be fixed*. Nothing here is on the execution path of a job. The individual
+   workspace checks are the ones the project-member ``repair`` and ``scan_project``
+   surface through core's ``httk project repair``; each repair is explicit.
+
+
+
+Attributes
+----------
+
+.. autoapisummary::
+
+   httk.workflow.hygiene.REMOTE_DESCRIPTION_FORMAT
+   httk.workflow.hygiene.TMP_MAXIMUM_AGE_SECONDS
+
+
+Classes
+-------
+
+.. autoapisummary::
+
+   httk.workflow.hygiene.Finding
+
+
+Functions
+---------
+
+.. autoapisummary::
+
+   httk.workflow.hygiene.describe_remote
+   httk.workflow.hygiene.remove_remote
+
+
+Module Contents
+---------------
+
+.. py:data:: REMOTE_DESCRIPTION_FORMAT
+   :value: 'httk-remote-description'
+
+
+.. py:data:: TMP_MAXIMUM_AGE_SECONDS
+   :value: 86400
+
+
+.. py:function:: describe_remote(name, *, project = None)
+
+   Describe one remote: where it lives, what it is, how it is configured.
+
+   Credential values never appear. A remote's settings are reported with the
+   file each one came from, and for a setting stored in the manifest-excluded
+   ``credentials.json`` only its *name* is reported: a description an operator
+   can paste into a bug report must never carry a password.
+
+   :param name: Remote bundle name.
+   :param project: Project directory used for project-local lookup.
+   :return: JSON-compatible remote description.
+   :raises ValueError: If the remote name is invalid or unknown.
+
+
+.. py:function:: remove_remote(name, *, project = None)
+
+   Remove one remote bundle, refusing while a transfer still needs it.
+
+   A sealed bundle that has not been acknowledged is work this remote still
+   owes an answer about, and the adapter is how that answer is fetched.
+   Removing the remote would leave the transfer with no way home, so it is
+   refused by name — retire or fetch the transfer first.
+
+   :param name: Remote bundle name.
+   :param project: Project directory used for project-local lookup.
+   :return: JSON-compatible removal result.
+   :raises ValueError: If the remote is invalid, unknown, or still has transfers.
+
+
+.. py:class:: Finding
+
+   Describe one thing the check looked at and what it found.
+
+   :param check: Check name.
+   :param status: Check result status.
+   :param message: Human-readable result.
+   :param repairable: Whether the finding can be repaired automatically.
+   :param repaired: Whether this run repaired the finding.
+   :param action: Repair action, when one was taken.
+   :param details: Structured result details.
+
+
+   .. py:attribute:: check
+      :type:  str
+
+
+   .. py:attribute:: status
+      :type:  str
+
+
+   .. py:attribute:: message
+      :type:  str
+
+
+   .. py:attribute:: repairable
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: repaired
+      :type:  bool
+      :value: False
+
+
+
+   .. py:attribute:: action
+      :type:  str | None
+      :value: None
+
+
+
+   .. py:attribute:: details
+      :type:  dict[str, object]
+
+
+   .. py:method:: as_mapping()
+
+      Return the JSON representation of this finding.
+
+      :return: JSON-compatible finding members.
+
+
+
