@@ -489,15 +489,19 @@ def handle_job_new(arguments: argparse.Namespace, context: CLIContext) -> int:
                 "--workflow accepts a workflow name, not a package directory; "
                 "use --workflow-dir DIR (or --from-runner FILE for a runner)"
             )
-        if "/" in arguments.workflow or workflow_path.suffix.lower() in {
-            ".py",
-            ".sh",
-            ".bash",
-            ".cwl",
-            ".json",
-            ".yaml",
-            ".yml",
-        }:
+        if not arguments.workflow.startswith("git+") and (
+            "/" in arguments.workflow
+            or workflow_path.suffix.lower()
+            in {
+                ".py",
+                ".sh",
+                ".bash",
+                ".cwl",
+                ".json",
+                ".yaml",
+                ".yml",
+            }
+        ):
             raise ValueError(
                 "--workflow accepts workflow names only; use --from-runner FILE for a runner "
                 "or --workflow-dir DIR for a package directory"
@@ -1799,7 +1803,7 @@ def build_job_parser(
         metavar="WORKFLOW",
         help="a registered or packaged workflow name ("
         + ", ".join(workflow_names)
-        + ") (not a path; use --from-runner or --workflow-dir)",
+        + ") or a git IRI git+https://HOST/PATH[@REF][#SUBDIR] (not a path; use --from-runner or --workflow-dir)",
     )
     workflow_group.add_argument(
         "--workflow-dir",

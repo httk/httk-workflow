@@ -214,6 +214,7 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.adapter_protocol",
         "httk.workflow.configuration",
         "httk.workflow.projects",
+        "httk.workflow.git_workflows",
         # Domain and compatibility consumers.
         "httk.workflow.vasp",
         "httk.workflow.compat",

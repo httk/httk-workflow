@@ -8,6 +8,7 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
+from ..git_workflows import parse_workflow_iri
 from ..packages import installed_plugin_workflow_owners, installed_plugin_workflows
 from ..scaffold import (
     ResolvedWorkflow,
@@ -45,7 +46,7 @@ def _manifest_step_drift(workflow: ResolvedWorkflow) -> str | None:
         return None
     steps = described.get("steps")
     described_steps = [str(item) for item in steps] if isinstance(steps, list) else []
-    if list(workflow.steps) == described_steps:
+    if sorted(workflow.steps) == sorted(described_steps):  # order is not semantic; initial_step is separate
         return None
     return (
         f"the manifest declares steps {list(workflow.steps)} but the runner entry "
@@ -54,6 +55,8 @@ def _manifest_step_drift(workflow: ResolvedWorkflow) -> str | None:
 
 
 def _source_kind(target: str, workflow: ResolvedWorkflow) -> str:
+    if (workflow.registration_id or "").startswith("git+"):
+        return "fetched"
     provider = workflow_provider(target)
     if provider is not None:
         return "registered-directory" if provider.directory is not None else "installed-package"
@@ -121,12 +124,16 @@ def _declaration_document(workflow: ResolvedWorkflow) -> dict[str, object]:
 def _workflow_description(target: str, format: str | None = None) -> dict[str, object]:
     workflow = resolve_workflow(target, format=format)
     source = workflow.directory if workflow.directory is not None else workflow.source
+    source_document: dict[str, object] = {"kind": _source_kind(target, workflow), "path": str(source)}
+    if source_document["kind"] == "fetched":
+        iri = parse_workflow_iri(workflow.workflow_id)
+        source_document.update(iri=workflow.workflow_id, commit=iri.ref, name=workflow.name)
     return {
         "format": WORKFLOW_DESCRIPTION_FORMAT,
         "format_version": 2,
         "workflow": workflow.workflow_id,
         "alias": workflow.alias,
-        "source": {"kind": _source_kind(target, workflow), "path": str(source)},
+        "source": source_document,
         "summary": workflow.summary,
         "description": workflow.summary,
         "steps": [{"name": step, "initial": step == workflow.initial_step} for step in workflow.steps],
@@ -202,7 +209,10 @@ def _render_text(description: Mapping[str, object]) -> str:
     ]
     source = description["source"]
     assert isinstance(source, Mapping)
-    lines.append(f"source: {source['kind']} ({source['path']})")
+    if source["kind"] == "fetched":
+        lines.append(f"source: fetched {source['iri']} ({source['path']})")
+    else:
+        lines.append(f"source: {source['kind']} ({source['path']})")
     lines.extend(
         [
             f"summary: {description['summary'] or '-'}",
@@ -290,11 +300,11 @@ def handle_workflow_describe(arguments: argparse.Namespace, context: Any) -> int
 
 
 def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
-    """List the registered and installed-plugin workflows, ids only.
+    """List the registered, installed-plugin and fetched workflows, ids only.
 
     The listing is the same union ``--workflow`` resolves against: the workflows
     ``register_workflow`` added in this process, followed by the workflows
-    installed plugins bundle. A workflow reached only by explicit path
+    installed plugins bundle, then fetched git workflows by short name. A workflow reached only by explicit path
     (``--workflow-dir`` or ``--from-runner``) is not registered, so it cannot be
     listed here; ``describe PATH`` reports one such workflow directly.
 
@@ -313,11 +323,18 @@ def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
         # identity check — not mere membership — decides the source.
         is_plugin = provider is not None and provider is plugin_providers.get(workflow_id)
         owner = owners.get(workflow_id) if is_plugin else None
+        is_fetched = provider is not None and provider.workflow_id.startswith("git+")
+        row_source: dict[str, object] = {
+            "kind": "plugin" if is_plugin else "fetched" if is_fetched else "registered",
+            "plugin": owner,
+        }
+        if provider is not None and is_fetched:
+            row_source["iri"] = provider.workflow_id
         rows.append(
             {
                 "workflow": workflow_id,
                 "alias": provider.alias if provider is not None else None,
-                "source": {"kind": "plugin" if is_plugin else "registered", "plugin": owner},
+                "source": row_source,
                 "summary": (provider.summary or None) if provider is not None else None,
             }
         )
@@ -330,7 +347,13 @@ def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
     for row in rows:
         source = row["source"]
         assert isinstance(source, dict)
-        source_text = f"plugin {source['plugin']}" if source["kind"] == "plugin" else "registered"
+        source_text = (
+            f"plugin {source['plugin']}"
+            if source["kind"] == "plugin"
+            else f"fetched {source['iri']}"
+            if source["kind"] == "fetched"
+            else "registered"
+        )
         print(f"{row['workflow']}\t{row['alias'] or '-'}\t{source_text}\t{row['summary'] or '-'}")
     return 0
 
@@ -343,10 +366,10 @@ def build_list_parser(
     listing = _leaf(
         subparsers,
         "list",
-        summary="list the registered and installed-plugin workflows",
+        summary="list the registered, installed-plugin and fetched workflows",
         description=(
             "List the workflows a job can select by name with --workflow: those registered in this "
-            "process, then those installed plugins bundle. A workflow reached only by explicit path "
+            "process, then those installed plugins bundle, then fetched git workflows by short name. A workflow reached only by explicit path "
             "(--workflow-dir or --from-runner) is not registered and is not listed here"
         ),
         handler=handle_workflow_list,
@@ -363,11 +386,14 @@ def build_describe_parser(
         subparsers,
         "describe",
         summary="describe a workflow without publishing it",
-        description="Describe a registered workflow, runner file, or workflow package directory",
+        description="Describe a registered workflow, git workflow IRI, runner file, or workflow package directory",
         handler=handle_workflow_describe,
     )
     describe.add_argument(
-        "targets", metavar="TARGET", nargs="+", help="workflow id, alias, runner file, or package directory"
+        "targets",
+        metavar="TARGET",
+        nargs="+",
+        help="workflow id, alias, git+https://…@ref#subdir IRI, runner file, or package directory",
     )
     describe.add_argument(
         "--format",

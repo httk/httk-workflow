@@ -536,7 +536,7 @@ def _workflow_declaration(
     return document
 
 
-def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
+def parse_workflow_manifest(directory: str | Path, *, _iri: str | None = None) -> WorkflowProvider:
     """Parse and validate one directory workflow package.
 
     The ``httk_workflow.toml`` file is httk-owned glue: unknown keys are rejected
@@ -546,6 +546,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
     job's ``parameters`` member.
 
     :param directory: Locate the package directory to parse.
+    :param _iri: Give the canonical git IRI of a fetched package (private).
     :return: The validated workflow provider.
     :raises ValueError: If the package is missing, malformed, or violates the
         manifest contract.
@@ -605,6 +606,12 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
             raise _error(root, "[workflow].alias must match [a-z0-9._-]+")
     description = _optional_string(workflow, "description", "[workflow]", root) or ""
     declaration_uri = _optional_string(workflow, "declaration_uri", "[workflow]", root)
+    short_name: str | None = None
+    if _iri is not None:
+        # A fetched package is identified by its IRI; the manifest id is its short name.
+        short_name, workflow_id = workflow_id, _iri
+        if declaration_uri is None and "declaration_file" not in workflow:
+            declaration_uri = _iri
 
     runner = _table(workflow.get("runner"), "[workflow.runner]", root)
     language_name = _optional_string(runner, "language", "[workflow.runner]", root)
@@ -823,6 +830,7 @@ def parse_workflow_manifest(directory: str | Path) -> WorkflowProvider:
             seen_outputs[port] = name
     provider = WorkflowProvider(
         workflow_id=workflow_id,
+        name=short_name,
         runner_package=None,
         runner_file=None,
         language=language_name,
@@ -974,16 +982,17 @@ def _reset_plugin_workflow_cache() -> None:
     _PLUGIN_WORKFLOW_CACHE = None
 
 
-def load_workflow_package(path: str | Path, *, register: bool = True) -> WorkflowProvider:
+def load_workflow_package(path: str | Path, *, register: bool = True, _iri: str | None = None) -> WorkflowProvider:
     """Parse one package and optionally add it to the workflow registry.
 
     :param path: Locate the package directory to load.
     :param register: Add the provider to the process registry when true.
+    :param _iri: Give the canonical git IRI of a fetched package (private).
     :return: The validated workflow provider.
     :raises ValueError: If parsing or registration rejects the package.
     """
 
-    provider = parse_workflow_manifest(path)
+    provider = parse_workflow_manifest(path, _iri=_iri)
     if register:
         register_workflow(provider)
     return provider

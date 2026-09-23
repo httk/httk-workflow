@@ -1392,7 +1392,16 @@ def _job_collector(
         raise
     except Exception as exc:
         return None, None, f"job-pinned collector manifest is invalid: {exc}"
-    if provider.workflow_id != workflow_id:
+    expected: str | None = workflow_id
+    if workflow_id.startswith("git+"):
+        # A fetched workflow's manifest id is its short name. The tree is already
+        # digest-verified against the job's runner pin, so when the IRI is not
+        # installed here there is no short name to compare and none is required.
+        from .scaffold import workflow_provider
+
+        installed = workflow_provider(workflow_id)
+        expected = installed.name if installed is not None else None
+    if expected is not None and provider.workflow_id != expected:
         return (
             None,
             None,

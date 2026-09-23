@@ -1051,7 +1051,8 @@ class Attempt:
         try:
             scaffold_job(
                 Workspace(self.workspace, durable=self.context.durable),
-                workflow,
+                # A git IRI was fetched once above; its canonical, pinned IRI is a cache hit.
+                (resolved.registration_id or workflow) if os.fspath(workflow).startswith("git+") else workflow,
                 staging,
                 inputs=inputs,
                 files=files,

@@ -41,6 +41,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`sdks/index` — the same authoring surface in eight more languages
 - {doc}`vasp_runners` — the packaged runners and relaxation report, for campaigns that write none
 - {doc}`workflow_packages` — authoring directory packages and their manifest
+- {doc}`workflow_iris` — sharing and referencing workflows in Git repositories by IRI
 - {doc}`declarations` — saying what a workflow *is*, for a data layer
 - {doc}`provenance` — turning one `JobRecord` into one `httk.core.Run`
 - {doc}`collecting` — collecting provider-produced outputs and products
@@ -109,6 +110,7 @@ runtime_helpers
 sdks/index
 vasp_runners
 workflow_packages
+workflow_iris
 declarations
 provenance
 collecting
