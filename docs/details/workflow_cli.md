@@ -283,10 +283,12 @@ and returned 0; any resolution error or nonzero script return exits 1.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `list` | list the workflows `job new --workflow NAME` can resolve: those registered in this process, then those installed plugins bundle | `--json` |
+| `list` | list the workflows `job new --workflow NAME` can resolve: those registered in this process, then those installed plugins bundle, then fetched git workflows by short name | `--json` |
 
-Each text line is `WORKFLOW_ID`, alias (or `-`), source (`registered` or `plugin
-OWNER`), and summary (or `-`); `--json` reports the same as an array of objects.
+Each text line is `WORKFLOW_ID`, alias (or `-`), source (`registered`, `plugin
+OWNER`, or `fetched IRI`), and summary (or `-`); `--json` reports the same as an
+array of objects, with `source.kind` `"fetched"` and `source.iri` for fetched
+workflows.
 A workflow reached only by explicit path — `--workflow-dir DIR` or `--from-runner
 FILE` — is not registered, so it is not listed here; use `describe PATH` to
 report one such workflow directly. To list the runners one workspace has
@@ -297,7 +299,11 @@ workflows`.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `describe TARGET` | describe a registered id/alias, runner file, or package directory | `--json` |
+| `describe TARGET` | describe a registered id/alias, git workflow IRI, runner file, or package directory | `--json` |
+
+A git IRI target is fetched and installed like any explicit reference; it and
+the short name of a fetched workflow report source kind `fetched`, with `iri`
+and `commit` in the `--json` `source` object.
 
 Resolving a workflow trusts a directory package's manifest and never executes
 anything. `describe` is a report, so for a directory package it additionally
@@ -656,7 +662,7 @@ partition map, stored in the project, that spreads a very large body of work
 across many workspaces without a new scheduler. Each partition names one
 registered workspace, roots are assigned to partitions by policy, and spawned
 children always inherit their parent's workspace. See {doc}`/campaigns`.
-`campaign submit --workflow` accepts a workflow name or alias only; use
+`campaign submit --workflow` accepts a workflow name, alias, or git IRI only; use
 `job new --from-runner` or `job new --from-command` for a file or command.
 
 ## Creating jobs
@@ -671,6 +677,11 @@ httk job new --workspace WORKSPACE --workflow vasp-relax --input-from structure 
 httk job new --from-runner ./my_runner.py --step characterize --parameter sites=8
 httk job new --from-command 'srun --ntasks=10 my_executable {input}' --file input=input_files/a.dat --tag a
 ```
+
+`--workflow` also accepts a git IRI, `git+https://HOST/PATH[@REF][#SUBDIR]`:
+the repository is fetched at `REF`, the package in `SUBDIR` is installed, and
+the job records the canonical IRI with the full commit hash as its workflow id.
+See {doc}`/workflow_iris`.
 
 Packaged VASP workflows default to `--data-mode none`: results remain in the
 persistent workdir and `collect` reads them there, with no `data/` copy. Add

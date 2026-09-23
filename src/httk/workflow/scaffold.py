@@ -177,6 +177,7 @@ class WorkflowProvider:
     :param outputs: Declare the workflow's output metadata.
     :param declaration_uri: Identify the source declaration URI.
     :param declaration_file: Name the source declaration file.
+    :param name: Give the short name of a workflow whose id is an IRI.
     """
 
     workflow_id: str
@@ -210,6 +211,7 @@ class WorkflowProvider:
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
     declaration_file: str | None = None
+    name: str | None = None
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -313,7 +315,28 @@ def registered_workflows() -> tuple[str, ...]:
     result.extend(
         workflow_id for workflow_id in sorted(installed_plugin_workflows()) if workflow_id not in registered_names
     )
+    result.extend(sorted(name for name, provider in _visible_fetched().items() if name == provider.name))
     return tuple(result)
+
+
+def _claimed_names() -> set[str]:
+    """Return every in-process and installed-plugin id and alias, conflicted or not."""
+
+    from .packages import _plugin_workflow_conflicts, installed_plugin_workflows
+
+    names = set(_plugin_workflow_conflicts())
+    for provider in (*_WORKFLOW_PROVIDERS.values(), *installed_plugin_workflows().values()):
+        names.update(name for name in (provider.workflow_id, provider.alias) if name)
+    return names
+
+
+def _visible_fetched() -> dict[str, WorkflowProvider]:
+    """Return fetched workflows by short name or alias, minus shadowed and conflicted names."""
+
+    from .git_workflows import _fetched_names
+
+    claimed = _claimed_names()
+    return {name: provider for name, provider in _fetched_names()[0].items() if name not in claimed}
 
 
 #: File suffixes that make an argument path-shaped: a runner file or a language
@@ -349,6 +372,11 @@ def registered_workflow_labels() -> tuple[str, ...]:
         alias = provider.alias if provider.alias not in conflicts else None
         label = f"{workflow_id} ({alias})" if alias else workflow_id
         labels.append(f"{label} [plugin {owners[workflow_id]}]")
+    fetched = _visible_fetched()
+    for name, provider in sorted(fetched.items()):
+        if name == provider.name:
+            label = f"{name} ({provider.alias})" if fetched.get(provider.alias or "") is provider else name
+            labels.append(f"{label} [{provider.workflow_id}]")
     return tuple(labels)
 
 
@@ -370,16 +398,26 @@ def _registered_names() -> list[str]:
             names.append(workflow_id)
         if provider.alias and provider.alias not in conflicts:
             names.append(provider.alias)
+    names.extend(sorted(_visible_fetched()))
     return names
 
 
 def workflow_provider(name: str) -> WorkflowProvider | None:
-    """Return the provider selected by canonical id or alias.
+    """Return the provider selected by canonical id, alias, or fetched short name.
 
-    :param name: Select a workflow by id or alias.
+    A git IRI selects only an already installed workflow pinned to a full
+    commit hash: this lookup never fetches, so a job payload naming an IRI can
+    never cause code acquisition.
+
+    :param name: Select a workflow by id, alias, short name, or pinned git IRI.
     :return: The selected provider, or ``None`` when no provider matches.
+    :raises ValueError: If the name is claimed by several plugins or fetched lineages.
     """
 
+    if name.startswith("git+"):
+        from .git_workflows import _installed_provider
+
+        return _installed_provider(name)
     provider = _WORKFLOW_PROVIDERS.get(name)
     if provider is not None:
         return provider
@@ -400,7 +438,9 @@ def workflow_provider(name: str) -> WorkflowProvider | None:
     for candidate in providers.values():
         if candidate.alias == name:
             return candidate
-    return None
+    from .git_workflows import _fetched_provider
+
+    return _fetched_provider(name)
 
 
 class JobItem(TypedDict, total=False):
@@ -467,6 +507,7 @@ class ResolvedWorkflow:
     :param outputs: Preserve the workflow's output metadata.
     :param declaration_uri: Identify the source declaration URI.
     :param declaration_file: Name the source declaration file.
+    :param name: Give the short name of a workflow whose id is an IRI.
     """
 
     source: Path
@@ -503,6 +544,7 @@ class ResolvedWorkflow:
     outputs: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     declaration_uri: str | None = None
     declaration_file: str | None = None
+    name: str | None = None
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -873,8 +915,12 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
     """
 
     provider = workflow_provider(name)
-    if provider is None:
-        return None
+    return None if provider is None else _provider_resolution(provider)
+
+
+def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
+    """Return the resolution of one registered, plugin, or fetched provider."""
+
     source = provider.directory if provider.directory is not None else _packaged_runner_path(provider)
     return ResolvedWorkflow(
         source=source,
@@ -915,6 +961,7 @@ def registered_workflow(name: str) -> ResolvedWorkflow | None:
         outputs=provider.outputs,
         declaration_uri=provider.declaration_uri,
         declaration_file=provider.declaration_file,
+        name=provider.name,
         _input_metadata=provider._input_metadata,
     )
 
@@ -929,8 +976,9 @@ def resolve_workflow(
 ) -> ResolvedWorkflow:
     """Return the :class:`ResolvedWorkflow` *workflow* names.
 
-    *workflow* is the name of a packaged workflow, the file name of a packaged
-    runner, or the path of a runner file. A runner file is described by running
+    *workflow* is the name of a packaged workflow, a git workflow IRI (which is
+    fetched and installed, see ``httk.workflow.git_workflows``), the file name
+    of a packaged runner, or the path of a runner file. A runner file is described by running
     it, so its workflow name and its steps come from the runner itself; *workflow*
     and *step* override what it said, and *step* is required when a runner
     registers several steps and none of them is ``start``.
@@ -945,7 +993,14 @@ def resolve_workflow(
     """
 
     text = os.fspath(workflow)
-    resolved = registered_workflow(text)
+    if text.startswith("git+"):
+        # An explicit IRI reference is consent to fetch; job payloads go through
+        # the cache-only :func:`workflow_provider` instead.
+        from .git_workflows import fetch_workflow
+
+        resolved: ResolvedWorkflow | None = _provider_resolution(fetch_workflow(text))
+    else:
+        resolved = registered_workflow(text)
     if resolved is not None and format is not None:
         raise ValueError(
             "--format applies only to bare workflow documents or directories; registered workflows use their manifest language"

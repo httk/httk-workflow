@@ -677,6 +677,73 @@ There are THREE TRUST TIERS:
    `job.json`; refusal or tampering degrades that job instead of stopping the
    sweep.
 
+## Git IRI references
+
+A workflow reference starting with `git+` is a git IRI
+({py:mod}`httk.workflow.git_workflows`, parsed by
+{py:func}`~httk.workflow.git_workflows.parse_workflow_iri`); one that fails to parse is an error and never
+falls through to path or id resolution. The grammar is
+
+```text
+git+SCHEME://AUTHORITY/PATH[@REF][#SUBDIR]      SCHEME = https | http | file
+```
+
+`#` is split first (the fragment is the package subdirectory), then `@REF` is
+split with the last `@` after the authority, so refs may contain `/`. Refused:
+ssh and `git@host:path` forms, userinfo in the authority (it would be copied
+into `job.json`), a query, an empty ref, a ref starting with `-`, an empty
+fragment, and a subdirectory that is absolute, has backslashes, or has empty,
+`.` or `..` components. The authority may be empty only for `file`.
+
+The **canonical form** is
+`git+SCHEME://AUTHORITY(host lowercased)PATH(trailing / stripped)@COMMIT[#SUBDIR]`,
+where `COMMIT` is the full lowercase commit hash (40 or 64 hex digits). The
+repository path is otherwise verbatim, so `…/repo` and `…/repo.git` are
+distinct. The canonical IRI is the provider's `workflow_id`, the job's
+`workflow`, and — when the manifest names neither `declaration_uri` nor
+`declaration_file` — the generated declaration's `$id`. The manifest
+`[workflow] id` becomes the provider's `name`, its short name.
+
+**Cache layout**, under `httk.core.userdirs.data_home() / "workflows"`:
+
+```text
+git/<sha256(repository)[:16]>/<commit>/        checkout tree, .git removed
+git/<sha256(repository)[:16]>/<commit>.json    httk-workflow-git-checkout record
+installed/<sha256(canonical IRI)[:32]>.json    httk-workflow-installed entry
+```
+
+A cached `<commit>/` tree is a cache hit: a pinned IRI whose tree exists runs
+no git. Clones land in a temporary directory beside the final name and are
+renamed into place, and JSON files are replaced atomically. Every explicit
+reference rewrites the installed entry, refreshing `referenced_at`. Git runs
+without hooks, global or system configuration, credential helpers, `GIT_*`
+environment, or terminal prompts, so private repositories are not supported.
+A package whose tree could not be published (for example one containing a
+symlink) is refused at fetch time, before it is installed. Its instantiate
+hook runs from the published, digest-pinned tree; its collect hook and
+postprocess scripts run from the installed cache tree, like a plugin package.
+
+**Resolution precedence.** `resolve_workflow` (and so `new_job`,
+`job new --workflow`, `workflow describe` and `Attempt.call`) tries a git IRI
+first, fetching and installing it with
+{py:func}`~httk.workflow.git_workflows.fetch_workflow`; the result is a directory package published and
+digest-pinned into the runner store like any other. A short name resolves to
+in-process registrations first, then installed plugins, then fetched
+workflows by `name` or `alias`. Among fetched entries claiming the name, one
+lineage (`repository`, `subdir`) selects its most recently referenced commit;
+several lineages are an error naming the competing IRIs. `workflow list` and
+the unknown-workflow hint include fetched short names that are neither
+shadowed nor conflicted.
+
+**Cache-only rule.** `workflow_provider(IRI)`, like
+{py:func}`~httk.workflow.git_workflows.fetched_workflows`, returns an installed provider
+only for a pinned IRI with an installed entry, and otherwise `None`; it never
+runs git or writes files. Collection dispatches through it, so a job payload
+can never cause code acquisition. With `--allow-job-collector`, a job whose IRI
+is not installed here uses its digest-verified pinned tree without an id
+comparison; when the IRI is installed, the tree's manifest id must equal the
+installed short name.
+
 ## Publication and lifecycle
 
 `job new --workflow-dir` publishes the complete package tree into the workspace

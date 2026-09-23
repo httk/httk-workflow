@@ -56,6 +56,10 @@ in-process registrations first, then installed plugins; `httk workflow list`
 labels plugin entries with their owning plugin, while `workflow describe`
 reports a plugin entry as `source: installed-package`.
 
+A package committed to a Git repository can be referenced from anywhere by a
+git IRI such as `git+https://github.com/httk/workflows-vasp@468f14262805f0b63f54296e7cb21c81033ed5c2#vasp-relax`,
+which fetches and installs it; see {doc}`workflow_iris`.
+
 The full guide, {doc}`details/workflow_packages`, is the manifest reference:
 every table and key, hook envelopes, output declarations and provenance,
 language realizations, and the build-registration mechanics.
