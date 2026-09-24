@@ -1803,7 +1803,7 @@ def build_job_parser(
         metavar="WORKFLOW",
         help="a registered or packaged workflow name ("
         + ", ".join(workflow_names)
-        + ") or a git IRI git+https://HOST/PATH[@REF][#SUBDIR] (not a path; use --from-runner or --workflow-dir)",
+        + ") or a git URI git+https://HOST/PATH[@REF][#SUBDIR] (not a path; use --from-runner or --workflow-dir)",
     )
     workflow_group.add_argument(
         "--workflow-dir",

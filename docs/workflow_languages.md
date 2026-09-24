@@ -47,7 +47,7 @@ This is the same shape used by the package fixtures:
 
 ```toml
 [workflow]
-id = "example.cwl"
+name = "example.cwl"
 
 [workflow.runner]
 language = "cwl"
@@ -76,7 +76,7 @@ additional import roots, and `allowed_modules` is a module-prefix allowlist:
 
 ```toml
 [workflow]
-id = "example.pwd"
+name = "example.pwd"
 
 [workflow.runner]
 language = "pwd"
@@ -111,7 +111,7 @@ form constructs the Maker with `Class(**parameters)`:
 
 ```toml
 [workflow]
-id = "example.jobflow"
+name = "example.jobflow"
 
 [workflow.runner]
 language = "jobflow"
@@ -194,7 +194,7 @@ The v1 form has no document member and uses the ordinary manager:
 
 ```toml
 [workflow]
-id = "example.v1"
+name = "example.v1"
 
 [workflow.runner]
 language = "httk-v1"

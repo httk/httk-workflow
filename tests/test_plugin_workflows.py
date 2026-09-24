@@ -35,7 +35,7 @@ def _plugin(
         alias_line = f'alias = "{alias}"\n' if alias is not None else ""
         build_section = "\n[workflow.build]\ncommand = \"sh build.sh\"\nartifacts = [\"build\"]\n" if build else ""
         (package / "httk_workflow.toml").write_text(
-            f'[workflow]\nid = "{workflow_id}"\n{alias_line}\n[workflow.runner]\nsteps = ["run"]\n{build_section}',
+            f'[workflow]\nname = "{workflow_id}"\n{alias_line}\n[workflow.runner]\nsteps = ["run"]\n{build_section}',
             encoding="utf-8",
         )
         (package / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -80,7 +80,7 @@ def test_manifest_resource_requirements_reach_provider_and_job(tmp_path: Path) -
     (package / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (package / "run").chmod(0o755)
     (package / "httk_workflow.toml").write_text(
-        '[workflow]\nid = "test.resources"\n'
+        '[workflow]\nname = "test.resources"\n'
         '[workflow.runner]\nsteps = ["start", "finish"]\n'
         '[workflow.resources]\nprocs = 2\n'
         '[workflow.steps.finish.resources]\nmem = 512\n',
@@ -111,7 +111,7 @@ def test_manifest_resource_requirements_reject_bad_declarations(tmp_path: Path, 
     (package / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (package / "run").chmod(0o755)
     (package / "httk_workflow.toml").write_text(
-        '[workflow]\nid = "test.resources"\n[workflow.runner]\nsteps = ["start"]\n' + extra,
+        '[workflow]\nname = "test.resources"\n[workflow.runner]\nsteps = ["start"]\n' + extra,
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match=message):
@@ -123,7 +123,7 @@ def test_manifest_step_resources_require_an_executable_runner_steps_list(tmp_pat
     package.mkdir()
     (package / "document.json").write_text("{}", encoding="utf-8")
     (package / "httk_workflow.toml").write_text(
-        '[workflow]\nid = "test.resources"\n'
+        '[workflow]\nname = "test.resources"\n'
         '[workflow.runner]\nlanguage = "httk-v1"\n'
         '[workflow.steps.start.resources]\nprocs = 1\n',
         encoding="utf-8",

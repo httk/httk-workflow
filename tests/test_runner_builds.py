@@ -222,7 +222,7 @@ def _compiled_package(root: Path) -> Path:
     package = root / "package"
     package.mkdir()
     (package / "httk_workflow.toml").write_text(
-        "[workflow]\nid = 'compiled.test'\n[workflow.runner]\nsteps = ['start']\n"
+        "[workflow]\nname = 'compiled.test'\n[workflow.runner]\nsteps = ['start']\n"
         "[workflow.build]\ncommand = './build.sh'\nartifacts = ['build']\n",
         encoding="utf-8",
     )
@@ -298,7 +298,7 @@ def test_workflow_build_prefers_in_workspace_packages_and_resolves_job_globs(tmp
     name = register_ws(context, workspace.root, "build-selector")
     package = _package(
         workspace.root / "package",
-        '[workflow]\nid = "tests.build.selector"\n[workflow.runner]\nsteps = ["start"]\n'
+        '[workflow]\nname = "tests.build.selector"\n[workflow.runner]\nsteps = ["start"]\n'
         '[workflow.build]\ncommand = "./build.sh"\nartifacts = ["out"]\n',
     )
     (package / "build.sh").write_text("#!/bin/sh\nmkdir -p out\nprintf artifact > out/result\n", encoding="utf-8")

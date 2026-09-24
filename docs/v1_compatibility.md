@@ -23,7 +23,7 @@ A v1 package selects the language and may set the task pool and retry budget:
 
 ```toml
 [workflow]
-id = "legacy.silicon"
+name = "legacy.silicon"
 
 [workflow.runner]
 language = "httk-v1"

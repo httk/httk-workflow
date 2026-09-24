@@ -31,8 +31,13 @@ digest coverage, and honest reporting belong here.
 
 Packaged workflows may carry declarations into every scaffolded `job.json`; the
 built-in VASP workflows declare their `workflow` `$id` using the published
-`schemas.httk.org` IRIs. See {doc}`provenance` for the rule that uses this `$id`
+`schemas.httk.org` URIs. See {doc}`provenance` for the rule that uses this `$id`
 as the workflow URI fallback.
+
+A declaration `$id` names the *declaration* document, never the code: a
+workflow referenced by git URI keeps that URI as its *definition* URI, and its
+generated declaration carries a `$id` only when the manifest names a
+`declaration_uri`. See {doc}`workflow_uris`.
 
 Directory packages can generate this declaration from their manifest or carry
 an externally authored, validated declaration file; see {doc}`workflow_packages`.

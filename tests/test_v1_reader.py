@@ -33,7 +33,7 @@ def _task(root: Path, name: str, dates: tuple[str, ...], *, code: str | None = "
 def _package(root: Path) -> Path:
     root.mkdir()
     (root / "httk_workflow.toml").write_text(
-        '[workflow]\nid = "tests.v1.finished"\ndeclaration_uri = "urn:finished"\n'
+        '[workflow]\nname = "tests.v1.finished"\ndeclaration_uri = "urn:finished"\n'
         '[workflow.runner]\nlanguage = "httk-v1"\n'
         '[workflow.collect]\nfile = "collect.py"\n'
         '[workflow.outputs.result]\nentry_type = "records"\n',

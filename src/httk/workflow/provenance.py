@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Final
 
 from httk.core import Run, RunEdge
+from httk.core.git_sources import parse_git_uri
 
 from .collecting import JobRecord
 
@@ -79,6 +80,18 @@ def _workflow_uri(identity: str, declarations: Mapping[str, Mapping[str, object]
         if isinstance(document, Mapping) and "$id" in document:
             return _uri(identity, document["$id"], "workflow $id", allow_none=False)
     return None
+
+
+def _definition_uri(workflow: object) -> str | None:
+    """Return the job's workflow as a definition URI when it is a pinned git URI."""
+
+    if not isinstance(workflow, str) or not workflow.startswith("git+"):
+        return None
+    try:
+        uri = parse_git_uri(workflow)
+    except ValueError:
+        return None
+    return str(uri) if uri.pinned else None
 
 
 def _timestamp(value: object) -> datetime | None:
@@ -161,6 +174,7 @@ def run_record(record: JobRecord) -> Run:
 
     return Run(
         workflow_declaration_uri=workflow_uri,
+        workflow_definition_uri=_definition_uri(record.job.get("workflow")),
         inputs=() if document is None else _edges(identity, document, "inputs"),
         artifacts=() if document is None else _edges(identity, document, "artifacts"),
         outputs=() if document is None else _edges(identity, document, "outputs"),

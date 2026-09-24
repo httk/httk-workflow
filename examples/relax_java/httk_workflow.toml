@@ -1,5 +1,5 @@
 [workflow]
-id = "httk.vasp.relax-java"
+name = "httk.vasp.relax-java"
 description = "A minimal Java VASP relaxation runner."
 
 [workflow.runner]

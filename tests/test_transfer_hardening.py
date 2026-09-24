@@ -551,7 +551,7 @@ def test_receive_reminds_about_build_registration_for_bundled_runner_trees(tmp_p
     package = tmp_path / "compiled"
     package.mkdir()
     (package / "httk_workflow.toml").write_text(
-        "[workflow]\nid = 'compiled.transfer'\n[workflow.runner]\nsteps = ['start']\n"
+        "[workflow]\nname = 'compiled.transfer'\n[workflow.runner]\nsteps = ['start']\n"
         "[workflow.build]\ncommand = './build.sh'\nartifacts = ['out']\n",
         encoding="utf-8",
     )
@@ -580,7 +580,7 @@ def test_local_transfer_command_reminds_after_importing_a_build_declaring_runner
     package = tmp_path / "compiled-command"
     package.mkdir()
     (package / "httk_workflow.toml").write_text(
-        "[workflow]\nid = 'compiled.transfer.command'\n[workflow.runner]\nsteps = ['start']\n"
+        "[workflow]\nname = 'compiled.transfer.command'\n[workflow.runner]\nsteps = ['start']\n"
         "[workflow.build]\ncommand = './build.sh'\nartifacts = ['out']\n",
         encoding="utf-8",
     )
@@ -605,7 +605,7 @@ def test_receive_does_not_remind_for_buildless_runner_trees(tmp_path: Path, caps
     runner = tmp_path / "runner"
     runner.mkdir()
     (runner / "httk_workflow.toml").write_text(
-        "[workflow]\nid = 'buildless.transfer'\n[workflow.runner]\nsteps = ['start']\n",
+        "[workflow]\nname = 'buildless.transfer'\n[workflow.runner]\nsteps = ['start']\n",
         encoding="utf-8",
     )
     (runner / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")

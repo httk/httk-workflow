@@ -122,7 +122,7 @@ def _package(root: Path, hook: str, *, workflow: str = "tests.instantiate.exec",
     root.mkdir()
     (root / "httk_workflow.toml").write_text(
         f"""[workflow]
-id = {workflow!r}
+name = {workflow!r}
 
 [workflow.runner]
 steps = ["start"]

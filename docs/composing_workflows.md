@@ -39,8 +39,8 @@ This is a distinct tool from the two nearby ones:
 {py:func}`~httk.workflow.scaffold.new_job` (and `httk job new`) does:
 
 - a **registered id or alias** — a packaged workflow such as `vasp-relax`;
-- a **git IRI** such as `git+https://github.com/httk/workflows-vasp@468f14262805f0b63f54296e7cb21c81033ed5c2#vasp-relax`,
-  fetched and installed on first reference (see {doc}`workflow_iris`), or the
+- a **git URI** such as `git+https://github.com/httk/workflows-vasp#vasp-relax`,
+  fetched and installed on first reference (see {doc}`workflow_uris`), or the
   short name of a workflow installed that way;
 - a **runner file** of your own (`./elastic_constant.py`);
 - a **workflow package directory** (one holding `httk_workflow.toml`);

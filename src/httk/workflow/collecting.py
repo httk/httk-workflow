@@ -1394,8 +1394,8 @@ def _job_collector(
         return None, None, f"job-pinned collector manifest is invalid: {exc}"
     expected: str | None = workflow_id
     if workflow_id.startswith("git+"):
-        # A fetched workflow's manifest id is its short name. The tree is already
-        # digest-verified against the job's runner pin, so when the IRI is not
+        # An installed git workflow's manifest name is its short name. The tree is already
+        # digest-verified against the job's runner pin, so when the URI is not
         # installed here there is no short name to compare and none is required.
         from .scaffold import workflow_provider
 
@@ -1405,7 +1405,7 @@ def _job_collector(
         return (
             None,
             None,
-            f"job-pinned collector manifest id {provider.workflow_id!r} does not match job workflow {workflow_id!r}",
+            f"job-pinned collector manifest name {provider.workflow_id!r} does not match job workflow {workflow_id!r}",
         )
     if provider.collect_file is None:
         return None, None, "job-pinned workflow tree has no collect hook"
@@ -1479,6 +1479,7 @@ def _assemble_collected(
     owned = tuple(_entry_edge(identity, role, value, roles[role]) for role, value in outputs.items())
     run = core.Run(
         workflow_declaration_uri=run.workflow_declaration_uri,
+        workflow_definition_uri=run.workflow_definition_uri,
         inputs=run.inputs,
         artifacts=_overlay_edges(run.artifacts, owned),
         outputs=_overlay_edges(run.outputs, owned),
@@ -1589,7 +1590,7 @@ def collect(
         per-job collection failure.
     """
 
-    from .provenance import run_record
+    from .provenance import _definition_uri, run_record
     from .scaffold import workflow_provider
 
     batch_size = _validate_batch_size(batch_size)
@@ -1611,6 +1612,7 @@ def collect(
             except ValueError as exc:
                 empty_run = _core().Run(
                     workflow_declaration_uri=None,
+                    workflow_definition_uri=_definition_uri(workflow_id),
                     inputs=(),
                     artifacts=(),
                     outputs=(),

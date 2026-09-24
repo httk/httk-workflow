@@ -72,7 +72,7 @@ def handle_campaign_submit(arguments: argparse.Namespace, context: CLIContext) -
         resolved = resolve_workflow(workflow)
     except ValueError as exc:
         if workflow.startswith("git+"):
-            raise  # a git IRI's fetch or manifest error is the diagnostic
+            raise  # a git URI's fetch or manifest error is the diagnostic
         raise ValueError(
             "campaign submit accepts registered or packaged workflow names only; "
             "use job new --from-runner FILE, --workflow-dir DIR, or --from-command TEMPLATE"
@@ -293,7 +293,7 @@ def build_campaign_parser(
         "--workflow",
         metavar="WORKFLOW",
         required=True,
-        help="the registered workflow id or alias, or a git+https://HOST/PATH[@REF][#SUBDIR] IRI, to scaffold "
+        help="the registered workflow id or alias, or a git+https://HOST/PATH[@REF][#SUBDIR] URI, to scaffold "
         "(no paths; use job new for files or commands)",
     )
     submit.add_argument(

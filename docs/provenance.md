@@ -62,6 +62,18 @@ Observed replaces declared wholesale; it is a full replacement document, not
 a merge. If no provenance document exists, `run_record` still uses the `$id`
 from the `workflow` declaration when available.
 
+## Declaration and definition
+
+A `Run` names the workflow twice, for two different things.
+`workflow_declaration_uri` is the `$id` of the workflow *declaration*, the
+document describing what the workflow consumes and produces (see
+{doc}`declarations`). `workflow_definition_uri` identifies the workflow
+*definition*, the code that ran: `run_record` sets it to the job's `workflow`
+when that is a commit-pinned git URI (see {doc}`workflow_uris`), and to `None`
+otherwise. A git workflow without a `declaration_uri` therefore has a
+definition URI but no declaration URI. The v1 reader records the declaration
+URI of its package, if any, and no definition URI. `httk workflow collect` reports both in each run summary.
+
 The end-to-end handoff is:
 
 ```python

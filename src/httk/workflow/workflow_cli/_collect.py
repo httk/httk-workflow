@@ -132,6 +132,7 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
         "missing_collector": item.missing_collector,
         "run": {
             "workflow_declaration_uri": item.run.workflow_declaration_uri,
+            "workflow_definition_uri": item.run.workflow_definition_uri,
             "edges": _edge_counts(item.run),
         },
         "products": [
