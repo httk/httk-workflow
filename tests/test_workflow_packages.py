@@ -22,7 +22,7 @@ from httk.workflow.scaffold import BuildSpec, new_job, resolve_workflow, workflo
 
 _MANIFEST = '''
 [workflow]
-id = "tests.package"
+name = "tests.package"
 alias = "test-package"
 description = "A package for tests."
 declaration_uri = "https://example.test/workflows/package"
@@ -111,7 +111,7 @@ def _language_package(root: Path, language: str = "cwl", manifest_extra: str = "
     document = "echo.cwl" if language == "cwl" else "workflow.json"
     output_name = "spoken" if language == "cwl" else "result"
     content = f'''[workflow]
-id = "tests.{language}"
+name = "tests.{language}"
 
 [workflow.runner]
 language = "{language}"
@@ -309,7 +309,7 @@ def _jobflow_package(root: Path, runner: str, *, document: bool = False) -> Path
     document_line = 'document = "maker.json"\n' if document else ""
     (root / "httk_workflow.toml").write_text(
         f'''[workflow]
-id = "tests.jobflow"
+name = "tests.jobflow"
 
 [workflow.runner]
 language = "jobflow"
@@ -532,7 +532,7 @@ def test_required_input_is_enforced_and_entry_type_defaults_required(tmp_path: P
     # shared _MANIFEST package: the hook-module cache is content-addressed, and
     # byte-identical trees deliberately share one loaded module.
     package = _package(
-        tmp_path / "required", _MANIFEST.replace('id = "tests.package"', 'id = "tests.package.required"')
+        tmp_path / "required", _MANIFEST.replace('name = "tests.package"', 'name = "tests.package.required"')
     )
     workspace = Workspace.initialize(tmp_path / "workspace")
     # The structure input declares entry_type, so it defaults to required.
@@ -580,7 +580,7 @@ def test_required_and_forbidden_language_documents_remain_enforced(tmp_path: Pat
     v1.mkdir()
     (v1 / "httk_workflow.toml").write_text(
         '''[workflow]
-id = "tests.v1"
+name = "tests.v1"
 
 [workflow.runner]
 language = "httk-v1"
@@ -898,7 +898,7 @@ def test_external_declaration_must_match_the_manifest(tmp_path: Path, field: str
 @pytest.mark.parametrize(
     ("change", "message"),
     [
-        ("id = \"tests.package\"", r"\[workflow\]\.id is required"),
+        ("name = \"tests.package\"", r"\[workflow\]\.name is required"),
         ("alias = \"test-package\"", r"\[workflow\]\.alias must match"),
         ("[workflow.runner]\nsteps = [\"start\"]\nunknown = true", r"unknown key \[workflow\.runner\.unknown\]"),
         (
@@ -913,8 +913,8 @@ def test_external_declaration_must_match_the_manifest(tmp_path: Path, field: str
 )
 def test_manifest_validation_errors_are_pathful(tmp_path: Path, change: str, message: str) -> None:
     manifest = _MANIFEST
-    if change.startswith("id ="):
-        manifest = manifest.replace('id = "tests.package"', "")
+    if change.startswith("name ="):
+        manifest = manifest.replace('name = "tests.package"', "")
     elif change.startswith("alias ="):
         manifest = manifest.replace('alias = "test-package"', 'alias = "Bad Alias"')
     elif change.startswith("[workflow.runner]"):
@@ -987,7 +987,7 @@ def test_load_register_alias_and_register_false(tmp_path: Path, monkeypatch: pyt
     assert workflow_provider("test-package") == loaded
     assert resolve_workflow("tests.package").directory == package.resolve()
 
-    collision_manifest = _MANIFEST.replace('id = "tests.package"', 'id = "tests.other"')
+    collision_manifest = _MANIFEST.replace('name = "tests.package"', 'name = "tests.other"')
     collision = parse_workflow_manifest(_package(tmp_path / "collision", collision_manifest))
     with pytest.raises(ValueError, match="collides"):
         load_workflow_package(tmp_path / "collision")
@@ -1031,3 +1031,12 @@ def test_directory_workflow_scaffolds_from_the_published_tree_and_pins_declarati
     (stored / "collect.py").write_text("def collect(record):\n    return {'changed': True}\n", encoding="utf-8")
     with pytest.raises(ValueError, match="published workflow tree"):
         new_job(workspace, package, inputs={"structure": structure})
+
+
+def test_manifest_id_key_is_retired_and_git_names_are_refused(tmp_path: Path) -> None:
+    retired = _package(tmp_path / "retired", _MANIFEST.replace('name = "tests.package"', 'id = "tests.package"'))
+    with pytest.raises(ValueError, match=r"unknown key \[workflow\.id\]"):
+        parse_workflow_manifest(retired)
+    git = _package(tmp_path / "git", _MANIFEST.replace('name = "tests.package"', 'name = "git+https://x.test/a"'))
+    with pytest.raises(ValueError, match="must not start with 'git\\+'"):
+        parse_workflow_manifest(git)

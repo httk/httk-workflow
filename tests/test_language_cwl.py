@@ -254,7 +254,7 @@ def _package(
     port_line = "" if input_port is None else f'port = "{input_port}"\n'
     (root / "httk_workflow.toml").write_text(
         f'''[workflow]
-id = "tests.language.{root.name}"
+name = "tests.language.{root.name}"
 
 [workflow.runner]
 language = "cwl"

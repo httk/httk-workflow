@@ -1,5 +1,5 @@
 [workflow]
-id = "httk.vasp.relax-cpp"
+name = "httk.vasp.relax-cpp"
 description = "A minimal C++17 VASP relaxation runner."
 
 [workflow.runner]

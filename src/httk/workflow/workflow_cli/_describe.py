@@ -1,4 +1,4 @@
-"""The read-only top-level workflow description command."""
+"""The top-level workflow describe, list, install and uninstall commands."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
-from ..git_workflows import parse_workflow_iri
+from httk.core.git_sources import parse_git_uri
+
+from ..git_workflows import _uninstall_workflows, fetch_workflow
 from ..packages import installed_plugin_workflow_owners, installed_plugin_workflows
 from ..scaffold import (
     ResolvedWorkflow,
@@ -56,7 +58,7 @@ def _manifest_step_drift(workflow: ResolvedWorkflow) -> str | None:
 
 def _source_kind(target: str, workflow: ResolvedWorkflow) -> str:
     if (workflow.registration_id or "").startswith("git+"):
-        return "fetched"
+        return "installed"
     provider = workflow_provider(target)
     if provider is not None:
         return "registered-directory" if provider.directory is not None else "installed-package"
@@ -125,9 +127,9 @@ def _workflow_description(target: str, format: str | None = None) -> dict[str, o
     workflow = resolve_workflow(target, format=format)
     source = workflow.directory if workflow.directory is not None else workflow.source
     source_document: dict[str, object] = {"kind": _source_kind(target, workflow), "path": str(source)}
-    if source_document["kind"] == "fetched":
-        iri = parse_workflow_iri(workflow.workflow_id)
-        source_document.update(iri=workflow.workflow_id, commit=iri.ref, name=workflow.name)
+    if source_document["kind"] == "installed":
+        uri = parse_git_uri(workflow.workflow_id)
+        source_document.update(uri=workflow.workflow_id, commit=uri.ref, name=workflow.name)
     return {
         "format": WORKFLOW_DESCRIPTION_FORMAT,
         "format_version": 2,
@@ -209,8 +211,8 @@ def _render_text(description: Mapping[str, object]) -> str:
     ]
     source = description["source"]
     assert isinstance(source, Mapping)
-    if source["kind"] == "fetched":
-        lines.append(f"source: fetched {source['iri']} ({source['path']})")
+    if source["kind"] == "installed":
+        lines.append(f"source: installed {source['uri']} ({source['path']})")
     else:
         lines.append(f"source: {source['kind']} ({source['path']})")
     lines.extend(
@@ -300,11 +302,11 @@ def handle_workflow_describe(arguments: argparse.Namespace, context: Any) -> int
 
 
 def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
-    """List the registered, installed-plugin and fetched workflows, ids only.
+    """List the registered, installed-plugin and installed git workflows, ids only.
 
     The listing is the same union ``--workflow`` resolves against: the workflows
     ``register_workflow`` added in this process, followed by the workflows
-    installed plugins bundle, then fetched git workflows by short name. A workflow reached only by explicit path
+    installed plugins bundle, then installed git workflows by short name. A workflow reached only by explicit path
     (``--workflow-dir`` or ``--from-runner``) is not registered, so it cannot be
     listed here; ``describe PATH`` reports one such workflow directly.
 
@@ -323,13 +325,13 @@ def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
         # identity check — not mere membership — decides the source.
         is_plugin = provider is not None and provider is plugin_providers.get(workflow_id)
         owner = owners.get(workflow_id) if is_plugin else None
-        is_fetched = provider is not None and provider.workflow_id.startswith("git+")
+        is_installed = provider is not None and provider.definition_uri is not None
         row_source: dict[str, object] = {
-            "kind": "plugin" if is_plugin else "fetched" if is_fetched else "registered",
+            "kind": "plugin" if is_plugin else "installed" if is_installed else "registered",
             "plugin": owner,
         }
-        if provider is not None and is_fetched:
-            row_source["iri"] = provider.workflow_id
+        if provider is not None and is_installed:
+            row_source["uri"] = provider.workflow_id
         rows.append(
             {
                 "workflow": workflow_id,
@@ -350,8 +352,8 @@ def handle_workflow_list(arguments: argparse.Namespace, context: Any) -> int:
         source_text = (
             f"plugin {source['plugin']}"
             if source["kind"] == "plugin"
-            else f"fetched {source['iri']}"
-            if source["kind"] == "fetched"
+            else f"installed {source['uri']}"
+            if source["kind"] == "installed"
             else "registered"
         )
         print(f"{row['workflow']}\t{row['alias'] or '-'}\t{source_text}\t{row['summary'] or '-'}")
@@ -366,10 +368,10 @@ def build_list_parser(
     listing = _leaf(
         subparsers,
         "list",
-        summary="list the registered, installed-plugin and fetched workflows",
+        summary="list the registered, installed-plugin and installed git workflows",
         description=(
             "List the workflows a job can select by name with --workflow: those registered in this "
-            "process, then those installed plugins bundle, then fetched git workflows by short name. A workflow reached only by explicit path "
+            "process, then those installed plugins bundle, then installed git workflows by short name. A workflow reached only by explicit path "
             "(--workflow-dir or --from-runner) is not registered and is not listed here"
         ),
         handler=handle_workflow_list,
@@ -386,14 +388,14 @@ def build_describe_parser(
         subparsers,
         "describe",
         summary="describe a workflow without publishing it",
-        description="Describe a registered workflow, git workflow IRI, runner file, or workflow package directory",
+        description="Describe a registered workflow, git workflow URI, runner file, or workflow package directory",
         handler=handle_workflow_describe,
     )
     describe.add_argument(
         "targets",
         metavar="TARGET",
         nargs="+",
-        help="workflow id, alias, git+https://…@ref#subdir IRI, runner file, or package directory",
+        help="workflow id, alias, git+https://…@ref#subdir URI, runner file, or package directory",
     )
     describe.add_argument(
         "--format",
@@ -401,3 +403,93 @@ def build_describe_parser(
         help="force LANG for a bare workflow document or directory",
     )
     describe.add_argument("--json", action="store_true", help="print descriptions as one JSON array")
+
+
+def handle_workflow_install(arguments: argparse.Namespace, context: Any) -> int:
+    """Fetch and install git workflows without creating a job."""
+
+    rows: list[dict[str, object]] = []
+    failed = False
+    for target in arguments.uris:
+        try:
+            if not target.startswith("git+"):
+                raise ValueError("install takes a git+https://HOST/PATH[@REF][#SUBDIR] URI")
+            provider = fetch_workflow(target)
+        except (OSError, ValueError) as exc:
+            failed = True
+            print(f"{target}: {exc}", file=sys.stderr)
+            continue
+        rows.append({"uri": provider.workflow_id, "name": provider.name, "alias": provider.alias})
+        if not arguments.json:
+            print(f"{provider.workflow_id}\t{provider.name}")
+    if arguments.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+    return 1 if failed else 0
+
+
+def _not_installable(selector: str) -> str | None:
+    """Explain why a selector names a workflow uninstall cannot remove."""
+
+    from ..packages import installed_plugin_workflows
+    from ..scaffold import _WORKFLOW_PROVIDERS
+
+    def claims(providers: Mapping[str, Any]) -> bool:
+        return selector in providers or any(provider.alias == selector for provider in providers.values())
+
+    if claims(installed_plugin_workflows()):
+        return f"{selector!r} is a plugin workflow; remove its plugin with httk plugin uninstall"
+    if claims(_WORKFLOW_PROVIDERS):
+        return f"{selector!r} is registered in-process and cannot be uninstalled"
+    return None
+
+
+def handle_workflow_uninstall(arguments: argparse.Namespace, context: Any) -> int:
+    """Forget installed git workflows by short name or URI."""
+
+    rows: list[dict[str, object]] = []
+    failed = False
+    for selector in arguments.selectors:
+        try:
+            removed = _uninstall_workflows(selector)
+        except (OSError, ValueError) as exc:
+            failed = True
+            print(f"{selector}: {_not_installable(selector) or exc}", file=sys.stderr)
+            continue
+        for member in removed:
+            rows.append({"uri": member.uri, "names": list(member.names)})
+            if not arguments.json:
+                print(f"{member.uri}\t{', '.join(member.names)}")
+    if arguments.json:
+        print(json.dumps(rows, indent=2, sort_keys=True))
+    return 1 if failed else 0
+
+
+def build_install_parser(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+) -> None:
+    """Declare the top-level ``install`` and ``uninstall`` workflow commands."""
+
+    install = _leaf(
+        subparsers,
+        "install",
+        summary="fetch and install git workflows without creating a job",
+        description=(
+            "Fetch each git+https://HOST/PATH[@REF][#SUBDIR] URI and install its workflow package, "
+            "printing its canonical commit-pinned URI and short name"
+        ),
+        handler=handle_workflow_install,
+    )
+    install.add_argument("uris", metavar="URI", nargs="+", help="a git workflow URI")
+    install.add_argument("--json", action="store_true", help="print the installed workflows as one JSON array")
+    uninstall = _leaf(
+        subparsers,
+        "uninstall",
+        summary="forget installed git workflows",
+        description=(
+            "Forget installed git workflows: a pinned URI removes that commit, an unpinned URI or a short "
+            "name removes its whole repository and subdirectory lineage; cached checkouts stay"
+        ),
+        handler=handle_workflow_uninstall,
+    )
+    uninstall.add_argument("selectors", metavar="SELECTOR", nargs="+", help="a short name or git workflow URI")
+    uninstall.add_argument("--json", action="store_true", help="print the removed entries as one JSON array")

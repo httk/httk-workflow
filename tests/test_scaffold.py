@@ -1190,7 +1190,7 @@ def test_command_files_directory_works_with_workflow_dir_and_from_runner(tmp_pat
     package = tmp_path / "package"
     package.mkdir()
     (package / "httk_workflow.toml").write_text(
-        '[workflow]\nid = "tests.files.package"\ndescription = "file staging test"\n\n'
+        '[workflow]\nname = "tests.files.package"\ndescription = "file staging test"\n\n'
         '[workflow.runner]\nsteps = ["start"]\n',
         encoding="utf-8",
     )

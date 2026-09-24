@@ -53,7 +53,15 @@ from ._compat import (
     build_v1_parser,
     handle_v1_collect,
 )
-from ._describe import build_describe_parser, build_list_parser, handle_workflow_describe, handle_workflow_list
+from ._describe import (
+    build_describe_parser,
+    build_install_parser,
+    build_list_parser,
+    handle_workflow_describe,
+    handle_workflow_install,
+    handle_workflow_list,
+    handle_workflow_uninstall,
+)
 from ._job import (
     add_job_request_arguments,
     add_job_submit_arguments,
@@ -169,6 +177,7 @@ __all__ = [
     "build_collect_parser",
     "build_config_parser",
     "build_describe_parser",
+    "build_install_parser",
     "build_job_parser",
     "build_launcher_parser",
     "build_list_parser",
@@ -234,7 +243,9 @@ __all__ = [
     "handle_transfer_retire",
     "handle_v1_collect",
     "handle_workflow_describe",
+    "handle_workflow_install",
     "handle_workflow_list",
+    "handle_workflow_uninstall",
     "handle_workspace_delete",
     "handle_workspace_forget",
     "handle_workspace_fsck",
@@ -285,6 +296,7 @@ def build_parser(
         build_job_parser(groups, program=f"{context.program} job")
     build_describe_parser(groups)
     build_list_parser(groups)
+    build_install_parser(groups)
     build_seal_parser(groups)
     build_collect_parser(groups)
     build_build_parser(groups)

@@ -100,7 +100,7 @@ def _validate_settings(raw: object) -> dict[str, object]:
 def _validate_workflow_prelude_id(workflow_id: str) -> str:
     """Return one workflow-prelude key, refusing an ill-formed one.
 
-    The key mirrors a ``[workflow].id``: a nonempty string with no whitespace,
+    The key mirrors a ``[workflow].name``: a nonempty string with no whitespace,
     because a prelude map is keyed by the workflow it initializes the
     environment for.
     """

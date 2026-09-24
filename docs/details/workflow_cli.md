@@ -26,6 +26,8 @@ httk workflow build      [--workspace WORKSPACE] TARGET...
 httk job                 new | submit | request | delete | seal | unseal | list | show | log | why | debug
 httk workflow list       [--json]
 httk workflow describe   TARGET [--json]
+httk workflow install    URI... [--json]
+httk workflow uninstall  SELECTOR... [--json]
 httk workflow seal       verify [PATH] [--json] [--trusted-key KEY] [--shallow]
 httk workflow precheck   [--workspace WORKSPACE] [--placement P] [--json]
 httk workflow collect
@@ -283,12 +285,12 @@ and returned 0; any resolution error or nonzero script return exits 1.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `list` | list the workflows `job new --workflow NAME` can resolve: those registered in this process, then those installed plugins bundle, then fetched git workflows by short name | `--json` |
+| `list` | list the workflows `job new --workflow NAME` can resolve: those registered in this process, then those installed plugins bundle, then installed git workflows by short name | `--json` |
 
 Each text line is `WORKFLOW_ID`, alias (or `-`), source (`registered`, `plugin
-OWNER`, or `fetched IRI`), and summary (or `-`); `--json` reports the same as an
-array of objects, with `source.kind` `"fetched"` and `source.iri` for fetched
-workflows.
+OWNER`, or `installed URI`), and summary (or `-`); `--json` reports the same as an
+array of objects, with `source.kind` `"installed"` and `source.uri` for installed
+git workflows.
 A workflow reached only by explicit path — `--workflow-dir DIR` or `--from-runner
 FILE` — is not registered, so it is not listed here; use `describe PATH` to
 report one such workflow directly. To list the runners one workspace has
@@ -299,10 +301,10 @@ workflows`.
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `describe TARGET` | describe a registered id/alias, git workflow IRI, runner file, or package directory | `--json` |
+| `describe TARGET` | describe a registered id/alias, git workflow URI, runner file, or package directory | `--json` |
 
-A git IRI target is fetched and installed like any explicit reference; it and
-the short name of a fetched workflow report source kind `fetched`, with `iri`
+A git URI target is fetched and installed like any explicit reference; it and
+the short name of an installed git workflow report source kind `installed`, with `uri`
 and `commit` in the `--json` `source` object.
 
 Resolving a workflow trusts a directory package's manifest and never executes
@@ -320,6 +322,22 @@ Installed-plugin workflow names are included in the registered-workflow
 listings — `httk workflow list`, and the `--workflow` help and unknown-workflow
 hint entries, which carry `[plugin PLUGIN_NAME]` for their owner; `describe`
 resolves a plugin name and reports its source as `installed-package`.
+
+### `install` and `uninstall` — git workflows without a job
+
+| Command | What it does | Notable options |
+| --- | --- | --- |
+| `install URI...` | fetch each git URI and install its workflow; print the canonical URI and short name | `--json` |
+| `uninstall SELECTOR...` | forget installed git workflows by short name or URI; cached checkouts stay | `--json` |
+
+To install a git workflow without creating a job, run `httk workflow install
+'git+https://github.com/httk/workflows-vasp#vasp-relax'`; the workflow is then
+selectable as `--workflow vasp.relax`. `uninstall` removes one commit for a
+pinned URI, and the whole repository-and-subdirectory lineage for an unpinned
+URI or a short name. A selector naming only an in-process registration is an
+error, and one naming a plugin workflow points to `httk plugin uninstall`.
+Each argument is processed independently; any failure exits `1` after the
+rest. See {doc}`/workflow_uris`.
 
 ### `precheck` — readiness before an attempt
 
@@ -662,7 +680,7 @@ partition map, stored in the project, that spreads a very large body of work
 across many workspaces without a new scheduler. Each partition names one
 registered workspace, roots are assigned to partitions by policy, and spawned
 children always inherit their parent's workspace. See {doc}`/campaigns`.
-`campaign submit --workflow` accepts a workflow name, alias, or git IRI only; use
+`campaign submit --workflow` accepts a workflow name, alias, or git URI only; use
 `job new --from-runner` or `job new --from-command` for a file or command.
 
 ## Creating jobs
@@ -678,10 +696,10 @@ httk job new --from-runner ./my_runner.py --step characterize --parameter sites=
 httk job new --from-command 'srun --ntasks=10 my_executable {input}' --file input=input_files/a.dat --tag a
 ```
 
-`--workflow` also accepts a git IRI, `git+https://HOST/PATH[@REF][#SUBDIR]`:
+`--workflow` also accepts a git URI, `git+https://HOST/PATH[@REF][#SUBDIR]`:
 the repository is fetched at `REF`, the package in `SUBDIR` is installed, and
-the job records the canonical IRI with the full commit hash as its workflow id.
-See {doc}`/workflow_iris`.
+the job records the canonical URI with the full commit hash as its workflow id.
+See {doc}`/workflow_uris`.
 
 Packaged VASP workflows default to `--data-mode none`: results remain in the
 persistent workdir and `collect` reads them there, with no `data/` copy. Add
@@ -1068,7 +1086,7 @@ environment:
   applies to every job. It is an ordinary application setting: `workspace
   settings set --key environment.prelude --value "…" NAME`.
 - **`workflow-prelude`** — the per-workflow layer, keyed by workflow id (the
-  `[workflow].id` of the manifest, `=` the job's `workflow`). It applies only to
+  `[workflow].name` of the manifest, `=` the job's `workflow`). It applies only to
   jobs of that workflow and runs *after* the workspace-wide prelude:
 
   ```console

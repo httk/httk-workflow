@@ -177,7 +177,7 @@ class WorkflowProvider:
     :param outputs: Declare the workflow's output metadata.
     :param declaration_uri: Identify the source declaration URI.
     :param declaration_file: Name the source declaration file.
-    :param name: Give the short name of a workflow whose id is an IRI.
+    :param name: Give the short name of a workflow whose id is a git URI.
     """
 
     workflow_id: str
@@ -268,6 +268,12 @@ class WorkflowProvider:
         object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
         object.__setattr__(self, "postprocess_scripts", MappingProxyType(dict(self.postprocess_scripts)))
         object.__setattr__(self, "_input_metadata", MappingProxyType(dict(self._input_metadata)))
+
+    @property
+    def definition_uri(self) -> str | None:
+        """The git URI identifying the workflow definition, when the id is one."""
+
+        return self.workflow_id if self.workflow_id.startswith("git+") else None
 
 
 #: Every registered workflow, keyed by name in registration order. The scaffold
@@ -405,11 +411,11 @@ def _registered_names() -> list[str]:
 def workflow_provider(name: str) -> WorkflowProvider | None:
     """Return the provider selected by canonical id, alias, or fetched short name.
 
-    A git IRI selects only an already installed workflow pinned to a full
-    commit hash: this lookup never fetches, so a job payload naming an IRI can
-    never cause code acquisition.
+    A git URI selects only an already installed workflow pinned to a full
+    commit hash: this lookup never fetches or raises for a URI, so a job payload
+    naming one can never cause code acquisition.
 
-    :param name: Select a workflow by id, alias, short name, or pinned git IRI.
+    :param name: Select a workflow by id, alias, short name, or pinned git URI.
     :return: The selected provider, or ``None`` when no provider matches.
     :raises ValueError: If the name is claimed by several plugins or fetched lineages.
     """
@@ -507,7 +513,7 @@ class ResolvedWorkflow:
     :param outputs: Preserve the workflow's output metadata.
     :param declaration_uri: Identify the source declaration URI.
     :param declaration_file: Name the source declaration file.
-    :param name: Give the short name of a workflow whose id is an IRI.
+    :param name: Give the short name of a workflow whose id is a git URI.
     """
 
     source: Path
@@ -583,6 +589,12 @@ class ResolvedWorkflow:
                 }
             ),
         )
+
+    @property
+    def definition_uri(self) -> str | None:
+        """The git URI identifying the workflow definition, when the id is one."""
+
+        return self.workflow_id if self.workflow_id.startswith("git+") else None
 
     @property
     def store_name(self) -> str:
@@ -976,7 +988,7 @@ def resolve_workflow(
 ) -> ResolvedWorkflow:
     """Return the :class:`ResolvedWorkflow` *workflow* names.
 
-    *workflow* is the name of a packaged workflow, a git workflow IRI (which is
+    *workflow* is the name of a packaged workflow, a git workflow URI (which is
     fetched and installed, see ``httk.workflow.git_workflows``), the file name
     of a packaged runner, or the path of a runner file. A runner file is described by running
     it, so its workflow name and its steps come from the runner itself; *workflow*
@@ -994,7 +1006,7 @@ def resolve_workflow(
 
     text = os.fspath(workflow)
     if text.startswith("git+"):
-        # An explicit IRI reference is consent to fetch; job payloads go through
+        # An explicit URI reference is consent to fetch; job payloads go through
         # the cache-only :func:`workflow_provider` instead.
         from .git_workflows import fetch_workflow
 

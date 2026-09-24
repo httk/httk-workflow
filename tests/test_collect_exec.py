@@ -665,7 +665,7 @@ def test_declared_ref_requires_store_validation(monkeypatch: pytest.MonkeyPatch,
 
 def test_collect_manifest_accepts_executable_and_describes_kind(tmp_path: Path) -> None:
     (tmp_path / "httk_workflow.toml").write_text(
-        '[workflow]\nid = "tests.exec"\n'
+        '[workflow]\nname = "tests.exec"\n'
         '[workflow.runner]\nsteps = ["start"]\n'
         '[workflow.collect]\nfile = "collect-hook"\n'
         '[workflow.outputs.answer]\nentry_type = "records"\n',
@@ -687,7 +687,7 @@ def test_collect_manifest_accepts_executable_and_describes_kind(tmp_path: Path) 
 
 def test_collect_manifest_rejects_non_executable_non_python(tmp_path: Path) -> None:
     (tmp_path / "httk_workflow.toml").write_text(
-        '[workflow]\nid = "tests.exec"\n'
+        '[workflow]\nname = "tests.exec"\n'
         '[workflow.runner]\nsteps = ["start"]\n'
         '[workflow.collect]\nfile = "collect-hook"\n',
         encoding="utf-8",

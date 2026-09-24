@@ -127,7 +127,7 @@ def _package(root: Path, document: dict[str, object], *, runner_extra: str = "")
     root.mkdir(parents=True, exist_ok=True)
     (root / "httk_workflow.toml").write_text(
         f'''[workflow]
-id = "tests.language.{root.name}"
+name = "tests.language.{root.name}"
 
 [workflow.runner]
 language = "pwd"

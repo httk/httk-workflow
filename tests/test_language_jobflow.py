@@ -49,7 +49,7 @@ def _jobflow_package(
     runner_source = f'maker = "{maker}"' if maker is not None else f'document = "{document}"'
     (root / "httk_workflow.toml").write_text(
         f'''[workflow]
-id = "tests.jobflow.{root.name}"
+name = "tests.jobflow.{root.name}"
 
 [workflow.runner]
 language = "jobflow"
@@ -324,7 +324,7 @@ def test_jobflow_linear_maker_runs_through_task_manager(tmp_path: Path, monkeypa
     package = tmp_path / "package"
     package.mkdir()
     (package / "httk_workflow.toml").write_text(
-        """[workflow]\nid = \"tests.jobflow.smoke\"\n\n[workflow.runner]\nlanguage = \"jobflow\"\nmaker = \"toy:Maker\"\n\n[workflow.outputs.output]\nentry_type = \"records\"\nrole = \"result\"\n""",
+        """[workflow]\nname = \"tests.jobflow.smoke\"\n\n[workflow.runner]\nlanguage = \"jobflow\"\nmaker = \"toy:Maker\"\n\n[workflow.outputs.output]\nentry_type = \"records\"\nrole = \"result\"\n""",
         encoding="utf-8",
     )
     monkeypatch.setenv("PYTHONPATH", f"{tmp_path}{os.pathsep}{os.environ.get('PYTHONPATH', '')}")

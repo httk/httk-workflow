@@ -18,7 +18,7 @@ def _legacy_source(root: Path, source: str, *, program: str = "ht_steps") -> Pat
     payload.mkdir()
     (payload / "httk_workflow.toml").write_text(
         """[workflow]
-id = "tests.v1.legacy"
+name = "tests.v1.legacy"
 [workflow.runner]
 language = "httk-v1"
 attempts = 10
@@ -550,7 +550,7 @@ def _v1_package(root: Path, manifest: str, program: str) -> Path:
 
 _V1_MANIFEST = '''
 [workflow]
-id = "tests.v1.package"
+name = "tests.v1.package"
 
 [workflow.runner]
 language = "httk-v1"

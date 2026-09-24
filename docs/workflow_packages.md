@@ -13,7 +13,7 @@ my-workflow/
 
 ```toml
 [workflow]
-id = "example.relax"
+name = "example.relax"
 
 [workflow.runner]
 entry = "run"
@@ -57,8 +57,8 @@ labels plugin entries with their owning plugin, while `workflow describe`
 reports a plugin entry as `source: installed-package`.
 
 A package committed to a Git repository can be referenced from anywhere by a
-git IRI such as `git+https://github.com/httk/workflows-vasp@468f14262805f0b63f54296e7cb21c81033ed5c2#vasp-relax`,
-which fetches and installs it; see {doc}`workflow_iris`.
+git URI such as `git+https://github.com/httk/workflows-vasp#vasp-relax`,
+which fetches and installs it; see {doc}`workflow_uris`.
 
 The full guide, {doc}`details/workflow_packages`, is the manifest reference:
 every table and key, hook envelopes, output declarations and provenance,

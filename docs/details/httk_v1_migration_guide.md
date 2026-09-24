@@ -790,7 +790,7 @@ Use a manifest that makes the v1 contract explicit:
 
 ```toml
 [workflow]
-id = "legacy.silicon-relax"
+name = "legacy.silicon-relax"
 
 [workflow.runner]
 language = "httk-v1"

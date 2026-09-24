@@ -51,7 +51,7 @@ def _compiled_runner_job(
     (source / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     (source / "run").chmod(0o755)
     manifest = (
-        "[workflow]\nid = 'compiled'\n[workflow.runner]\nsteps = ['start']\n"
+        "[workflow]\nname = 'compiled'\n[workflow.runner]\nsteps = ['start']\n"
         "[workflow.build]\ncommand = './build.sh'\nartifacts = ['out']\n"
     )
     if platform is not None:
