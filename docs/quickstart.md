@@ -7,7 +7,9 @@ walkthrough does not run from an arbitrary empty directory.
 
 Eight commands from a checkout to a finished VASP relaxation whose results
 are stored and plotted. Nothing here needs a runner to be written or a graph
-to be declared.
+to be declared: the relaxation workflow is fetched from the
+[workflows-vasp](https://github.com/httk/workflows-vasp) repository by its git
+URI, which needs `git` and network access the first time.
 
 ```{admonition} No VASP? Run the mock one
 :class: tip
@@ -49,7 +51,7 @@ END
 $ httk init --name "Your Name" --email you@example.org
 $ httk project init --name quickstart .
 $ httk workspace init --name default .
-$ httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
+$ httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --input structure=POSCAR --tag silicon
 $ httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 $ httk workflow run
 $ httk workflow collect --into results.sqlite --id-base httk.quickstart
@@ -70,16 +72,20 @@ unchanged.
 **`project init`** created the project anchor. The next command initialized and
 registered the workspace at the project root as `default`; project creation
 does not create or contain a workspace.
-The workspace is the state of the work. Packaged VASP workflows default to
+The workspace is the state of the work. The VASP workflows default to
 `data.mode="none"`: the persistent `run/` workdir holds the results, and no
 `data/` copy is created. Add `--data-mode transactional` to `job new` to also
 publish a curated copy into `data/vasp/`.
 
-**`job new`** built and submitted one job. `--workflow vasp-relax` is the packaged
-relaxation runner — one file, three steps, the reviewed remedy ladder — so no
-runner had to be written. The runner file is published into the workspace and the
-job pins its digest, so upgrading *httk-workflow* underneath a queued campaign
-cannot change what its jobs execute. `--input structure=POSCAR` staged the
+**`job new`** built and submitted one job. `--workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax'`
+names the `vasp.relax` workflow of the workflows-vasp repository — one runner,
+three steps, the reviewed remedy ladder — so no runner had to be written.
+Referencing the URI fetched and installed the workflow; the job records its
+canonical URI, pinned to the full commit, and the workflow package is published
+into the workspace by digest, so neither a new commit of the repository nor an
+upgrade of *httk-workflow* underneath a queued campaign can change what its jobs
+execute. Once installed, the short name `vasp.relax` selects it too; see
+{doc}`vasp_runners`. `--input structure=POSCAR` staged the
 declared structure input as the
 `files/POSCAR` the runner reads, and `--tag silicon` made the job's key readable.
 The command printed the job key and the payload directory:
@@ -144,7 +150,7 @@ Point `--input-from structure` at a *directory* and every readable structure
 file in it becomes one job, each tagged after its file:
 
 ```console
-$ httk job new --workspace quickstart-workspace --workflow vasp-relax --input-from structure structures/ \
+$ httk job new --workspace quickstart-workspace --workflow vasp.relax --input-from structure structures/ \
       --parameter kpoint_density=30.0 --placement project/screening
 ```
 
@@ -163,7 +169,7 @@ from httk.workflow.scaffold import new_jobs, structure_tag
 
 workspace = Workspace.default()
 items = ({"inputs": {"structure": path}, "tag": structure_tag(path)} for path in Path("structures").glob("POSCAR.*"))
-for job in new_jobs(workspace, "vasp-relax", items, parameters={"kpoint_density": 30.0}):
+for job in new_jobs(workspace, "vasp.relax", items, parameters={"kpoint_density": 30.0}):
     print(job.job_key)
 ```
 
@@ -201,11 +207,11 @@ overwrite a name already pointing somewhere else.
 
 ## Where to go next
 
-- {doc}`vasp_runners` — what the packaged VASP runners do, every job input and parameter they
-  read, and the failure codes they publish.
+- {doc}`vasp_runners` — the VASP workflows of the workflows-vasp repository:
+  their URIs, how to install and uninstall them, and the helper API they build on.
 - {doc}`runtime_helpers` — authoring a runner of your own. `job new --from-runner
   ./my_runner.py --step characterize` scaffolds jobs for it exactly as for a
-  packaged one; the file is published into the workspace and pinned by digest.
+  registered one; the file is published into the workspace and pinned by digest.
   Two complete campaign runners are in `examples/defect_campaign.py` and
   `examples/defect_campaign.sh`.
 - {doc}`workflow_packages` — authoring a directory workflow with hooks and a

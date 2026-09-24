@@ -4,11 +4,9 @@
 The same path as ``docs/quickstart.md``, one call per command:
 
 * :meth:`httk.workflow.Workspace.initialize` creates the workspace;
-* importing :mod:`httk.workflow.vasp` registers its packaged workflows, which is
-  what lets :func:`~httk.workflow.scaffold.new_job` resolve ``vasp-relax`` by
-  name — the generic scaffold never names a domain itself;
 * :func:`httk.workflow.scaffold.new_job` builds and submits one job of the
-  packaged ``vasp-relax`` workflow;
+  ``vasp.relax`` workflow, referenced by its git URI ``git+https://github.com/httk/workflows-vasp#vasp-relax``
+  (fetching it needs git and, the first time, network access);
 * :class:`httk.workflow.TaskManager` runs everything that is ready;
 * :func:`httk.workflow.collect` reads the finished jobs back.
 
@@ -26,9 +24,10 @@ to use the real thing. Install ``httk-atomistic`` to read the finished VASP resu
 import os
 from pathlib import Path
 
-import httk.workflow.vasp  # noqa: F401 - registers the packaged vasp-relax workflow used below
 from httk.workflow import TaskManager, Workspace, collect
 from httk.workflow.scaffold import new_job
+
+WORKFLOW = "git+https://github.com/httk/workflows-vasp#vasp-relax"
 
 POSCAR = """silicon
 1.0
@@ -55,14 +54,14 @@ def main() -> int:
     workspace = Workspace.initialize(Path("example-workflow-workspace"))
     print(f"workspace {workspace.workspace_id} at {workspace.root}")
 
-    # One job of the packaged relaxation runner. The runner file is published into
-    # the workspace store and pinned by digest; the structure is staged where the
-    # runner reads it, as files/POSCAR.
+    # One job of the vasp.relax workflow. Referencing its URI fetches and installs
+    # it; the job records the URI pinned to the full commit, and the structure is
+    # staged where the runner reads it, as files/POSCAR.
     structure = Path("POSCAR")
     structure.write_text(POSCAR, encoding="utf-8")
     job = new_job(
         workspace,
-        "vasp-relax",
+        WORKFLOW,
         files={"POSCAR": structure},
         parameters={"kpoint_density": 20.0, "incar_tags": {"ENCUT": 320}},
         tag="silicon",

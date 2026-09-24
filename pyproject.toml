@@ -141,14 +141,6 @@ namespaces = true
   "v1_runtime/README.md",
   "v1_runtime/compat/*.sh",
 ]
-# The Python runners are modules of the package and ship with it; the Bash runner
-# beside them is data, and a job referencing pkg:httk.workflow.vasp.runners/...
-# needs it installed exactly like the shell libraries above.
-"httk.workflow.vasp.runners" = [
-  "*.sh",
-  "scripts/relaxation_report",
-  "scripts/relaxation_plot",
-]
 # httk.workflow.languages.cwl and httk.workflow.languages.pwd follow the same rule and
 # need no entry of their own: cwl_runner.py and pwd_runner.py are modules of those
 # packages, so a job referencing pkg:httk.workflow.languages.cwl/... or

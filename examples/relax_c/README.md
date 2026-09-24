@@ -1,7 +1,7 @@
 # A VASP relaxation runner in C
 
-`relax.c` has the same three-step shape as the packaged Bash runner
-`httk.workflow.vasp.runners/vasp_relax.sh` (not a line-for-line port), authored against the native C SDK in
+`relax.c` has the same three-step shape as the Bash runner of `vasp.relax-bash`
+in [workflows-vasp](https://github.com/httk/workflows-vasp) (not a line-for-line port), authored against the native C SDK in
 `src/httk/workflow/native/c/`. It declares the workflow `httk.vasp.relax-c` with
 three steps — `prepare`, `run`, `publish` — and is a *bridge client*: every
 `httk_workflow_*` call execs `$HTTK_WORKFLOW_PYTHON -m httk.workflow._shell_bridge`,

@@ -7,7 +7,8 @@
 #     examples/quickstart.sh
 #
 # It creates POSCAR and httk_project/ in the working directory and drives one
-# packaged VASP relaxation to completion. Without VASP installed the mock one
+# VASP relaxation of https://github.com/httk/workflows-vasp to completion
+# (fetching it needs git and, the first time, network access). Without VASP installed the mock one
 # beside this file stands in for it; set vasp.command to use the real thing.
 set -euo pipefail
 
@@ -60,10 +61,10 @@ END
 httk_project init --name quickstart .
 httk_cmd workspace init --name default .
 
-# 2. One job of the packaged relaxation runner, starting from that structure. The
-#    command prints one tab-separated line with its key and payload.
+# 2. One job of the vasp.relax workflow, referenced by its git URI, starting from
+#    that structure. The command prints one tab-separated line with its key and payload.
 httk_cmd job new \
-    --workflow vasp-relax \
+    --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' \
     --input structure=POSCAR \
     --tag silicon
 

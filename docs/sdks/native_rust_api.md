@@ -220,7 +220,8 @@ was terminated, and `125` when a checker or diagnostic stopped it.
 `examples/relax_rust/src/main.rs` has the same three-step shape as
 `examples/relax_c`, in three step functions built entirely on the methods above.
 It is a minimal example: it stages a POSCAR and an optional INCAR and runs one
-command, and deliberately omits what the packaged `vasp-relax` runner adds — INCAR
+command, and deliberately omits what the `vasp.relax` runner of
+[workflows-vasp](https://github.com/httk/workflows-vasp) adds — INCAR
 and KPOINTS generation, restart and back-off logic, and the supervision
 diagnostics and remedies.
 

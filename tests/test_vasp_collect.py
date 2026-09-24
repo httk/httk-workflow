@@ -1,9 +1,5 @@
 """VASP collectors support persistent workdirs and opted-in published data."""
 
-import importlib.resources
-import json
-import re
-import stat
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
@@ -14,8 +10,6 @@ pytest.importorskip("httk.atomistic")
 import httk.core
 
 from httk.workflow.collecting import JobRecord
-from httk.workflow.postprocessing import run_postprocess_script
-from httk.workflow.scaffold import registered_workflow
 from httk.workflow.vasp.collect import (
     collect_vasp_relax,
     collect_vasp_relax_static,
@@ -156,53 +150,3 @@ def test_missing_workdir_result_names_job_identity(tmp_path: Path, workdir: Pure
     record = replace(_record(tmp_path, "httk.vasp.relax"), workdir_path=workdir, data_path=None, data_generation=None)
     with pytest.raises(ValueError, match=r"ws:12345678-1234-4234-8234-123456789abc.*CONTCAR"):
         collect_vasp_relax(record)
-
-
-def test_packaged_relaxation_report_runs_from_published_data(tmp_path: Path) -> None:
-    _write(tmp_path / "data", "vasp", "CONTCAR")
-    _write(tmp_path / "data", "vasp", "OUTCAR")
-    (tmp_path / "run").mkdir()
-    record = replace(_record(tmp_path, "httk.vasp.relax"), workdir_path=PurePosixPath("run"))
-    workflow = registered_workflow("vasp-relax")
-    assert workflow is not None
-    assert workflow.runner_package is not None
-    script = Path(str(importlib.resources.files(workflow.runner_package).joinpath("scripts/relaxation_report")))
-    assert script.stat().st_mode & stat.S_IXUSR
-
-    result = run_postprocess_script(workflow, "relaxation-report", record)
-    assert result.returncode == 0
-    report = json.loads((result.output_dir / "relaxation_report.json").read_text(encoding="utf-8"))
-    assert report["final_energy"] == pytest.approx(-27.09328752)
-    assert report["structure_files"] == ["vasp/CONTCAR"]
-    assert "vasp/CONTCAR" in (result.output_dir / "relaxation_report.txt").read_text(encoding="utf-8")
-
-
-def test_packaged_relaxation_plot_runs_from_published_data(tmp_path: Path) -> None:
-    _write(tmp_path / "data", "vasp", "OUTCAR")
-    (tmp_path / "run").mkdir()
-    record = replace(_record(tmp_path, "httk.vasp.relax"), workdir_path=PurePosixPath("run"))
-    workflow = registered_workflow("vasp-relax")
-    assert workflow is not None
-    assert workflow.runner_package is not None
-    script = Path(str(importlib.resources.files(workflow.runner_package).joinpath("scripts/relaxation_plot")))
-    assert script.stat().st_mode & stat.S_IXUSR
-
-    result = run_postprocess_script(workflow, "relaxation-plot", record)
-    assert result.returncode == 0
-    svg = (result.output_dir / "relaxation_energies.svg").read_text(encoding="utf-8")
-    points = re.search(r'<polyline points="([^"]+)"', svg)
-    assert points is not None
-    assert len(points.group(1).split()) == 3
-    assert "relaxation_energies.svg" in result.stdout
-
-
-def test_packaged_relaxation_plot_tolerates_missing_outcar(tmp_path: Path) -> None:
-    (tmp_path / "run").mkdir()
-    record = replace(_record(tmp_path, "httk.vasp.relax"), workdir_path=PurePosixPath("run"))
-    workflow = registered_workflow("vasp-relax")
-    assert workflow is not None
-
-    result = run_postprocess_script(workflow, "relaxation-plot", record)
-    assert result.returncode == 0
-    assert "no OUTCAR" in result.stdout
-    assert not (result.output_dir / "relaxation_energies.svg").exists()

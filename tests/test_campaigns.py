@@ -149,15 +149,17 @@ def test_submit_routes_a_root_into_its_assigned_partition(tmp_path: Path) -> Non
     assert workspaces["north"].find_marker_by_id(job.job_id) is None
 
 
+@pytest.mark.usefixtures("relax_workflow")
 def test_campaign_submit_passes_creation_parameters_to_the_scaffold(tmp_path: Path) -> None:
     root, workspaces = _campaign_project(tmp_path, "explicit")
     structure = tmp_path / "POSCAR"
     structure.write_text("structure\n", encoding="utf-8")
-    job = campaign_submit("vasp-relax", key="north", project=root, inputs={"structure": structure})
+    job = campaign_submit("test-relax", key="north", project=root, inputs={"structure": structure})
     assert (job.payload / "files" / "POSCAR").read_text(encoding="utf-8") == "structure\n"
     assert workspaces["north"].find_marker_by_id(job.job_id) is not None
 
 
+@pytest.mark.usefixtures("relax_workflow")
 def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path, capsys) -> None:
     pytest.importorskip("httk.atomistic")
     root, workspaces = _campaign_project(tmp_path, "round-robin")
@@ -175,7 +177,7 @@ def test_campaign_cli_batch_uses_the_requested_round_robin_index(tmp_path: Path,
                 "campaign",
                 "submit",
                 "--workflow",
-                "vasp-relax",
+                "test-relax",
                 "--key",
                 "silicon",
                 "--index",

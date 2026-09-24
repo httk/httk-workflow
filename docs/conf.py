@@ -159,11 +159,9 @@ _INTERNAL_MODULES = (
     "vasp.diagnostics",
     "vasp.remedies",
     "vasp.reports",
-    "vasp.workflows",
 )
 nitpick_ignore_regex = [
     (r"py:.*", r"httk\.workflow\.(" + "|".join(_INTERNAL_MODULES) + r")(\..+)?"),
-    (r"py:.*", r"httk\.workflow\.vasp\.runners(\..+)?"),
     (
         r"py:.*",
         r"(DataMode|WorkdirMode|PublishMode|RunnerSource|StepHandler|JoinCondition"

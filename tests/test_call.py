@@ -14,7 +14,6 @@ from pathlib import Path
 
 import pytest
 
-import httk.workflow.vasp  # noqa: F401  registers the packaged vasp-* workflows
 from httk.workflow import Attempt, TaskManager, Workspace
 from httk.workflow.models import JobDefinition
 
@@ -179,18 +178,19 @@ def test_call_runs_another_workflow_and_resumes_at_the_gather(tmp_path: Path) ->
     assert (child_payload / "run" / "seen.txt").read_text(encoding="utf-8") == "sub-saw:hello-from-parent\n"
 
 
+@pytest.mark.usefixtures("relax_workflow")
 def test_call_references_a_packaged_workflow_by_alias_without_copying(tmp_path: Path) -> None:
     workspace = Workspace.initialize(tmp_path / "workspace")
     structure = tmp_path / "POSCAR"
     structure.write_text(_POSCAR, encoding="utf-8")
     attempt = _in_process_attempt(tmp_path, workspace.root)
 
-    reference = attempt.call("vasp-relax", label="relax", files={"POSCAR": structure})
+    reference = attempt.call("test-relax", label="relax", files={"POSCAR": structure})
 
     child_json = next(attempt.control.glob("outcome.tmp.*/children/jobs/*/job.json"))
     child = json.loads(child_json.read_text(encoding="utf-8"))
     assert child["id"] == reference.job_id
-    assert child["workflow"] == "httk.vasp.relax"
+    assert child["workflow"] == "tests.relax"
     runner = child["runner"]
     assert isinstance(runner, Mapping)
     # A registered packaged workflow is pinned through pkg: and copies nothing.

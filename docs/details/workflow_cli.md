@@ -659,11 +659,12 @@ and `workspace status NAME` for reading a remote workspace's markers.
 An earlier release also renamed two whole groups: `httk workflow computer …`
 became `httk workflow remote …` (git's word for the same idea), and
 `httk workflow tasks …` (once `httk workflow remote send|fetch|…`) became today's
-`httk workflow transfer`. A job whose `runner.path` pins the old
-`pkg:httk.workflow.runners/vasp_*` form breaks too: the packaged VASP runners are
-now modules of `httk.workflow.vasp.runners`, and a job pinning the old path fails
-with `runner_unavailable` naming the module it could not resolve — scaffold the
-job again, or edit the one `runner.path` member.
+`httk workflow transfer`. A job whose `runner.path` pins a
+`pkg:httk.workflow.runners/vasp_*` or `pkg:httk.workflow.vasp.runners/vasp_*` form
+breaks too: the VASP workflows left the module for
+[workflows-vasp](https://github.com/httk/workflows-vasp), and a job pinning either
+path fails with `runner_unavailable` naming the module it could not resolve —
+scaffold the job again from a workflows-vasp URI (see {doc}`/vasp_runners`).
 
 ### `campaign` — partitioning a large run across many workspaces
 
@@ -690,8 +691,8 @@ a runner file, a package directory, or a bare language document — and needs no
 prepared payload:
 
 ```console
-httk job new --workspace WORKSPACE --workflow vasp-relax --input structure=POSCAR --tag silicon
-httk job new --workspace WORKSPACE --workflow vasp-relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening
+httk job new --workspace WORKSPACE --workflow vasp.relax --input structure=POSCAR --tag silicon
+httk job new --workspace WORKSPACE --workflow vasp.relax --input-from structure structures/ --parameter kpoint_density=30.0 --placement project/screening
 httk job new --from-runner ./my_runner.py --step characterize --parameter sites=8
 httk job new --from-command 'srun --ntasks=10 my_executable {input}' --file input=input_files/a.dat --tag a
 ```
@@ -701,7 +702,7 @@ the repository is fetched at `REF`, the package in `SUBDIR` is installed, and
 the job records the canonical URI with the full commit hash as its workflow id.
 See {doc}`/workflow_uris`.
 
-Packaged VASP workflows default to `--data-mode none`: results remain in the
+The workflows-vasp workflows default to `--data-mode none`: results remain in the
 persistent workdir and `collect` reads them there, with no `data/` copy. Add
 `--data-mode transactional` to copy curated outputs into `data/` as well; this
 explicit option overrides the workflow default. See {doc}`/vasp_runners` for
@@ -1378,7 +1379,7 @@ httk workflow remote check kappa
 httk workspace init kappa:/scratch/rar/httk/runs
 httk workspace settings set --key slurm.partition --value batch kappa:runs
 httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" kappa:runs
-httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
+httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon
 httk workflow transfer --job JOB-ID default kappa:runs
 httk workflow run --workspace kappa:runs --workers 8
 httk workspace status kappa:runs

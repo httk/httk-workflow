@@ -200,10 +200,10 @@ terminated, and `125` when a checker or diagnostic stopped it.
 
 ## The `examples/relax_c` walkthrough
 
-`examples/relax_c/relax.c` has the **same three-step shape** as the packaged Bash
-runner `vasp_relax.sh` — `prepare`, `run`, `publish` — built entirely on the
-functions above. It is a teaching example, not a drop-in replacement for the
-packaged runner: it deliberately omits the input derivation (`vasp-prepare`,
+`examples/relax_c/relax.c` has the **same three-step shape** as the Bash runner
+of `vasp.relax-bash` in [workflows-vasp](https://github.com/httk/workflows-vasp)
+— `prepare`, `run`, `publish` — built entirely on the functions above. It is a
+teaching example, not a drop-in replacement for that runner: it deliberately omits the input derivation (`vasp-prepare`,
 KPOINTS/POTCAR generation), the finer run classifications, the reviewed remedy
 ladder, the parsed energy state, and the `POTCAR.provenance.json` the real runner
 produces, so it collapses `run` to "completed or `vasp.failed`". What it does
@@ -250,4 +250,4 @@ httk workflow collect
 The finished calculation lands in `jobs/*/data/vasp/`. It publishes the same
 protocol artifacts a Python or Bash runner does — outcome, transactional data,
 run log — through the one shared implementation; it does not reproduce the
-packaged VASP runner's derived inputs and richer state (see above).
+workflows-vasp runner's derived inputs and richer state (see above).

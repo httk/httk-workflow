@@ -6,7 +6,7 @@ settings, then a default — so an operator configures a machine's VASP command
 once per workspace instead of exporting it for every job, while a single job or a
 single shell can still override it. These tests prove that order holds in both
 SDKs identically, that a remote definition seeds a new workspace's settings, and
-that the packaged VASP runner reads the workspace setting with no environment at
+that an in-process attempt reads the workspace setting with no environment at
 all.
 """
 
@@ -370,11 +370,9 @@ def test_a_failing_workflow_prelude_aborts_before_the_runner(tmp_path: Path) -> 
     assert marker is not None and marker.kind != "succeeded"
 
 
-def test_the_vasp_runner_reads_the_workspace_setting_without_the_environment(tmp_path: Path, monkeypatch) -> None:
-    """The packaged relaxation runner takes its command from ``vasp.command``, so a
-    workspace configured with it needs no ``HTTK_VASP_COMMAND`` in the run's env."""
-
-    from httk.workflow.vasp.runners.vasp_relax import vasp_argv
+def test_an_attempt_reads_the_workspace_setting_without_the_environment(tmp_path: Path, monkeypatch) -> None:
+    """A runner that takes its command from ``vasp.command`` needs no
+    ``HTTK_VASP_COMMAND`` in the run's env once the workspace is configured."""
 
     monkeypatch.delenv("HTTK_VASP_COMMAND", raising=False)
     environment = _attempt_environment(
@@ -383,4 +381,4 @@ def test_the_vasp_runner_reads_the_workspace_setting_without_the_environment(tmp
         settings={"vasp.command": "srun -n 8 vasp_std"},
     )
     attempt = Attempt.initialize(environment)
-    assert vasp_argv(attempt) == ("srun", "-n", "8", "vasp_std")
+    assert attempt.setting("vasp.command", "") == "srun -n 8 vasp_std"

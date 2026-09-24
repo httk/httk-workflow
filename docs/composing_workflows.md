@@ -4,8 +4,8 @@
 resuming when it finishes, not re-implementing what it already does.*
 
 A runner does not have to do everything itself. From inside a running step it can
-**call** another registered workflow — a packaged one like `vasp-relax`, or a
-runner of your own — which runs as a child job with that workflow's own runner,
+**call** another workflow — an installed one like `vasp.relax` from
+[workflows-vasp](https://github.com/httk/workflows-vasp), or a runner of your own — which runs as a child job with that workflow's own runner,
 and the calling step resumes when the child is done. This is how one workflow is
 assembled out of others without copying their steps into it.
 
@@ -22,7 +22,7 @@ through {py:attr}`~httk.workflow.Attempt.children`.
 
 This is a distinct tool from the two nearby ones:
 
-- It is **not** a single multi-step runner sharing one workdir. `vasp-relax-static`
+- It is **not** a single multi-step runner sharing one workdir. `vasp.relax-static`
   (see {doc}`vasp_runners`) is one runner whose steps hand a directory from
   relaxation to a static run in place. Reach for that when the stages are one
   program's phases; reach for `call` when a stage *is* another workflow with its
@@ -38,10 +38,10 @@ This is a distinct tool from the two nearby ones:
 `call` resolves its first argument exactly as
 {py:func}`~httk.workflow.scaffold.new_job` (and `httk job new`) does:
 
-- a **registered id or alias** — a packaged workflow such as `vasp-relax`;
+- a **registered id or alias** — a workflow a Python package registers in-process;
 - a **git URI** such as `git+https://github.com/httk/workflows-vasp#vasp-relax`,
   fetched and installed on first reference (see {doc}`workflow_uris`), or the
-  short name of a workflow installed that way;
+  short name of a workflow installed that way, such as `vasp.relax`;
 - a **runner file** of your own (`./elastic_constant.py`);
 - a **workflow package directory** (one holding `httk_workflow.toml`);
 - a **bare language document** (a CWL file, a jobflow document, …).
@@ -55,7 +55,7 @@ pins it by digest so an upgrade underneath a queued job cannot change what runs.
 
 ## A worked example
 
-`start` calls the packaged `vasp-relax` on a structure, waits for it, then calls a
+`start` calls the installed `vasp.relax` on a structure, waits for it, then calls a
 second runner of your own on the relaxed structure, and finishes.
 
 ```python
@@ -66,7 +66,7 @@ run = Runner("elastic_constant")
 
 @run.step
 def start(a):
-    a.call("vasp-relax", label="relax", files={"POSCAR": a.payload / "files" / "POSCAR"})
+    a.call("vasp.relax", label="relax", files={"POSCAR": a.payload / "files" / "POSCAR"})
     a.gather("after_relax", when="all_succeeded", on_impossible="triage")
 
 
@@ -107,7 +107,7 @@ source "$HTTK_WORKFLOW_BASH_API"
 httk_workflow_runner elastic_constant start after_relax finish triage
 
 step_start() {
-    httk_workflow_call relax vasp-relax --file "POSCAR=$HTTK_WORKFLOW_JOB_DIR/files/POSCAR"
+    httk_workflow_call relax vasp.relax --file "POSCAR=$HTTK_WORKFLOW_JOB_DIR/files/POSCAR"
     httk_workflow_gather after_relax --when all_succeeded --on-impossible triage
 }
 
@@ -167,4 +167,4 @@ gathering step.
 - {doc}`campaigns` — `ChildSpec` fan-out and partitioning, the other way one job
   becomes many.
 - {doc}`declarations` — what a workflow records about its inputs and outputs.
-- {doc}`vasp_runners` — the packaged VASP workflows a runner most often calls.
+- {doc}`vasp_runners` — the VASP workflows a runner most often calls.

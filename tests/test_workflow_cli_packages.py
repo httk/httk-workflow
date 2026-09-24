@@ -288,6 +288,7 @@ def test_job_new_batch_reports_partial_progress_before_failing(tmp_path: Path, c
     assert "of 2 jobs before failing" in capsys.readouterr().err
 
 
+@pytest.mark.usefixtures("relax_workflow")
 def test_job_new_accepts_a_package_directory_and_rejects_workflow_selection_errors(tmp_path: Path, capsys) -> None:
     context = _context(tmp_path)
     workspace = _workspace(tmp_path, context)
@@ -313,7 +314,7 @@ def test_job_new_accepts_a_package_directory_and_rejects_workflow_selection_erro
     )
     assert (
         command(
-            ["job", "new", "--workspace", workspace, "--workflow", "vasp-relax", "--workflow-dir", str(package)],
+            ["job", "new", "--workspace", workspace, "--workflow", "test-relax", "--workflow-dir", str(package)],
             context,
         )
         == 2
@@ -393,28 +394,19 @@ def test_workflow_describe_reports_build_registration(tmp_path: Path, capsys) ->
     assert "build: yes" in capsys.readouterr().out
 
 
+@pytest.mark.usefixtures("relax_workflow")
 def test_workflow_describe_reports_packaged_and_missing_hooks_honestly(tmp_path: Path, capsys) -> None:
     context = _context(tmp_path)
-    assert command(["describe", "--json", "vasp-relax"], context) == 0
+    assert command(["describe", "--json", "test-relax"], context) == 0
     packaged = json.loads(capsys.readouterr().out)[0]
     assert packaged["hooks"]["collect"] == {"present": True, "file": None, "kind": None, "packaged": True}
     assert packaged["hooks"]["instantiate"] == {"present": False, "file": None, "kind": None, "packaged": True}
     assert packaged["inputs"]["structure"]["role"] == "initial_structure"
     assert packaged["inputs"]["structure"]["entry_type"] == "structures"
-    assert packaged["postprocess"] == {
-        "relaxation-report": {
-            "file": "scripts/relaxation_report",
-            "description": "write a relaxation summary (text + JSON) into the job's postprocess directory",
-        },
-        "relaxation-plot": {
-            "file": "scripts/relaxation_plot",
-            "description": "plot ionic-step energies into the job's postprocess directory",
-        },
-    }
-    assert command(["describe", "vasp-relax"], context) == 0
+    assert packaged["postprocess"] == {"report": {"file": "scripts/report", "description": "write a report"}}
+    assert command(["describe", "test-relax"], context) == 0
     described = capsys.readouterr().out
-    assert "relaxation-report: scripts/relaxation_report" in described
-    assert "relaxation-plot: scripts/relaxation_plot" in described
+    assert "report: scripts/report" in described
 
     no_hooks = _package(
         tmp_path / "no-hooks",
