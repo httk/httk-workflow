@@ -28,5 +28,5 @@ sources only, so the same package can be built independently on another
 machine. When the manager runs it, `run` reads the compiled classes from
 `$HTTK_WORKFLOW_RUNNER_ARTIFACTS`.
 
-The example is intentionally minimal and mock-VASP compatible; the packaged
-`vasp-relax` runner adds the production restart and diagnostic behavior.
+The example is intentionally minimal and mock-VASP compatible; the `vasp.relax`
+runner of [workflows-vasp](https://github.com/httk/workflows-vasp) adds the production restart and diagnostic behavior.

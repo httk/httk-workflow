@@ -31,10 +31,10 @@ from httk.workflow import (
 from httk.workflow import collecting as collecting_module
 from httk.workflow import scaffold as scaffold_module
 from httk.workflow.collecting import COLLECT_FORMAT, module_distribution
+from httk.workflow.languages import runner_path, runner_reference
+from httk.workflow.languages.pwd import PACKAGE, RUNNER
 from httk.workflow.protocol import JobSpec, prepare_job_payload
-from httk.workflow.runners import runner_path, runner_reference
 from httk.workflow.scaffold import WorkflowProvider
-from httk.workflow.vasp.runners import PACKAGE
 from httk.workflow.workflow_cli import command
 
 pytestmark = pytest.mark.xdist_group("collect-campaign")
@@ -169,19 +169,19 @@ def campaign(tmp_path_factory: pytest.TempPathFactory) -> tuple[Workspace, dict[
     identifiers["single"] = single.id
 
     # A packaged runner named by the reserved pkg: form, resolved by the manager
-    # inside its own module allowlist. Its payload has no starting structure, so
-    # the runner refuses the job by name after one real attempt.
-    reference = runner_reference("vasp_static.py")
+    # inside its own module allowlist. Its payload has no document, so the runner
+    # exits without an outcome after one real attempt.
+    reference = runner_reference(PACKAGE, RUNNER)
     packaged = prepare_job_payload(
         root / "packaged",
         JobSpec(
             name="Collect packaged",
-            workflow="httk.vasp.static",
+            workflow="tests.collect.packaged",
             runner_path=str(reference["path"]),
             runner_source="installed",
             runner_sha256=str(reference["sha256"]),
             tag="packaged",
-            initial_step="prepare",
+            initial_step="execute",
             maximum_attempts_per_activation=1,
         ),
     )
@@ -436,17 +436,19 @@ def test_a_packaged_runner_record_names_the_distribution_that_installs_it(
     packaged = _by_label(list(job_records(workspace, states=("failed",))))["packaged"]
 
     assert packaged.state == "failed"
-    assert packaged.failure is not None and packaged.failure.code == "vasp.input_missing"
+    assert packaged.failure is not None and packaged.failure.code == "process_failure"
+    # The pwd runner itself ran: its own refusal is in the attempt log.
+    assert "carries no PWD document" in (packaged.payload / "logs" / "stdio.out").read_text(encoding="utf-8")
     assert packaged.job["runner"] == {
         "executor": "path",
         "source": "installed",
-        "path": f"pkg:{PACKAGE}/vasp_static.py",
-        "sha256": sha256_file(runner_path("vasp_static.py")),
+        "path": f"pkg:{PACKAGE}/{RUNNER}",
+        "sha256": sha256_file(runner_path(PACKAGE, RUNNER)),
         "arguments": [],
     }
     assert packaged.runner_provenance == {
         "module": PACKAGE,
-        "resource": "vasp_static.py",
+        "resource": RUNNER,
         "distribution": "httk-workflow",
         "version": metadata.version("httk-workflow"),
     }

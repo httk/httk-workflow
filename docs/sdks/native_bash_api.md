@@ -347,8 +347,8 @@ prepare a payload directory and spawn that with `--payload`.
 as a child job and prints its job key. Where `httk_workflow_spawn` runs a step of
 this same runner (or a payload you prepared yourself), `call` scaffolds a
 complete child payload for `WORKFLOW` — resolved exactly as `httk workflow job
-new` resolves it: a registered id or alias (`vasp-relax`), a runner file of your
-own, a workflow package directory, or a bare language document. Its `--file` and
+new` resolves it: a registered id or alias, a git URI or the short name of a
+installed workflow (`vasp.relax`), a runner file of your own, a workflow package directory, or a bare language document. Its `--file` and
 `--input` arguments are staged into the child payload and its `job.json` is
 written, so the child runs that workflow's own runner. Wait for it with
 `httk_workflow_gather` and read it back with `httk_workflow_children`, exactly as
@@ -528,7 +528,7 @@ defaults, in Bash and in Python at once:
 (the calculation the remedy is validated against) and `--policy`, and records the
 escalation ladder in the job state directory rather than in the workdir, so a job
 with an isolated workdir keeps climbing it. A complete Bash VASP runner built on
-these functions ships with the module: see {doc}`../vasp_runners`.
+these functions is `vasp.relax-bash` of workflows-vasp: see {doc}`../vasp_runners`.
 
 ## Mapping from *httk* v1
 

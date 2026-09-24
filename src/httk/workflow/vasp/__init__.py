@@ -6,10 +6,8 @@ in ``v1_runtime/NOTICE``.
 
 The implementation is split across cohesive sibling modules — ``inputs``,
 ``diagnostics``, ``remedies``, and ``reports`` — and this package is a thin
-public facade that re-exports their surface unchanged. Importing the package
-also registers the packaged VASP workflows with the generic scaffold (see the
-``workflows`` module), which is how ``httk job new --workflow
-vasp-relax`` resolves a runner the scaffold never names.
+public facade that re-exports their surface unchanged. The VASP workflows
+built on these helpers live in https://github.com/httk/workflows-vasp.
 """
 
 from httk.core import register_citation
@@ -58,10 +56,7 @@ register_citation(
     ),
 )
 
-# Imported for its registration side effect: the packaged VASP workflows join
-# the scaffold's provider registry when this package is imported.
 from . import collect as _collect  # noqa: F401
-from . import workflows as _workflows  # noqa: F401 - import registers packaged workflows
 from .diagnostics import (
     VASP_RESTART_ARTIFACTS,
     clean_outcar,

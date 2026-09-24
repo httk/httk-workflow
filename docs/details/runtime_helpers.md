@@ -293,13 +293,13 @@ a.spawn(a.workdir / "child", label="prepared", placement="project/children")
 `a.call(workflow, label=..., files=..., ...)` spawns a *different* registered
 workflow as a child job. Where `spawn` runs a step of this same runner, `call`
 scaffolds a complete child payload for `workflow` — resolved exactly as
-`new_job` resolves it (a registered id or alias like `"vasp-relax"`, a runner
-file of your own, a package directory, or a language document) — stages its
+`new_job` resolves it (a registered id or alias, a git URI or the short name of
+an installed workflow like `"vasp.relax"`, a runner file of your own, a package directory, or a language document) — stages its
 `files` and `inputs`, and registers it as a child, so the child runs that
 workflow's own runner:
 
 ```python
-a.call("vasp-relax", label="relax", files={"POSCAR": path})
+a.call("vasp.relax", label="relax", files={"POSCAR": path})
 a.gather("after_relax", on_impossible="triage")
 ```
 
@@ -386,7 +386,7 @@ The API also provides `read_poscar_header`, `suggested_magnetic_moments`,
 `contcar_to_poscar`. `validate_vasp_workdir` checks VASP's conservative path
 limit and `clean_vasp_outputs` performs explicit pre-run cleanup while
 preserving requested files. Diagnosis never changes inputs. Whole workflows built
-from these helpers ship with the module: see {doc}`/vasp_runners`.
+from these helpers are published in workflows-vasp: see {doc}`/vasp_runners`.
 
 A few behaviors are worth stating explicitly, because they are what makes a run
 reproducible and a retry meaningful:

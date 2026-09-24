@@ -6,10 +6,18 @@ script on ``PATH``.
 What the assertions then read is the workspace those commands produced — a
 succeeded job whose persistent workdir holds a real OUTCAR and CONTCAR — so the page
 cannot drift from what works.
+
+The quickstart and the Python tour relax with the ``vasp.relax`` workflow of
+https://github.com/httk/workflows-vasp, referenced by its git URI. The suite is
+network-free: those tests run only when ``HTTK_TEST_WORKFLOWS_VASP`` names a
+reachable clone of that repository (for example ``git+file:///…/workflows-vasp``,
+or the GitHub URL itself in CI), which then replaces the repository prefix of the
+documented URI.
 """
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +38,36 @@ _QUICKSTART = _ROOT / "docs" / "quickstart.md"
 # explains them; everything after it is annotated with its own output.
 _EXPLANATION = "## What each command did"
 _CONSOLE_FENCE = "```console"
+#: The repository prefix the documented workflow URI carries.
+_WORKFLOWS_VASP = "git+https://github.com/httk/workflows-vasp"
+_RELAX_URI = f"{_WORKFLOWS_VASP}#vasp-relax"
+
+
+def _workflows_vasp() -> str:
+    """Return the workflows-vasp prefix to substitute, or skip the test."""
+
+    value = os.environ.get("HTTK_TEST_WORKFLOWS_VASP")
+    if not value:
+        pytest.skip(
+            "HTTK_TEST_WORKFLOWS_VASP is unset; set it to a git URI of a workflows-vasp clone "
+            "(e.g. git+file:///path/to/workflows-vasp) to run the documented VASP relaxation"
+        )
+    return value.rstrip("/")
+
+
+def _assert_pinned_relax(workflow: object, prefix: str) -> None:
+    """Assert *workflow* is the canonical, commit-pinned URI of ``#vasp-relax``."""
+
+    assert isinstance(workflow, str)
+    assert re.fullmatch(rf"{re.escape(prefix)}@[0-9a-f]{{40}}#vasp-relax", workflow, flags=re.IGNORECASE), workflow
+
+
+def _point_examples_at(work: Path, prefix: str) -> None:
+    """Rewrite the copied examples so their workflow URI uses *prefix*."""
+
+    for name in ("quickstart.sh", "example.py"):
+        path = work / "examples" / name
+        path.write_text(path.read_text(encoding="utf-8").replace(_WORKFLOWS_VASP, prefix), encoding="utf-8")
 
 
 def _documented_commands(document: Path) -> list[str]:
@@ -125,13 +163,15 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
 ) -> None:
     pytest.importorskip("httk.atomistic")
     pytest.importorskip("httk.store.backend.sql.engine")
+    prefix = _workflows_vasp()
     commands = [line.replace(" --remote local", "") for line in _documented_commands(_QUICKSTART)]
 
     # The page really is eight commands, including identity and workspace setup.
     assert sum(1 for line in commands if line.startswith("httk")) == 8
     assert 'httk init --name "Your Name" --email you@example.org' in commands
     assert "httk project init --name quickstart ." in commands
-    assert any(line.startswith("httk job new --workflow vasp-relax") for line in commands)
+    assert any(line.startswith(f"httk job new --workflow '{_RELAX_URI}'") for line in commands)
+    commands = [line.replace(_WORKFLOWS_VASP, prefix) for line in commands]
 
     completed = _run(
         ["bash", "-e", "-c", "\n".join(commands)],
@@ -153,7 +193,7 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
     records = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{") and line != "{"]
     assert len(records) == 2
     assert records[0]["format"] == "httk-workflow-collected"
-    assert records[0]["workflow"] == "httk.vasp.relax"
+    _assert_pinned_relax(records[0]["workflow"], prefix)
     assert records[0]["missing_collector"] is None
     assert set(records[0]["outputs"]) == {"relaxed_structure", "total_energy"}
     assert records[0]["job_key"].startswith("silicon--")
@@ -168,6 +208,8 @@ def test_the_documented_quickstart_commands_produce_a_finished_relaxation(
 def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) -> None:
     pytest.importorskip("httk.atomistic")
     pytest.importorskip("httk.store.backend.sql.engine")
+    prefix = _workflows_vasp()
+    _point_examples_at(work, prefix)
     # No console scripts on PATH at all: the script's documented module fallback is
     # what runs, which is the form a checkout without an install uses.
     empty = tmp_path / "no-scripts"
@@ -188,11 +230,16 @@ def test_the_quickstart_script_runs_the_same_path(work: Path, tmp_path: Path) ->
     assert (work / "results.sqlite").is_file()
     assert postprocess_svg.is_file()
     assert not postprocess_svg.is_relative_to(payload)
-    assert '"workflow":"httk.vasp.relax"' in completed.stdout
+    workflows = re.findall(r'"workflow":"([^"]*)"', completed.stdout)
+    assert workflows
+    for workflow in workflows:
+        _assert_pinned_relax(workflow, prefix)
 
 
 def test_the_python_api_tour_runs(work: Path, tmp_path: Path) -> None:
     pytest.importorskip("httk.atomistic")
+    prefix = _workflows_vasp()
+    _point_examples_at(work, prefix)
     empty = tmp_path / "no-scripts"
     empty.mkdir()
     completed = _run(
@@ -207,7 +254,9 @@ def test_the_python_api_tour_runs(work: Path, tmp_path: Path) -> None:
     assert (payload / "run" / "CONTCAR").is_file()
     lines = completed.stdout.splitlines()
     assert lines[0].startswith("workspace ")
-    assert any(line.startswith("succeeded silicon--") for line in lines)
+    succeeded = [line for line in lines if line.startswith("succeeded silicon--")]
+    assert len(succeeded) == 1
+    _assert_pinned_relax(succeeded[0].rsplit("(", 1)[1].rstrip(")"), prefix)
     assert "  workdir OUTCAR" in lines
 
 

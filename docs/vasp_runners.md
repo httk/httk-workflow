@@ -1,230 +1,62 @@
-# Packaged VASP runners
+# VASP workflows
 
 *For campaigns that want an ordinary VASP calculation without writing a runner at all.*
 
-*httk-workflow* ships complete VASP runners. A campaign that wants the ordinary
-thing — relax a structure, run a single point, or both in sequence — writes no
-runner at all: it submits jobs that name one of the installed files in
-`httk.workflow.vasp.runners`.
+The ready-made VASP workflows live in the
+[workflows-vasp](https://github.com/httk/workflows-vasp) repository, one
+workflow package per subdirectory. *httk-workflow* does not bundle them; it
+ships the VASP helper API they are built on, listed at the end of this page.
 
-Their result hooks live in `httk.workflow.vasp.collect` as
-`collect_vasp_relax`, `collect_vasp_static`, and `collect_vasp_relax_static`.
-
-| Runner | Workflow | Steps |
+| URI | Short name | What it does |
 | --- | --- | --- |
-| `vasp_relax.py` | `httk.vasp.relax` | publish, prepare, run |
-| `vasp_relax.sh` | `httk.vasp.relax` | publish, prepare, run |
-| `vasp_static.py` | `httk.vasp.static` | publish, prepare, run |
-| `vasp_relax_static.py` | `httk.vasp.relax-static` | publish, prepare, promote, run, static |
+| `git+https://github.com/httk/workflows-vasp#vasp-relax` | `vasp.relax` | relax a structure with the reviewed remedy ladder |
+| `git+https://github.com/httk/workflows-vasp#vasp-relax-bash` | `vasp.relax-bash` | the same relaxation, authored in Bash |
+| `git+https://github.com/httk/workflows-vasp#vasp-static` | `vasp.static` | one single-point calculation of a fixed structure |
+| `git+https://github.com/httk/workflows-vasp#vasp-relax-static` | `vasp.relax-static` | relax, then evaluate the relaxed structure statically |
 
-`vasp_relax.sh` is the Bash authoring of exactly the same workflow as
-`vasp_relax.py`: the same steps, the same job parameters, the same job state, the same
-failure codes, and the same files in the workdir and in the published data. It is
-both a working runner and the proof that the two authoring SDKs are one protocol.
+Each takes one required input, `structure`, staged as `files/POSCAR`. Their job
+parameters, failure codes, postprocess scripts (`relaxation-report`,
+`relaxation-plot`) and result layout are documented in that repository.
 
-## Submitting a job
+## Install, run, uninstall
 
-Reference a packaged runner as an installed runner, which needs no publication —
-the manager resolves the reserved `pkg:` form inside its own module allowlist, and
-`httk.workflow` is in that allowlist by default:
-
-```python
-from httk.workflow import JobSpec, Workspace, prepare_job_payload
-from httk.workflow.runners import runner_reference
-
-reference = runner_reference("vasp_relax.py")
-job = prepare_job_payload(
-    "prepared-job",
-    JobSpec(
-        name="Relax silicon",
-        workflow="httk.vasp.relax",
-        runner_path=str(reference["path"]),      # pkg:httk.workflow.vasp.runners/vasp_relax.py
-        runner_source="installed",
-        runner_sha256=str(reference["sha256"]),
-        initial_step="prepare",
-        data_mode="none",
-        parameters={"kpoint_density": 30.0, "incar_tags": {"ENCUT": 520}},
-    ),
-)
-```
-
-The payload carries the structure and the INCAR it starts from:
+Referencing a URI fetches and installs the workflow; the job records its
+canonical URI, pinned to the full commit (append `@<ref>` before `#` to choose a
+branch, tag or commit). `httk workflow install` does the same without creating a
+job. Once installed, the short name selects it:
 
 ```console
-mkdir -p prepared-job/files
-cp POSCAR INCAR POTCAR prepared-job/files/
-httk project init --name workflow .
-httk job submit --placement project/si prepared-job
-httk workflow manager run
-```
-
-Every `httk workflow` command names the *registered* workspace, never a path;
-`workspace init` both creates the workspace and registers the name — see
-{doc}`workflow_cli`.
-
-The same file can be published to the workspace runner store instead, which pins
-it by digest for a whole campaign:
-
-```python
-workspace = Workspace.initialize("workflow-workspace")
-published = workspace.publish_runner("/path/to/vasp_relax.py", name="vasp/relax.py")
-```
-
-## The command to run
-
-The VASP command is the `vasp.command` application setting, which the runners
-resolve through `a.setting("vasp.command")` — most
-specific first: a job's own `vasp.command` parameter, then `HTTK_VASP_COMMAND` in the
-environment, then the workspace's `vasp.command` setting, and finally the job's
-legacy `vasp_command` parameter. The chosen string is split the way a shell would.
-
-Two spellings therefore both work, and mean different things. A machine that
-invokes VASP its own way still exports the environment variable, and it wins over
-everything a workspace configures — deployment state a job submitted elsewhere
-cannot know:
-
-Configure the command once on the workspace, so no one has to export it for
-every job — and a workspace bound to a remote is even seeded with it from the
-remote definition when it is created:
-
-```console
+httk workflow install 'git+https://github.com/httk/workflows-vasp#vasp-relax'
 httk workspace settings set --key vasp.command --value "srun -n 32 vasp_std" default
-httk workflow manager run --pool vasp
+httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon
+httk workflow run
+httk workflow collect
+httk workflow uninstall vasp.relax
 ```
 
-The pseudopotential library resolves the same way, as `vasp.pseudo_library`
-(environment `HTTK_VASP_PSEUDO_LIBRARY`), falling back to the job's
-`pseudopotential_library` parameter. See {doc}`sdks/sdk_parity` for the resolution table
-and {doc}`workflow_cli` for `workspace settings`.
+`httk plugin install git+https://github.com/httk/workflows-vasp` installs all
+four at once as a plugin instead. See {doc}`workflow_uris` for URI resolution,
+short names and the trust model.
 
-## Declared inputs and parameters
+The VASP command is the `vasp.command` application setting, resolved most
+specific first: a job's own `vasp.command` parameter, then `HTTK_VASP_COMMAND`
+in the environment, then the workspace setting. The pseudopotential library
+resolves the same way as `vasp.pseudo_library` (`HTTK_VASP_PSEUDO_LIBRARY`).
+See {doc}`sdks/sdk_parity` for the resolution table. The workflows default to
+`data.mode="none"`: the persistent `run/` workdir is the result; pass
+`--data-mode transactional` to `job new` to also publish a curated copy into
+`data/`.
 
-The four workflows declare one creation input: `structure` → `files/POSCAR`.
-Paths are copied verbatim; other objects are serialized with `httk.core.save`,
-which requires the `httk-atomistic` package for POSCAR/CIF writers.
+## What stays in httk-workflow
 
-Every implementation parameter is optional and every one is documented, with its default, in the API
-reference of {py:mod}`httk.workflow.vasp.runners`. The ones a campaign normally sets are
-`poscar`, `incar_tags`, `kpoint_density`, `pseudopotential_library`, `timeout`, and
-`collect`.
+- {py:mod}`httk.workflow.vasp`: the dependency-free helpers the runners import —
+  input preparation (`prepare_vasp_inputs`, k-point grids, POTCAR assembly),
+  diagnostics, the reviewed remedy ladder (`plan_vasp_remedy`,
+  {py:func}`~httk.workflow.vasp.register_remedy_policy`), supervised execution
+  (`run_vasp`), and the result collectors in `httk.workflow.vasp.collect`. See
+  {doc}`runtime_helpers`.
+- The Bash VASP API: a Bash runner sources `$HTTK_WORKFLOW_VASP_BASH_API` after
+  `$HTTK_WORKFLOW_BASH_API`; see {doc}`sdks/native_bash_api`.
 
-`workdir.mode` must be `persistent` (the global default), because the inputs a
-remedy rewrites have to be the inputs the next attempt reads. All four packaged
-VASP workflows default to `data.mode="none"`: the workdir is the result, no
-`data/` tree is created, and collection reads the workdir directly.
-
-To also copy the curated outputs into transactional data, opt in explicitly:
-
-```console
-httk job new --workflow vasp-relax --input structure=POSCAR --data-mode transactional
-```
-
-The Python equivalent is `new_job(..., data_mode="transactional")`. This override
-wins over the workflow default, and collection supports both modes.
-
-## What a run does
-
-`prepare` stages the payload files into the workdir, then derives what the job did
-not give: the k-point grid from `kpoint_density`, `EDIFF` and `EDIFFG` from
-`accuracy_per_atom`, `MAGMOM` from the structure, `NBANDS` from the POTCAR, and a
-POTCAR from `pseudopotential_library` when none was staged. Explicit `incar_tags`
-are applied first and win over every derived value.
-
-`run` executes VASP under supervision, writes `vasp-run-report.json`, and acts on
-the classification:
-
-| Classification | What the runner does |
-| --- | --- |
-| `completed` | records the energy and advances |
-| anything else with a remedy left | applies exactly one remedy and asks for another attempt |
-| anything else without one | fails with `vasp.failed`, carrying the decision that ran out |
-
-Remedies are the bounded ladder of the policy named by `remedy_policy`, which
-defaults to `reviewed-v1`; they are planned and applied explicitly and never
-invented: see {doc}`runtime_helpers`. A group with its own reviewed practice
-registers a policy and names it in the job parameters rather than editing a runner. The
-ladder position is recorded in the job state directory, so it survives every attempt
-of the job, and `maximum_remedies` bounds how many a single job may apply.
-
-`reviewed-v1` handles the `edddav_zhegv` diagnostic from both `EDDAV` and
-`EDDDAV: Call to ZHEGV failed` messages. Its CPU MPI recovery first sets
-`NPAR=1`, then increases an explicit `NBANDS` by two, then gives up. These
-are INCAR edits within the existing allocation, not a reduction in MPI ranks.
-See the [review and limitations](details/runtime_helpers.md#zhegv-recovery).
-
-The `publish` step leaves outputs in the workdir by default. With transactional
-data enabled, it copies the files named by `collect` into `data/`, under
-`data_prefix`. This duplicates those files already retained in the workdir.
-
-Relaxation (Python and Bash) collects `run/CONTCAR` and `run/OUTCAR`; static
-collects `run/OUTCAR`. The chained workflow archives the relaxation before the
-single point overwrites the workdir: it collects the relaxed structure from
-`run/relax/CONTCAR` and the final static energy from `run/OUTCAR`. With
-transactional data, those paths become `data/relax/CONTCAR` and
-`data/static/OUTCAR` (under `data_prefix` when supplied). Single-stage
-transactional results default to `data/vasp/`. `data_prefix` does not change
-workdir paths.
-
-No result information is removed by the default change. Custom postprocessing
-that hard-codes `data/` paths must use the workdir layout or opt into
-transactional data. The packaged report and plot scripts support both layouts
-and select the final static energy for the chained workflow. The `collect`
-parameter filters transactional copies and the chained relaxation archive; it
-does not prune the persistent workdir. Keep that workdir to retain the results.
-
-## relaxation-report
-
-The packaged vasp-relax, vasp-relax-bash, and vasp-relax-static workflows
-declare the relaxation-report postprocess script. Run it after collection:
-
-~~~console
-httk workflow postprocess --workspace WS --script relaxation-report
-~~~
-
-It reads HTTK_WORKFLOW_DATA_DIR (or HTTK_WORKFLOW_WORKDIR when no
-transactional data directory exists), finds the published OUTCAR and CONTCAR
-files, and writes relaxation_report.txt and relaxation_report.json into
-workdir/postprocess/relaxation-report/. Missing files are reported as
-unavailable and do not make the script fail.
-
-## relaxation-plot
-
-The same three packaged workflows also declare the relaxation-plot postprocess
-script. Run it after collection:
-
-~~~console
-httk workflow postprocess --workspace WS --script relaxation-plot
-~~~
-
-It reads the preferred published OUTCAR from HTTK_WORKFLOW_DATA_DIR (or
-HTTK_WORKFLOW_WORKDIR when no transactional data directory exists), plots every
-ionic-step energy, and writes
-workdir/postprocess/relaxation-plot/relaxation_energies.svg. Missing OUTCAR
-data or energies are reported and do not make the script fail.
-
-## Failure codes
-
-| Code | Meaning |
-| --- | --- |
-| `vasp.command_missing` | no `vasp.command` resolved — set it with `httk workspace settings set --key vasp.command --value '...' default`, or use `HTTK_VASP_COMMAND` as a deployment override; no `vasp_command` parameter was provided |
-| `vasp.input_missing` | the structure named by `poscar` is not in the payload |
-| `vasp.no_relaxed_structure` | the chained runner's relaxation left no CONTCAR |
-| `vasp.failed` | VASP did not complete and no remedy remained |
-
-## Formation energies
-
-`vasp_relax_static.py` is the *httk* v1 formation-energy template without its
-database half. A formation energy is assembled from the total energies of several
-finished jobs and the elemental references they are compared against, which is an
-analysis over jobs rather than a step inside one. What the runner guarantees is the
-pair of numbers that assembly needs: one relaxed structure and one total energy of
-it, each with the evidence of how it was produced.
-
-## Copying one
-
-A group whose practice differs from the packaged one should copy the file and edit
-it. Each runner is one self-contained file that imports nothing but an installed
-*httk-workflow*, so a copy is a complete runner, publishable as it stands. A group
-with its own reviewed remedy practice can also keep the packaged runners and
-register its own policy with
-{py:func}`httk.workflow.vasp.register_remedy_policy`.
+A group whose practice differs copies a workflow package from the repository
+and edits it, or keeps the workflows and registers its own remedy policy.

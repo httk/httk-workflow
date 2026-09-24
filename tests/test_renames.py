@@ -10,8 +10,8 @@ wrong no other test would notice:
   ``transfer``;
 * the per-user remote definitions and identity keys moved from the data home to
   the configuration home;
-* ``WorkflowWorkspace`` became ``Workspace``, and the packaged VASP runners moved
-  into :mod:`httk.workflow.vasp.runners`.
+* ``WorkflowWorkspace`` became ``Workspace``, and the packaged VASP workflows
+  left the distribution for https://github.com/httk/workflows-vasp.
 
 The superseded spellings are now **removed**, not merely hidden. This module
 asserts both halves: the canonical spellings work, and the old ones are gone —
@@ -26,7 +26,7 @@ import pytest
 from httk.core.cli import CLIContext
 
 import httk.workflow
-from httk.workflow import Attempt, TaskManager, Workspace
+from httk.workflow import Attempt
 from httk.workflow import workflow_cli as cli
 from httk.workflow.adapters import (
     METADATA_FILE,
@@ -37,9 +37,7 @@ from httk.workflow.adapters import (
 )
 from httk.workflow.configuration import config_home, data_home
 from httk.workflow.projects import PROJECT_DIRECTORY, initialize_project
-from httk.workflow.protocol import JobSpec, prepare_job_payload
-from httk.workflow.runners import RUNNERS, runner_package, runner_path, runner_reference
-from httk.workflow.scaffold import new_job, registered_workflows
+from httk.workflow.scaffold import registered_workflows
 from httk.workflow.workflow_cli import command
 
 
@@ -206,32 +204,18 @@ def test_the_vasp_helpers_live_only_in_the_vasp_package() -> None:
     assert vasp.__doc__ is not None and vasp.__doc__.startswith("Small, dependency-free VASP runner helpers")
 
 
-def test_the_packaged_runners_moved_with_the_science_they_implement() -> None:
-    for name in RUNNERS:
-        assert runner_package(name) == "httk.workflow.vasp.runners"
-        installed = runner_path(name)
-        assert installed.is_file()
-        assert installed.parent.name == "runners" and installed.parent.parent.name == "vasp"
-        assert runner_reference(name)["path"] == f"pkg:httk.workflow.vasp.runners/{name}"
-    with pytest.raises(ValueError, match="unknown packaged runner"):
-        runner_path("nothing.py")
+def test_the_packaged_vasp_workflows_are_gone() -> None:
+    """They live in https://github.com/httk/workflows-vasp; only the helpers stay."""
+
+    import importlib
+
+    for module in ("httk.workflow.runners", "httk.workflow.vasp.runners", "httk.workflow.vasp.workflows"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(module)
+    assert not any(name.startswith("httk.vasp.") for name in registered_workflows())
 
 
-def test_the_scaffold_workflow_ids_and_aliases_are_registered(tmp_path: Path) -> None:
-    assert registered_workflows() == (
-        "httk.vasp.relax",
-        "httk.vasp.relax-bash",
-        "httk.vasp.static",
-        "httk.vasp.relax-static",
-    )
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    structure = tmp_path / "POSCAR"
-    structure.write_text("structure", encoding="utf-8")
-    job = new_job(workspace, "vasp-relax", publish="installed", tag="silicon", inputs={"structure": structure})
-    assert job.runner["path"] == "pkg:httk.workflow.vasp.runners/vasp_relax.py"
-    assert job.workflow == "httk.vasp.relax"
-
-
+@pytest.mark.usefixtures("relax_workflow")
 def test_retired_lifecycle_spellings_are_gone() -> None:
     from httk.workflow import scaffold
 
@@ -247,11 +231,8 @@ def test_retired_lifecycle_spellings_are_gone() -> None:
         assert not hasattr(scaffold, name)
     assert not hasattr(httk.workflow, "HarvestRecord")
     assert not hasattr(httk.workflow, "harvest")
-    providers = [scaffold.workflow_provider(alias) for alias in ("vasp-relax", "vasp-relax-bash")]
-    assert {provider.workflow_id for provider in providers if provider is not None} == {
-        "httk.vasp.relax",
-        "httk.vasp.relax-bash",
-    }
+    providers = [scaffold.workflow_provider("test-relax")]
+    assert {provider.workflow_id for provider in providers if provider is not None} == {"tests.relax"}
     from httk.workflow.protocol import JobSpec
 
     assert not hasattr(JobSpec, "inputs")
@@ -264,7 +245,7 @@ def test_retired_lifecycle_spellings_are_gone() -> None:
     parser = cli.build_parser("httk workflow", CLIContext("httk", Path.cwd()))
     with pytest.raises(SystemExit):
         parser.parse_args(
-            ["job", "new", "--workspace", "WS", "--workflow", "vasp-relax", "--parameter-from", "structure", "x"]
+            ["job", "new", "--workspace", "WS", "--workflow", "test-relax", "--parameter-from", "structure", "x"]
         )
     root = Path(httk.workflow.__file__).parents[2]
     retired = re.compile(
@@ -275,38 +256,3 @@ def test_retired_lifecycle_spellings_are_gone() -> None:
         if path.name in {"_transfer.py", "adapters.py"}:
             continue
         assert not retired.search(path.read_text(encoding="utf-8")), path
-
-
-def test_a_job_pinning_the_new_package_path_runs(tmp_path: Path) -> None:
-    """The manager resolves and executes the runner at its new package path.
-
-    The payload deliberately has no structure, so the runner itself refuses the
-    job by name. That failure is the proof: it can only be reported by a runner
-    that was found, read, and run.
-    """
-
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    reference = runner_reference("vasp_static.py")
-    assert reference["path"] == "pkg:httk.workflow.vasp.runners/vasp_static.py"
-    job = prepare_job_payload(
-        tmp_path / "payload",
-        JobSpec(
-            name="packaged by its new path",
-            workflow="httk.vasp.static",
-            runner_path=str(reference["path"]),
-            runner_source="installed",
-            runner_sha256=str(reference["sha256"]),
-            tag="packaged",
-            initial_step="prepare",
-            maximum_attempts_per_activation=1,
-        ),
-    )
-    workspace.submit(tmp_path / "payload", "project/packaged")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
-
-    markers = workspace.find_markers(job.job_key)
-    assert len(markers) == 1 and markers[0].kind == "failed"
-    frame = workspace.read_state(markers[0])
-    failure = frame.get("failure")
-    assert isinstance(failure, dict) and failure["code"] == "vasp.input_missing"

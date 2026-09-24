@@ -7,7 +7,8 @@ declares the workflow `httk.vasp.relax-rust` with three steps — `prepare`, `ru
 `$HTTK_WORKFLOW_PYTHON -m httk.workflow._shell_bridge`, so a published outcome is
 the same protocol bytes a Python, Bash, C, or Fortran runner writes, and it works
 with the mock VASP beside `examples/mock_vasp.py`. It is a minimal example and
-deliberately omits what the packaged `vasp-relax` runner adds — INCAR and KPOINTS
+deliberately omits what the `vasp.relax` runner of
+[workflows-vasp](https://github.com/httk/workflows-vasp) adds — INCAR and KPOINTS
 generation, restarts, and supervision diagnostics.
 
 The Rust SDK is a std-only crate with **zero crates.io dependencies** and no

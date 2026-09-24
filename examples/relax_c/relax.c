@@ -1,6 +1,7 @@
 /*
  * One VASP relaxation, authored in C: the same three-step shape as the Bash
- * runner httk.workflow.vasp.runners/vasp_relax.sh, built on the native C SDK.
+ * runner of vasp.relax-bash in https://github.com/httk/workflows-vasp, built on
+ * the native C SDK.
  *
  *   prepare  stage the payload POSCAR (and INCAR if present) into the workdir
  *   run      run the configured VASP command and classify what it did

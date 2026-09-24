@@ -4,7 +4,7 @@
 **This is not VASP and computes nothing.** It reads the POSCAR in its working
 directory and writes the files a finished VASP run leaves behind — OUTCAR,
 OSZICAR, CONTCAR, and ``vasprun.xml`` — with numbers that are plausible enough for
-the parsers of the packaged runners and meaningless as physics. The "relaxed"
+the parsers of the workflows-vasp runners and meaningless as physics. The "relaxed"
 structure is the input with its last atom nudged.
 
 Use it exactly the way a deployment names the real thing:

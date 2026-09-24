@@ -5,7 +5,7 @@ leave behind.* The everyday cycle is four commands:
 
 ```console
 $ httk workspace init --name default .
-$ httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
+$ httk job new --workflow vasp.relax --input structure=POSCAR --tag silicon
 $ httk workflow run                 # serve jobs until idle (--idle keeps serving)
 $ httk workspace status
 ```

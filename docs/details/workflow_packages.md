@@ -447,7 +447,7 @@ meaning beyond convenience.
 
 **Inputs** are the objects the workflow *operates on* — the things named in the
 workflow's declaration, described by OPTIMADE property and entry-type
-definitions. They define what the workflow *is*: two runs of `httk.vasp.relax`
+definitions. They define what the workflow *is*: two runs of `vasp.relax`
 on different structures are the same workflow applied to different inputs, and
 it is the inputs (and the declared outputs) that give the workflow's `$id` its
 meaning across databases. Inputs are staged into the job payload at creation

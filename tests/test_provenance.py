@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-import httk.workflow.vasp  # noqa: F401 - imports and registers packaged workflows
+from conftest import RELAX_DECLARATION_URI
 from httk.workflow import JobRecord, TaskManager, Workspace, job_records, new_job
 from httk.workflow.provenance import run_record
 from httk.workflow.scaffold import registered_workflow
@@ -116,11 +116,12 @@ def test_workflow_id_supplies_uri_without_provenance() -> None:
     assert run.workflow_declaration_uri == "https://example.test/workflows/v1"
 
 
+@pytest.mark.usefixtures("relax_workflow")
 def test_packaged_workflow_id_supplies_uri_without_provenance() -> None:
-    workflow = registered_workflow("vasp-relax")
+    workflow = registered_workflow("test-relax")
     assert workflow is not None
     run = run_record(_record({"workflow": {"declared": workflow.declarations["workflow"], "observed": None}}))
-    assert run.workflow_declaration_uri == "https://schemas.httk.org/defs/v0.1/workflows/vasp-relax"
+    assert run.workflow_declaration_uri == RELAX_DECLARATION_URI
 
 
 def test_explicit_null_provenance_uri_does_not_fall_back() -> None:

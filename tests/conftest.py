@@ -33,6 +33,51 @@ from httk.workflow.adapters import (
 from httk.workflow.registry import (
     register_workspace,
 )
+from httk.workflow.scaffold import _WORKFLOW_PROVIDERS, WorkflowProvider
+
+#: The packaged runner of the ``tests.relax`` workflow, a test-only stand-in for a
+#: domain's packaged runner (see ``workflow_fixtures/__init__.py``).
+RELAX_RUNNER = Path(__file__).with_name("workflow_fixtures") / "relax.py"
+RELAX_DECLARATION_URI = "https://example.test/workflows/relax"
+
+#: A registered packaged workflow shaped like a relaxation: a required structure
+#: staged as ``POSCAR``, three steps starting at ``prepare``, a declaration, a
+#: collector and one postprocess script.
+RELAX_PROVIDER = WorkflowProvider(
+    workflow_id="tests.relax",
+    alias="test-relax",
+    runner_package="workflow_fixtures",
+    runner_file="relax.py",
+    initial_step="prepare",
+    steps=("publish", "prepare", "run"),
+    inputs={"structure": "POSCAR"},
+    _input_metadata={
+        "structure": {
+            "role": "initial_structure",
+            "entry_type": "structures",
+            "destination": "POSCAR",
+            "required": True,
+        }
+    },
+    summary="relax one test structure",
+    declarations={
+        "workflow": {
+            "$id": RELAX_DECLARATION_URI,
+            "inputs": [{"name": "initial_structure", "entry_type": "structures"}],
+            "outputs": [],
+        }
+    },
+    collector=lambda _record: {},
+    postprocess_scripts={"report": {"file": "scripts/report", "description": "write a report"}},
+)
+
+
+@pytest.fixture()
+def relax_workflow(monkeypatch: pytest.MonkeyPatch) -> WorkflowProvider:
+    """Register the ``tests.relax`` packaged workflow for one test."""
+
+    monkeypatch.setitem(_WORKFLOW_PROVIDERS, RELAX_PROVIDER.workflow_id, RELAX_PROVIDER)
+    return RELAX_PROVIDER
 
 
 def configure_identity(

@@ -194,11 +194,11 @@ esac
 ```{admonition} A relaxation may need no runner at all
 :class: tip
 
-The workflow below ships with the module, in Bash and in Python, as
-`vasp_relax.sh` and `vasp_relax.py`. A campaign that wants the ordinary relaxation
-submits jobs naming the installed file and writes nothing: see
-{doc}`/vasp_runners`. Write your own when your practice differs from the packaged
-one — starting from a copy of it.
+The workflow below is published, in Bash and in Python, as `vasp.relax-bash`
+and `vasp.relax` in [workflows-vasp](https://github.com/httk/workflows-vasp). A
+campaign that wants the ordinary relaxation submits jobs naming its git URI and
+writes nothing: see {doc}`/vasp_runners`. Write your own when your practice
+differs — starting from a copy of it.
 ```
 
 The native Bash equivalent sources paths supplied by the manager and publishes

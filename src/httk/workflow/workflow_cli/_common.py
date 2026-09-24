@@ -27,11 +27,6 @@ from pathlib import Path
 import httk.core
 from httk.core.cli import CLIContext
 
-# The packaged domains register their workflows as an import side effect, so the
-# CLI resolves `job new --workflow NAME` against a populated registry. The generic
-# execution layer never imports a domain; the CLI does, exactly here.
-# Importing the domain registers its built-in workflows in the shared registry.
-from .. import vasp as _vasp  # noqa: F401
 from .._manager_runners import RUNNER_TREE_ENTRY
 from ..adapters import resolve_remote, run_adapter
 from ..errors import WorkflowError

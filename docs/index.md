@@ -39,7 +39,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 
 - {doc}`runtime_helpers` — the Python authoring SDK: `Runner`, `Attempt`, steps
 - {doc}`sdks/index` — the same authoring surface in eight more languages
-- {doc}`vasp_runners` — the packaged runners and relaxation report, for campaigns that write none
+- {doc}`vasp_runners` — the ready-made VASP workflows of workflows-vasp, for campaigns that write none
 - {doc}`workflow_packages` — authoring directory packages and their manifest
 - {doc}`workflow_uris` — sharing and referencing workflows in Git repositories by URI
 - {doc}`declarations` — saying what a workflow *is*, for a data layer
@@ -80,13 +80,14 @@ python -m pip install -e .
 
 ## Minimal setup
 
-One workspace, one job of a packaged runner, and one manager that runs it:
+One workspace, one job of a ready-made VASP workflow referenced by its git URI,
+and one manager that runs it:
 
 ```console
 httk init --name "Your Name" --email you@example.org
 httk project init --name quickstart .
 httk workspace init --name default .
-httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
+httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --input structure=POSCAR --tag silicon
 httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 httk workflow run
 httk workflow collect

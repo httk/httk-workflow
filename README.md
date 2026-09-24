@@ -29,12 +29,14 @@ hooks; collector failures differ deliberately: registered `.py` exceptions
 abort iteration, while executable-hook errors degrade per job and continue the
 sweep.
 
-From nothing to a finished VASP relaxation, without writing a runner:
+From nothing to a finished VASP relaxation, without writing a runner, using
+the `vasp.relax` workflow of
+[workflows-vasp](https://github.com/httk/workflows-vasp) by its git URI:
 
 ```console
 httk init --name "Your Name" --email you@example.org
 httk project init --name quickstart .
-httk job new --workflow vasp-relax --input structure=POSCAR --tag silicon
+httk job new --workflow 'git+https://github.com/httk/workflows-vasp#vasp-relax' --input structure=POSCAR --tag silicon
 httk workspace settings set --key vasp.command --value "$PWD/examples/mock_vasp.py" default
 httk workflow run
 httk workflow collect
@@ -79,6 +81,12 @@ followed by the serial timing command above. `make ci` uses the same extended
 profile with fast-fail enabled. Tests whose process timing must remain
 comparable use the `timing` marker and run serially after the parallel pass.
 
+The quickstart and Python-tour example tests relax with the `vasp.relax`
+workflow of [workflows-vasp](https://github.com/httk/workflows-vasp). They are
+skipped unless `HTTK_TEST_WORKFLOWS_VASP` names a git URI of that repository,
+such as `HTTK_TEST_WORKFLOWS_VASP=git+file:///path/to/workflows-vasp` for a
+local clone. Module CI does not set it yet, so these tests skip there.
+
 ## What it does
 
 - **Runs workflows without a graph.** A step decides at run time which children
@@ -94,8 +102,10 @@ comparable use the `timing` marker and run serially after the parallel pass.
   job is the source of truth, so an interrupted manager, node, or calculation is
   resumed from what is on disk. The protocol is specified in
   [`docs/workflow_filesystem_api.md`](docs/workflow_filesystem_api.md).
-- **Ships complete VASP runners**, so an ordinary relaxation or single point
-  needs no runner written at all — see [`docs/vasp_runners.md`](docs/vasp_runners.md).
+- **Runs ready-made VASP workflows** from
+  [workflows-vasp](https://github.com/httk/workflows-vasp) by git URI, so an
+  ordinary relaxation or single point needs no runner written at all, and ships
+  the VASP helper API they build on — see [`docs/vasp_runners.md`](docs/vasp_runners.md).
 - **Runs workflows written elsewhere.** Python Workflow Definition and CWL
   documents become ordinary jobs; see
   [`docs/workflow_languages.md`](docs/workflow_languages.md).

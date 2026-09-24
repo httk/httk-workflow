@@ -4,8 +4,8 @@ Nothing here fabricates protocol state. Every job is built by
 :func:`httk.workflow.scaffold.new_job` or by ``httk job new`` and then
 read back from the workspace it was submitted to, and the jobs that have to prove
 they *run* are driven to completion by a real
-:class:`httk.workflow.TaskManager` with the mock VASP of ``examples/mock_vasp.py``
-standing in for VASP.
+:class:`httk.workflow.TaskManager`. The registered packaged workflow is the
+test-only ``tests.relax`` (``conftest.relax_workflow``).
 """
 
 import json
@@ -19,29 +19,28 @@ from httk.core.cli import CLIContext
 from httk.core.digests import sha256_file
 from httk.core.register import register_format_serializer, register_reader, register_writer
 
-import httk.workflow.vasp
-from conftest import register_ws
-from httk.workflow import FormatError, TaskManager, Workspace, scaffold
+from conftest import RELAX_PROVIDER, RELAX_RUNNER, register_ws
+from httk.workflow import FormatError, TaskManager, Workspace, job_records, scaffold
 from httk.workflow.models import JobDefinition, StateFrame, validate_label, validate_resources
-from httk.workflow.runners import RUNNERS, runner_path
+from httk.workflow.postprocessing import run_postprocess_script
 from httk.workflow.runtime_builders import JobSpec
 from httk.workflow.scaffold import (
     JOB_SCAFFOLD_FORMAT,
     JobItem,
+    PublishMode,
     WorkflowProvider,
     _has_bash_shebang,
     describe_runner,
     new_job,
     new_jobs,
     payload_relative,
-    registered_workflow,
-    registered_workflows,
     resolve_workflow,
     structure_files,
     structure_tag,
 )
-from httk.workflow.vasp.runners import PACKAGE
 from httk.workflow.workflow_cli._job import _command_runner_text
+
+pytestmark = pytest.mark.usefixtures("relax_workflow")
 
 
 def test_job_definition_uses_runner_executor_wire_key() -> None:
@@ -239,59 +238,34 @@ def workspace(tmp_path: Path) -> Iterator[Workspace]:
     yield Workspace.initialize(tmp_path / "workspace")
 
 
-def test_every_packaged_runner_has_a_workflow_that_says_what_it_implements() -> None:
-    """The workflow table and the packaged runners cannot drift apart.
+def test_a_registered_packaged_workflow_resolves_by_name_and_step() -> None:
+    """A registered packaged workflow resolves by id or alias to its installed
+    runner, whose own description agrees with the registration."""
 
-    The workflow and the steps of a packaged workflow are declared in the table
-    rather than asked of the runner on every call, so what holds the two together
-    is this: every packaged runner is described here, by running it, and its own
-    answer is what the table must contain.
-    """
-
-    workflows = [registered_workflow(name) for name in registered_workflows()]
-    assert {workflow.packaged for workflow in workflows if workflow} == set(RUNNERS)
-    for workflow in workflows:
-        assert workflow is not None
-        described = describe_runner(workflow.source)
-        assert described["workflow"] == workflow.workflow_id
-        assert described["steps"] == sorted(workflow.steps)
-        assert workflow.inputs == {"structure": "POSCAR"}
-        assert workflow.initial_step in workflow.steps
-
-    expected = {
-        "httk.vasp.relax": "vasp-relax",
-        "httk.vasp.relax-bash": "vasp-relax",
-        "httk.vasp.static": "vasp-static",
-        "httk.vasp.relax-static": "vasp-relax-static",
-    }
-    for workflow_id, workflow_name in expected.items():
-        workflow = registered_workflow(workflow_id)
-        assert workflow is not None
-        assert (
-            workflow.declarations["workflow"]["$id"] == f"https://schemas.httk.org/defs/v0.1/workflows/{workflow_name}"
-        )
-
-    # A packaged runner is nameable by its own file name as well as by its workflow
-    # name, and both resolve to exactly the installed bytes.
-    workflow = resolve_workflow("vasp-relax")
-    assert workflow.source == runner_path("vasp_relax.py")
-    assert workflow.workflow_id == "httk.vasp.relax" and workflow.initial_step == "prepare"
-    assert workflow.data_mode == "none"
-    with pytest.raises(ValueError, match="no such file: vasp_relax.py"):
-        resolve_workflow("vasp_relax.py")
-    assert resolve_workflow("vasp-relax-static", step="static").initial_step == "static"
+    workflow = resolve_workflow("test-relax")
+    assert workflow.source == RELAX_RUNNER
+    assert resolve_workflow("tests.relax").source == RELAX_RUNNER
+    described = describe_runner(workflow.source)
+    assert described["workflow"] == workflow.workflow_id == "tests.relax"
+    assert described["steps"] == sorted(workflow.steps)
+    assert workflow.initial_step == "prepare" and workflow.data_mode == "none"
+    assert workflow.declarations["workflow"]["$id"] == "https://example.test/workflows/relax"
+    # The packaged runner is not nameable by its bare file name.
+    with pytest.raises(ValueError, match="no such file: relax.py"):
+        resolve_workflow("relax.py")
+    assert resolve_workflow("test-relax", step="run").initial_step == "run"
     with pytest.raises(ValueError, match="does not implement the step 'prepear'"):
-        resolve_workflow("vasp-relax", step="prepear")
+        resolve_workflow("test-relax", step="prepear")
     with pytest.raises(ValueError, match="unknown workflow"):
-        resolve_workflow("vasp-nonexistent")
+        resolve_workflow("test-nonexistent")
 
 
 def test_unknown_workflow_suggests_a_close_match_and_lists_aliases() -> None:
     with pytest.raises(ValueError) as excinfo:
-        resolve_workflow("vasp-relx")
+        resolve_workflow("test-relx")
     message = str(excinfo.value)
-    assert "did you mean 'vasp-relax'?" in message
-    assert "httk.vasp.relax (vasp-relax)" in message
+    assert "did you mean 'test-relax'?" in message
+    assert "tests.relax (test-relax)" in message
 
 
 def test_path_shaped_unknown_workflow_reports_no_such_file() -> None:
@@ -306,8 +280,8 @@ def test_workflow_declarations_are_forwarded_and_digest_covered(
     provider = WorkflowProvider(
         workflow_id="tests.declarations",
         alias="test-declarations",
-        runner_package=PACKAGE,
-        runner_file="vasp_relax.py",
+        runner_package="workflow_fixtures",
+        runner_file="relax.py",
         initial_step="prepare",
         steps=("publish", "prepare", "run"),
         declarations=declarations,
@@ -321,7 +295,7 @@ def test_workflow_declarations_are_forwarded_and_digest_covered(
 
 
 def test_no_provenance_leaves_declarations_byte_identical(workspace: Workspace, structure: Path) -> None:
-    job = new_job(workspace, "vasp-relax", files={"POSCAR": structure}, tag="silicon")
+    job = new_job(workspace, "test-relax", files={"POSCAR": structure}, tag="silicon")
     definition = JobDefinition.from_path(job.payload / "job.json")
     assert set(definition.declarations) == {"workflow"}
 
@@ -331,8 +305,8 @@ def test_provenance_becomes_the_declared_entry_when_the_workflow_has_none(
 ) -> None:
     provider = WorkflowProvider(
         workflow_id="tests.provenance.none",
-        runner_package=PACKAGE,
-        runner_file="vasp_relax.py",
+        runner_package="workflow_fixtures",
+        runner_file="relax.py",
         initial_step="prepare",
         steps=("publish", "prepare", "run"),
     )
@@ -349,8 +323,8 @@ def test_provenance_merges_section_wise_with_a_workflow_declared_provenance(
 ) -> None:
     provider = WorkflowProvider(
         workflow_id="tests.provenance.merge",
-        runner_package=PACKAGE,
-        runner_file="vasp_relax.py",
+        runner_package="workflow_fixtures",
+        runner_file="relax.py",
         initial_step="prepare",
         steps=("publish", "prepare", "run"),
         declarations={
@@ -391,8 +365,8 @@ def test_provenance_duplicate_label_in_one_section_raises_value_error(
 ) -> None:
     provider = WorkflowProvider(
         workflow_id="tests.provenance.duplicate",
-        runner_package=PACKAGE,
-        runner_file="vasp_relax.py",
+        runner_package="workflow_fixtures",
+        runner_file="relax.py",
         initial_step="prepare",
         steps=("publish", "prepare", "run"),
         declarations={"provenance": {"inputs": {"entity": {"type": "amdb_material", "id": "old"}}}},
@@ -413,8 +387,8 @@ def test_provenance_non_mapping_section_on_either_side_raises_and_does_not_erase
 ) -> None:
     provider = WorkflowProvider(
         workflow_id="tests.provenance.non_mapping",
-        runner_package=PACKAGE,
-        runner_file="vasp_relax.py",
+        runner_package="workflow_fixtures",
+        runner_file="relax.py",
         initial_step="prepare",
         steps=("publish", "prepare", "run"),
         declarations={"provenance": {"inputs": {"reference": {"type": "structures", "id": "ref-1"}}}},
@@ -430,8 +404,8 @@ def test_provenance_non_mapping_section_on_either_side_raises_and_does_not_erase
     # caller's side is a well-formed mapping.
     broken = WorkflowProvider(
         workflow_id="tests.provenance.non_mapping.workflow_side",
-        runner_package=PACKAGE,
-        runner_file="vasp_relax.py",
+        runner_package="workflow_fixtures",
+        runner_file="relax.py",
         initial_step="prepare",
         steps=("publish", "prepare", "run"),
         declarations={"provenance": {"inputs": []}},
@@ -451,8 +425,8 @@ def test_new_jobs_per_item_provenance_overrides_the_shared_default(
 ) -> None:
     provider = WorkflowProvider(
         workflow_id="tests.provenance.campaign",
-        runner_package=PACKAGE,
-        runner_file="vasp_relax.py",
+        runner_package="workflow_fixtures",
+        runner_file="relax.py",
         initial_step="prepare",
         steps=("publish", "prepare", "run"),
     )
@@ -475,7 +449,7 @@ def test_new_jobs_per_item_provenance_overrides_the_shared_default(
 
 def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, structure: Path) -> None:
     job = new_job(
-        workspace, "vasp-relax", files={"POSCAR": structure}, tag="silicon", parameters={"kpoint_density": 30.0}
+        workspace, "test-relax", files={"POSCAR": structure}, tag="silicon", parameters={"kpoint_density": 30.0}
     )
 
     # The job is submitted, its runner is in the store under a name carrying the
@@ -483,12 +457,12 @@ def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, 
     # reads it.
     assert job.job_key == f"silicon--{job.job_id}"
     assert job.placement.as_posix() == "jobs"
-    digest = sha256_file(runner_path("vasp_relax.py"))
-    assert job.runner == {"source": "workspace", "path": f"vasp_relax.{digest[:12]}.py", "sha256": digest}
+    digest = sha256_file(RELAX_RUNNER)
+    assert job.runner == {"source": "workspace", "path": f"relax.{digest[:12]}.py", "sha256": digest}
     assert sha256_file(workspace.runner_store_path(str(job.runner["path"]))) == digest
     assert (job.payload / "files" / "POSCAR").read_text(encoding="utf-8") == _POSCAR
     definition = JobDefinition.from_path(job.payload / "job.json")
-    assert definition.workflow == "httk.vasp.relax" and definition.initial_step == "prepare"
+    assert definition.workflow == "tests.relax" and definition.initial_step == "prepare"
     assert json.loads((job.payload / "job.json").read_text(encoding="utf-8"))["runner"]["executor"] == "path"
     assert definition.data_mode == "none" and definition.workdir_mode == "persistent"
     assert definition.parameters == {"kpoint_density": 30.0}
@@ -496,20 +470,42 @@ def test_a_scaffolded_job_publishes_its_runner_by_content(workspace: Workspace, 
 
     # Scaffolding a second job publishes nothing new: identical bytes are one
     # store entry, which is what makes one runner serve a whole campaign.
-    again = new_job(workspace, "vasp-relax", files={"POSCAR": structure}, tag="silicon")
+    again = new_job(workspace, "test-relax", files={"POSCAR": structure}, tag="silicon")
     assert again.runner == job.runner
-    assert sorted(path.name for path in workspace.runners.iterdir()) == [f"vasp_relax.{digest[:12]}.py"]
+    assert sorted(path.name for path in workspace.runners.iterdir()) == [f"relax.{digest[:12]}.py"]
+
+
+@pytest.mark.parametrize("publish", ("workspace", "installed"))
+def test_a_registered_packaged_workflow_runs_and_postprocesses(
+    workspace: Workspace, structure: Path, publish: PublishMode
+) -> None:
+    """The packaged runner runs from either publication, and its packaged
+    postprocess script resolves inside the runner package."""
+
+    job = new_job(workspace, "test-relax", files={"POSCAR": structure}, publish=publish)
+    assert job.runner["source"] == publish
+    with TaskManager(
+        workspace, heartbeat_interval=0.01, runner_modules=("httk.workflow", "workflow_fixtures")
+    ) as manager:
+        manager.run_until_idle(timeout=120.0)
+    marker = workspace.find_marker_by_id(job.job_id)
+    assert marker is not None and marker.kind == "succeeded"
+
+    record = next(job_records(workspace))
+    result = run_postprocess_script(RELAX_PROVIDER, "report", record)
+    assert result.returncode == 0, result.stderr
+    assert (result.output_dir / "report.txt").read_text(encoding="utf-8") == "reported\n"
 
 
 def test_a_path_parameter_lands_at_the_declared_payload_destination(workspace: Workspace, structure: Path) -> None:
-    job = new_job(workspace, "vasp-relax", inputs={"structure": structure})
+    job = new_job(workspace, "test-relax", inputs={"structure": structure})
     assert (job.payload / "files" / "POSCAR").read_text(encoding="utf-8") == _POSCAR
     assert "parameters" not in json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
 
 
 def test_parameter_validation_and_realization_fail_before_submission(tmp_path: Path, workspace: Workspace) -> None:
     with pytest.raises(ValueError, match="declared inputs: structure"):
-        new_job(workspace, "vasp-relax", inputs={"unknown": object()})
+        new_job(workspace, "test-relax", inputs={"unknown": object()})
 
     runner = tmp_path / "hook.py"
     runner.write_text(
@@ -748,15 +744,15 @@ def test_a_runner_without_a_parameter_description_has_an_empty_declaration(tmp_p
 def test_the_installed_form_references_a_packaged_runner_without_copying(workspace: Workspace, structure: Path) -> None:
     job = new_job(
         workspace,
-        "vasp-static",
+        "test-relax",
         files={"POSCAR": structure},
         publish="installed",
-        workflow_id="tests.override.static",
+        workflow_id="tests.override.relax",
     )
 
     assert job.runner["source"] == "installed"
-    assert job.runner["path"] == f"pkg:{PACKAGE}/vasp_static.py"
-    assert job.workflow == "tests.override.static"
+    assert job.runner["path"] == "pkg:workflow_fixtures/relax.py"
+    assert job.workflow == "tests.override.relax"
     assert not list(workspace.runners.iterdir())
     assert job.tag is None and job.job_key == job.job_id
 
@@ -828,10 +824,10 @@ def test_an_undescribable_workflow_is_refused_by_name(tmp_path: Path, workspace:
         new_job(workspace, mystery)
 
 
-@pytest.mark.parametrize("workflow", ("vasp-relax", "vasp-relax-bash", "vasp-static", "vasp-relax-static"))
-def test_vasp_defaults_to_workdir_results_with_transactional_opt_in(
-    tmp_path: Path, structure: Path, workflow: str
+def test_a_packaged_workflow_defaults_to_workdir_results_with_transactional_opt_in(
+    tmp_path: Path, structure: Path
 ) -> None:
+    workflow = "test-relax"
     plain = Workspace.initialize(tmp_path / "plain")
     job = new_job(plain, workflow, files={"POSCAR": structure})
     assert JobDefinition.from_path(job.payload / "job.json").data_mode == "none"
@@ -853,7 +849,7 @@ def test_a_campaign_publishes_one_runner_and_yields_jobs_lazily(workspace: Works
     ]
     campaign = new_jobs(
         workspace,
-        "vasp-relax",
+        "test-relax",
         iter(items),
         parameters={"kpoint_density": 15.0},
         placement="project/screening",
@@ -894,7 +890,7 @@ def test_a_staged_name_lands_where_the_runner_reads_it(workspace: Workspace, str
     incar.write_text("ENCUT = 300\n", encoding="utf-8")
     job = new_job(
         workspace,
-        "vasp-relax",
+        "test-relax",
         files={"POSCAR": structure, "INCAR": incar, "reference/notes.txt": incar, "files/logs/x": incar},
         tag="staged",
     )
@@ -905,9 +901,9 @@ def test_a_staged_name_lands_where_the_runner_reads_it(workspace: Workspace, str
     # A directory and a file that is not there are refused before anything is
     # submitted, so a refused scaffolding leaves no half job behind.
     with pytest.raises(ValueError, match="not a directory"):
-        new_job(workspace, "vasp-relax", files={"POSCAR": tmp_path})
+        new_job(workspace, "test-relax", files={"POSCAR": tmp_path})
     with pytest.raises(ValueError, match="does not exist"):
-        new_job(workspace, "vasp-relax", files={"POSCAR": tmp_path / "absent"})
+        new_job(workspace, "test-relax", files={"POSCAR": tmp_path / "absent"})
     assert len(list(workspace.scan_markers())) == 1
 
 
@@ -958,7 +954,7 @@ def test_the_command_scaffolds_one_job(
                 "--workspace",
                 ws_name,
                 "--workflow",
-                "vasp-relax",
+                "test-relax",
                 "--input",
                 f"structure={structure}",
                 "--tag",
@@ -1006,7 +1002,7 @@ def test_the_command_scaffolds_a_whole_structure_directory(tmp_path: Path, capsy
                 "--workspace",
                 ws_name,
                 "--workflow",
-                "vasp-relax",
+                "test-relax",
                 "--input-from",
                 "structure",
                 str(directory),
@@ -1019,7 +1015,7 @@ def test_the_command_scaffolds_a_whole_structure_directory(tmp_path: Path, capsy
     reports = json.loads(capsys.readouterr().out)
     assert [report["tag"] for report in reports] == ["a", "b"]
     assert {report["format"] for report in reports} == {JOB_SCAFFOLD_FORMAT}
-    assert {report["workflow"] for report in reports} == {"httk.vasp.relax"}
+    assert {report["workflow"] for report in reports} == {"tests.relax"}
 
 
 def test_command_workflow_is_generated_published_once_and_runs(tmp_path: Path, capsys) -> None:
@@ -1643,7 +1639,7 @@ def test_command_requires_all_placeholders_and_is_mutually_exclusive(tmp_path: P
                 "--from-command",
                 "echo ok",
                 "--workflow",
-                "vasp-relax",
+                "test-relax",
             ],
             _context(tmp_path),
         )
@@ -1827,7 +1823,7 @@ def test_the_command_reports_what_it_cannot_do(
 
     # A malformed assignment, an unknown workflow, and an empty structure directory.
     assert (
-        command(["job", "new", "--workspace", name, "--workflow", "vasp-relax", "--input", "bare"], _context(tmp_path))
+        command(["job", "new", "--workspace", name, "--workflow", "test-relax", "--input", "bare"], _context(tmp_path))
         == 2
     )
     assert "NAME=VALUE" in capsys.readouterr().err
@@ -1837,7 +1833,7 @@ def test_the_command_reports_what_it_cannot_do(
     empty.mkdir()
     assert (
         command(
-            ["job", "new", "--workspace", name, "--workflow", "vasp-relax", "--input-from", "structure", str(empty)],
+            ["job", "new", "--workspace", name, "--workflow", "test-relax", "--input-from", "structure", str(empty)],
             _context(tmp_path),
         )
         == 2
@@ -1861,7 +1857,7 @@ def test_parameter_from_single_structure_file(
                 "--workspace",
                 name,
                 "--workflow",
-                "vasp-relax",
+                "test-relax",
                 "--input-from",
                 "structure",
                 str(structure),
@@ -1924,7 +1920,7 @@ def test_parameter_from_generic_files_and_two_batches_are_validated(
         for line in reports
     )
 
-    # A packaged VASP workflow accepts the same source shape; two batch sources
+    # A registered packaged workflow accepts the same source shape; two batch sources
     # are refused before either job is submitted.
     assert (
         command(
@@ -1934,7 +1930,7 @@ def test_parameter_from_generic_files_and_two_batches_are_validated(
                 "--workspace",
                 name,
                 "--workflow",
-                "vasp-relax",
+                "test-relax",
                 "--input-from",
                 "structure",
                 str(directory),
@@ -1949,7 +1945,7 @@ def test_parameter_from_generic_files_and_two_batches_are_validated(
     assert "only one --input-from" in capsys.readouterr().err
     assert (
         command(
-            ["job", "new", "--workspace", name, "--workflow", "vasp-relax", "--from", str(structure)],
+            ["job", "new", "--workspace", name, "--workflow", "test-relax", "--from", str(structure)],
             _context(tmp_path),
         )
         == 2
@@ -1985,7 +1981,7 @@ def test_parameter_from_cif_is_written_as_a_poscar_when_domain_plugins_are_avail
                 "--workspace",
                 "cif",
                 "--workflow",
-                "vasp-relax",
+                "test-relax",
                 "--input-from",
                 "structure",
                 str(cif),

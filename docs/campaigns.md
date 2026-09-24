@@ -62,7 +62,7 @@ an index map to a partition reproducibly, run after run.
 ## Submitting into a campaign
 
 ```console
-$ httk workflow campaign submit --workflow vasp-relax --key silicon \
+$ httk workflow campaign submit --workflow vasp.relax --key silicon \
       --input structure=structures/Si.vasp --tag silicon
 silicon--0c4f…	/…/screening-a/jobs/silicon--0c4f…
 ```
@@ -79,7 +79,7 @@ partition = assign_partition("silicon", project="my-project")
 
 # Submit the root there; its children inherit the same workspace.
 job = campaign_submit(
-    "vasp-relax",
+    "vasp.relax",
     key="silicon",
     project="my-project",
     files={"POSCAR": "structures/Si.vasp"},
