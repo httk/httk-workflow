@@ -5,8 +5,9 @@ historic ``VASP_*`` Python or shell APIs. Historical authorship is documented
 in ``v1_runtime/NOTICE``.
 
 The implementation is split across cohesive sibling modules — ``inputs``,
-``diagnostics``, ``remedies``, and ``reports`` — and this package is a thin
-public facade that re-exports their surface unchanged. The VASP workflows
+``diagnostics``, ``remedies``, ``reports``, and ``steps`` (the attempt-level
+steps a Python VASP runner declares) — and this package is a thin public facade
+that re-exports their surface unchanged. The VASP workflows
 built on these helpers live in https://github.com/httk/workflows-vasp.
 """
 
@@ -104,10 +105,24 @@ from .remedies import (
     remedy_policy_names,
 )
 from .reports import VaspRunReport, run_vasp
+from .steps import (
+    DEFAULT_STATIC_TAGS,
+    DEFAULT_VASP_COLLECT,
+    promote_vasp_relaxation,
+    publish_vasp_files,
+    run_vasp_step,
+    stage_vasp_inputs,
+    vasp_command,
+    vasp_data_prefix,
+    vasp_preparation_options,
+    vasp_static_tags,
+)
 
 __all__ = [
     "DEFAULT_KPOINT_CENTERING",
     "DEFAULT_REMEDY_HISTORY",
+    "DEFAULT_STATIC_TAGS",
+    "DEFAULT_VASP_COLLECT",
     "KPOINT_CENTERINGS",
     "REMEDY_OPERATIONS",
     "VASP_RESTART_ARTIFACTS",
@@ -136,6 +151,8 @@ __all__ = [
     "plan_vasp_remedy",
     "potcar_summary",
     "prepare_vasp_inputs",
+    "promote_vasp_relaxation",
+    "publish_vasp_files",
     "rattle_poscar",
     "read_incar",
     "read_poscar_header",
@@ -143,9 +160,15 @@ __all__ = [
     "remedy_policy",
     "remedy_policy_names",
     "run_vasp",
+    "run_vasp_step",
     "scale_poscar_lattice",
+    "stage_vasp_inputs",
     "suggested_magnetic_moments",
     "update_incar",
     "validate_vasp_workdir",
+    "vasp_command",
+    "vasp_data_prefix",
+    "vasp_preparation_options",
+    "vasp_static_tags",
     "write_automatic_kpoints",
 ]
