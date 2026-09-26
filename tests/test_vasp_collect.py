@@ -1,5 +1,6 @@
 """VASP collectors support persistent workdirs and opted-in published data."""
 
+import runpy
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
@@ -150,3 +151,15 @@ def test_missing_workdir_result_names_job_identity(tmp_path: Path, workdir: Pure
     record = replace(_record(tmp_path, "httk.vasp.relax"), workdir_path=workdir, data_path=None, data_generation=None)
     with pytest.raises(ValueError, match=r"ws:12345678-1234-4234-8234-123456789abc.*CONTCAR"):
         collect_vasp_relax(record)
+
+
+def test_the_mock_vasp_outcar_reports_its_last_ionic_energy(tmp_path: Path) -> None:
+    """Each ionic step of the example mock repeats the header, so the final energy is the last one."""
+
+    mock = runpy.run_path(str(Path(__file__).parents[1] / "examples" / "mock_vasp.py"))
+    outcar = tmp_path / "data" / "vasp" / "OUTCAR"
+    outcar.parent.mkdir(parents=True)
+    outcar.write_text(mock["_OUTCAR"], encoding="utf-8")
+    energy = collect_vasp_static(_record(tmp_path, "httk.vasp.static"))["total_energy"]
+    assert isinstance(energy, httk.core.DataRecord)
+    assert energy.value == pytest.approx(-10.5)

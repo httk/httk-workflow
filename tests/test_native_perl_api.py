@@ -4,8 +4,7 @@ The Perl SDK is a bridge client, exactly like the Bash, C, Fortran, and Rust
 ones: every bridge-backed verb spawns ``$HTTK_WORKFLOW_PYTHON -m
 httk.workflow._shell_bridge``, and only ``--describe`` is native. What is
 tested here is what only the Perl half can get wrong: warning-clean syntax,
-byte-identical description output, dispatch, outcome handling, and one real
-VASP relaxation through a real manager.
+byte-identical description output, dispatch, and outcome handling.
 """
 
 import json
@@ -21,7 +20,6 @@ from typing import Any
 import pytest
 
 import httk.workflow
-from httk.workflow import TaskManager, Workspace
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.scaffold import describe_runner
 
@@ -30,22 +28,6 @@ pytestmark = pytest.mark.skipif(shutil.which("perl") is None, reason="no Perl in
 _PERL = shutil.which("perl")
 _PERL_SDK = Path(httk.workflow.__file__).parent / "native" / "perl"
 _SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
-_RELAX_PERL = Path(__file__).parents[1] / "examples" / "relax_perl" / "relax.pl"
-
-
-_MOCK_VASP = Path(__file__).parents[1] / "examples" / "mock_vasp.py"
-_RELAX_PERL_DIR = Path(__file__).parents[1] / "examples" / "relax_perl"
-_POSCAR = """silicon
-1.0
-2.0 0.0 0.0
-0.0 2.0 0.0
-0.0 0.0 2.0
-Si
-2
-Direct
-0.0000000000 0.0000000000 0.0000000000
-0.5000000000 0.5000000000 0.5000000000
-"""
 
 
 def _runner(
@@ -171,38 +153,21 @@ def test_the_module_is_warning_clean() -> None:
     assert "warning" not in completed.stderr.lower()
 
 
-def test_the_sdk_and_example_are_warning_clean() -> None:
-    assert _PERL is not None
-    for source in (_PERL_SDK / "HttkWorkflow.pm", _RELAX_PERL):
-        completed = subprocess.run([_PERL, "-cw", str(source)], text=True, capture_output=True, check=False)
-        assert completed.returncode == 0, completed.stderr
-        assert completed.stderr.endswith(f"{source.name} syntax OK\n")
-        assert "warning" not in completed.stderr.lower()
-
-
 def test_a_published_copy_uses_the_manager_sdk_path(tmp_path: Path) -> None:
+    """A runner outside any source tree finds the SDK only through the described environment."""
+
     published = tmp_path / "runner.pl"
-    shutil.copyfile(_RELAX_PERL, published)
-    published.chmod(0o555)
-    assert describe_runner(published) == {
-        "workflow": "httk.vasp.relax-perl",
-        "steps": ["prepare", "publish", "run"],
-    }
-
-
-def test_an_in_source_tree_runner_uses_the_findbin_fallback() -> None:
-    environment = dict(os.environ)
-    environment.pop("HTTK_WORKFLOW_PERL_API", None)
-    completed = subprocess.run(
-        [str(_RELAX_PERL), "--describe"],
-        cwd=_RELAX_PERL_DIR,
-        text=True,
-        capture_output=True,
-        check=False,
-        env=environment,
+    published.write_text(
+        "#!/usr/bin/env perl\n"
+        "use lib $ENV{HTTK_WORKFLOW_PERL_API};\n"
+        "use HttkWorkflow;\n"
+        "my $runner = HttkWorkflow::Runner->new(workflow => 'tests.perl.published', steps => ['run', 'prepare']);\n"
+        "$runner->step($_ => sub { return 0; }) for ('run', 'prepare');\n"
+        "$runner->main();\n",
+        encoding="utf-8",
     )
-    assert completed.returncode == 0, completed.stderr
-    assert '"workflow": "httk.vasp.relax-perl"' in completed.stdout
+    published.chmod(0o555)
+    assert describe_runner(published) == {"workflow": "tests.perl.published", "steps": ["prepare", "run"]}
 
 
 def test_describe_is_byte_identical_to_the_bash_sdk(tmp_path: Path) -> None:
@@ -324,43 +289,3 @@ def test_a_handler_returning_nonzero_leaves_a_perl_error_breadcrumb(tmp_path: Pa
     assert breadcrumb["step"] == "explode"
     assert breadcrumb["exception"] == "PerlError"
     assert breadcrumb["message"] == "explode exited with status 3"
-
-
-def test_the_relax_runner_prepares_runs_and_publishes(tmp_path: Path) -> None:
-    """The examples/relax_perl runner, driven end to end through a real manager."""
-
-    payload = tmp_path / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "POSCAR").write_text(_POSCAR, encoding="utf-8")
-
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    workspace.set_setting("vasp.command", f"{sys.executable} {_MOCK_VASP}")
-    reference = dict(workspace.publish_runner(_RELAX_PERL_DIR / "relax.pl", name="relax"))
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Perl relaxation",
-            workflow="httk.vasp.relax-perl",
-            runner_path=str(reference["path"]),
-            runner_source="workspace",
-            runner_sha256=str(reference["sha256"]),
-            tag="silicon",
-            initial_step="prepare",
-            data_mode="transactional",
-            maximum_total_attempts=8,
-        ),
-    )
-    workspace.submit(payload, "project/vasp")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=300.0)
-
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "succeeded"
-    root = workspace.payload_path(marker.placement, marker.job_key)
-    state = json.loads((root / ".httk-job" / "state.json").read_text(encoding="utf-8"))
-    assert state["classification"] == "completed"
-    published = root / "data" / "vasp"
-    assert (published / "OUTCAR").is_file()
-    contcar = (published / "CONTCAR").read_text(encoding="utf-8").splitlines()
-    assert contcar[-1].startswith("0.51")

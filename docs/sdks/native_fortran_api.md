@@ -71,9 +71,18 @@ manager runs it directly and the scaffolder describes it by running it — a job
 that starts from a runner file of your own is resolved the same way whatever
 language wrote it.
 
-A complete VASP relaxation authored this way — `prepare`, `run`, `publish`, the
-`vasp.command` setting, mock-VASP compatible, publishing to transactional data —
-ships as `examples/relax_fortran/`; see the walkthrough at the end of this page.
+From a workflow package, build against the installed SDK through
+`HTTK_WORKFLOW_NATIVE_API`, which `[workflow.build]` commands and attempts both
+see:
+
+```console
+cc       -std=c99   -c "$HTTK_WORKFLOW_NATIVE_API/c/httk_workflow.c" -o httk_workflow_c.o
+gfortran -std=f2008    "$HTTK_WORKFLOW_NATIVE_API/fortran/httk_workflow.f90" \
+         runner.f90 httk_workflow_c.o -o runner
+```
+
+A complete VASP relaxation authored this way is described at the end of this
+page.
 
 ## Step handlers and dispatch
 
@@ -247,55 +256,10 @@ end if
 `0`, `22` for a nonzero exit, `124` for a timeout whose process group was
 terminated, and `125` when a checker or diagnostic stopped it.
 
-## The `examples/relax_fortran` walkthrough
+## A VASP relaxation package
 
-`examples/relax_fortran/relax.f90` has the **same three-step shape** as
-`examples/relax_c` (it is not a line-for-line port), in three `bind(c)` step
-functions built entirely on the procedures above:
-
-- **`prepare`** stages the payload POSCAR into the workdir — reading the `poscar`
-  parameter (default `files/POSCAR`) into an allocatable with a byte-exact stream
-  copy — fails by name (`httk_workflow_fail("vasp.input_missing", …)`) when it is
-  absent, copies an optional INCAR, notes progress with
-  `httk_workflow_runlog_note`, and `httk_workflow_advance("run")`.
-- **`run`** resolves the VASP command with `httk_workflow_setting("vasp.command",
-  …)` — falling back to a `vasp_command` parameter, and failing
-  `vasp.command_missing` when neither is set — word-splits it on whitespace, runs
-  it under supervision with `httk_workflow_run`, records
-  `state_set("classification", "completed")` and advances to `publish` on
-  success, and `httk_workflow_fail("vasp.failed", …)` otherwise.
-- **`publish`** stages the finished files into the job's transactional data with
-  `httk_workflow_put` when the job has a data directory, and
-  `httk_workflow_succeed`.
-
-Two divergences from the C example follow from the SDK, not the workflow: a value
-with significant trailing whitespace is trimmed at the C boundary, and a single
-whitespace-separated command token wider than the example's fixed `ARG_WIDTH`
-(4096) makes `run` fail loudly rather than truncate. Neither affects an ordinary
-VASP command.
-
-Build and describe it:
-
-```console
-cd examples/relax_fortran
-make
-./relax --describe
-```
-
-Then drive it exactly like `docs/quickstart.md`, naming the compiled binary as the
-runner and the mock VASP as the command:
-
-```console
-httk project init --name relax-fortran .
-httk workspace init --name default .
-httk job new --from-runner ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
-httk workflow run
-httk workflow collect
-```
-
-The runner reads the `poscar` parameter (default `files/POSCAR`), so the POSCAR is
-staged with `--file POSCAR=POSCAR` and the first step is named with `--step
-prepare`. The finished calculation lands in `jobs/*/data/vasp/`, and because every
-language SDK publishes through the one bridge, those files are the same bytes the
-Python, Bash, and C relaxation runners publish.
+The `vasp-relax-fortran` package of
+[workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
+and publishing to transactional data. Its workflow is `vasp.relax-fortran`; run it
+as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-fortran`.

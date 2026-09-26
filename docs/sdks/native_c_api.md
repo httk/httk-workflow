@@ -53,9 +53,17 @@ manager runs it directly and the scaffolder describes it by running it — a job
 that starts from a runner file of your own is resolved the same way whatever
 language wrote it.
 
-A complete VASP relaxation authored this way — `prepare`, `run`, `publish`, the
-`vasp.command` setting, mock-VASP compatible, publishing to transactional data —
-ships as `examples/relax_c/`; see the walkthrough at the end of this page.
+From a workflow package, build against the installed SDK through
+`HTTK_WORKFLOW_NATIVE_API`, which `[workflow.build]` commands and attempts both
+see:
+
+```console
+cc -std=c99 -Wall -Wextra -I"$HTTK_WORKFLOW_NATIVE_API/c" runner.c \
+   "$HTTK_WORKFLOW_NATIVE_API/c/httk_workflow.c" -o runner
+```
+
+A complete VASP relaxation authored this way is described at the end of this
+page.
 
 ## Registration and dispatch
 
@@ -198,56 +206,10 @@ free(energy);
 `0`, `22` for a nonzero exit, `124` for a timeout whose process group was
 terminated, and `125` when a checker or diagnostic stopped it.
 
-## The `examples/relax_c` walkthrough
+## A VASP relaxation package
 
-`examples/relax_c/relax.c` has the **same three-step shape** as the Bash runner
-of `vasp.relax-bash` in [workflows-vasp](https://github.com/httk/workflows-vasp)
-— `prepare`, `run`, `publish` — built entirely on the functions above. It is a
-teaching example, not a drop-in replacement for that runner: it deliberately omits the input derivation (`vasp-prepare`,
-KPOINTS/POTCAR generation), the finer run classifications, the reviewed remedy
-ladder, the parsed energy state, and the `POTCAR.provenance.json` the real runner
-produces, so it collapses `run` to "completed or `vasp.failed`". What it does
-share is the protocol machinery — the `vasp.command` setting, mock-VASP
-compatibility, structured failure codes, and publishing to transactional data:
-
-- **`prepare`** stages the payload POSCAR into the workdir with
-  `httk_workflow_parameter("poscar", "files/POSCAR", …)` and `copy_file`, fails
-  by name (`httk_workflow_fail("vasp.input_missing", …)`) when it is absent,
-  copies an optional INCAR, notes progress with `httk_workflow_runlog_note`, and
-  `httk_workflow_advance("run", NULL)`.
-- **`run`** resolves the VASP command with
-  `httk_workflow_setting("vasp.command", …)` — falling back to a `vasp_command`
-  parameter, and failing `vasp.command_missing` when neither is set — runs it
-  under supervision with `httk_workflow_run`, records
-  `state_set("classification", "completed")` and advances to `publish` on
-  success, and `httk_workflow_fail("vasp.failed", …)` otherwise.
-- **`publish`** stages the finished files into the job's transactional data with
-  `httk_workflow_put` when the job has a data directory, and
-  `httk_workflow_succeed`.
-
-Build and describe it:
-
-```console
-cd examples/relax_c
-make
-./relax --describe
-```
-
-Then drive it, naming the compiled binary as the runner and the mock VASP as the
-command. The runner starts at `prepare` and reads the structure from
-`files/POSCAR` rather than a declared input, so the job names the step explicitly
-and stages the file:
-
-```console
-httk project init --name relax-c .
-httk workspace init --name default .
-httk job new --from-runner ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
-httk workflow run
-httk workflow collect
-```
-
-The finished calculation lands in `jobs/*/data/vasp/`. It publishes the same
-protocol artifacts a Python or Bash runner does — outcome, transactional data,
-run log — through the one shared implementation; it does not reproduce the
-workflows-vasp runner's derived inputs and richer state (see above).
+The `vasp-relax-c` package of
+[workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
+and publishing to transactional data. Its workflow is `vasp.relax-c`; run it
+as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-c`.

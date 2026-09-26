@@ -4,8 +4,7 @@ import argparse
 import ast
 import json
 import os
-import shutil
-import sys
+import subprocess
 import uuid
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
@@ -35,7 +34,7 @@ from httk.workflow.transfers import (
 from httk.workflow.workflow_cli import _transfer as transfer_cli
 from httk.workflow.workflow_cli import command
 from httk.workflow.workflow_cli._transfer import _resolve_transfer_jobs
-from test_native_java_api import _build_example
+from test_runner_builds import _compiled_package
 
 
 def _payload(root: Path, *, tag: str = "test") -> tuple[Path, str]:
@@ -503,21 +502,13 @@ def test_a_source_bundle_already_moved_aside_is_retired_without_a_second_move(tm
     assert not retired.exists()
 
 
-@pytest.mark.skipif(shutil.which("javac") is None or shutil.which("java") is None, reason="javac and java are required")
 def test_a_directory_runner_survives_detach_bundle_import_and_execution(tmp_path: Path) -> None:
-    package = _build_example(tmp_path / "java-build")
-    poscar = tmp_path / "POSCAR"
-    poscar.write_text(
-        "silicon\n1.0\n2.0 0.0 0.0\n0.0 2.0 0.0\n0.0 0.0 2.0\nSi\n2\nDirect\n"
-        "0.0000000000 0.0000000000 0.0000000000\n0.5000000000 0.5000000000 0.5000000000\n",
-        encoding="utf-8",
-    )
+    package = _compiled_package(tmp_path)
+    # A local build leaves artifacts in the package; publication must strip them.
+    subprocess.run(["./build.sh"], cwd=package, check=True)
     source = Workspace.initialize(tmp_path / "source")
     destination = Workspace.initialize(tmp_path / "destination")
-    destination.set_setting(
-        "vasp.command", f"{sys.executable} {Path(__file__).parents[1] / 'examples' / 'mock_vasp.py'}"
-    )
-    job = new_job(source, package, files={"POSCAR": poscar}, step="prepare", data_mode="transactional")
+    job = new_job(source, package)
     job_document = json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
     runner_path = str(job_document["runner"]["path"])
     expected_digest = source_tree_digest(package)
@@ -526,7 +517,7 @@ def test_a_directory_runner_survives_detach_bundle_import_and_execution(tmp_path
     manifest = validate_bundle(bundle)
     assert manifest["runners"] == [{"path": runner_path, "sha256": expected_digest}]
     bundled_runner = bundle / TRANSFER_DIRECTORY / "runners" / Path(*runner_path.split("/"))
-    assert not (bundled_runner / "classes").exists()
+    assert not (bundled_runner / "build").exists()
     destination.import_bundle(bundle)
 
     stored = destination.runner_store_path(runner_path)
@@ -536,7 +527,7 @@ def test_a_directory_runner_survives_detach_bundle_import_and_execution(tmp_path
         destination,
         stored,
         PurePosixPath(runner_path),
-        BuildSpec("make", ("classes",)),
+        BuildSpec("./build.sh", ("build",)),
         source_sha256=expected_digest,
     )
     with TaskManager(destination, heartbeat_interval=0.01) as manager:

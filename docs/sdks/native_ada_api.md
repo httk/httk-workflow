@@ -19,6 +19,10 @@ gnatmake -gnat2012 -gnatwa -gnatwe -I.../native/ada \
   -o runner runner.adb -largs httk_workflow_c.o
 ```
 
+From a workflow package, replace `.../native` with `"$HTTK_WORKFLOW_NATIVE_API"`,
+the installed SDK directory that `[workflow.build]` commands and attempts both
+see.
+
 ## Registration and dispatch
 
 `Httk_Workflow_Runner` takes a workflow name, an array of
@@ -115,21 +119,10 @@ The status constants are `HTTK_WORKFLOW_OK` (`0`),
 `0`, `22` for a nonzero program exit, `124` for timeout, and `125` for a
 checker or diagnostic stop.
 
-## The relaxation example
+## A VASP relaxation package
 
-`examples/relax_ada/relax.adb` registers the library-level handlers from
-`relax_steps.ads`/`relax_steps.adb` and declares `httk.vasp.relax-ada` with
-`prepare`, `run`, and `publish` steps. It stages `files/POSCAR`, resolves
-`vasp.command`, invokes `Httk_Workflow_Run`, records the completion state, and
-stages VASP outputs into transactional data. It is driven by the same mock VASP
-flow as the other native SDK examples:
-
-```console
-cd examples/relax_ada
-make
-./relax --describe
-```
-
-The Makefile uses `cc -std=c99` for the C object and
-`gnatmake -gnat2012 -gnatwa -gnatwe` for Ada, with no executable-stack linker
-flag.
+The `vasp-relax-ada` package of
+[workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
+and publishing to transactional data. Its workflow is `vasp.relax-ada`; run it
+as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-ada`.

@@ -1,4 +1,4 @@
-"""The native Java authoring SDK: compile cleanliness, parity, dispatch, and relaxation."""
+"""The native Java authoring SDK: compile cleanliness, parity, dispatch, and outcomes."""
 
 import json
 import os
@@ -7,16 +7,13 @@ import subprocess
 import sys
 import uuid
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 import httk.workflow
-from httk.workflow import TaskManager, Workspace
-from httk.workflow._runner_builds import register_build
 from httk.workflow.protocol import JobSpec, prepare_job_payload
-from httk.workflow.scaffold import BuildSpec, new_job
 
 _JAVAC = shutil.which("javac")
 _JAVA = shutil.which("java")
@@ -24,20 +21,6 @@ pytestmark = pytest.mark.skipif(_JAVAC is None or _JAVA is None, reason="javac a
 
 _JAVA_SDK = Path(httk.workflow.__file__).parent / "native" / "java" / "HttkWorkflow.java"
 _SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
-_RELAX_JAVA = Path(__file__).parents[1] / "examples" / "relax_java"
-_MOCK_VASP = Path(__file__).parents[1] / "examples" / "mock_vasp.py"
-
-_POSCAR = """silicon
-1.0
-2.0 0.0 0.0
-0.0 2.0 0.0
-0.0 0.0 2.0
-Si
-2
-Direct
-0.0000000000 0.0000000000 0.0000000000
-0.5000000000 0.5000000000 0.5000000000
-"""
 
 
 def _compile(output: Path, *sources: Path) -> subprocess.CompletedProcess[str]:
@@ -165,24 +148,13 @@ def _attempt(
     return _Attempt(payload, control, workdir, environment)
 
 
-def _build_example(tmp_path: Path) -> Path:
-    package = tmp_path / "relax_java"
-    shutil.copytree(_RELAX_JAVA, package, ignore=shutil.ignore_patterns("classes"))
-    classes = package / "classes"
-    result = _compile(classes, package / "HttkWorkflow.java", package / "Relax.java")
-    assert result.returncode == 0, result.stderr
-    return package
-
-
-def test_sdk_and_example_compile_warning_clean(tmp_path: Path) -> None:
-    result = _compile(tmp_path / "classes", _JAVA_SDK, _RELAX_JAVA / "Relax.java")
+def test_sdk_and_a_runner_compile_warning_clean(tmp_path: Path) -> None:
+    source = tmp_path / "RunnerMain.java"
+    source.write_text(_runner_source("tests.java.clean", {"only": "return 0;"}), encoding="utf-8")
+    result = _compile(tmp_path / "classes", _JAVA_SDK, source)
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
     assert result.stderr == ""
-
-
-def test_vendored_java_sdk_is_byte_identical() -> None:
-    assert (_RELAX_JAVA / "HttkWorkflow.java").read_bytes() == _JAVA_SDK.read_bytes()
 
 
 def test_describe_is_byte_identical_to_the_bash_sdk(tmp_path: Path) -> None:
@@ -320,84 +292,3 @@ def test_handler_endings_map_to_no_outcome_and_structured_failure(tmp_path: Path
     completed = failed.run(classes)
     assert completed.returncode == 0, completed.stderr
     assert failed.outcome()["failure"] == {"code": "tests.broken", "message": "it broke"}
-
-
-def test_relax_runner_prepares_runs_and_publishes(tmp_path: Path) -> None:
-    package = _build_example(tmp_path)
-    poscar = tmp_path / "POSCAR"
-    poscar.write_text(_POSCAR, encoding="utf-8")
-
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    workspace.set_setting("vasp.command", f"{sys.executable} {_MOCK_VASP}")
-    job = new_job(
-        workspace,
-        package,
-        files={"POSCAR": poscar},
-        tag="silicon",
-        data_mode="transactional",
-        step="prepare",
-    )
-    source = workspace.runner_store_path(str(job.runner["path"]))
-    register_build(
-        workspace,
-        source,
-        PurePosixPath(str(job.runner["path"])),
-        BuildSpec("make", ("classes",)),
-        source_sha256=str(job.runner["sha256"]),
-    )
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=300.0)
-
-    marker = workspace.find_marker_by_id(job.job_id)
-    assert marker is not None and marker.kind == "succeeded"
-    root = workspace.payload_path(marker.placement, marker.job_key)
-    state = json.loads((root / ".httk-job" / "state.json").read_text(encoding="utf-8"))
-    assert state["classification"] == "completed"
-    published = root / "data" / "vasp"
-    assert (published / "OUTCAR").is_file()
-    assert (published / "CONTCAR").read_text(encoding="utf-8").splitlines()[-1].startswith("0.51")
-
-
-def test_relax_package_needs_foreground_build_registration(tmp_path: Path) -> None:
-    package = tmp_path / "relax_java"
-    shutil.copytree(_RELAX_JAVA, package, ignore=shutil.ignore_patterns("classes"))
-    assert not (package / "classes").exists()
-    poscar = tmp_path / "POSCAR"
-    poscar.write_text(_POSCAR, encoding="utf-8")
-
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    workspace.set_setting("vasp.command", f"{sys.executable} {_MOCK_VASP}")
-    first = new_job(
-        workspace,
-        package,
-        files={"POSCAR": poscar},
-        tag="unbuilt",
-        data_mode="transactional",
-        step="prepare",
-    )
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=300.0)
-    marker = workspace.find_marker_by_id(first.job_id)
-    assert marker is not None and marker.kind == "failed"
-    assert workspace.read_state(marker)["failure"]["code"] == "runner_not_built"
-
-    source = workspace.runner_store_path(str(first.runner["path"]))
-    register_build(
-        workspace,
-        source,
-        PurePosixPath(str(first.runner["path"])),
-        BuildSpec("make", ("classes",)),
-        source_sha256=str(first.runner["sha256"]),
-    )
-    second = new_job(
-        workspace,
-        package,
-        files={"POSCAR": poscar},
-        tag="built",
-        data_mode="transactional",
-        step="prepare",
-    )
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=300.0)
-    marker = workspace.find_marker_by_id(second.job_id)
-    assert marker is not None and marker.kind == "succeeded"

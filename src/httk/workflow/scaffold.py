@@ -757,6 +757,7 @@ def describe_runner(runner: str | os.PathLike[str], *, preserve_registration_ord
         environment["HTTK_WORKFLOW_PRESERVE_STEP_ORDER"] = "1"
     shell = Path(__file__).with_name("shell")
     environment["HTTK_WORKFLOW_BASH_API"] = str(shell / "httk-workflow.sh")
+    environment["HTTK_WORKFLOW_NATIVE_API"] = str(Path(__file__).with_name("native"))
     environment["HTTK_WORKFLOW_PERL_API"] = str(Path(__file__).with_name("native") / "perl")
     environment["HTTK_WORKFLOW_VASP_BASH_API"] = str(shell / "httk-vasp.sh")
     # Describing is a pure read of the program, so no attempt context of a

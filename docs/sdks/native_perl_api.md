@@ -16,8 +16,7 @@ answered natively. The normative cross-language semantics are in
 #!/usr/bin/env perl
 use strict;
 use warnings;
-use FindBin;
-use lib $ENV{HTTK_WORKFLOW_PERL_API} // "$FindBin::Bin/../../src/httk/workflow/native/perl";
+use lib $ENV{HTTK_WORKFLOW_PERL_API};
 use HttkWorkflow;
 
 my $runner = HttkWorkflow::Runner->new(
@@ -53,8 +52,8 @@ trailing newline:
 `HTTK_WORKFLOW_DESCRIBE=1` has the same effect. Managers and the describe
 helper export `HTTK_WORKFLOW_PERL_API` as the installed `native/perl` directory;
 use that environment variable in `use lib` so published and transferred
-single-file runners find the SDK. An in-source-tree runner may fall back to a
-script-relative path. The runner is interpreted; the module is one
+single-file runners find the SDK (it equals `$HTTK_WORKFLOW_NATIVE_API/perl`).
+Set it yourself to run a runner by hand. The runner is interpreted; the module is one
 `HttkWorkflow.pm` file and has no CPAN dependencies.
 
 ## Values and errors
@@ -103,24 +102,10 @@ booleans. `gather($step, { when => ..., count => ..., on_impossible => ...,
 priority => ... })` forwards only defined options. The `invoke` method is the
 escape hatch for bridge subcommands without a dedicated wrapper.
 
-## The `examples/relax_perl` walkthrough
+## A VASP relaxation package
 
-`examples/relax_perl/relax.pl` has the same `prepare`, `run`, and `publish`
-shape as the C and Rust examples. It stages `POSCAR`, resolves `vasp.command`,
-runs the configured command through `Attempt->run`, records a completed
-classification, and publishes the finished files into transactional data.
-
-```console
-cd examples/relax_perl
-perl relax.pl --describe
-httk project init --name relax-perl .
-httk workspace init --name default .
-httk job new --from-runner ./relax.pl --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
-httk workflow run
-httk workflow collect
-```
-
-The example resolves the SDK through `HTTK_WORKFLOW_PERL_API` under a manager
-and falls back to its script-relative `use lib` path for a bare in-source-tree
-invocation. It needs no compile step.
+The `vasp-relax-perl` package of
+[workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
+and publishing to transactional data. Its workflow is `vasp.relax-perl`; run it
+as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-perl`.

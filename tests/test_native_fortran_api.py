@@ -1,4 +1,4 @@
-"""The native modern-Fortran authoring SDK: describe parity, dispatch, one relax.
+"""The native modern-Fortran authoring SDK: describe parity, dispatch, and outcomes.
 
 The Fortran SDK is `iso_c_binding` bindings over the native C SDK plus an
 idiomatic Fortran module: every verb is a `bind(c)` call into the same C library
@@ -7,8 +7,7 @@ calling back into Fortran step handlers through `c_funloc` function pointers. So
 what is tested here is what only the Fortran half can get wrong -- compiling
 warning-clean under the modern-Fortran standard, describing itself byte-for-byte
 the way the C and Bash SDKs do, dispatching into a Fortran handler, and turning a
-handler's ending into exactly one outcome -- plus one real VASP relaxation driven
-end to end through a real manager.
+handler's ending into exactly one outcome.
 
 Every test gates on both a Fortran compiler (``gfortran``) and a C compiler
 (``cc``), and skips cleanly without either.
@@ -27,7 +26,6 @@ from typing import Any
 import pytest
 
 import httk.workflow
-from httk.workflow import TaskManager, Workspace
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.scaffold import describe_runner
 
@@ -40,20 +38,6 @@ pytestmark = pytest.mark.skipif(
 _C_SDK = Path(httk.workflow.__file__).parent / "native" / "c"
 _F_SDK = Path(httk.workflow.__file__).parent / "native" / "fortran"
 _SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
-_MOCK_VASP = Path(__file__).parents[1] / "examples" / "mock_vasp.py"
-_RELAX_F = Path(__file__).parents[1] / "examples" / "relax_fortran" / "relax.f90"
-
-_POSCAR = """silicon
-1.0
-2.0 0.0 0.0
-0.0 2.0 0.0
-0.0 0.0 2.0
-Si
-2
-Direct
-0.0000000000 0.0000000000 0.0000000000
-0.5000000000 0.5000000000 0.5000000000
-"""
 
 
 def _compile(
@@ -444,84 +428,3 @@ def test_a_runner_can_be_registered_twice(tmp_path: Path) -> None:
         "steps": ["beta", "gamma"],
         "workflow": "w.second",
     }
-
-
-def test_the_relax_runner_prepares_runs_and_publishes(tmp_path: Path) -> None:
-    """The examples/relax_fortran runner, driven end to end through a real manager."""
-
-    result = _compile(tmp_path, _RELAX_F, name="relax")
-    assert result.returncode == 0, result.stderr
-
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    # The documented flow: name the mock VASP as the workspace vasp.command.
-    workspace.set_setting("vasp.command", f"{sys.executable} {_MOCK_VASP}")
-
-    reference = dict(workspace.publish_runner(tmp_path / "relax", name="relax"))
-    payload = tmp_path / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "POSCAR").write_text(_POSCAR, encoding="utf-8")
-
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Fortran relaxation",
-            workflow="httk.vasp.relax-fortran",
-            runner_path=str(reference["path"]),
-            runner_source="workspace",
-            runner_sha256=str(reference["sha256"]),
-            tag="silicon",
-            initial_step="prepare",
-            data_mode="transactional",
-            maximum_total_attempts=8,
-        ),
-    )
-    workspace.submit(payload, "project/vasp")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=300.0)
-
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "succeeded"
-    root = workspace.payload_path(marker.placement, marker.job_key)
-
-    state = json.loads((root / ".httk-job" / "state.json").read_text(encoding="utf-8"))
-    assert state["classification"] == "completed"
-
-    published = root / "data" / "vasp"
-    assert (published / "OUTCAR").is_file()
-    contcar = (published / "CONTCAR").read_text(encoding="utf-8").splitlines()
-    assert contcar[-1].startswith("0.51")
-
-
-def test_a_missing_vasp_command_fails_by_name(tmp_path: Path) -> None:
-    result = _compile(tmp_path, _RELAX_F, name="relax")
-    assert result.returncode == 0, result.stderr
-
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    reference = dict(workspace.publish_runner(tmp_path / "relax", name="relax"))
-    payload = tmp_path / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "POSCAR").write_text(_POSCAR, encoding="utf-8")
-
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Fortran relaxation",
-            workflow="httk.vasp.relax-fortran",
-            runner_path=str(reference["path"]),
-            runner_source="workspace",
-            runner_sha256=str(reference["sha256"]),
-            initial_step="prepare",
-            data_mode="transactional",
-        ),
-    )
-    workspace.submit(payload, "project/vasp")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
-
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "failed"
-    failure = workspace.read_state(marker).get("failure")
-    assert isinstance(failure, dict)
-    assert failure["code"] == "vasp.command_missing"

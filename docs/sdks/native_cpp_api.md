@@ -17,6 +17,10 @@ c++ -std=c++17 -Wall -Wextra -I.../native/cpp \
   -o runner runner.cpp httk_workflow_c.o
 ```
 
+From a workflow package, replace `.../native` with `"$HTTK_WORKFLOW_NATIVE_API"`,
+the installed SDK directory that `[workflow.build]` commands and attempts both
+see.
+
 ## Registration and dispatch
 
 `httk::workflow::Runner` is a builder for one workflow and its complete step
@@ -114,20 +118,10 @@ optional result shape. Command verbs return the C bridge status directly;
 `Attempt::run` returns the supervised classification (`0`, `22`, `124`, or
 `125`) rather than throwing for the program's result.
 
-## The relaxation example
+## A VASP relaxation package
 
-`examples/relax_cpp/relax.cpp` declares `httk.vasp.relax-cpp` with `prepare`,
-`run`, and `publish` steps. It stages `files/POSCAR`, resolves
-`vasp.command`, invokes `Attempt::run`, records the completion state, and
-stages VASP outputs into transactional data. Build and enumerate it with:
-
-```console
-cd examples/relax_cpp
-make
-./relax --describe
-```
-
-The Makefile uses `cc -std=c99` for the C object and
-`c++ -std=c++17 -Wall -Wextra` for the C++ compile and link. No C++ protocol
-implementation, third-party dependency, CMake project, or executable-stack
-linker flag is needed.
+The `vasp-relax-cpp` package of
+[workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
+and publishing to transactional data. Its workflow is `vasp.relax-cpp`; run it
+as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-cpp`.

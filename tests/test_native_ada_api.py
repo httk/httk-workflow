@@ -1,11 +1,11 @@
-"""The native Ada authoring SDK: describe parity, dispatch, reads, outcomes, and one relax.
+"""The native Ada authoring SDK: describe parity, dispatch, reads, and outcomes.
 
 The Ada SDK is ``Interfaces.C`` bindings over the native C SDK. Every bridge
 verb reaches the same ``httk.workflow._shell_bridge`` implementation, while
 the C ``httk_workflow_main`` owns registration, dispatch, and exit status. This
 tests the Ada-specific boundary: a warning-clean GNAT build, byte-identical
-description, C-convention handler dispatch, absent-versus-refused reads, the
-``CError`` breadcrumb, and one real mock-VASP relaxation through a manager.
+description, C-convention handler dispatch, absent-versus-refused reads,
+and the ``CError`` breadcrumb.
 """
 
 import json
@@ -21,7 +21,6 @@ from typing import Any
 import pytest
 
 import httk.workflow
-from httk.workflow import TaskManager, Workspace
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.scaffold import describe_runner
 
@@ -36,20 +35,6 @@ pytestmark = pytest.mark.skipif(
 _C_SDK = Path(httk.workflow.__file__).parent / "native" / "c"
 _ADA_SDK = Path(httk.workflow.__file__).parent / "native" / "ada"
 _SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
-_MOCK_VASP = Path(__file__).parents[1] / "examples" / "mock_vasp.py"
-_RELAX_ADA = Path(__file__).parents[1] / "examples" / "relax_ada" / "relax.adb"
-
-_POSCAR = """silicon
-1.0
-2.0 0.0 0.0
-0.0 2.0 0.0
-0.0 0.0 2.0
-Si
-2
-Direct
-0.0000000000 0.0000000000 0.0000000000
-0.5000000000 0.5000000000 0.5000000000
-"""
 
 
 def _compile(tmp_path: Path, source: Path, *, name: str = "runner") -> subprocess.CompletedProcess[str]:
@@ -260,11 +245,14 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
 def test_the_sdk_and_a_runner_compile_warning_clean(tmp_path: Path) -> None:
     """-gnat2012 -gnatwa -gnatwe is the warning-clean contract for the Ada package."""
 
-    result = _compile(tmp_path, _RELAX_ADA, name="relax")
+    spec, body, main = _runner_sources("tests.ada.clean", {"only": "return 0;"})
+    (tmp_path / "generated_steps.ads").write_text(spec, encoding="utf-8")
+    (tmp_path / "generated_steps.adb").write_text(body, encoding="utf-8")
+    (tmp_path / "generated.adb").write_text(main, encoding="utf-8")
+    result = _compile(tmp_path, tmp_path / "generated.adb", name="relax")
     output = result.stdout + result.stderr
     assert result.returncode == 0, result.stderr
     assert "warning" not in output.lower()
-    assert "execstack" not in (Path(__file__).parents[1] / "examples" / "relax_ada" / "Makefile").read_text()
     assert _READELF is not None
     headers = subprocess.run([_READELF, "-lW", str(tmp_path / "relax")], text=True, capture_output=True, check=False)
     assert headers.returncode == 0, headers.stderr
@@ -393,40 +381,3 @@ def test_absent_and_refused_reads_stay_distinct(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr
     assert "ABSENT  1" in completed.stderr
     assert "REFUSED  2" in completed.stderr
-
-
-def test_the_relax_runner_prepares_runs_and_publishes(tmp_path: Path) -> None:
-    """The examples/relax_ada runner works end to end through a real manager."""
-
-    result = _compile(tmp_path, _RELAX_ADA, name="relax")
-    assert result.returncode == 0, result.stderr
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    workspace.set_setting("vasp.command", f"{sys.executable} {_MOCK_VASP}")
-    reference = dict(workspace.publish_runner(tmp_path / "relax", name="relax"))
-    payload = tmp_path / "payload"
-    (payload / "files").mkdir(parents=True)
-    (payload / "files" / "POSCAR").write_text(_POSCAR, encoding="utf-8")
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Ada relaxation",
-            workflow="httk.vasp.relax-ada",
-            runner_path=str(reference["path"]),
-            runner_source="workspace",
-            runner_sha256=str(reference["sha256"]),
-            tag="silicon",
-            initial_step="prepare",
-            data_mode="transactional",
-            maximum_total_attempts=8,
-        ),
-    )
-    workspace.submit(payload, "project/vasp")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=300.0)
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "succeeded"
-    root = workspace.payload_path(marker.placement, marker.job_key)
-    assert json.loads((root / ".httk-job" / "state.json").read_text(encoding="utf-8"))["classification"] == "completed"
-    published = root / "data" / "vasp"
-    assert (published / "OUTCAR").is_file()
-    assert (published / "CONTCAR").read_text(encoding="utf-8").splitlines()[-1].startswith("0.51")

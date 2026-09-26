@@ -39,10 +39,22 @@ without a package tree. Compile it with the runner:
 javac --release 17 -Werror -Xlint:all -d classes HttkWorkflow.java Relax.java
 ```
 
-`examples/relax_java/` includes this build, a POSIX `relax` launcher, and a
-three-step mock-VASP-compatible relaxation. Its `httk_workflow.toml` package
-uses the required `run` entry to delegate to `relax`, so publication transfers
-the launcher and its compiled `classes/` directory together as one pinned tree.
+From a workflow package, compile the installed SDK source through
+`HTTK_WORKFLOW_NATIVE_API`, which `[workflow.build]` commands and attempts both
+see:
+
+```console
+javac --release 17 -Werror -Xlint:all -d classes "$HTTK_WORKFLOW_NATIVE_API/java/HttkWorkflow.java" Relax.java
+```
+
+The `vasp-relax-java` package of
+[workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages)
+is a complete three-step mock-VASP-compatible relaxation built this way (workflow
+`vasp.relax-java`, run as
+`git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-java`).
+Its `httk_workflow.toml` uses the required `run` entry to delegate to a POSIX
+launcher, so publication transfers the launcher and its compiled `classes/`
+directory together as one pinned tree.
 
 ## Values and errors
 

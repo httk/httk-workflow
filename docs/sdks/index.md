@@ -17,7 +17,17 @@ The breadcrumb labels summarize the errors as ShellError; CError for C, Fortran,
 Single-file compiled runners are architecture-bound and should transfer only
 between matching machines. A self-contained package with a `[workflow.build]`
 declaration is the portable alternative: transfer its sources, then build once
-per platform class. See `examples/relax_cpp` for the C++ package form.
+per platform class. Build commands and runners find the installed SDKs under
+`$HTTK_WORKFLOW_NATIVE_API`, one subdirectory per language (`c`, `cpp`,
+`fortran`, `rust`, `ada`, `java`, `perl`); see {doc}`../details/workflow_packages`.
+Outside a manager, `python -c 'import httk.workflow, pathlib;
+print(pathlib.Path(httk.workflow.__file__).with_name("native"))'` prints the
+same directory.
+
+A VASP relaxation written with each native SDK is the package `vasp-relax-<lang>`
+(workflow `vasp.relax-<lang>`) of
+[workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages),
+run as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-<lang>`.
 
 ```{toctree}
 :maxdepth: 1

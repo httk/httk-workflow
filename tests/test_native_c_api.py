@@ -1,11 +1,11 @@
-"""The native C authoring SDK: describe parity, dispatch, and one relaxation.
+"""The native C authoring SDK: describe parity, dispatch, and CLI scaffolding.
 
 The C SDK is a bridge client, exactly like the Bash one: every verb execs
 ``$HTTK_WORKFLOW_PYTHON -m httk.workflow._shell_bridge``, and only ``--describe``
 is native. What is tested here is what only the C half can get wrong — compiling
 warning-clean, describing itself byte-for-byte the way the Bash SDK does,
 dispatching into a step handler, and turning a handler's ending into exactly one
-outcome — plus one real VASP relaxation driven end to end through a real manager.
+outcome — plus `job new --from-runner` resolving and running a compiled runner.
 
 Every test gates on a C compiler and skips cleanly without one.
 """
@@ -35,20 +35,6 @@ pytestmark = pytest.mark.skipif(_CC is None, reason="no C compiler (cc) is avail
 
 _SDK = Path(httk.workflow.__file__).parent / "native" / "c"
 _SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
-_MOCK_VASP = Path(__file__).parents[1] / "examples" / "mock_vasp.py"
-_RELAX_C = Path(__file__).parents[1] / "examples" / "relax_c" / "relax.c"
-
-_POSCAR = """silicon
-1.0
-2.0 0.0 0.0
-0.0 2.0 0.0
-0.0 0.0 2.0
-Si
-2
-Direct
-0.0000000000 0.0000000000 0.0000000000
-0.5000000000 0.5000000000 0.5000000000
-"""
 
 
 def _compile(
@@ -289,136 +275,31 @@ def test_a_handler_that_returns_nonzero_leaves_a_breadcrumb_and_no_outcome(tmp_p
     assert breadcrumb["message"] == "explode exited with status 3"
 
 
-def test_the_relax_runner_prepares_runs_and_publishes(tmp_path: Path) -> None:
-    """The examples/relax_c runner, driven end to end through a real manager."""
+def _cli_context(tmp_path: Path) -> tuple[Workspace, CLIContext, str]:
+    """Compile a one-step ``relax`` runner and register a workspace for it."""
 
-    result = _compile(tmp_path, _RELAX_C, name="relax")
-    assert result.returncode == 0, result.stderr
-
+    _write_runner(tmp_path, "tests.c.cli", {"start": "httk_workflow_succeed(); return 0;"}, name="relax")
     workspace = Workspace.initialize(tmp_path / "workspace")
-    # The documented flow: name the mock VASP as the workspace vasp.command.
-    workspace.set_setting("vasp.command", f"{sys.executable} {_MOCK_VASP}")
-
-    reference = dict(workspace.publish_runner(tmp_path / "relax", name="relax"))
-    payload = tmp_path / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "POSCAR").write_text(_POSCAR, encoding="utf-8")
-
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="C relaxation",
-            workflow="httk.vasp.relax-c",
-            runner_path=str(reference["path"]),
-            runner_source="workspace",
-            runner_sha256=str(reference["sha256"]),
-            tag="silicon",
-            initial_step="prepare",
-            data_mode="transactional",
-            maximum_total_attempts=8,
-        ),
-    )
-    workspace.submit(payload, "project/vasp")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=300.0)
-
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "succeeded"
-    root = workspace.payload_path(marker.placement, marker.job_key)
-
-    state = json.loads((root / ".httk-job" / "state.json").read_text(encoding="utf-8"))
-    assert state["classification"] == "completed"
-
-    published = root / "data" / "vasp"
-    assert (published / "OUTCAR").is_file()
-    contcar = (published / "CONTCAR").read_text(encoding="utf-8").splitlines()
-    assert contcar[-1].startswith("0.51")
+    context = CLIContext("httk", tmp_path)
+    return workspace, context, register_ws(context, workspace.root)
 
 
-def test_a_missing_vasp_command_fails_by_name(tmp_path: Path) -> None:
-    result = _compile(tmp_path, _RELAX_C, name="relax")
-    assert result.returncode == 0, result.stderr
+def _job_new(ws: str, runner: str, context: CLIContext) -> int:
+    return workflow_command(["job", "new", "--workspace", ws, "--from-runner", runner, "--step", "start"], context)
 
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    reference = dict(workspace.publish_runner(tmp_path / "relax", name="relax"))
-    payload = tmp_path / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "POSCAR").write_text(_POSCAR, encoding="utf-8")
 
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="C relaxation",
-            workflow="httk.vasp.relax-c",
-            runner_path=str(reference["path"]),
-            runner_source="workspace",
-            runner_sha256=str(reference["sha256"]),
-            initial_step="prepare",
-            data_mode="transactional",
-        ),
-    )
-    workspace.submit(payload, "project/vasp")
+def _assert_succeeded(workspace: Workspace) -> None:
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle(timeout=120.0)
-
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "failed"
-    failure = workspace.read_state(marker).get("failure")
-    assert isinstance(failure, dict)
-    assert failure["code"] == "vasp.command_missing"
+    assert len(list(workspace.walk_markers(("succeeded",)))) == 1
 
 
-def _cli_relax_context(tmp_path: Path) -> tuple[Workspace, CLIContext, str, Path]:
-    """Compile relax, register a workspace with a mock VASP, and stage a POSCAR."""
-
-    result = _compile(tmp_path, _RELAX_C, name="relax")
-    assert result.returncode == 0, result.stderr
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    workspace.set_setting("vasp.command", f"{sys.executable} {_MOCK_VASP}")
-    context = CLIContext("httk", tmp_path)
-    ws = register_ws(context, workspace.root)
-    (tmp_path / "POSCAR").write_text(_POSCAR, encoding="utf-8")
-    return workspace, context, ws, tmp_path / "POSCAR"
-
-
-def _job_new(ws: str, workflow: str, poscar: Path, context: CLIContext) -> int:
-    argv = [
-        "job",
-        "new",
-        "--workspace",
-        ws,
-        "--from-runner",
-        workflow,
-        "--step",
-        "prepare",
-        "--file",
-        f"POSCAR={poscar}",
-        "--data-mode",
-        "transactional",
-        "--tag",
-        "silicon",
-    ]
-    return workflow_command(argv, context)
-
-
-def _assert_relax_succeeded(workspace: Workspace) -> None:
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=300.0)
-    markers = list(workspace.walk_markers(("succeeded",)))
-    assert len(markers) == 1
-    root = workspace.payload_path(markers[0].placement, markers[0].job_key)
-    assert (root / "data" / "vasp" / "OUTCAR").is_file()
-    assert (root / "data" / "vasp" / "CONTCAR").is_file()
-
-
-def test_the_cli_scaffolds_and_runs_the_relax_binary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_cli_scaffolds_and_runs_a_c_binary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """An absolute `--from-runner` path scaffolds, describes by running, and submits."""
 
-    workspace, context, ws, poscar = _cli_relax_context(tmp_path)
-    assert _job_new(ws, str(tmp_path / "relax"), poscar, context) == 0, capsys.readouterr().err
-    _assert_relax_succeeded(workspace)
+    workspace, context, ws = _cli_context(tmp_path)
+    assert _job_new(ws, str(tmp_path / "relax"), context) == 0, capsys.readouterr().err
+    _assert_succeeded(workspace)
 
 
 def test_the_cli_scaffolds_from_a_relative_runner_path(
@@ -426,12 +307,12 @@ def test_the_cli_scaffolds_from_a_relative_runner_path(
 ) -> None:
     """The documented `--from-runner ./relax` flow: a relative path must not PATH-exec."""
 
-    workspace, context, ws, poscar = _cli_relax_context(tmp_path)
+    workspace, context, ws = _cli_context(tmp_path)
     # From the runner's own directory, `./relax` normalizes to bare `relax`; only
     # the resolve() in describe_runner keeps exec from doing a PATH lookup.
     monkeypatch.chdir(tmp_path)
-    assert _job_new(ws, "./relax", poscar, context) == 0, capsys.readouterr().err
-    _assert_relax_succeeded(workspace)
+    assert _job_new(ws, "./relax", context) == 0, capsys.readouterr().err
+    _assert_succeeded(workspace)
 
 
 def test_a_bare_runner_name_resolves_to_the_cwd_file_not_path(
@@ -446,10 +327,10 @@ def test_a_bare_runner_name_resolves_to_the_cwd_file_not_path(
     hijack.
     """
 
-    workspace, context, ws, poscar = _cli_relax_context(tmp_path)
+    workspace, context, ws = _cli_context(tmp_path)
     monkeypatch.chdir(tmp_path)
-    assert _job_new(ws, "relax", poscar, context) == 0, capsys.readouterr().err
-    _assert_relax_succeeded(workspace)
+    assert _job_new(ws, "relax", context) == 0, capsys.readouterr().err
+    _assert_succeeded(workspace)
 
 
 # A runner that ignores SIGCHLD — as a daemonized launcher or MPI harness leaves

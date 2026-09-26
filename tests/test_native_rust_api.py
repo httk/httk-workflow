@@ -1,4 +1,4 @@
-"""The native Rust authoring SDK: describe parity, dispatch, and one relaxation.
+"""The native Rust authoring SDK: describe parity, dispatch, and outcomes.
 
 The Rust SDK is a bridge client, exactly like the Bash, C, and Fortran ones:
 every verb spawns ``$HTTK_WORKFLOW_PYTHON -m httk.workflow._shell_bridge``, and
@@ -7,8 +7,7 @@ library -- it is a std-only, dependency-free reimplementation of the same thin
 pattern in safe Rust. What is tested here is what only the Rust half can get
 wrong: building warning-clean with no crates.io dependency and no network,
 describing itself byte-for-byte the way the Bash SDK does, dispatching into a
-step handler, and turning a handler's ending into exactly one outcome -- plus one
-real VASP relaxation driven end to end through a real manager.
+step handler, and turning a handler's ending into exactly one outcome.
 
 Every test gates on ``cargo`` and skips cleanly without it; the whole build runs
 ``--offline`` and depends only on path crates, so it never touches the network.
@@ -27,7 +26,6 @@ from typing import Any
 import pytest
 
 import httk.workflow
-from httk.workflow import TaskManager, Workspace
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.scaffold import describe_runner
 
@@ -37,20 +35,6 @@ pytestmark = pytest.mark.skipif(_CARGO is None, reason="no Rust toolchain (cargo
 
 _RUST_SDK = Path(httk.workflow.__file__).parent / "native" / "rust"
 _SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
-_MOCK_VASP = Path(__file__).parents[1] / "examples" / "mock_vasp.py"
-_RELAX_RUST = Path(__file__).parents[1] / "examples" / "relax_rust"
-
-_POSCAR = """silicon
-1.0
-2.0 0.0 0.0
-0.0 2.0 0.0
-0.0 0.0 2.0
-Si
-2
-Direct
-0.0000000000 0.0000000000 0.0000000000
-0.5000000000 0.5000000000 0.5000000000
-"""
 
 
 def _cargo_env(tmp_path: Path) -> dict[str, str]:
@@ -129,26 +113,6 @@ httk_workflow = {{ path = "{sdk}" }}
     result = _cargo_build(tmp_path, crate / "Cargo.toml")
     assert result.returncode == 0, result.stderr
     return tmp_path / "target" / "debug" / name
-
-
-def _build_example(tmp_path: Path) -> Path:
-    """Build examples/relax_rust against the staged SDK, out of tree; return its binary."""
-
-    sdk = _stage_sdk(tmp_path)
-    crate = tmp_path / "relax_example"
-    (crate / "src").mkdir(parents=True, exist_ok=True)
-    (crate / "src" / "main.rs").write_text(
-        (_RELAX_RUST / "src" / "main.rs").read_text(encoding="utf-8"), encoding="utf-8"
-    )
-    (crate / "Cargo.toml").write_text(
-        (_RELAX_RUST / "Cargo.toml")
-        .read_text(encoding="utf-8")
-        .replace('path = "../../src/httk/workflow/native/rust"', f'path = "{sdk}"'),
-        encoding="utf-8",
-    )
-    result = _cargo_build(tmp_path, crate / "Cargo.toml", release=True)
-    assert result.returncode == 0, result.stderr
-    return tmp_path / "target" / "release" / "relax"
 
 
 @dataclass(frozen=True)
@@ -234,16 +198,16 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
     return _Attempt(payload, control, workdir, environment)
 
 
-def test_the_sdk_and_the_example_build_warning_clean(tmp_path: Path) -> None:
-    """A std-only offline build is the contract; the crate and example are warning-clean."""
+def test_the_sdk_and_a_runner_build_warning_clean(tmp_path: Path) -> None:
+    """A std-only offline build is the contract; the crate and a runner are warning-clean."""
 
     sdk = _stage_sdk(tmp_path)
     sdk_build = _cargo_build(tmp_path, sdk / "Cargo.toml")
     assert sdk_build.returncode == 0, sdk_build.stderr
     assert "warning" not in sdk_build.stderr
 
-    # Building the example proves the path-dependency wiring compiles the same way.
-    binary = _build_example(tmp_path)
+    # Building a runner proves the path-dependency wiring compiles the same way.
+    binary = _write_runner(tmp_path, "tests.rust.clean", {"only": "Ok(())"})
     assert binary.is_file()
 
     # A path-deps-only build must have fetched nothing: no vendored registry cache.
@@ -378,82 +342,3 @@ def test_a_handler_that_returns_an_error_leaves_a_breadcrumb_and_no_outcome(tmp_
     assert breadcrumb["step"] == "explode"
     assert breadcrumb["exception"] == "RustError"
     assert breadcrumb["message"] == "explode exited with status 3"
-
-
-def test_the_relax_runner_prepares_runs_and_publishes(tmp_path: Path) -> None:
-    """The examples/relax_rust runner, driven end to end through a real manager."""
-
-    binary = _build_example(tmp_path)
-
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    # The documented flow: name the mock VASP as the workspace vasp.command.
-    workspace.set_setting("vasp.command", f"{sys.executable} {_MOCK_VASP}")
-
-    reference = dict(workspace.publish_runner(binary, name="relax"))
-    payload = tmp_path / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "POSCAR").write_text(_POSCAR, encoding="utf-8")
-
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Rust relaxation",
-            workflow="httk.vasp.relax-rust",
-            runner_path=str(reference["path"]),
-            runner_source="workspace",
-            runner_sha256=str(reference["sha256"]),
-            tag="silicon",
-            initial_step="prepare",
-            data_mode="transactional",
-            maximum_total_attempts=8,
-        ),
-    )
-    workspace.submit(payload, "project/vasp")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=300.0)
-
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "succeeded"
-    root = workspace.payload_path(marker.placement, marker.job_key)
-
-    state = json.loads((root / ".httk-job" / "state.json").read_text(encoding="utf-8"))
-    assert state["classification"] == "completed"
-
-    published = root / "data" / "vasp"
-    assert (published / "OUTCAR").is_file()
-    contcar = (published / "CONTCAR").read_text(encoding="utf-8").splitlines()
-    assert contcar[-1].startswith("0.51")
-
-
-def test_a_missing_vasp_command_fails_by_name(tmp_path: Path) -> None:
-    binary = _build_example(tmp_path)
-
-    workspace = Workspace.initialize(tmp_path / "workspace")
-    reference = dict(workspace.publish_runner(binary, name="relax"))
-    payload = tmp_path / "payload"
-    files = payload / "files"
-    files.mkdir(parents=True)
-    (files / "POSCAR").write_text(_POSCAR, encoding="utf-8")
-
-    job = prepare_job_payload(
-        payload,
-        JobSpec(
-            name="Rust relaxation",
-            workflow="httk.vasp.relax-rust",
-            runner_path=str(reference["path"]),
-            runner_source="workspace",
-            runner_sha256=str(reference["sha256"]),
-            initial_step="prepare",
-            data_mode="transactional",
-        ),
-    )
-    workspace.submit(payload, "project/vasp")
-    with TaskManager(workspace, heartbeat_interval=0.01) as manager:
-        manager.run_until_idle(timeout=120.0)
-
-    marker = workspace.find_marker_by_id(job.id)
-    assert marker is not None and marker.kind == "failed"
-    failure = workspace.read_state(marker).get("failure")
-    assert isinstance(failure, dict)
-    assert failure["code"] == "vasp.command_missing"

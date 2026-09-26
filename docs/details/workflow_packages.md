@@ -219,9 +219,18 @@ artifacts = ["relax", "*.o"]
 covers that directory's subtree; patterns are evaluated against relative paths.
 The patterns may not strip `run` or `httk_workflow.toml`, so the committed
 `run` entry and manifest remain in the source package. The build command runs in
-a copy of the published source tree and can use only files inside that package:
-compiled packages must vendor their SDK and other build inputs. For example,
-`examples/relax_cpp` vendors both halves of its native SDK.
+a copy of the published source tree and can use only files inside that package
+and the installed native SDKs. Every `HTTK_WORKFLOW_*` variable is removed from
+its environment except `HTTK_WORKFLOW_NATIVE_API`, the absolute path of the
+installed `httk/workflow/native` directory with one subdirectory per SDK (`c`,
+`cpp`, `fortran`, `rust`, `ada`, `java`, `perl`). A C package, for example,
+builds with `cc -I"$HTTK_WORKFLOW_NATIVE_API/c" relax.c
+"$HTTK_WORKFLOW_NATIVE_API/c/httk_workflow.c" -o relax`. The source digest does
+not cover that SDK, so re-register builds after upgrading *httk-workflow*; a
+package that must not depend on the installed SDK vendors it instead. The
+manager exports the same variable to every attempt. The native relax packages of
+[workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages)
+are complete examples.
 
 The `[workflow.build]` vocabulary and build engine are shared
 `httk.core.building` machinery; `BuildSpec` and its execution helpers live

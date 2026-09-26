@@ -62,9 +62,20 @@ manager runs it directly and the scaffolder describes it by running it — a job
 that starts from a runner file of your own is resolved the same way whatever
 language wrote it.
 
-A complete VASP relaxation authored this way — `prepare`, `run`, `publish`, the
-`vasp.command` setting, mock-VASP compatible, publishing to transactional data —
-ships as `examples/relax_rust/`; see the walkthrough at the end of this page.
+A Cargo path cannot name an environment variable, so a workflow package depends
+on `httk_workflow = { path = "target/sdk" }` and its `[workflow.build]` command
+first copies the installed SDK crate there from `HTTK_WORKFLOW_NATIVE_API`:
+
+```console
+mkdir -p target && cp -R "$HTTK_WORKFLOW_NATIVE_API/rust" target/sdk && cargo build --release --offline
+```
+
+Declare `target` and `Cargo.lock` as build `artifacts`, so the copied SDK and
+the build outputs are stripped before publication and never enter the source
+digest.
+
+A complete VASP relaxation authored this way is described at the end of this
+page.
 
 ## Registration and dispatch
 
@@ -215,50 +226,10 @@ status comparison. `Attempt::run` returns the classified outcome of the program 
 ran instead: `0`, `22` for a nonzero exit, `124` for a timeout whose process group
 was terminated, and `125` when a checker or diagnostic stopped it.
 
-## The `examples/relax_rust` walkthrough
+## A VASP relaxation package
 
-`examples/relax_rust/src/main.rs` has the same three-step shape as
-`examples/relax_c`, in three step functions built entirely on the methods above.
-It is a minimal example: it stages a POSCAR and an optional INCAR and runs one
-command, and deliberately omits what the `vasp.relax` runner of
-[workflows-vasp](https://github.com/httk/workflows-vasp) adds — INCAR
-and KPOINTS generation, restart and back-off logic, and the supervision
-diagnostics and remedies.
-
-- **`prepare`** stages the payload POSCAR into the workdir with
-  `attempt.parameter("poscar", Some("files/POSCAR"))` and `std::fs::copy`, fails
-  by name (`attempt.fail("vasp.input_missing", …, false)`) when it is absent,
-  copies an optional INCAR, notes progress with `attempt.runlog_note`, and
-  `attempt.advance("run", &[])`.
-- **`run`** resolves the VASP command with `attempt.setting("vasp.command", …)` —
-  falling back to a `vasp_command` parameter, and failing `vasp.command_missing`
-  when neither is set — splits it on whitespace, runs it under supervision with
-  `attempt.run`, records `state_set("classification", "completed")` and advances
-  to `publish` on success, and `attempt.fail("vasp.failed", …, false)` otherwise.
-- **`publish`** stages the finished files into the job's transactional data with
-  `attempt.put` when the job has a data directory, and `attempt.succeed`.
-
-Build and describe it:
-
-```console
-cd examples/relax_rust
-make
-./relax --describe
-```
-
-Then drive it exactly like `docs/quickstart.md`, naming the compiled binary as the
-runner and the mock VASP as the command:
-
-```console
-httk project init --name relax-rust .
-httk workspace init --name default .
-httk job new --from-runner ./relax --step prepare --file POSCAR=POSCAR --data-mode transactional --tag silicon
-httk workspace settings set --key vasp.command --value "$PWD/../mock_vasp.py" default
-httk workflow run
-httk workflow collect
-```
-
-The runner file declares no inputs, so its POSCAR is staged with `--file` and its
-first step is named with `--step`. The finished calculation lands in
-`jobs/*/data/vasp/`, and for the same input it publishes the same collected files
-as the other relaxation examples.
+The `vasp-relax-rust` package of
+[workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages) is a complete
+`prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
+and publishing to transactional data. Its workflow is `vasp.relax-rust`; run it
+as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-rust`.
