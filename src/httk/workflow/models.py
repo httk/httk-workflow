@@ -515,6 +515,115 @@ def validate_runner_path(value: object, source: str) -> PurePosixPath:
     return path
 
 
+_RUNNER_COMMAND_ELEMENT = re.compile(
+    r"(?P<prefix>(?:-*[A-Za-z0-9_.][A-Za-z0-9_.-]*=)?)\{(?P<name>package|artifacts)\}(?P<path>.*)", re.DOTALL
+)
+
+
+@dataclass(frozen=True)
+class RunnerCommandReference:
+    """One placeholder reference in a runner command element.
+
+    :param name: The placeholder name, ``package`` or ``artifacts``.
+    :param path: The relative POSIX path after the placeholder, or ``None`` for the root itself.
+    :param prefix: The ``NAME=`` text before the placeholder, or empty at element start.
+    """
+
+    name: str
+    path: str | None
+    prefix: str
+
+
+def runner_command_reference(element: str, name: str = "runner.command") -> RunnerCommandReference | None:
+    """Return the placeholder reference of one runner command element.
+
+    A placeholder may appear only at the element start or directly after
+    ``NAME=``, and the rest of the element is either empty or ``/`` followed by a
+    relative POSIX path whose parts are nonempty and not ``.`` or ``..``.
+
+    :param element: The command element.
+    :param name: The member name used in validation errors.
+    :return: The reference, or ``None`` for an element without placeholders.
+    :raises httk.workflow.errors.FormatError: If braces appear outside that form.
+    """
+
+    if "{" not in element and "}" not in element:
+        return None
+    match = _RUNNER_COMMAND_ELEMENT.fullmatch(element)
+    if match is None:
+        raise FormatError(
+            f"{name} element {element!r} must place {{package}} or {{artifacts}} at its start or after NAME="
+        )
+    path = match["path"]
+    if not path:
+        return RunnerCommandReference(match["name"], None, match["prefix"])
+    parts = path[1:].split("/") if path.startswith("/") else []
+    if not parts or any(part in {"", ".", ".."} or "{" in part or "}" in part for part in parts):
+        raise FormatError(
+            f"{name} element {element!r} must continue its placeholder with /PATH, "
+            "a relative path of nonempty parts other than '.' and '..'"
+        )
+    return RunnerCommandReference(match["name"], "/".join(parts), match["prefix"])
+
+
+def validate_runner_command(value: object, name: str = "runner.command") -> tuple[str, ...]:
+    """Validate the structure of a declared runner command.
+
+    A command is a nonempty argument vector whose elements may reference only the
+    ``{package}`` and ``{artifacts}`` placeholders, in the form
+    :func:`runner_command_reference` accepts. Its program is a placeholder path
+    or a bare name resolved on the attempt ``PATH``, never an absolute or
+    relative filesystem path.
+
+    :param value: The command value to validate.
+    :param name: The member name used in validation errors.
+    :return: The unexpanded command.
+    :raises httk.workflow.errors.FormatError: If the command is malformed.
+    """
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or not value:
+        raise FormatError(f"{name} must be a nonempty array of strings")
+    command = tuple(require_string(item, f"{name} element") for item in value)
+    for element in command:
+        if not element or "\x00" in element:
+            raise FormatError(f"{name} elements must be nonempty strings without NUL")
+        runner_command_reference(element, name)
+    program = command[0]
+    reference = runner_command_reference(program, name)
+    if (reference is None and ("/" in program or program in {".", ".."})) or (
+        reference is not None and (reference.prefix or reference.path is None)
+    ):
+        raise FormatError(
+            f"{name} program {program!r} must be {{package}}/PATH, {{artifacts}}/PATH, or a bare name found on PATH"
+        )
+    return command
+
+
+def expand_runner_command(command: Sequence[str], package: Path, artifacts: Path | None) -> tuple[str, ...]:
+    """Expand the placeholders of a validated runner command.
+
+    :param command: The unexpanded command.
+    :param package: The verified runner tree substituted for ``{package}``.
+    :param artifacts: The registered build artifacts substituted for ``{artifacts}``.
+    :return: The expanded argument vector.
+    :raises ValueError: If the command uses ``{artifacts}`` and no artifacts are given.
+    """
+
+    expanded: list[str] = []
+    for element in command:
+        reference = runner_command_reference(element)
+        if reference is None:
+            expanded.append(element)
+            continue
+        if reference.name == "artifacts" and artifacts is None:
+            raise ValueError("the runner command uses {artifacts} but no build artifacts are registered")
+        root = package if reference.name == "package" else artifacts
+        assert root is not None
+        target = root if reference.path is None else root.joinpath(*reference.path.split("/"))
+        expanded.append(f"{reference.prefix}{target}")
+    return tuple(expanded)
+
+
 def job_digest(data: bytes) -> str:
     """Return the normative immutable job digest of stored ``job.json`` bytes.
 
@@ -1366,6 +1475,8 @@ class JobDefinition:
     raw: Mapping[str, object]
     #: The ``NAME>=VERSION`` distributions a claiming manager's environment must meet.
     requires: tuple[str, ...] = ()
+    #: The unexpanded package command run instead of the tree ``run`` entry, when declared.
+    runner_command: tuple[str, ...] | None = None
     stored_digest: str | None = None
 
     @property
@@ -1454,6 +1565,11 @@ class JobDefinition:
             runner_sha256 = None
         else:
             runner_sha256 = validate_sha256(runner.get("sha256"), "runner.sha256")
+        runner_command: tuple[str, ...] | None = None
+        if "command" in runner:
+            if runner_source == "payload":
+                raise FormatError("runner.command is forbidden for a payload runner")
+            runner_command = validate_runner_command(runner["command"])
         workdir = require_mapping(value.get("workdir"), "workdir")
         workdir_mode = require_string(workdir.get("mode"), "workdir.mode")
         if workdir_mode not in {"persistent", "isolated"}:
@@ -1514,6 +1630,7 @@ class JobDefinition:
             parent=None if parent is None else dict(parent),
             raw=dict(value),
             requires=tuple(item.text for item in requires),
+            runner_command=runner_command,
         )
 
 

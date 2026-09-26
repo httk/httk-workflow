@@ -62,6 +62,14 @@ cc -std=c99 -Wall -Wextra -I"$HTTK_WORKFLOW_NATIVE_API/c" runner.c \
    "$HTTK_WORKFLOW_NATIVE_API/c/httk_workflow.c" -o runner
 ```
 
+Its manifest then runs the registered binary directly, with no `run` bridge
+script (see {doc}`../details/workflow_packages`):
+
+```toml
+[workflow.runner]
+command = ["{artifacts}/runner"]
+```
+
 A complete VASP relaxation authored this way is described at the end of this
 page.
 

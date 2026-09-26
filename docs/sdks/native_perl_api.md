@@ -109,3 +109,5 @@ The `vasp-relax-perl` package of
 `prepare`/`run`/`publish` relaxation built with this SDK, mock-VASP compatible
 and publishing to transactional data. Its workflow is `vasp.relax-perl`; run it
 as `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-perl`.
+It needs no build and no `run` bridge script: its manifest runs the script with
+`command = ["perl", "{package}/relax.pl"]`.

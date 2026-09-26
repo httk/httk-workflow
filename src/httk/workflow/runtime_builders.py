@@ -42,6 +42,7 @@ from .models import (
     validate_label,
     validate_parameters,
     validate_resources,
+    validate_runner_command,
     validate_sha256,
     validate_step,
 )
@@ -158,6 +159,7 @@ class JobSpec:
     :param runner_source: Select where the runner lives.
     :param runner_sha256: Pin a runner outside the payload by digest.
     :param runner_arguments: Supply runner arguments.
+    :param runner_command: Supply the unexpanded package command of a shared runner tree.
     :param workdir_mode: Select the workdir mode.
     :param workdir_path: Name the workdir below the job payload.
     :param data_mode: Select the job data mode.
@@ -188,6 +190,7 @@ class JobSpec:
     runner_source: Literal["payload", "workspace", "installed"] = "payload"
     runner_sha256: str | None = None
     runner_arguments: tuple[str, ...] = ()
+    runner_command: tuple[str, ...] | None = None
     workdir_mode: Literal["persistent", "isolated"] = "persistent"
     workdir_path: str = "run"
     data_mode: Literal["none", "transactional"] = "none"
@@ -237,6 +240,10 @@ class JobSpec:
             if self.runner_sha256 is None:
                 raise ValueError(f"a {self.runner_source} runner must pin runner_sha256")
             runner["sha256"] = validate_sha256(self.runner_sha256, "runner_sha256")
+        if self.runner_command is not None:
+            if self.runner_source == "payload":
+                raise ValueError("a payload runner cannot carry runner_command")
+            runner["command"] = list(validate_runner_command(self.runner_command, "runner_command"))
         resources = validate_resources(self.resources)
         step_resources: dict[str, dict[str, int]] = {}
         for raw_step, raw_resources in self.step_resources.items():

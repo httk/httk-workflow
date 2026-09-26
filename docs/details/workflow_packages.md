@@ -10,7 +10,8 @@ externally authored declaration that it validates and carries.
 
 ## Package layout
 
-The smallest useful package has an executable `run` entry and a manifest:
+The smallest useful package has an executable `run` entry (or a declared
+`[workflow.runner] command` in its place) and a manifest:
 
 ```text
 my-workflow/
@@ -63,12 +64,12 @@ default collection to the registered language realization.
 
 | Form | Manifest selector | Required/allowed members | Runner contract |
 | --- | --- | --- | --- |
-| executable entry | no `language` | `entry`, `steps`, `initial_step`, `data_mode`, `workdir_mode` | package `run` plus the declared step set |
+| executable entry | no `language` | `entry` or `command`, `steps`, `initial_step`, `data_mode`, `workdir_mode` | package `run` (or the declared `command`) plus the declared step set |
 | document language | `language = "cwl"` or `"pwd"` and `document` | language keys only; `port` is allowed on document inputs/outputs | installed `cwl_runner.py` or `pwd_runner.py` |
 | jobflow | `language = "jobflow"` and `maker` or `document` | `maker` or `document` (exactly one); `port` is allowed on inputs/outputs; no mode keys | installed `jobflow_runner.py` |
 | httk-v1 | `language = "httk-v1"` and no `document` | `taskset`, `attempts`; no mode keys | package snapshot plus `pkg:httk.workflow.languages.httk_v1/v1_runner.py` through the ordinary `path` runner |
 
-For language forms, `entry`, `steps`, and `initial_step` are forbidden because
+For language forms, `entry`, `command`, `steps`, and `initial_step` are forbidden because
 the language supplies built-in steps. `[workflow.instantiate]` is forbidden
 because language inputs are hook-consumed. `destination` is forbidden on
 CWL/PWD, jobflow, and httk-v1 inputs; an omitted v1 destination is an
@@ -147,10 +148,52 @@ or the sole step is selected. Otherwise `initial_step` is required.
 | Key | Required/default | Meaning |
 | --- | --- | --- |
 | `entry` | `"run"` | Relative entry member; it must be named `run`. |
+| `command` | absent | Argument vector the manager runs instead of `run`; excludes `entry`. |
 | `initial_step` | `"start"` when present; otherwise sole step | First scaffolded step. |
 | `steps` | required | Nonempty runner step list. |
 | `data_mode` | `"none"` | `"none"` or `"transactional"`. |
 | `workdir_mode` | `"persistent"` | `"persistent"` or `"isolated"`. |
+
+`command` names the program a compiled, JVM, or interpreted package runs, so
+the package needs no one-line `run` bridge script. It is a nonempty array of
+strings. Two placeholders, and no others, may appear in an element:
+`{package}` expands to the verified published package tree and `{artifacts}` to
+the build registered for this machine (see
+[Building and registering binaries](#building-and-registering-binaries)). The
+manager appends the job's runner arguments, keeps the attempt environment
+(including `HTTK_WORKFLOW_RUNNER_ARTIFACTS`) and any workflow prelude, and runs
+the expanded vector in the job workdir.
+
+```toml
+[workflow.runner]
+command = ["{artifacts}/relax"]                        # C, C++, Fortran, Ada, Rust
+# command = ["java", "-cp", "{artifacts}/classes", "Relax"]
+# command = ["perl", "{package}/relax.pl"]
+steps = ["publish", "prepare", "run"]
+initial_step = "prepare"
+```
+
+The manifest is validated when the package loads:
+
+- a placeholder starts its element or directly follows `NAME=` (as in
+  `-Dhome={package}`), and the rest of the element is empty or `/PATH`, a
+  relative POSIX path whose parts are nonempty and not `.` or `..`;
+- the first element starts with a placeholder or is a bare program name found
+  on the attempt `PATH` (`java`, `perl`, `python3`); absolute paths and other
+  paths containing `/` are refused;
+- each `{package}/MEMBER` reference names an existing regular source member (not
+  a build artifact), and a `{package}/MEMBER` program must be executable;
+- `{artifacts}` requires `[workflow.build]`, and each `{artifacts}/PATH`
+  reference must be a relative path covered by `[workflow.build].artifacts`;
+- the package must not contain a `run` member. A job records the command in
+  `job.json`, and a manager that predates `command` looks for `run` and fails
+  with `runner_unavailable` instead of running a stray entry.
+
+A package whose command uses `{artifacts}` fails with `runner_not_built` until
+its build is registered, exactly like a `run` bridge into the artifacts.
+`httk workflow describe` runs the command with `HTTK_WORKFLOW_DESCRIBE=1` to
+check the manifest steps only when it uses no `{artifacts}`; describe has no
+build registration, so for a compiled package it reports the manifest alone.
 
 ### `[workflow.resources]` and `[workflow.steps.NAME]`
 
@@ -217,8 +260,8 @@ artifacts = ["relax", "*.o"]
 `command` and the optional `platform` are shell-word command strings. Each
 `artifacts` member is a relative POSIX `fnmatch` pattern. A directory match
 covers that directory's subtree; patterns are evaluated against relative paths.
-The patterns may not strip `run` or `httk_workflow.toml`, so the committed
-`run` entry and manifest remain in the source package. The build command runs in
+The patterns may not strip `run` or `httk_workflow.toml`, so a committed
+`run` entry and the manifest remain in the source package. The build command runs in
 a copy of the published source tree and can use only files inside that package
 and the installed native SDKs. Every `HTTK_WORKFLOW_*` variable is removed from
 its environment except `HTTK_WORKFLOW_NATIVE_API`, the absolute path of the
@@ -277,11 +320,10 @@ manager-detected failures are terminal unless the job explicitly opts into
 registration and reports a missing one as a problem. Platform-specific builds
 are reported as indeterminate because the local precheck cannot stand in for the
 manager's machine; the manager probes its own platform at attempt start. The
-build command is never inferred from `run`: `run` must be committed, executable,
-and usable as the package's source entry point before any build is registered.
-At execution time a compiled package's `run` entry must locate its binaries
-under `$HTTK_WORKFLOW_RUNNER_ARTIFACTS`; the source tree remains unchanged and
-the runner is executed from that tree with the job workdir as its cwd.
+build command is never inferred from the runner entry. A compiled package
+declares `command = ["{artifacts}/relax"]` (or, with a committed `run` entry,
+locates its binaries under `$HTTK_WORKFLOW_RUNNER_ARTIFACTS`); the source tree
+remains unchanged and the runner runs with the job workdir as its cwd.
 
 ### Hook tables
 

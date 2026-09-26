@@ -70,6 +70,14 @@ first copies the installed SDK crate there from `HTTK_WORKFLOW_NATIVE_API`:
 mkdir -p target && cp -R "$HTTK_WORKFLOW_NATIVE_API/rust" target/sdk && cargo build --release --offline
 ```
 
+Its manifest then runs the registered binary (copied out of `target/release`) directly, with no `run` bridge
+script (see {doc}`../details/workflow_packages`):
+
+```toml
+[workflow.runner]
+command = ["{artifacts}/runner"]
+```
+
 Declare `target` and `Cargo.lock` as build `artifacts`, so the copied SDK and
 the build outputs are stripped before publication and never enter the source
 digest.

@@ -1728,6 +1728,7 @@ class TaskManager:
                         context=context,
                         runner=runner,
                         workflow_prelude=workflow_prelude,
+                        command=verified.command if verified is not None else None,
                     )
                 )
             )
@@ -1756,6 +1757,11 @@ class TaskManager:
                     "runner_source": job.runner_source,
                     "runner_path": str(verified.path if verified is not None else runner),
                     "runner_sha256": runner_sha256,
+                    **(
+                        {"runner_command": list(verified.command)}
+                        if verified is not None and verified.command is not None
+                        else {}
+                    ),
                     "files": [],
                 },
                 marker.job_key,

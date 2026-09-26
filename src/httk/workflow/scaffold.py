@@ -78,6 +78,7 @@ from .models import (
     LOGS_DIRECTORY,
     JobDefinition,
     ensure_step_known,
+    expand_runner_command,
     normalize_placement,
     validate_parameters,
     validate_resources,
@@ -99,6 +100,7 @@ __all__ = [
     "ResolvedWorkflow",
     "ScaffoldedJob",
     "WorkflowProvider",
+    "describe_package_runner",
     "describe_runner",
     "new_job",
     "new_jobs",
@@ -168,6 +170,7 @@ class WorkflowProvider:
     :param directory: Locate a directory-sourced workflow package.
     :param build: Describe the package build command and generated artifacts.
     :param entry: Name the directory package's runner entry.
+    :param command: Give the directory package's unexpanded runner command, replacing *entry*.
     :param instantiate_file: Name the directory package's instantiate hook.
     :param instantiate_exec: Name an executable directory package instantiate hook.
     :param collect_file: Name the directory package's collector.
@@ -203,6 +206,7 @@ class WorkflowProvider:
     directory: Path | None = None
     build: BuildSpec | None = None
     entry: str = "run"
+    command: tuple[str, ...] | None = None
     instantiate_file: str | None = None
     instantiate_exec: str | None = None
     collect_file: str | None = None
@@ -223,7 +227,7 @@ class WorkflowProvider:
                 raise ValueError("a language workflow cannot supply a runner package or file")
             if self.directory is None:
                 raise ValueError("a language workflow provider must be directory-sourced")
-            if self.entry != "run" or self.instantiate_file is not None:
+            if self.entry != "run" or self.command is not None or self.instantiate_file is not None:
                 raise ValueError("language workflow runner fields are implied by the language")
             if not self.instantiate:
                 raise ValueError("a language workflow provider must have instantiate enabled")
@@ -235,6 +239,7 @@ class WorkflowProvider:
                 raise ValueError("a workflow provider must be packaged or directory-sourced, exclusively")
             if packaged and (
                 self.entry != "run"
+                or self.command is not None
                 or self.instantiate_file is not None
                 or self.instantiate_exec is not None
                 or self.collect_file is not None
@@ -506,6 +511,7 @@ class ResolvedWorkflow:
     :param directory: Locate a directory-sourced workflow package.
     :param build: Describe the package build command and generated artifacts.
     :param entry: Name the directory package's runner entry.
+    :param command: Give the directory package's unexpanded runner command, replacing *entry*.
     :param instantiate_file: Name the directory package's instantiate hook.
     :param instantiate_exec: Name an executable directory package instantiate hook.
     :param collect_file: Name the directory package's collector.
@@ -544,6 +550,7 @@ class ResolvedWorkflow:
     directory: Path | None = None
     build: BuildSpec | None = None
     entry: str = "run"
+    command: tuple[str, ...] | None = None
     instantiate_file: str | None = None
     instantiate_exec: str | None = None
     collect_file: str | None = None
@@ -562,7 +569,7 @@ class ResolvedWorkflow:
         if self.language is not None:
             if self.packaged is not None or (self.directory is None and self.document_path is None):
                 raise ValueError("a language workflow must have a source document or directory")
-            if self.entry != "run" or self.instantiate_file is not None:
+            if self.entry != "run" or self.command is not None or self.instantiate_file is not None:
                 raise ValueError("language workflow runner fields are implied by the language")
             if not self.instantiate:
                 raise ValueError("a language workflow must have instantiate enabled")
@@ -571,6 +578,7 @@ class ResolvedWorkflow:
                 raise ValueError("a resolved workflow cannot be packaged and directory-sourced")
             if self.packaged is not None and (
                 self.entry != "run"
+                or self.command is not None
                 or self.instantiate_file is not None
                 or self.instantiate_exec is not None
                 or self.collect_file is not None
@@ -687,6 +695,7 @@ class _Prepared:
     runner_sha256: str | None
     data_mode: DataMode
     runner_executor: str = "path"
+    runner_command: tuple[str, ...] | None = None
     payload_runner: str | None = None
     workdir_path: str | None = None
     required_capabilities: tuple[str, ...] = ()
@@ -749,6 +758,48 @@ def describe_runner(runner: str | os.PathLike[str], *, preserve_registration_ord
     path = Path(runner).expanduser().resolve()
     if not path.is_file():
         raise ValueError(f"a runner workflow must be an existing file: {path}")
+    return _describe(_describe_command(path), path, preserve_registration_order=preserve_registration_order)
+
+
+def describe_package_runner(
+    directory: str | os.PathLike[str], *, artifacts: str | os.PathLike[str] | None = None
+) -> dict[str, object]:
+    """Return the self-description of a directory package's runner, by running it.
+
+    A package with ``[workflow.runner].command`` is described by running that
+    command with its placeholders expanded, exactly as a manager launches it;
+    otherwise its ``run`` entry is described with :func:`describe_runner`.
+
+    :param directory: Locate the workflow package directory.
+    :param artifacts: Locate the package's built artifacts, substituted for ``{artifacts}``.
+    :return: The validated runner description.
+    :raises ValueError: If the package is malformed, its command needs artifacts that
+        were not given, or the runner emits an invalid description.
+    """
+
+    from .packages import parse_workflow_manifest
+
+    root = Path(directory).expanduser().resolve()
+    provider = parse_workflow_manifest(root)
+    if provider.command is None:
+        return describe_runner(root / provider.entry)
+    artifacts_path = None if artifacts is None else Path(artifacts).expanduser().resolve()
+    command = expand_runner_command(provider.command, root, artifacts_path)
+    extra = {"HTTK_WORKFLOW_RUNNER_ROOT": str(root)}
+    if artifacts_path is not None:
+        extra["HTTK_WORKFLOW_RUNNER_ARTIFACTS"] = str(artifacts_path)
+    return _describe(list(command), root, extra=extra)
+
+
+def _describe(
+    command: list[str],
+    path: Path,
+    *,
+    preserve_registration_order: bool = False,
+    extra: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Run one runner command in describe mode and validate what it prints."""
+
     environment = dict(os.environ)
     environment[_DESCRIBE_VARIABLE] = "1"
     # Describe under this interpreter, exactly as the manager runs an attempt.
@@ -777,9 +828,10 @@ def describe_runner(runner: str | os.PathLike[str], *, preserve_registration_ord
         "HTTK_WORKFLOW_RUNNER_ARTIFACTS",
     ):
         environment.pop(name, None)
+    environment.update(extra or {})
     try:
         completed = subprocess.run(
-            _describe_command(path),
+            command,
             capture_output=True,
             text=True,
             timeout=_DESCRIBE_TIMEOUT,
@@ -971,6 +1023,7 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
         directory=provider.directory,
         build=provider.build,
         entry=provider.entry,
+        command=provider.command,
         instantiate_file=provider.instantiate_file,
         instantiate_exec=provider.instantiate_exec,
         collect_file=provider.collect_file,
@@ -1063,6 +1116,7 @@ def resolve_workflow(
                 directory=provider.directory or path.resolve(),
                 build=provider.build,
                 entry=provider.entry,
+                command=provider.command,
                 instantiate_file=provider.instantiate_file,
                 instantiate_exec=provider.instantiate_exec,
                 collect_file=provider.collect_file,
@@ -1562,6 +1616,7 @@ def _prepare(
         runner_source=cast(Literal["workspace", "installed"], str(reference["source"])),
         runner_path=str(reference["path"]),
         runner_sha256=runner_sha256,
+        runner_command=resolved.command,
         data_mode=resolved.data_mode,
         instantiate=instantiate,
         instantiate_exec=instantiate_exec,
@@ -1995,6 +2050,7 @@ def _build_payload(
         runner_path=prepared.runner_path,
         runner_source=prepared.runner_source,
         runner_sha256=prepared.runner_sha256,
+        runner_command=prepared.runner_command,
         initial_step=workflow.initial_step,
         tag=tag,
         workdir_mode=workdir_mode,

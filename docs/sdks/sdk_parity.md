@@ -169,8 +169,8 @@ variable in it.
 For a shared runner, the manager also exports **`HTTK_WORKFLOW_RUNNER_ROOT`**
 with the runner file or tree root. For a workspace package with a registered
 build, it exports **`HTTK_WORKFLOW_RUNNER_ARTIFACTS`** with the build-artifacts
-directory; the package's `run` entry uses that directory to locate compiled
-binaries.
+directory; a package's `[workflow.runner] command` names it as `{artifacts}`,
+and a `run` entry uses the variable to locate compiled binaries.
 
 ## Exit-code discipline
 

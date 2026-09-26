@@ -30,6 +30,7 @@ from httk.core.cli import CLIContext
 from .._manager_runners import RUNNER_TREE_ENTRY
 from ..adapters import resolve_remote, run_adapter
 from ..errors import WorkflowError
+from ..packages import MANIFEST_NAME
 from ..registry import LOCAL_REMOTE, WorkspaceBinding, default_workspace, resolve_workspace
 from ..scaffold import STRUCTURE_PATTERNS, JobItem, _sanitize_tag, structure_tag
 from ..workspace import Workspace
@@ -620,8 +621,9 @@ def _add_adapter_timeout(parser: argparse.ArgumentParser) -> None:
 def _published_runner_entries(directory: Path) -> Iterator[Path]:
     """Yield each runner a workspace store publishes: a file, or one tree.
 
-    A subdirectory that holds the tree entry point is one directory runner; any
-    other subdirectory is a namespace descended into. This is the single walk
+    A subdirectory that holds the tree entry point or a package manifest (whose
+    command may replace the entry point) is one directory runner; any other
+    subdirectory is a namespace descended into. This is the single walk
     both ``runner describe`` and ``workspace workflows`` list the store by.
 
     :param directory: The store root, or a namespace within it, to walk.
@@ -632,7 +634,7 @@ def _published_runner_entries(directory: Path) -> Iterator[Path]:
         if path.is_file():
             yield path
         elif path.is_dir():
-            if (path / RUNNER_TREE_ENTRY).is_file():
+            if (path / RUNNER_TREE_ENTRY).is_file() or (path / MANIFEST_NAME).is_file():
                 yield path
             else:
                 yield from _published_runner_entries(path)

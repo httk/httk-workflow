@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 from httk.core.digests import sha256_file, tree_digest
 
 from . import languages
-from ._manager_runners import check_runner_reference, contained, runner_module_allowed
+from ._manager_runners import check_runner_reference, contained, runner_command_problem, runner_module_allowed
 from ._manager_scheduling import unmet_job_requirements
 from .errors import WorkflowError
 from .introspection._diagnosis import ManagerRecord, claim_requirements, manager_refusals, read_managers
@@ -139,11 +139,16 @@ def _runner_problem(
             candidate = contained(root, resource.parts)
             if candidate is None or not candidate.exists():
                 return "problem", f"installed runner pkg:{module}/{resource.as_posix()} does not exist"
-            executable = candidate / "run" if candidate.is_dir() else candidate
-            if not executable.is_file():
-                return "problem", f"runner tree {resource.as_posix()} has no run entry point"
-            if not os.access(executable, os.X_OK):
-                return "problem", "runner is not executable"
+            if candidate.is_dir() and job.runner_command is not None:
+                problem = runner_command_problem(job, candidate, None)
+                if problem is not None:
+                    return "problem", problem
+            else:
+                executable = candidate / "run" if candidate.is_dir() else candidate
+                if not executable.is_file():
+                    return "problem", f"runner tree {resource.as_posix()} has no run entry point"
+                if not os.access(executable, os.X_OK):
+                    return "problem", "runner is not executable"
             actual = tree_digest(candidate) if candidate.is_dir() else sha256_file(candidate)
             if actual != job.runner_sha256:
                 return "problem", f"runner digest {actual} does not match pinned {job.runner_sha256}"
@@ -175,15 +180,13 @@ def _runner_problem(
                         f"{workspace_build_command(workspace, job.runner_path)}"
                     ),
                 )
-            if (
-                registered_artifacts(
-                    workspace,
-                    job.runner_path,
-                    "any",
-                    expected_source_sha256=job.runner_sha256,
-                )
-                is None
-            ):
+            artifacts = registered_artifacts(
+                workspace,
+                job.runner_path,
+                "any",
+                expected_source_sha256=job.runner_sha256,
+            )
+            if artifacts is None:
                 return (
                     "problem",
                     (
@@ -191,6 +194,10 @@ def _runner_problem(
                         f"run: {workspace_build_command(workspace, job.runner_path)}"
                     ),
                 )
+            if job.runner_command is not None:
+                problem = runner_command_problem(job, candidate, artifacts)
+                if problem is not None:
+                    return "problem", problem
     return None
 
 

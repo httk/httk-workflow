@@ -25,8 +25,10 @@ from .errors import FormatError
 from .models import (
     RESERVED_WORKFLOW_ENVIRONMENT_PREFIX,
     environment_variable_name,
+    runner_command_reference,
     validate_declarations,
     validate_resources,
+    validate_runner_command,
 )
 from .scaffold import DataMode, WorkdirMode, WorkflowProvider, payload_relative, register_workflow
 
@@ -124,6 +126,41 @@ def _collect_member(directory: Path, value: object, path: str) -> tuple[str, boo
     if not os.access(candidate, os.X_OK):
         raise _error(directory, f"{path} must name a .py member or an executable member (chmod +x): {value!r}")
     return member, True
+
+
+def _runner_command(root: Path, value: object, build: BuildSpec | None) -> tuple[str, ...]:
+    """Validate ``[workflow.runner].command`` against the package and its build."""
+
+    path = "[workflow.runner].command"
+    try:
+        command = validate_runner_command(value, path)
+        references = [runner_command_reference(element, path) for element in command]
+    except FormatError as exc:
+        raise _error(root, str(exc)) from exc
+    is_artifact = artifact_excluder(build)
+    for index, reference in enumerate(references):
+        if reference is None:
+            continue
+        if reference.name == "artifacts" and build is None:
+            raise _error(root, f"{path} uses {{artifacts}}, which requires [workflow.build]")
+        relative = reference.path
+        if relative is None:
+            continue
+        if reference.name == "package":
+            member = _member(root, relative, f"{path} reference {{package}}/{relative}")
+            if is_artifact(member):
+                raise _error(root, f"{path} reference {{package}}/{relative} is a build artifact; use {{artifacts}}")
+            if index == 0 and not os.access(root / member, os.X_OK):
+                raise _error(root, f"{path} program {{package}}/{relative} must be executable (chmod +x)")
+        elif not is_artifact(relative):
+            raise _error(
+                root, f"{path} reference {{artifacts}}/{relative} is not covered by [workflow.build].artifacts"
+            )
+    if (root / "run").exists() or (root / "run").is_symlink():
+        # A job of this package records its command; a manager that predates
+        # commands ignores it and would silently execute a stray run entry.
+        raise _error(root, f"{path} replaces the run entry point; remove the package member 'run'")
+    return command
 
 
 def read_build_spec(root: Path) -> BuildSpec | None:
@@ -629,7 +666,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             lang = languages.language(language_name)
         except ValueError as exc:
             raise _error(root, f"[workflow.runner].language: {exc}") from exc
-        for key in ("entry", "steps", "initial_step"):
+        for key in ("entry", "command", "steps", "initial_step"):
             if key in runner:
                 raise _error(root, f"[workflow.runner].{key} is implied by language {language_name!r}")
         if "instantiate" in workflow:
@@ -662,13 +699,26 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             if document_member is None and not has_maker:
                 raise _error(root, "[workflow.runner] give either document= or maker=, not neither")
         entry = "run"
+        command = None
         steps = lang.steps
         initial_step = lang.initial_step
     else:
-        _unknown(runner, {"entry", "initial_step", "steps", "data_mode", "workdir_mode"}, "[workflow.runner]", root)
-        entry = _member(root, runner.get("entry", "run"), "[workflow.runner].entry")
-        if entry != "run":
-            raise _error(root, "custom entries are not yet supported; the tree entry point must be named run")
+        _unknown(
+            runner,
+            {"entry", "command", "initial_step", "steps", "data_mode", "workdir_mode"},
+            "[workflow.runner]",
+            root,
+        )
+        entry = "run"
+        command = None
+        if "command" in runner:
+            if "entry" in runner:
+                raise _error(root, "[workflow.runner] give either entry= or command=, not both")
+            command = _runner_command(root, runner["command"], read_build_spec(root))
+        else:
+            entry = _member(root, runner.get("entry", "run"), "[workflow.runner].entry")
+            if entry != "run":
+                raise _error(root, "custom entries are not yet supported; the tree entry point must be named run")
         steps_raw = runner.get("steps")
         if (
             not isinstance(steps_raw, list)
@@ -853,6 +903,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         declarations={},
         directory=root.resolve(),
         entry=entry,
+        command=command,
         instantiate_file=instantiate_file,
         instantiate_exec=instantiate_exec,
         collect_file=collect_file,

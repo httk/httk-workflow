@@ -21,6 +21,14 @@ From a workflow package, replace `.../native` with `"$HTTK_WORKFLOW_NATIVE_API"`
 the installed SDK directory that `[workflow.build]` commands and attempts both
 see.
 
+Its manifest then runs the registered binary directly, with no `run` bridge
+script (see {doc}`../details/workflow_packages`):
+
+```toml
+[workflow.runner]
+command = ["{artifacts}/runner"]
+```
+
 ## Registration and dispatch
 
 `httk::workflow::Runner` is a builder for one workflow and its complete step

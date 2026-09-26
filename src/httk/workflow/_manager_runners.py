@@ -12,7 +12,7 @@ from typing import Any
 from httk.core.digests import sha256_file, tree_digest
 
 from .errors import FormatError, RunnerResolutionError
-from .models import JobDefinition, parse_package_runner
+from .models import JobDefinition, expand_runner_command, parse_package_runner, runner_command_reference
 
 RUNNER_TREE_ENTRY = "run"
 
@@ -26,6 +26,8 @@ class VerifiedRunner:
     sha256: str
     fd: int | None
     artifacts: Path | None
+    #: The expanded package command replacing ``path``, when the job declares one.
+    command: tuple[str, ...] | None = None
 
 
 def runner_module_allowed(module: str, runner_modules: Sequence[str] = ("httk.workflow",)) -> bool:
@@ -146,7 +148,12 @@ def check_runner_reference(
                 runner_search_paths=runner_search_paths,
                 runner_modules=runner_modules,
             )
-        if candidate.is_dir():
+        if candidate.is_dir() and job.runner_command is not None:
+            problem = runner_command_problem(job, candidate, None)
+            if problem is not None:
+                return problem
+            actual = tree_digest(candidate)
+        elif candidate.is_dir():
             executable = candidate / tree_entry
             if not executable.is_file():
                 return f"runner tree {job.runner_path.as_posix()} has no {tree_entry} entry point"
@@ -213,6 +220,56 @@ def _registered_runner_artifacts(manager: Any, job: JobDefinition, source: Path)
         raise RunnerResolutionError("runner_unavailable", f"cannot locate runner artifacts: {exc}") from exc
 
 
+def runner_command_problem(job: JobDefinition, tree: Path, artifacts: Path | None) -> str | None:
+    """Return a problem with a job's package command references, or ``None``.
+
+    Every ``{package}/PATH`` reference must name an existing file or directory
+    that resolves inside *tree*, and every ``{artifacts}/PATH`` one inside
+    *artifacts*; ``{artifacts}`` references are skipped when *artifacts* is
+    ``None``. A placeholder program must be an executable file.
+
+    :param job: Job definition carrying the command.
+    :param tree: The verified runner tree.
+    :param artifacts: The registered build artifacts, when known.
+    :return: A human-readable problem, or ``None``.
+    """
+
+    assert job.runner_command is not None
+    for index, element in enumerate(job.runner_command):
+        reference = runner_command_reference(element)
+        if reference is None or reference.path is None:
+            continue
+        root = tree if reference.name == "package" else artifacts
+        if root is None:
+            continue
+        candidate = root.joinpath(*reference.path.split("/"))
+        try:
+            inside = candidate.resolve(strict=True).is_relative_to(root.resolve(strict=True))
+        except OSError:
+            return f"runner {job.runner_path.as_posix()} command reference {element} does not exist"
+        if not inside:
+            return f"runner {job.runner_path.as_posix()} command reference {element} escapes its root"
+        if index == 0 and (not candidate.is_file() or not os.access(candidate, os.X_OK)):
+            return f"runner {job.runner_path.as_posix()} command program {element} is not an executable file"
+    return None
+
+
+def _runner_command(job: JobDefinition, source: Path, artifacts: Path | None) -> tuple[str, ...]:
+    """Check and expand a job's package command."""
+
+    assert job.runner_command is not None
+    try:
+        command = expand_runner_command(job.runner_command, source, artifacts)
+    except ValueError as exc:
+        raise RunnerResolutionError(
+            "runner_unavailable", f"runner {job.runner_path.as_posix()}: {exc} for this runner"
+        ) from exc
+    problem = runner_command_problem(job, source, artifacts)
+    if problem is not None:
+        raise RunnerResolutionError("runner_unavailable", problem)
+    return command
+
+
 def verify_runner(manager: Any, job: JobDefinition) -> VerifiedRunner:
     """Resolve and verify a shared runner without modifying its source tree.
 
@@ -232,6 +289,9 @@ def verify_runner(manager: Any, job: JobDefinition) -> VerifiedRunner:
                 "runner_mismatch",
                 f"{job.runner_source} runner {job.runner_path.as_posix()} has digest {digest}, but the job pinned {job.runner_sha256}",
             )
+        artifacts = _registered_runner_artifacts(manager, job, source)
+        if job.runner_command is not None:
+            return VerifiedRunner(source, source, digest, None, artifacts, _runner_command(job, source, artifacts))
         executable = source / RUNNER_TREE_ENTRY
         if not executable.is_file():
             raise RunnerResolutionError(
@@ -240,9 +300,7 @@ def verify_runner(manager: Any, job: JobDefinition) -> VerifiedRunner:
             )
         if not os.access(executable, os.X_OK):
             raise RunnerResolutionError("runner_unavailable", "runner is not executable")
-        return VerifiedRunner(
-            source / RUNNER_TREE_ENTRY, source, digest, None, _registered_runner_artifacts(manager, job, source)
-        )
+        return VerifiedRunner(source / RUNNER_TREE_ENTRY, source, digest, None, artifacts)
 
     fd: int | None = None
     try:

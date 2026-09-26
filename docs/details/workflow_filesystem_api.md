@@ -981,12 +981,41 @@ place — and executes it in place with the job workdir as cwd; it MUST NOT
 modify the runner or its tree. A digest disagreement fails the job with
 `runner_mismatch`; a runner that cannot be resolved or entered fails it with
 `runner_unavailable`. Both are ordinary continuable failures, never silent
-substitutions. A tree is entered at its top-level `run` file. File verification
+substitutions. A tree is entered at its top-level `run` file, unless the job
+carries `runner.command`. File verification
 pins the inode through launch; tree verification accepts the TOCTOU window
 between its digest check and execution because the store owner is trusted not
 to overwrite a runner concurrently. For a file runner, `argv[0]` and Python's
 `__file__` identify its `/dev/fd/<N>` descriptor path; siblings are located via
 `HTTK_WORKFLOW_RUNNER_ROOT`.
+
+A shared tree runner may instead carry `runner.command`, the unexpanded
+argument vector a workflow package declares as `[workflow.runner] command`, for
+example `["{artifacts}/relax"]` or `["java", "-cp", "{artifacts}/classes",
+"Relax"]`. It is a nonempty array of strings, covered by the job digest and
+forbidden for a `payload` runner. Its only placeholders are `{package}`, the
+verified tree, and `{artifacts}`, the build registered for this machine. A
+placeholder MUST start its element or directly follow `NAME=` (as in
+`-Dhome={package}`), and the rest of the element is empty or `/PATH`, a
+relative POSIX path whose parts are nonempty and not `.` or `..`. The program
+starts with a placeholder or is a bare name resolved on the attempt `PATH`.
+The manager verifies the tree digest, resolves `{artifacts}` (failing with
+`runner_not_built` when the build is unregistered), expands the vector, checks
+that every placeholder path exists and resolves inside its root and that a
+placeholder program is an executable file (otherwise `runner_unavailable`),
+appends `runner.arguments`, and runs it instead of the tree's `run` file, which
+such a tree does not have. The attempt's runlog event records the expanded
+vector as `runner_command`. A manager that predates `runner.command` ignores
+the member, finds no `run` entry, and fails the job with `runner_unavailable`.
+
+`runner.command` is part of the immutable, digest-covered `job.json` and is
+trusted exactly like the rest of the job: whoever can submit a job can already
+run their own code through a payload runner. The placeholder rules keep a
+package's references inside its own tree and build rather than sandboxing it.
+A bare program name is whatever the attempt `PATH` resolves, and is not
+restricted to an allowlist. `{artifacts}` exists only for a `workspace` runner,
+the only source with build registrations; an `installed` runner's command can
+use only `{package}`.
 
 An `installed` path may also use the reserved form `pkg:<module>/<resource>`,
 which resolves inside an installed Python package. A manager MUST restrict that

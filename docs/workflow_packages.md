@@ -11,6 +11,10 @@ my-workflow/
 └── run                    # the executable entry (any language)
 ```
 
+A package may instead declare `[workflow.runner] command`, an argument vector
+such as `["{artifacts}/relax"]` or `["perl", "{package}/relax.pl"]`, and carry
+no `run` script.
+
 ```toml
 [workflow]
 name = "example.relax"

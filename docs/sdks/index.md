@@ -20,6 +20,8 @@ declaration is the portable alternative: transfer its sources, then build once
 per platform class. Build commands and runners find the installed SDKs under
 `$HTTK_WORKFLOW_NATIVE_API`, one subdirectory per language (`c`, `cpp`,
 `fortran`, `rust`, `ada`, `java`, `perl`); see {doc}`../details/workflow_packages`.
+Such a package names what the manager runs in `[workflow.runner]`, for example
+`command = ["{artifacts}/relax"]`, instead of carrying a `run` bridge script.
 Outside a manager, `python -c 'import httk.workflow, pathlib;
 print(pathlib.Path(httk.workflow.__file__).with_name("native"))'` prints the
 same directory.

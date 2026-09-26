@@ -254,6 +254,12 @@ class RunnerRef:
     reference of the spawning job itself, which is what a campaign whose steps all
     live in one published runner wants.
 
+    Only :meth:`inherit` carries the spawning job's ``runner.command``. A
+    :meth:`workspace` or :meth:`installed` reference records no command, so it
+    must name a tree with a ``run`` entry or a runner file; a child pointed at a
+    package that declares ``[workflow.runner] command`` fails with
+    ``runner_unavailable``.
+
     :param source: The location from which the child runner is loaded.
     :param path: The workspace or installed runner path when one is selected.
     :param sha256: The digest pin for a workspace or installed runner.
@@ -294,13 +300,15 @@ class RunnerRef:
 
         return cls("installed", str(PurePosixPath(path)), validate_sha256(sha256, "runner sha256"))
 
-    def _resolve(self, parent: JobDefinition) -> tuple[str, RunnerSource, str, str | None, tuple[str, ...]]:
-        """Return ``(executor, source, path, sha256, arguments)`` for a child."""
+    def _resolve(
+        self, parent: JobDefinition
+    ) -> tuple[str, RunnerSource, str, str | None, tuple[str, ...], tuple[str, ...] | None]:
+        """Return ``(executor, source, path, sha256, arguments, command)`` for a child."""
 
         if self.source != "inherit":
             if self.path is None or self.sha256 is None:
                 raise ValueError("a workspace or installed runner reference needs a path and a digest")
-            return "path", self.source, self.path, self.sha256, ()
+            return "path", self.source, self.path, self.sha256, (), None
         if parent.runner_source == "payload":
             raise ValueError(
                 "RunnerRef.inherit() needs a runner that lives outside the payload, but this job runs the "
@@ -315,6 +323,7 @@ class RunnerRef:
             parent.runner_path.as_posix(),
             parent.runner_sha256,
             parent.runner_arguments,
+            parent.runner_command,
         )
 
 
@@ -374,7 +383,7 @@ class ChildSpec:
     def _job_spec(self, parent: JobDefinition, label: str) -> JobSpec:
         """Return the job specification of this child under *parent*."""
 
-        executor, source, path, sha256, arguments = self.runner._resolve(parent)
+        executor, source, path, sha256, arguments, command = self.runner._resolve(parent)
         return JobSpec(
             name=self.name or f"{parent.name}: {self.step} ({label})",
             workflow=self.workflow or parent.workflow,
@@ -385,6 +394,7 @@ class ChildSpec:
             runner_source=source,
             runner_sha256=sha256,
             runner_arguments=arguments,
+            runner_command=command,
             workdir_mode=self.workdir_mode,
             workdir_path=self.workdir_path,
             data_mode=self.data_mode,

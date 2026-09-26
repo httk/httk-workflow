@@ -14,6 +14,7 @@ from ..git_workflows import _uninstall_workflows, fetch_workflow
 from ..packages import installed_plugin_workflow_owners, installed_plugin_workflows
 from ..scaffold import (
     ResolvedWorkflow,
+    describe_package_runner,
     describe_runner,
     registered_workflows,
     resolve_workflow,
@@ -29,9 +30,12 @@ def _manifest_step_drift(workflow: ResolvedWorkflow) -> str | None:
 
     Resolving a package trusts the manifest and never executes anything. Describe
     is a report, not a parser, so here — and only here — the directory package's
-    runner entry is run with ``--describe`` (which strips any surrounding attempt
-    context) and its actual steps are compared to the manifest's. A disagreement
-    is surfaced but does not change describe's exit status.
+    runner entry, or its declared command, is run with ``--describe`` (which
+    strips any surrounding attempt context) and its actual steps are compared to
+    the manifest's. A disagreement is surfaced but does not change describe's
+    exit status. A command that needs ``{artifacts}`` is not run: describe has no
+    workspace build registration, just as a ``run`` bridge into artifacts could
+    not describe itself.
 
     :param workflow: The resolved workflow to check.
     :return: A drift warning, or ``None`` when nothing can be compared or they agree.
@@ -39,9 +43,11 @@ def _manifest_step_drift(workflow: ResolvedWorkflow) -> str | None:
 
     if workflow.directory is None or workflow.language is not None:
         return None
-    entry = workflow.directory / workflow.entry
     try:
-        described = describe_runner(entry)
+        if workflow.command is not None:
+            described = describe_package_runner(workflow.directory)
+        else:
+            described = describe_runner(workflow.directory / workflow.entry)
     except (ValueError, OSError):
         # A runner that will not describe itself is not a steps disagreement;
         # describe stays a manifest report and leaves that to precheck/run.
@@ -51,8 +57,9 @@ def _manifest_step_drift(workflow: ResolvedWorkflow) -> str | None:
     if sorted(workflow.steps) == sorted(described_steps):  # order is not semantic; initial_step is separate
         return None
     return (
-        f"the manifest declares steps {list(workflow.steps)} but the runner entry "
-        f"{workflow.entry!r} describes {described_steps}"
+        f"the manifest declares steps {list(workflow.steps)} but the runner "
+        f"{'command' if workflow.command is not None else 'entry'} "
+        f"{list(workflow.command) if workflow.command is not None else repr(workflow.entry)} describes {described_steps}"
     )
 
 

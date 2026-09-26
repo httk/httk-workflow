@@ -39,6 +39,7 @@ class AttemptLaunch:
     :param context: Runner context members.
     :param runner: Resolved executable, or no value to use the payload runner.
     :param workflow_prelude: Shell text run in a login shell before the runner, or empty for none.
+    :param command: The expanded package command run in place of *runner*, when the job declares one.
     """
 
     job: JobDefinition
@@ -49,6 +50,7 @@ class AttemptLaunch:
     context: Mapping[str, Any]
     runner: Path | None = None
     workflow_prelude: str = ""
+    command: tuple[str, ...] | None = None
 
     @property
     def runner_command(self) -> Path:
@@ -133,7 +135,8 @@ class PathRunnerExecutor:
         :param launch: Attempt paths and runner context.
         :return: Argument vector for the runner process.
         """
-        base = [str(launch.runner_command), *launch.job.runner_arguments]
+        program = list(launch.command) if launch.command is not None else [str(launch.runner_command)]
+        base = [*program, *launch.job.runner_arguments]
         if not launch.workflow_prelude.strip():
             return base
         script_path = launch.control / "prelude.sh"

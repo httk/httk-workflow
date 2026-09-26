@@ -52,9 +52,16 @@ The `vasp-relax-java` package of
 is a complete three-step mock-VASP-compatible relaxation built this way (workflow
 `vasp.relax-java`, run as
 `git+https://github.com/httk/workflows-vasp-other-languages#vasp-relax-java`).
-Its `httk_workflow.toml` uses the required `run` entry to delegate to a POSIX
-launcher, so publication transfers the launcher and its compiled `classes/`
-directory together as one pinned tree.
+Its `httk_workflow.toml` declares `[workflow.build]` with `artifacts =
+["classes"]` and runs the registered classes with no `run` bridge script:
+
+```toml
+[workflow.runner]
+command = ["java", "-cp", "{artifacts}/classes", "Relax"]
+```
+
+Publication transfers sources only; each machine compiles and registers its
+own `classes/` (see {doc}`../details/workflow_packages`).
 
 ## Values and errors
 

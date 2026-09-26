@@ -81,6 +81,14 @@ gfortran -std=f2008    "$HTTK_WORKFLOW_NATIVE_API/fortran/httk_workflow.f90" \
          runner.f90 httk_workflow_c.o -o runner
 ```
 
+Its manifest then runs the registered binary directly, with no `run` bridge
+script (see {doc}`../details/workflow_packages`):
+
+```toml
+[workflow.runner]
+command = ["{artifacts}/runner"]
+```
+
 A complete VASP relaxation authored this way is described at the end of this
 page.
 
