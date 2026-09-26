@@ -49,54 +49,59 @@ See {doc}`sdks/sdk_parity` for the resolution table. The workflows default to
 
 ## Writing a VASP runner in Python
 
-The workflows-vasp Python runners are built on the step API of
-{py:mod}`httk.workflow.vasp` (defined in `httk.workflow.vasp.steps`): each
-runner is a few step declarations, and the attempt-level work — staging the
-payload inputs, one supervised VASP run with the reviewed remedy ladder, promoting
-a relaxation to a single point, and publishing a stage — is imported. A
-relaxation runner is this whole file:
+A Python VASP runner is an ordinary {py:class}`~httk.workflow.Runner` whose
+steps spell out their work on the {py:mod}`httk.workflow.vasp` primitives, the
+same functions the Bash VASP API wraps. The workflows-vasp runners
+(`vasp-relax/run`, `vasp-static/run`, `vasp-relax-static/run`) are the worked
+examples: copy one and edit it. Each step reads its job parameters directly with
+`a.parameter(...)`, `a.setting(...)` and `a.state`, the way the Bash runner
+reads `httk_workflow_parameter`:
+
+- `prepare` copies the payload POSCAR (failing `vasp.input_missing` when it is
+  absent), INCAR and POTCAR into the workdir, builds a
+  {py:class}`~httk.workflow.vasp.VaspPreparationOptions` from the job
+  parameters and calls {py:func}`~httk.workflow.vasp.prepare_vasp_inputs`.
+- `run` resolves the `vasp.command` setting, calls
+  {py:func}`~httk.workflow.vasp.clean_vasp_outputs` and
+  {py:func}`~httk.workflow.vasp.run_vasp`, and advances on a completed run with
+  the `classification` and the energy from
+  {py:func}`~httk.workflow.vasp.last_oszicar_energy`. Otherwise it plans a remedy
+  with {py:func}`~httk.workflow.vasp.plan_vasp_remedy`, fails `vasp.failed`
+  when the ladder or the remedy budget is exhausted, and else applies it with
+  {py:func}`~httk.workflow.vasp.apply_vasp_remedy`, optionally rattles the POSCAR
+  ({py:func}`~httk.workflow.vasp.rattle_poscar`), counts `remedies`, and retries.
+- `publish` puts the collected files into transactional data, or only notes
+  them when the persistent workdir is the result, and succeeds.
+
+A condensed form of the `run` step of `vasp-relax/run` (the file adds the
+command check, the remedy-policy parameter, rattling and log notes):
 
 ```python
-from httk.workflow import Attempt, Runner
-from httk.workflow.vasp import publish_vasp_files, run_vasp_step, stage_vasp_inputs, vasp_data_prefix
-
-run = Runner("mygroup.vasp-relax")
-
-
-@run.step
-def prepare(a: Attempt) -> None:
-    if stage_vasp_inputs(a) is not None:
-        a.advance("run")
-
-
-@run.step(name="run")
-def run_step(a: Attempt) -> None:
-    run_vasp_step(a, next_step="publish")
-
-
-@run.step
-def publish(a: Attempt) -> None:
-    publish_vasp_files(a, prefix=vasp_data_prefix(a))
-    a.succeed()
-
-
-if __name__ == "__main__":
-    raise SystemExit(run.main())
+report = run_vasp(argv, directory=a.workdir, timeout=a.parameter("timeout", 86400.0))
+oszicar = a.workdir / "OSZICAR"
+energy = last_oszicar_energy(oszicar) if oszicar.is_file() else None
+state: dict[str, object] = {"classification": report.classification}
+if energy is not None:
+    state["energy"] = energy
+if report.classification == "completed":
+    a.advance("publish", state=state)
+    return
+applied = int(a.state.get("remedies", 0))
+history = job_remedy_history_path(a.payload)
+decision = plan_vasp_remedy(report.diagnostics, directory=a.workdir, history_path=history)
+if decision.give_up or applied >= int(a.parameter("maximum_remedies", 8)):
+    a.state.merge(state)
+    a.fail("vasp.failed", f"VASP {report.classification}", details=decision.as_mapping())
+    return
+apply_vasp_remedy(decision, directory=a.workdir, history_path=history)
+a.state.merge({**state, "remedies": applied + 1})
+a.retry(f"applied the {decision.policy} remedy for {decision.problem}")
 ```
 
-`stage_vasp_inputs` fails the job `vasp.input_missing` when the structure is
-absent; {py:func}`~httk.workflow.vasp.run_vasp_step` advances on a completed
-run, applies one remedy and retries, or fails `vasp.failed`
-(`vasp.command_missing` without a command), and keeps the job state
-`classification`, `energy` and `remedies`. A relax-then-static runner adds a
-`promote` step calling `promote_vasp_relaxation(a, next_step="static")`
-({py:func}`~httk.workflow.vasp.promote_vasp_relaxation`, which fails
-`vasp.no_relaxed_structure` without a CONTCAR) and a `static` step running
-`run_vasp_step` again. A single-point runner stages with
-`stage_vasp_inputs(a, extra_tags=vasp_static_tags(a))`, and
-`vasp_data_prefix(a)` reads the `data_prefix` parameter a stage publishes
-under. The step functions read the same job parameters as the workflows-vasp
-runners; the Bash counterpart is the Bash VASP API below.
+A relax-then-static runner (`vasp-relax-static/run`) adds a `promote` step that
+archives the relaxation, turns its CONTCAR into the next POSCAR with
+{py:func}`~httk.workflow.vasp.contcar_to_poscar`, and re-derives the inputs
+with the static tags; the Bash counterpart is the Bash VASP API below.
 
 ## What stays in httk-workflow
 
@@ -104,8 +109,7 @@ runners; the Bash counterpart is the Bash VASP API below.
   input preparation (`prepare_vasp_inputs`, k-point grids, POTCAR assembly),
   diagnostics, the reviewed remedy ladder (`plan_vasp_remedy`,
   {py:func}`~httk.workflow.vasp.register_remedy_policy`), supervised execution
-  (`run_vasp`), the attempt-level steps above (`httk.workflow.vasp.steps`),
-  and the result collectors in `httk.workflow.vasp.collect`. See
+  (`run_vasp`), and the result collectors in `httk.workflow.vasp.collect`. See
   {doc}`runtime_helpers`.
 - The Bash VASP API: a Bash runner sources `$HTTK_WORKFLOW_VASP_BASH_API` after
   `$HTTK_WORKFLOW_BASH_API`; see {doc}`sdks/native_bash_api`.
