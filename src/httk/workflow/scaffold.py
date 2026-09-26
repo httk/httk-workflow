@@ -64,12 +64,13 @@ from typing import TYPE_CHECKING, Literal, TypedDict, cast
 from httk.core.building import BuildSpec
 from httk.core.digests import sha256_file, tree_digest
 from httk.core.report import context_logger
+from httk.core.requirements import check_requirements, parse_requirements
 
 if TYPE_CHECKING:
     from .collecting import JobRecord
     from .languages import LanguageRequest
 
-from ._util import validate_inputs
+from ._util import interpreter_first_path, validate_inputs
 from .errors import FormatError
 from .models import (
     ATTEMPTS_DIRECTORY,
@@ -178,6 +179,7 @@ class WorkflowProvider:
     :param declaration_uri: Identify the source declaration URI.
     :param declaration_file: Name the source declaration file.
     :param name: Give the short name of a workflow whose id is a git URI.
+    :param requires: Give the ``NAME>=VERSION`` distribution requirements a job of it must meet.
     """
 
     workflow_id: str
@@ -212,6 +214,7 @@ class WorkflowProvider:
     declaration_uri: str | None = None
     declaration_file: str | None = None
     name: str | None = None
+    requires: tuple[str, ...] = ()
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -514,6 +517,7 @@ class ResolvedWorkflow:
     :param declaration_uri: Identify the source declaration URI.
     :param declaration_file: Name the source declaration file.
     :param name: Give the short name of a workflow whose id is a git URI.
+    :param requires: Give the ``NAME>=VERSION`` distribution requirements a job of it must meet.
     """
 
     source: Path
@@ -551,6 +555,7 @@ class ResolvedWorkflow:
     declaration_uri: str | None = None
     declaration_file: str | None = None
     name: str | None = None
+    requires: tuple[str, ...] = ()
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -746,6 +751,8 @@ def describe_runner(runner: str | os.PathLike[str], *, preserve_registration_ord
         raise ValueError(f"a runner workflow must be an existing file: {path}")
     environment = dict(os.environ)
     environment[_DESCRIBE_VARIABLE] = "1"
+    # Describe under this interpreter, exactly as the manager runs an attempt.
+    environment["PATH"] = interpreter_first_path(environment.get("PATH"))
     if preserve_registration_order:
         environment["HTTK_WORKFLOW_PRESERVE_STEP_ORDER"] = "1"
     shell = Path(__file__).with_name("shell")
@@ -974,6 +981,7 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
         declaration_uri=provider.declaration_uri,
         declaration_file=provider.declaration_file,
         name=provider.name,
+        requires=provider.requires,
         _input_metadata=provider._input_metadata,
     )
 
@@ -1001,7 +1009,8 @@ def resolve_workflow(
     :param data_mode: Override the resolved data mode.
     :param format: Force a language for a bare document or directory.
     :return: The resolved workflow description.
-    :raises ValueError: If the workflow cannot be found or its description is invalid.
+    :raises ValueError: If the workflow cannot be found, its description is invalid, or its
+        ``requires`` are unmet in this interpreter (a ``RequirementError``).
     """
 
     text = os.fspath(workflow)
@@ -1063,6 +1072,7 @@ def resolve_workflow(
                 outputs=provider.outputs,
                 declaration_uri=provider.declaration_uri,
                 declaration_file=provider.declaration_file,
+                requires=provider.requires,
                 _input_metadata=provider._input_metadata,
             )
         elif path.exists():
@@ -1142,6 +1152,10 @@ def resolve_workflow(
         resolved = replace(resolved, initial_step=step)
     if data_mode is not None:
         resolved = replace(resolved, data_mode=data_mode)
+    if resolved.requires:
+        check_requirements(
+            parse_requirements(list(resolved.requires), "requires"), f"workflow {resolved.workflow_id!r}"
+        )
     return resolved
 
 
@@ -2000,6 +2014,7 @@ def _build_payload(
         ),
         declarations=_merge_provenance_declaration(workflow.declarations, provenance),
         declared=declared_member,
+        requires=workflow.requires,
     )
     if prepared.finalize is not None:
         spec = prepared.finalize(spec)

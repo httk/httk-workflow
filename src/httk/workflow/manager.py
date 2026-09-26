@@ -27,6 +27,7 @@ from . import (
     _manager_scheduling,
 )
 from ._util import (
+    interpreter_first_path,
     json_bytes,
     read_json,
     timestamp_seconds,
@@ -200,7 +201,8 @@ class WorkCensus:
 
     ``ready_blocked`` groups the ready and unregisterable-submitted jobs this
     manager cannot progress by the requirement it lacks — ``executor``, ``pool``,
-    ``capability``, or ``resources`` — mapping each requirement to the count of jobs it would
+    ``capability``, ``requirements`` (an unmet ``requires`` entry of the job, checked in
+    this manager's environment), or ``resources`` — mapping each requirement to the count of jobs it would
     turn away. Every such job is attributed to exactly one requirement, so the
     grouped counts sum to :attr:`ready_blocked_total`.
 
@@ -243,9 +245,11 @@ class WorkCensus:
 
     def _blocked_groups(self) -> list[str]:
         groups: list[str] = []
-        for kind in ("executor", "pool", "capability", "resources"):
+        for kind in ("executor", "pool", "capability", "requirements", "resources"):
             for name, count in sorted(self.ready_blocked.get(kind, {}).items()):
-                label = f"resource={name}" if kind == "resources" else f"{kind}={name}"
+                label = {"resources": f"resource={name}", "requirements": f"requires {name}"}.get(
+                    kind, f"{kind}={name}"
+                )
                 groups.append(f"{label}: {count}")
         return groups
 
@@ -278,9 +282,10 @@ class WorkCensus:
         capabilities = sorted(self.ready_blocked.get("capability", {}))
         executors = sorted(self.ready_blocked.get("executor", {}))
         resources = sorted(self.ready_blocked.get("resources", {}))
-        if not (pools or capabilities or executors or resources):
+        requirements = sorted(self.ready_blocked.get("requirements", {}))
+        if not (pools or capabilities or executors or resources or requirements):
             return None
-        if resources and not (pools or capabilities or executors):
+        if resources and not (pools or capabilities or executors or requirements):
             count = sum(self.ready_blocked["resources"].values())
             names = ", ".join(f"`{name}`" for name in resources)
             resource_flags = " ".join(f"--worker-resource {name} COUNT" for name in resources)
@@ -308,6 +313,11 @@ class WorkCensus:
         if executors:
             lacks.append("executor(s) " + ",".join(executors))
             remedies.append("run a manager that has executor(s) " + ",".join(executors) + " installed")
+        if requirements:
+            lacks.append("the job requirement(s) " + "; ".join(requirements))
+            remedies.append(
+                "install the required distribution versions in this manager's environment and restart the manager"
+            )
         remedy = "; ".join(remedies) if remedies else "start a manager that serves them"
         return (
             f"{self.ready_blocked_total} job(s) cannot be claimed here because this manager does not serve "
@@ -1638,6 +1648,9 @@ class TaskManager:
         environment.pop("HTTK_WORKFLOW_RUNNER_ROOT", None)
         environment.update(
             {
+                # A runner's ``#!/usr/bin/env python3`` finds this interpreter, the
+                # one the job's ``requires`` were checked in at claim time.
+                "PATH": interpreter_first_path(os.environ.get("PATH")),
                 "HTTK_WORKFLOW_CONTEXT": context_json,
                 "HTTK_WORKFLOW_CONTROL_DIR": str(control),
                 "HTTK_WORKFLOW_WORKSPACE_DIR": str(self.workspace.root),

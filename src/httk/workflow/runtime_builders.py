@@ -175,6 +175,7 @@ class JobSpec:
     :param declarations: Supply workflow declarations.
     :param declared: Supply the declared parameter and input metadata sections.
     :param compatibility: Supply an optional compatibility profile.
+    :param requires: Require these ``NAME>=VERSION`` distributions in the claiming manager's environment.
     """
 
     name: str
@@ -207,6 +208,7 @@ class JobSpec:
     #: the shape of the environment member.
     declared: Mapping[str, object] = field(default_factory=dict)
     compatibility: Mapping[str, object] | None = None
+    requires: tuple[str, ...] = ()
 
     def as_mapping(self, *, parent: Mapping[str, object] | None = None) -> dict[str, object]:
         """Return the validated job-definition mapping.
@@ -269,6 +271,8 @@ class JobSpec:
             result["declarations"] = validate_declarations(self.declarations)
         if self.declared:
             result["declared"] = validate_declared(self.declared)
+        if self.requires:
+            result["requires"] = list(self.requires)
         if self.compatibility is not None:
             result["compatibility"] = copy.deepcopy(dict(self.compatibility))
         return result

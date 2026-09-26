@@ -10,6 +10,7 @@ from httk.core.digests import sha256_file, tree_digest
 
 from . import languages
 from ._manager_runners import check_runner_reference, contained, runner_module_allowed
+from ._manager_scheduling import unmet_job_requirements
 from .errors import WorkflowError
 from .introspection._diagnosis import ManagerRecord, claim_requirements, manager_refusals, read_managers
 from .models import STATE_KINDS, JobDefinition, Marker, parse_package_runner
@@ -278,6 +279,30 @@ def _language_finding(job: JobDefinition, managers: Sequence[ManagerRecord]) -> 
     return {"status": "problem", "problem": problem}
 
 
+def _requirements_finding(job: JobDefinition, managers: Sequence[ManagerRecord]) -> dict[str, object] | None:
+    """Return a finding for ``requires`` entries this process's environment does not meet.
+
+    A manager checks ``requires`` in its own environment and leaves an unmet job
+    unclaimed, so, as for a language engine, a miss here is only a problem when no
+    live manager serves this job's executor; otherwise it is ``indeterminate``.
+
+    :param job: The parsed job definition.
+    :param managers: Every manager registered in the workspace.
+    :return: A requirements finding, or ``None`` when every requirement is met here.
+    """
+
+    unmet = unmet_job_requirements(job.requires)
+    if not unmet:
+        return None
+    problem = f"unmet requirement(s) {'; '.join(unmet)}"
+    if any(record.alive() and job.runner_executor in record.executors for record in managers):
+        return {
+            "status": "indeterminate",
+            "problem": problem + " in this process; a manager claims this job only if its own environment meets them",
+        }
+    return {"status": "problem", "problem": problem}
+
+
 def _input_problems(workspace: Workspace, marker: Marker, job: JobDefinition) -> list[str]:
     """Return one problem per required declared input missing from the payload.
 
@@ -368,6 +393,7 @@ def _finding(
             "runner": {"problem": str(exc)},
             "claim": None,
             "language": None,
+            "requirements": None,
             "inputs": [],
             "step": None,
         }
@@ -388,6 +414,7 @@ def _finding(
         "runner": runner,
         "claim": _claim_finding(marker, job, managers),
         "language": _language_finding(job, managers),
+        "requirements": _requirements_finding(job, managers),
         "inputs": _input_problems(workspace, marker, job),
         "step": _step_finding(workspace, marker, job),
     }
@@ -458,6 +485,13 @@ def has_language_problem(finding: Mapping[str, object]) -> bool:
 
     language = finding.get("language")
     return isinstance(language, Mapping) and language.get("status") == "problem"
+
+
+def has_requirements_problem(finding: Mapping[str, object]) -> bool:
+    """Return whether a finding names unmet ``requires`` with no live manager to judge them."""
+
+    requirements = finding.get("requirements")
+    return isinstance(requirements, Mapping) and requirements.get("status") == "problem"
 
 
 def has_input_problem(finding: Mapping[str, object]) -> bool:

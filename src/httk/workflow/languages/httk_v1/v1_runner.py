@@ -16,15 +16,8 @@ from collections.abc import Mapping, Sequence
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 
-try:
-    from httk.workflow import Attempt, Runner
-    from httk.workflow._util import write_json_atomic
-except ModuleNotFoundError:  # pragma: no cover - cluster interpreter bootstrap
-    python = os.environ.get("HTTK_WORKFLOW_PYTHON")
-    if python is None or os.environ.get("HTTK_WORKFLOW_RUNNER_BOOTSTRAP") == "1":
-        raise
-    os.environ["HTTK_WORKFLOW_RUNNER_BOOTSTRAP"] = "1"
-    os.execv(python, [python, os.path.abspath(__file__), *sys.argv[1:]])
+from httk.workflow import Attempt, Runner
+from httk.workflow._util import write_json_atomic
 
 V1_PRIORITY_MAP = {1: 100, 2: 300, 3: 500, 4: 700, 5: 900}
 TASK_PATTERN = re.compile(

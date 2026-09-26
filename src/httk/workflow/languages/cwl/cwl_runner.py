@@ -70,22 +70,10 @@ import json
 import os
 import re
 import shutil
-import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 
-try:
-    from httk.workflow import Attempt, ChildSpec, Runner, RunnerRef
-except ModuleNotFoundError:  # pragma: no cover - interpreter bootstrap
-    # The manager launches this file directly, so the interpreter is whatever the
-    # shebang found on PATH, which on a cluster is not necessarily the one httk is
-    # installed in. HTTK_WORKFLOW_PYTHON is the interpreter the manager itself runs,
-    # so re-exec under it once and let a second failure be reported honestly.
-    _python = os.environ.get("HTTK_WORKFLOW_PYTHON")
-    if _python is None or os.environ.get("HTTK_WORKFLOW_RUNNER_BOOTSTRAP") == "1":
-        raise
-    os.environ["HTTK_WORKFLOW_RUNNER_BOOTSTRAP"] = "1"
-    os.execv(_python, [_python, os.path.abspath(__file__), *sys.argv[1:]])
+from httk.workflow import Attempt, ChildSpec, Runner, RunnerRef
 
 WORKFLOW = "cwl.workflow"
 OUTPUTS_FILE = "cwl-outputs.json"

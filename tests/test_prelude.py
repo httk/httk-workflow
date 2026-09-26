@@ -8,6 +8,8 @@ launcher. These tests cover the workspace round-trip and validation, the pure
 executor wrap, and the slurm batch-script tail.
 """
 
+import os
+import shlex
 import sys
 from pathlib import Path, PurePosixPath
 
@@ -98,7 +100,7 @@ def test_executor_with_prelude_wraps_in_login_shell(tmp_path: Path) -> None:
     script = launch.control / "prelude.sh"
     assert list(PathRunnerExecutor().command(launch)) == ["bash", "-l", str(script), *base]
     text = script.read_text(encoding="utf-8")
-    assert text.startswith("set -e\n")
+    assert text.startswith(f'set -e\nexport PATH={shlex.quote(os.path.dirname(sys.executable))}:"$PATH"\nmodule load')
     assert "module load VASP/6.2.1" in text
     assert text.endswith('exec "$@"\n')
 

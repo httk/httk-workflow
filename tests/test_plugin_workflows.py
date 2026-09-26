@@ -200,3 +200,34 @@ def test_plugin_workflow_build_publishes_and_registers_artifacts(tmp_path: Path)
         source_sha256=str(reference["sha256"]),
     )
     assert (artifacts / "build" / "run").is_file()
+
+
+def test_plugin_requires_apply_to_its_workflows_and_reach_job_json(tmp_path: Path) -> None:
+    source = _plugin(tmp_path / "plugin", "plugin-req", [("test.plugin.flow", None, False)])
+    manifest = source / "httk_plugin.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8") + 'requires = ["httk-core>=0.1", "httk-workflow>=0.1"]\n', encoding="utf-8"
+    )
+    package = source / "workflows" / "0" / "httk_workflow.toml"
+    package.write_text(
+        package.read_text(encoding="utf-8").replace(
+            "\n\n[workflow.runner]", '\nrequires = ["httk-core>=0", "httk-workflow>=0.2"]\n\n[workflow.runner]'
+        ),
+        encoding="utf-8",
+    )
+    installed = install_plugin(source)
+    _reset_plugin_workflow_cache()
+    provider = workflow_provider("test.plugin.flow")
+    assert provider is not None and provider.requires == ("httk-core>=0.1", "httk-workflow>=0.2")
+    job = new_job(Workspace.initialize(tmp_path / "workspace"), "test.plugin.flow")
+    assert JobDefinition.from_path(job.payload / "job.json").requires == ("httk-core>=0.1", "httk-workflow>=0.2")
+
+    # The environment changed after installation: the plugin's requirement now fails every member.
+    installed_manifest = installed.root / "httk_plugin.toml"
+    installed_manifest.write_text(
+        installed_manifest.read_text(encoding="utf-8").replace("httk-core>=0.1", "httk-no-such-distribution>=1"),
+        encoding="utf-8",
+    )
+    _reset_plugin_workflow_cache()
+    with pytest.raises(ValueError, match=r"unmet requirements: httk-no-such-distribution>=1 \(not installed\)"):
+        resolve_workflow("test.plugin.flow")

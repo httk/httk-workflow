@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from httk.core.requirements import parse_requirements
+
 from ._util import (
     DEFAULT_VISIBILITY_DEADLINE_SECONDS,
     json_bytes,
@@ -1362,6 +1364,8 @@ class JobDefinition:
     declared: Mapping[str, Mapping[str, Mapping[str, object]]]
     parent: Mapping[str, object] | None
     raw: Mapping[str, object]
+    #: The ``NAME>=VERSION`` distributions a claiming manager's environment must meet.
+    requires: tuple[str, ...] = ()
     stored_digest: str | None = None
 
     @property
@@ -1478,6 +1482,11 @@ class JobDefinition:
         declared = {} if declared_raw is None else validate_declared(declared_raw)
         parent_raw = value.get("parent")
         parent = None if parent_raw is None else require_mapping(parent_raw, "parent")
+        requires_raw = value.get("requires")
+        try:
+            requires = () if requires_raw is None else parse_requirements(requires_raw, "requires")
+        except ValueError as exc:
+            raise FormatError(str(exc)) from exc
         return cls(
             id=job_id,
             tag=tag,
@@ -1504,6 +1513,7 @@ class JobDefinition:
             declared=declared,
             parent=None if parent is None else dict(parent),
             raw=dict(value),
+            requires=tuple(item.text for item in requires),
         )
 
 

@@ -1024,6 +1024,13 @@ both match. This is claim eligibility, not a workflow name; quantitative
 `resources` are separate declarations used by a capable manager when packing
 attempts.
 
+The optional top-level `requires` member is an array of `NAME>=VERSION`
+strings naming minimum installed distribution versions (only `>=`, a plain
+`N(.N)*` release, each distribution once). A manager MUST leave a ready job
+unclaimed when its own environment does not meet every entry, exactly like a
+missing capability. The member is omitted when empty, and a manager that
+predates it ignores it.
+
 The literal pool name `default` is reserved for jobs requiring no explicit
 routing. A manager started without pool configuration MUST advertise
 `default`. Thus a trivial deployment uses the value shown above without any

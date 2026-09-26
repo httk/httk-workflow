@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import sys
 import tempfile
 import time
 from collections.abc import Iterable, Iterator, Mapping
@@ -123,6 +124,23 @@ def fsync_tree(root: Path) -> None:
             fsync_file(entry)
     for directory in directories:
         fsync_directory(directory)
+
+
+def interpreter_first_path(path: str | None) -> str:
+    """Return *path* with this interpreter's directory as its first entry.
+
+    A runner's ``#!/usr/bin/env python3`` then resolves to the interpreter the
+    manager runs in, which is where the job's ``requires`` were checked.
+
+    :param path: Give the current ``PATH`` value, if any.
+    :return: The ``PATH`` value to run a runner with.
+    """
+
+    directory = os.path.dirname(sys.executable)
+    entries = path.split(os.pathsep) if path else []
+    if not directory or entries[:1] == [directory]:
+        return path or ""
+    return os.pathsep.join([directory, *entries])
 
 
 def require_mapping(value: object, name: str) -> Mapping[str, object]:

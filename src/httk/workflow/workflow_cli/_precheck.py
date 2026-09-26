@@ -13,6 +13,7 @@ from ..precheck import (
     has_environment_problem,
     has_input_problem,
     has_language_problem,
+    has_requirements_problem,
     has_runner_problem,
     has_step_problem,
     manager_availability_notice,
@@ -37,6 +38,8 @@ def _summary(findings: list[dict[str, object]]) -> dict[str, int]:
         "claim_problems": sum(has_claim_problem(item) for item in findings),
         "language_problems": sum(has_language_problem(item) for item in findings),
         "language_indeterminate": sum(status_of(item, "language") == "indeterminate" for item in findings),
+        "requirements_problems": sum(has_requirements_problem(item) for item in findings),
+        "requirements_indeterminate": sum(status_of(item, "requirements") == "indeterminate" for item in findings),
         "input_problems": sum(has_input_problem(item) for item in findings),
         "step_problems": sum(has_step_problem(item) for item in findings),
     }
@@ -102,11 +105,12 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
             claim = finding.get("claim")
             if isinstance(claim, Mapping) and claim.get("status") == "problem":
                 problems.append(f"claim: {claim.get('problem')}")
-            language = finding.get("language")
-            if isinstance(language, Mapping) and language.get("status") == "problem":
-                problems.append(f"language: {language.get('problem')}")
-            elif isinstance(language, Mapping) and language.get("status") == "indeterminate":
-                problems.append(f"language indeterminate: {language.get('problem')}")
+            for member in ("language", "requirements"):
+                value = finding.get(member)
+                if isinstance(value, Mapping) and value.get("status") == "problem":
+                    problems.append(f"{member}: {value.get('problem')}")
+                elif isinstance(value, Mapping) and value.get("status") == "indeterminate":
+                    problems.append(f"{member} indeterminate: {value.get('problem')}")
             inputs = finding.get("inputs")
             if isinstance(inputs, list):
                 problems.extend(f"input: {problem}" for problem in inputs)
@@ -118,7 +122,8 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
         print(
             f"checked {summary['checked']}, unresolved {summary['unresolved']}, "
             f"runner problems {summary['runner_problems']}, unclaimable {summary['claim_problems']}, "
-            f"language problems {summary['language_problems']}, input problems {summary['input_problems']}, "
+            f"language problems {summary['language_problems']}, "
+            f"requirements problems {summary['requirements_problems']}, input problems {summary['input_problems']}, "
             f"step problems {summary['step_problems']}"
         )
     return (
@@ -127,6 +132,7 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
         or summary["runner_problems"]
         or summary["claim_problems"]
         or summary["language_problems"]
+        or summary["requirements_problems"]
         or summary["input_problems"]
         or summary["step_problems"]
         else 0

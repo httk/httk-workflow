@@ -17,6 +17,7 @@ from typing import Any, cast
 
 from httk.core.building import BuildSpec, artifact_excluder, read_manifest_build_spec
 from httk.core.digests import tree_digest
+from httk.core.requirements import Requirement, parse_requirements
 
 from . import languages
 from ._util import validate_inputs
@@ -590,6 +591,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             "outputs",
             "resources",
             "steps",
+            "requires",
         },
         "[workflow]",
         root,
@@ -607,6 +609,10 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         if re.fullmatch(r"[a-z0-9._-]+", alias) is None:
             raise _error(root, "[workflow].alias must match [a-z0-9._-]+")
     description = _optional_string(workflow, "description", "[workflow]", root) or ""
+    try:
+        requires = tuple(item.text for item in parse_requirements(workflow.get("requires", []), "[workflow].requires"))
+    except ValueError as exc:
+        raise _error(root, str(exc)) from exc
     declaration_uri = _optional_string(workflow, "declaration_uri", "[workflow]", root)
     short_name: str | None = None
     if _uri is not None:
@@ -860,6 +866,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         step_resources=step_resources,
         declaration_uri=declaration_uri,
         declaration_file=None,
+        requires=requires,
         _input_metadata=input_metadata,
         collector=(
             f"httk.workflow.languages.{language_name.replace('-', '_')}:collect"
@@ -917,6 +924,9 @@ def _plugin_workflow_data() -> tuple[Mapping[str, WorkflowProvider], Mapping[str
                     exc,
                 )
                 continue
+            if plugin.manifest.requires:
+                # The plugin's requirements apply to every member it bundles.
+                provider = replace(provider, requires=_merged_requires(plugin.manifest.requires, provider.requires))
             record = len(records)
             records.append((plugin.name, provider))
             for name in (provider.workflow_id, provider.alias):
@@ -948,6 +958,17 @@ def _plugin_workflow_data() -> tuple[Mapping[str, WorkflowProvider], Mapping[str
         MappingProxyType({name: tuple(sorted(plugin_names)) for name, plugin_names in conflicts.items()}),
     )
     return _PLUGIN_WORKFLOW_CACHE
+
+
+def _merged_requires(plugin: tuple[Requirement, ...], workflow: tuple[str, ...]) -> tuple[str, ...]:
+    """Merge a plugin's requirements into a member workflow's, keeping the higher minimum per distribution."""
+
+    merged: dict[str, Requirement] = {}
+    for requirement in (*plugin, *parse_requirements(list(workflow), "[workflow].requires")):
+        previous = merged.get(requirement.name)
+        if previous is None or requirement.minimum > previous.minimum:
+            merged[requirement.name] = requirement
+    return tuple(requirement.text for requirement in merged.values())
 
 
 def installed_plugin_workflows() -> Mapping[str, WorkflowProvider]:

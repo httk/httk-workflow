@@ -1,5 +1,8 @@
 """Define runner-executor contracts used by the workflow manager."""
 
+import os
+import shlex
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -123,7 +126,9 @@ class PathRunnerExecutor:
         When the launch carries a workflow prelude, the runner is wrapped in a
         login shell that runs the prelude (under ``set -e``) then execs the
         runner, so a failing prelude line aborts before the runner starts and
-        the runner inherits the initialized environment.
+        the runner inherits the initialized environment. The login profiles may
+        reset ``PATH``, so the manager's interpreter directory is put first again
+        before the prelude, which keeps the last word.
 
         :param launch: Attempt paths and runner context.
         :return: Argument vector for the runner process.
@@ -132,7 +137,11 @@ class PathRunnerExecutor:
         if not launch.workflow_prelude.strip():
             return base
         script_path = launch.control / "prelude.sh"
-        script_path.write_text("set -e\n" + launch.workflow_prelude + '\nexec "$@"\n', encoding="utf-8")
+        interpreter = shlex.quote(os.path.dirname(sys.executable))
+        script_path.write_text(
+            f'set -e\nexport PATH={interpreter}:"$PATH"\n' + launch.workflow_prelude + '\nexec "$@"\n',
+            encoding="utf-8",
+        )
         return ["bash", "-l", str(script_path), *base]
 
     def commit_outcome(self, commit: OutcomeCommit) -> None:

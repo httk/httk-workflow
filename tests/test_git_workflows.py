@@ -469,3 +469,19 @@ def test_uninstall_of_a_plugin_workflow_points_to_plugin_uninstall(
 )
 def test_definition_uri_is_only_a_pinned_canonical_git_uri(workflow: object, expected: str | None) -> None:
     assert _definition_uri(workflow) == expected
+
+
+def test_git_workflow_with_unmet_requires_is_refused_at_job_creation(tmp_path: Path) -> None:
+    root, _ = _repository(tmp_path / "repo", {"relax": "tests.git.relax"})
+    manifest = root / "relax" / "httk_workflow.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "description =", 'requires = ["httk-no-such-distribution>=1"]\ndescription ='
+        ),
+        encoding="utf-8",
+    )
+    _commit(root, "requires")
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(ValueError, match=r"unmet requirements: httk-no-such-distribution>=1 \(not installed\)"):
+        new_job(workspace, f"git+file://{root}@main#relax")
+    assert not list(workspace.scan_marker_entries(("submitted",)))

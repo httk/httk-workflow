@@ -149,7 +149,8 @@ allowlist a manager does not carry), a **language job** (the collect gate's
 pip extra to install (for example `pip install httk-workflow[jobflow]`) — a
 failure only when no live manager serves its executor, since the extras belong on
 the machine that runs the job; when one does, it is `indeterminate` and
-non-failing. A declared **required input** whose staged destination has gone
+non-failing. A job whose `requires` are unmet in this process is reported the
+same way, naming each unmet requirement and its installed version. A declared **required input** whose staged destination has gone
 missing from the payload is flagged. When no manager is live, one workspace-level
 notice replaces per-job claim findings. An unresolved entry, broken runner,
 unclaimable job, missing-and-unserved engine, or missing required input gives
@@ -480,8 +481,8 @@ normal run is never silent about which manager is doing what and where its log
 is. When it exits idle it prints one closing summary line that classifies every
 remaining job: how many succeeded and failed, how many are *not claimable here*
 — ready or unregisterable-submitted jobs broken down by the pool, capability,
-or executor this manager does not serve, or by resource label beyond its
-capacity — how many are waiting on children, how many are paused, and how many
+or executor this manager does not serve, by the job `requires` entry its
+environment does not meet, or by resource label beyond its capacity — how many are waiting on children, how many are paused, and how many
 committing or cancelling jobs have an unreadable definition. A job this manager
 cannot progress — including one whose `job.json` is corrupt — no longer keeps
 it awake to the idle timeout; it is reported instead. If the manager does hit
@@ -780,7 +781,8 @@ remains readable is still shown.
 - `submitted`: whether any manager has registered it, and which live managers
   serve its runner executor;
 - `ready`: every claim precondition, one line each — runner executor, claim pool,
-  required capabilities, the maintenance lock, the workspace core profile, the
+  required capabilities, the job's `requires` (checked in the operator's
+  process, which a manager re-checks in its own), the maintenance lock, the workspace core profile, the
   attempt budgets, and which live manager would accept the job;
 - `claimed` and `running`: the owning manager, its heartbeat age against the
   recorded lease, and whether an expired lease means recovery rather than a stuck
@@ -854,6 +856,16 @@ the context supplied by `HTTK_WORKFLOW_CONTEXT` and publishes
 {doc}`workflow_filesystem_api` for the complete protocol, and
 {doc}`runtime_helpers`, {doc}`/sdks/native_bash_api`, or the {doc}`/sdks/sdk_parity` table
 for the two authoring SDKs that implement it.
+
+The manager puts the directory of its own interpreter first on the runner's
+`PATH`, so `#!/usr/bin/env python3` is the interpreter it runs in — the one a
+job's `requires` were checked in when it was claimed; a ready job whose
+`requires` that environment does not meet is left unclaimed for another manager.
+The remedy is to install the required distribution versions in that manager's
+environment and restart the manager, which checks them once per process.
+`HTTK_WORKFLOW_PYTHON` names the same interpreter. A workflow prelude's login
+shell re-puts that directory first after its profiles run, and the prelude itself
+still runs last and may change `PATH`.
 
 The local executor starts runners behind a one-byte launch gate. It records
 the process identity in the `running` frame before releasing that gate. If the

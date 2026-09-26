@@ -1,10 +1,13 @@
 """Private scheduling decisions used by :mod:`httk.workflow.manager`."""
 
+import functools
 import logging
 import uuid
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from typing import TYPE_CHECKING, Any
+
+from httk.core.requirements import parse_requirements, unmet_requirements
 
 from .errors import (
     FormatError,
@@ -18,6 +21,17 @@ if TYPE_CHECKING:
     from .manager import WorkCensus
 
 _LOGGER = logging.getLogger("httk.workflow.manager")
+
+
+@functools.cache
+def unmet_job_requirements(requires: tuple[str, ...]) -> tuple[str, ...]:
+    """Return which of a job's ``requires`` this process's environment does not meet.
+
+    Memoized for the process lifetime: installed distributions do not change
+    under a running manager, and one campaign repeats one requirement tuple.
+    """
+
+    return unmet_requirements(parse_requirements(list(requires), "requires")) if requires else ()
 
 
 def effective_requirement(
@@ -95,6 +109,10 @@ def eligible_ready(manager: Any) -> list[tuple[Marker, dict[str, int]]]:
                 marker.job_key,
                 ",".join(sorted(job.required_capabilities - manager.capabilities)),
             )
+            continue
+        unmet = unmet_job_requirements(job.requires)
+        if unmet:
+            _LOGGER.debug("skipping ready job %s: unmet requirements %s", marker.job_key, "; ".join(unmet))
             continue
         try:
             requirement = effective_requirement(job, state, manager.resources, manager.maximum_workers)
@@ -280,7 +298,7 @@ def _classify_pending(manager: Any, marker: Marker, blocked: dict[str, Counter[s
     """Classify one submitted or ready marker, returning whether it is actionable.
 
     A submitted job only needs its executor served to register; a ready job must
-    also match the pool, capabilities, and static resource capacity. A job this
+    also match the pool, capabilities, ``requires``, and static resource capacity. A job this
     manager cannot progress is attributed to exactly one missing requirement, in the same order
     :func:`eligible_ready` checks them.
     """
@@ -303,6 +321,10 @@ def _classify_pending(manager: Any, marker: Marker, blocked: dict[str, Counter[s
     if missing:
         blocked["capability"][min(missing)] += 1
         return False
+    unmet = unmet_job_requirements(job.requires)
+    if unmet:
+        blocked["requirements"][unmet[0]] += 1
+        return False
     try:
         state = manager._read_frame(marker)
     except (WorkflowError, OSError):
@@ -323,7 +345,7 @@ def work_census(manager: Any) -> "WorkCensus":
 
     Actionability applies exactly the claim predicates of :func:`eligible_ready`:
     a ready job counts as actionable only if this manager could claim it. A
-    wrong-pool, missing-capability, resource-unfit, or unserved-executor job is not actionable
+    wrong-pool, missing-capability, unmet-requirement, resource-unfit, or unserved-executor job is not actionable
     — the manager can do nothing about it — so it is reported for the operator
     instead of silently keeping the manager awake or silently letting it exit.
     """
@@ -347,6 +369,7 @@ def work_census(manager: Any) -> "WorkCensus":
         "executor": Counter(),
         "pool": Counter(),
         "capability": Counter(),
+        "requirements": Counter(),
         "resources": Counter(),
     }
     ready_claimable = 0

@@ -6,7 +6,6 @@ import importlib.util
 import json
 import os
 import shutil
-import sys
 import traceback
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -14,19 +13,7 @@ from contextlib import chdir
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
-try:
-    from httk.workflow import Attempt, ChildSpec, Runner, RunnerRef
-except ModuleNotFoundError:  # pragma: no cover - interpreter bootstrap
-    # The manager launches this file directly, so the interpreter is whatever the
-    # shebang found on PATH, which on a cluster is not necessarily the one httk is
-    # installed in. HTTK_WORKFLOW_PYTHON is the interpreter the manager itself runs,
-    # so re-exec under it once and let a second failure be reported honestly.
-    _python = os.environ.get("HTTK_WORKFLOW_PYTHON")
-    if _python is None or os.environ.get("HTTK_WORKFLOW_RUNNER_BOOTSTRAP") == "1":
-        raise
-    os.environ["HTTK_WORKFLOW_RUNNER_BOOTSTRAP"] = "1"
-    os.execv(_python, [_python, os.path.abspath(__file__), *sys.argv[1:]])
-
+from httk.workflow import Attempt, ChildSpec, Runner, RunnerRef
 from httk.workflow.languages.jobflow import OUTPUTS_FILE
 
 WORKFLOW = "jobflow.workflow"

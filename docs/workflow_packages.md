@@ -51,6 +51,10 @@ registrations; the manager passes registered build artifacts through
 `HTTK_WORKFLOW_RUNNER_ARTIFACTS` without modifying the published source tree.
 The build semantics are unchanged.
 
+`[workflow] requires = ["httk-workflow>=2.2.0", ...]` declares minimum
+distribution versions; they are checked when a job is created and again by the
+claiming manager in its own environment, so a runner needs no import guard.
+
 An installed *httk₂* plugin may bundle workflow packages. Resolution checks
 in-process registrations first, then installed plugins; `httk workflow list`
 labels plugin entries with their owning plugin, while `workflow describe`

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .._manager_runners import runner_module_allowed
+from .._manager_scheduling import unmet_job_requirements
 from .._util import read_json, timestamp_seconds
 from ..errors import WorkflowError
 from ..manifests import read_maintenance_lock
@@ -615,6 +616,19 @@ def _requirement_checks(job: JobDefinition, report: _Diagnosing) -> ClaimRequire
         f"this job runs on the {requirements.executor} runner executor "
         f"({job.runner_source}:{job.runner_path.as_posix()})",
     )
+    if job.requires:
+        unmet = unmet_job_requirements(job.requires)
+        report.check(
+            "required distributions",
+            not unmet,
+            (
+                f"unmet in this process's environment: {'; '.join(unmet)}; a manager claims this job only "
+                "when its own environment meets every requirement"
+                if unmet
+                else f"{', '.join(job.requires)} met in this process's environment; each manager re-checks "
+                "them in its own before claiming"
+            ),
+        )
     return requirements
 
 

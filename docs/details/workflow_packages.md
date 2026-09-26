@@ -99,6 +99,7 @@ before a provider is returned.
 | `declaration_file` | no | Relative regular-file member containing an externally authored OPTIMADE-format workflow declaration JSON. |
 | `resources` | no | Default resource requirements, a table mapping resource labels to non-negative integer values. |
 | `steps` | no | Per-step resource overrides; only valid with an executable runner and only for names in its declared `steps` list. |
+| `requires` | no | Minimum distribution versions, a list of `NAME>=VERSION` strings (only `>=`, a plain `N(.N)*` release, each distribution once), for example `["httk-workflow>=2.2.0", "httk-atomistic>=2.1.2"]`. |
 
 ```toml
 [workflow]
@@ -107,6 +108,7 @@ alias = "relax"
 description = "Relax one structure."
 declaration_uri = "https://example.org/workflows/relax"
 # declaration_file = "declaration.json"
+requires = ["httk-workflow>=2.2.0"]
 
 [workflow.resources]
 procs = 4
@@ -115,6 +117,26 @@ mem = 4096
 [workflow.steps.relax.resources]
 procs = 8
 ```
+
+### `requires`: where it is checked
+
+`requires` is checked twice, each time against the interpreter doing the work:
+
+- **at job creation**, when `job new`, `campaign submit`, `workflow describe`,
+  or `Attempt.call` resolves the workflow — a package directory, a registered
+  or plugin-bundled name, or a git URI (after it is fetched). An unmet entry
+  refuses with every unmet requirement and its installed version. A plugin's
+  `[plugin] requires` applies to every workflow it bundles and is merged in,
+  keeping the higher minimum per distribution;
+- **at claim time**, inside the workspace: the requirement texts are copied into
+  the job's `job.json` as the optional `requires` member, and a manager whose
+  own environment does not meet them leaves the ready job unclaimed for another
+  manager, exactly like a missing capability. Install the required distribution
+  versions in that manager's environment and restart the manager.
+
+The manager runs every runner with its own interpreter's directory first on
+`PATH`, so a Python runner's `#!/usr/bin/env python3` is the interpreter the
+requirements were just checked in and needs no import guard of its own.
 
 ### `[workflow.runner]`: executable form
 
