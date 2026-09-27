@@ -11,7 +11,9 @@ my-workflow/
 └── run                    # the executable entry (any language)
 ```
 
-A package may instead declare `[workflow.runner] command`, an argument vector
+`[workflow.runner] entry` may name any executable member instead, and a
+descriptive name such as `run.py` or `run.sh` is recommended; the package then
+has no `run` member. A package may instead declare `[workflow.runner] command`, an argument vector
 such as `["{artifacts}/relax"]` or `["perl", "{package}/relax.pl"]`, and carry
 no `run` script.
 
@@ -48,6 +50,9 @@ payload (under `<workspace>/postprocess/`, so a sealed job can still be
 postprocessed); and compiled
 workflows declare `[workflow.build]` (sources-only digests, binaries built and
 registered per machine with `httk workflow build`).
+An instantiate hook's parameters are the caller-supplied values plus any a
+language realization wires in; the declared defaults reach it separately and
+fill in every parameter still absent after it returns.
 
 The `[workflow.build]` vocabulary and engine are shared `httk.core.building`
 machinery. *httk-workflow* owns the workspace store layout and platform-tagged

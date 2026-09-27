@@ -8,9 +8,7 @@ from pathlib import Path
 import pytest
 
 from httk.workflow import Attempt
-from httk.workflow.compat.v1 import bundled_v1_root
-from httk.workflow.runtime import run_command
-from httk.workflow.vasp import (
+from httk.workflow.codes.vasp import (
     assemble_potcar,
     automatic_kpoint_grid,
     contcar_to_poscar,
@@ -21,6 +19,8 @@ from httk.workflow.vasp import (
     update_incar,
     write_automatic_kpoints,
 )
+from httk.workflow.compat.v1 import bundled_v1_root
+from httk.workflow.runtime import run_command
 
 
 def _context(path: Path) -> dict[str, object]:

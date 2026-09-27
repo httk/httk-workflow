@@ -12,7 +12,7 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
-from ..supervision import Diagnostic
+from ...supervision import Diagnostic
 from .inputs import _write_text_atomic
 
 #: Outputs :func:`clean_vasp_outputs` keeps unless they are named explicitly:

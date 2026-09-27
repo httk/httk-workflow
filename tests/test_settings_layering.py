@@ -29,7 +29,7 @@ from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.sdk import Attempt
 from httk.workflow.workflow_cli import command
 
-_BASH_API = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "shell" / "httk-workflow.sh"
+_BASH_API = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "native" / "bash" / "httk-workflow.sh"
 
 _EXPORT_RUNNER = """#!/usr/bin/env python3
 import json

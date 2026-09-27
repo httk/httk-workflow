@@ -10,6 +10,14 @@ import sys
 import uuid
 from pathlib import Path
 
+from httk.workflow.codes.vasp import (
+    VaspRemedyDecision,
+    apply_vasp_remedy,
+    clean_vasp_outputs,
+    diagnose_vasp_files,
+    plan_vasp_remedy,
+    run_vasp,
+)
 from httk.workflow.protocol import (
     AttemptContext,
     JobSpec,
@@ -18,14 +26,6 @@ from httk.workflow.protocol import (
     prepare_job_payload,
 )
 from httk.workflow.supervision import Diagnostic, ProcessSupervisor
-from httk.workflow.vasp import (
-    VaspRemedyDecision,
-    apply_vasp_remedy,
-    clean_vasp_outputs,
-    diagnose_vasp_files,
-    plan_vasp_remedy,
-    run_vasp,
-)
 
 
 def _draft(tmp_path: Path, *, data_generation: int | None = None) -> OutcomeDraft:

@@ -1024,49 +1024,149 @@ def _executable_path(provider: object, root: Path) -> Path:
     return source
 
 
-def _entry_record(value: Mapping[str, object]) -> object:
-    from httk.core.register import entry_record_info, known_entry_records, resolve_entry_family, resolve_entry_record
+def _entry_record(value: Mapping[str, object], declared: Mapping[str, object]) -> object:
+    """Reconstruct one ``{"entry": {...}}`` collector output as its registered entry.
+
+    The entry ``type`` (checked against the declared output's ``entry_type``)
+    selects the registered records and families of that type; a declared output
+    ``ref`` naming one of their definition IRIs narrows the choice. A record that
+    constructs itself from its mapping (``from_obj``) owns the emitted form.
+    Otherwise the form is the family's served OPTIMADE form, and the family's
+    OPTIMADE entry binding builds it — the same backend and view that read the
+    entry from a remote service. Its identity can differ from the object an
+    in-process collector builds for the same data (for example from a POSCAR).
+    """
+
+    from httk.core.register import (
+        entry_family_info,
+        entry_record_info,
+        known_entry_families,
+        known_entry_records,
+        optimade_entry_binding,
+        resolve_entry_family,
+        resolve_entry_record,
+    )
 
     entry_type = value.get("type")
     if not isinstance(entry_type, str):
         raise ValueError("entry output must contain a string type")
-    known: list[str] = []
-    for name in known_entry_records():
+    declared_type = declared.get("entry_type")
+    if isinstance(declared_type, str) and declared_type != entry_type:
+        raise ValueError(f"entry output type {entry_type!r} does not match the declared entry_type {declared_type!r}")
+    families: dict[str, tuple[type, str | None]] = {}
+    known: set[str] = set()
+    for name in known_entry_families():
         try:
-            candidate = resolve_entry_record(name)
+            family = resolve_entry_family(name)
         except (ImportError, ModuleNotFoundError, TypeError, ValueError):
             continue
+        family_definition = entry_family_info(name)[1]
+        family_type = getattr(family, "type", None)
+        if not isinstance(family_type, str) and isinstance(family_definition, str):
+            family_type = family_definition.rsplit("/", 1)[-1]
+        if isinstance(family_type, str):
+            known.add(family_type)
+            if family_type == entry_type:
+                families[name] = (family, family_definition)
+    records: list[tuple[str, type, str | None]] = []
+    for name in known_entry_records():
         _, family_name, definition_id = entry_record_info(name)
-        instance_type = None
         if family_name is not None:
-            try:
-                instance_type = getattr(resolve_entry_family(family_name), "type", None)
-            except (ImportError, ModuleNotFoundError, TypeError, ValueError):
-                instance_type = None
-        if not isinstance(instance_type, str) and isinstance(definition_id, str):
-            instance_type = definition_id.rsplit("/", 1)[-1]
-        if isinstance(instance_type, str):
-            known.append(instance_type)
-            if instance_type == entry_type:
-                fields = dict(value)
-                fields.pop("type", None)
-                expected_id = fields.pop("id", None)
-                result = cast(Any, candidate).from_obj(fields)
-                if expected_id is not None and expected_id != getattr(result, "id", None):
-                    raise ValueError(f"entry output id {expected_id!r} does not match the constructed record")
-                return result
-    raise ValueError(f"unknown entry type {entry_type!r}; known types: {', '.join(sorted(set(known))) or '(none)'}")
+            if family_name not in families:
+                continue
+            definition_id = definition_id or families[family_name][1]
+        elif isinstance(definition_id, str):
+            # A family-less record is typed by its definition IRI alone.
+            record_type = definition_id.rsplit("/", 1)[-1]
+            known.add(record_type)
+            if record_type != entry_type:
+                continue
+        else:
+            continue
+        try:
+            records.append((name, resolve_entry_record(name), definition_id))
+        except (ImportError, ModuleNotFoundError, TypeError, ValueError):
+            continue
+    ref = declared.get("ref")
+    if isinstance(ref, str):
+        # An output ref is a free declaration reference; it selects only when it
+        # names one of these definition IRIs.
+        narrowed_records = [item for item in records if item[2] == ref]
+        narrowed_families = {name: item for name, item in families.items() if item[1] == ref}
+        if narrowed_records or narrowed_families:
+            records, families = narrowed_records, narrowed_families
+        else:
+            _LOGGER.warning(
+                "output ref %r names no registered %s definition; resolving the entry by its type alone",
+                ref,
+                entry_type,
+            )
+    fields = dict(value)
+    fields.pop("type", None)
+    expected_id = fields.pop("id", None)
+    constructible = [item for item in records if callable(getattr(item[1], "from_obj", None))]
+    if len(constructible) > 1:
+        names = ", ".join(name for name, _, _ in constructible)
+        raise ValueError(f"entry type {entry_type!r} is ambiguous between records {names}; declare the output ref")
+    if constructible:
+        result = cast(Any, constructible[0][1]).from_obj(fields)
+        if expected_id is not None and expected_id != getattr(result, "id", None):
+            raise ValueError(f"entry output id {expected_id!r} does not match the constructed record")
+        return result
+    for family, definition_id in families.values():
+        binding = optimade_entry_binding(definition_id) if isinstance(definition_id, str) else None
+        if binding is None:
+            continue
+        result = _served_entry(entry_type, fields, family, cast(str, definition_id), binding)
+        if expected_id is not None and expected_id != content_id(result):
+            raise ValueError(f"entry output id {expected_id!r} does not match the constructed entry")
+        return result
+    if families or records:
+        raise ValueError(f"entry type {entry_type!r} has no record or OPTIMADE binding that can construct it")
+    raise ValueError(f"unknown entry type {entry_type!r}; known types: {', '.join(sorted(known)) or '(none)'}")
+
+
+def _served_entry(
+    entry_type: str, attributes: Mapping[str, object], family: type, definition_id: str, binding: Any
+) -> object:
+    """Build one served OPTIMADE entry through its family's entry binding.
+
+    The schema snapshot declares every property of the family's (extended)
+    definition by IRI, exactly as this entry would be served locally, so both
+    standard names and ``_httk_*`` extensions keep their meaning.
+    """
+
+    from httk.core import EntryTypeDefinition, load_entry_type_definition
+    from httk.core.optimade import OptimadeDocument, OptimadeResource, OptimadeSchemaSnapshot
+
+    factory = getattr(family, "entry_type_definition", None)
+    definition = factory() if callable(factory) else load_entry_type_definition(definition_id)
+    if not isinstance(definition, EntryTypeDefinition):
+        raise ValueError(f"{family.__name__}.entry_type_definition() must return an EntryTypeDefinition")
+    properties = {
+        name: {"$id": prop.definition_id} for name, prop in definition.properties.items() if prop.definition_id
+    }
+    document = OptimadeDocument(
+        json.dumps({"data": {"id": "collected", "type": entry_type, "attributes": dict(attributes)}}),
+        "about:httk-workflow-collect",
+    )
+    info = OptimadeDocument(
+        json.dumps({"meta": {"api_version": "1.3.0"}, "data": {"properties": properties}}),
+        "about:httk-workflow-collect/info",
+    )
+    resource = OptimadeResource(document, 0, OptimadeSchemaSnapshot(entry_type, info))
+    return binding.resolve_view()(binding.resolve_backend()(resource))
 
 
 def _resolve_executable_output(record: JobRecord, provider: object, role: str, value: object) -> object:
     if not isinstance(value, Mapping):
         raise ValueError("output must be exactly one of {'entry': {...}}, {'value': ...}, or {'file': '...'}")
     keys = set(value)
+    declared = _provider_output_roles(provider).get(role, {})
     if keys == {"entry"} and isinstance(value.get("entry"), Mapping):
-        return _entry_record(cast(Mapping[str, object], value["entry"]))
+        return _entry_record(cast(Mapping[str, object], value["entry"]), declared)
     if keys == {"value"}:
         raw = value["value"]
-        declared = _provider_output_roles(provider).get(role, {})
         ref = declared.get("ref")
         if isinstance(ref, str):
             try:

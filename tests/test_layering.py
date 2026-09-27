@@ -40,7 +40,7 @@ COMMON_LAYER = (
 #: The consumer packages. None may import another. The future ``httk_v1``
 #: language module is owned by the v1 consumer and may import it one-way.
 CONSUMER_ENGINES = (
-    "httk.workflow.vasp",
+    "httk.workflow.codes.vasp",
     "httk.workflow.compat.v1",
     "httk.workflow.languages.cwl",
     "httk.workflow.languages.pwd",
@@ -48,7 +48,7 @@ CONSUMER_ENGINES = (
 )
 
 CONSUMER_OWNERS = {
-    "httk.workflow.vasp": ("httk.workflow.vasp",),
+    "httk.workflow.codes.vasp": ("httk.workflow.codes.vasp",),
     "httk.workflow.compat.v1": ("httk.workflow.compat.v1", "httk.workflow.languages.httk_v1"),
     "httk.workflow.languages.cwl": ("httk.workflow.languages.cwl",),
     "httk.workflow.languages.pwd": ("httk.workflow.languages.pwd",),
@@ -159,7 +159,7 @@ def test_languages_registry_is_common_and_lazy() -> None:
 def _consumer_modules() -> list[Path]:
     """Return every consumer module whose imports the rule constrains."""
 
-    paths: list[Path] = sorted((WORKFLOW / "vasp").rglob("*.py"))
+    paths: list[Path] = sorted((WORKFLOW / "codes").rglob("*.py"))
     paths.extend(sorted((WORKFLOW / "compat").rglob("*.py")))
     for name in ("cwl", "pwd", "jobflow", "httk_v1"):
         package = WORKFLOW / "languages" / name
@@ -241,5 +241,5 @@ def test_scaffold_holds_no_vasp_knowledge() -> None:
     ):
         assert token not in source, f"scaffold must not name the VASP domain: {token!r}"
     for imported in _imported_modules(WORKFLOW / "scaffold.py"):
-        assert not _names("httk.workflow.vasp", imported)
+        assert not _names("httk.workflow.codes.vasp", imported)
         assert not _names("httk.workflow.compat", imported)

@@ -1,29 +1,30 @@
 """Small standard-library helpers for executable workflow hooks."""
 
-from __future__ import annotations
-
 import json
 import sys
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 COLLECT_STREAM_FORMAT = "httk-workflow-collect-stream"
 COLLECT_STREAM_VERSION = 2
 INSTANTIATE_FORMAT = "httk-workflow-instantiate"
-INSTANTIATE_VERSION = 2
+INSTANTIATE_VERSION = 3
 
 
 @dataclass(frozen=True)
 class InstantiateRequest:
-    """The v1 request passed to an executable instantiate hook.
+    """The version-3 request passed to an executable instantiate hook.
 
     :param workflow: The declared workflow id.
     :param tag: The caller's tag, or ``None``.
-    :param parameters: The parameters already supplied for the job.
+    :param parameters: The parameters the caller supplied for the job; declared
+        defaults are not merged in.
     :param inputs: Hook-consumed input descriptors. A descriptor is either
         ``{"kind": "value", "value": ...}`` or
         ``{"kind": "file", "path": "payload-relative/posix/path"}``.
+    :param defaults: The manifest's declared parameter defaults, applied after
+        the hook for every parameter still absent.
 
     The process current working directory is the staging payload. File
     descriptors therefore name files relative to that directory.
@@ -33,15 +34,16 @@ class InstantiateRequest:
     tag: str | None
     parameters: Mapping[str, Any]
     inputs: Mapping[str, Mapping[str, Any]]
+    defaults: Mapping[str, Any] = field(default_factory=dict)
 
 
 def instantiate_main(fn: Callable[[InstantiateRequest], Mapping[str, Any]]) -> None:
-    """Run *fn* as a v1 executable instantiate hook.
+    """Run *fn* as a version-3 executable instantiate hook.
 
     The hook receives one JSON document on standard input:
-    ``{"format": "httk-workflow-instantiate", "format_version": 2,
+    ``{"format": "httk-workflow-instantiate", "format_version": 3,
     "workflow": <workflow-id>, "tag": <string-or-null>, "parameters":
-    {...}, "inputs": {<name>: <descriptor>}}``. The current working
+    {...}, "defaults": {...}, "inputs": {<name>: <descriptor>}}``. The current working
     directory is the staging payload; file descriptors contain payload-relative
     POSIX paths. The returned mapping must contain ``parameters`` and may
     contain ``tag``; it is emitted as one JSON document on standard output.
@@ -62,16 +64,17 @@ def instantiate_main(fn: Callable[[InstantiateRequest], Mapping[str, Any]]) -> N
         tag = request.get("tag")
         parameters = request.get("parameters")
         inputs = request.get("inputs")
+        defaults = request.get("defaults")
         if not isinstance(workflow, str) or (tag is not None and not isinstance(tag, str)):
             raise ValueError("instantiate request has invalid workflow or tag")
-        if not isinstance(parameters, Mapping) or not isinstance(inputs, Mapping):
-            raise ValueError("instantiate request has invalid parameters or inputs mapping")
+        if not isinstance(parameters, Mapping) or not isinstance(inputs, Mapping) or not isinstance(defaults, Mapping):
+            raise ValueError("instantiate request has invalid parameters, defaults, or inputs mapping")
         typed_inputs: dict[str, Mapping[str, Any]] = {}
         for name, descriptor in inputs.items():
             if not isinstance(name, str) or not isinstance(descriptor, Mapping):
                 raise ValueError("instantiate input descriptors must be named mappings")
             typed_inputs[name] = descriptor
-        response = fn(InstantiateRequest(workflow, tag, parameters, typed_inputs))
+        response = fn(InstantiateRequest(workflow, tag, parameters, typed_inputs, defaults))
         if not isinstance(response, Mapping):
             raise TypeError("instantiate hook must return a mapping")
         response_parameters = response.get("parameters")

@@ -34,7 +34,7 @@ pytestmark = pytest.mark.skipif(
 
 _C_SDK = Path(httk.workflow.__file__).parent / "native" / "c"
 _ADA_SDK = Path(httk.workflow.__file__).parent / "native" / "ada"
-_SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
+_SHELL = Path(httk.workflow.__file__).parent / "native" / "bash" / "httk-workflow.sh"
 
 
 def _compile(tmp_path: Path, source: Path, *, name: str = "runner") -> subprocess.CompletedProcess[str]:

@@ -37,7 +37,7 @@ pytestmark = pytest.mark.skipif(
 
 _C_SDK = Path(httk.workflow.__file__).parent / "native" / "c"
 _F_SDK = Path(httk.workflow.__file__).parent / "native" / "fortran"
-_SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
+_SHELL = Path(httk.workflow.__file__).parent / "native" / "bash" / "httk-workflow.sh"
 
 
 def _compile(

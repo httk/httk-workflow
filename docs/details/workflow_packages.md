@@ -64,7 +64,7 @@ default collection to the registered language realization.
 
 | Form | Manifest selector | Required/allowed members | Runner contract |
 | --- | --- | --- | --- |
-| executable entry | no `language` | `entry` or `command`, `steps`, `initial_step`, `data_mode`, `workdir_mode` | package `run` (or the declared `command`) plus the declared step set |
+| executable entry | no `language` | `entry` or `command`, `steps`, `initial_step`, `data_mode`, `workdir_mode` | the package entry (default `run`) or the declared `command`, plus the declared step set |
 | document language | `language = "cwl"` or `"pwd"` and `document` | language keys only; `port` is allowed on document inputs/outputs | installed `cwl_runner.py` or `pwd_runner.py` |
 | jobflow | `language = "jobflow"` and `maker` or `document` | `maker` or `document` (exactly one); `port` is allowed on inputs/outputs; no mode keys | installed `jobflow_runner.py` |
 | httk-v1 | `language = "httk-v1"` and no `document` | `taskset`, `attempts`; no mode keys | package snapshot plus `pkg:httk.workflow.languages.httk_v1/v1_runner.py` through the ordinary `path` runner |
@@ -138,6 +138,8 @@ procs = 8
 The manager runs every runner with its own interpreter's directory first on
 `PATH`, so a Python runner's `#!/usr/bin/env python3` is the interpreter the
 requirements were just checked in and needs no import guard of its own.
+Describe, executable instantiate hooks, and postprocess scripts get the same
+interpreter-first `PATH`.
 
 ### `[workflow.runner]`: executable form
 
@@ -147,12 +149,20 @@ or the sole step is selected. Otherwise `initial_step` is required.
 
 | Key | Required/default | Meaning |
 | --- | --- | --- |
-| `entry` | `"run"` | Relative entry member; it must be named `run`. |
-| `command` | absent | Argument vector the manager runs instead of `run`; excludes `entry`. |
+| `entry` | `"run"` | Relative executable package member the manager runs, for example `run.py` or `run.sh`; excludes `command`. |
+| `command` | absent | Argument vector the manager runs instead of the entry; excludes `entry`. |
 | `initial_step` | `"start"` when present; otherwise sole step | First scaffolded step. |
 | `steps` | required | Nonempty runner step list. |
 | `data_mode` | `"none"` | `"none"` or `"transactional"`. |
 | `workdir_mode` | `"persistent"` | `"persistent"` or `"isolated"`. |
+
+A descriptive entry name such as `run.py` or `run.sh` is recommended: it says
+what the file is and keeps editors and linters working. An entry other than
+`run` is recorded in each job exactly as the one-element command
+`["{package}/<entry>"]`, so it follows every `command` rule below: it must be an
+executable regular member (`chmod +x`, with a `#!` line), not a build artifact,
+and the package must then have no `run` member, which a manager that predates
+`runner.command` would otherwise run instead.
 
 `command` names the program a compiled, JVM, or interpreted package runs, so
 the package needs no one-line `run` bridge script. It is a nonempty array of
@@ -375,7 +385,8 @@ HTTK_WORKFLOW_WORKSPACE_DIR, HTTK_WORKFLOW_JOB_DIR (the immutable payload,
 read-only from the script's perspective), and HTTK_WORKFLOW_POSTPROCESS_DIR
 (the output directory); it also receives HTTK_WORKFLOW_WORKDIR and
 HTTK_WORKFLOW_DATA_DIR when those exist, otherwise scripts should fall back
-across them. The current working directory is the output directory,
+across them, and runs with the framework's interpreter directory first on
+`PATH`. The current working directory is the output directory,
 <root>/<placement>/<job_key>/<NAME>/, where reports should be written; the
 root is <workspace>/postprocess by default, the postprocess.directory
 workspace setting when set, or the postprocess --output-dir override. Output
@@ -401,7 +412,7 @@ Every input table accepts these keys:
 | `entry_type` | Optional declaration entry type. |
 | `ref` | Optional declaration reference. |
 | `role` | Optional declaration role; defaults to the input key. |
-| `required` | Optional boolean. Defaults to `true` when the input declares `entry_type` and `false` otherwise. A required input must be supplied at submission — for an input with a `destination`, staging that destination (including a directly staged file) satisfies it; for a hook-consumed input, the value must be supplied. Language workflows satisfy their own inputs, so the check does not apply to them. |
+| `required` | Optional boolean. Defaults to `true` when the input declares `entry_type` and `false` otherwise. A required input must be supplied at submission — for an input with a `destination`, staging that destination (including a directly staged file) satisfies it; for a hook-consumed input, the value must be supplied. The check runs before any instantiate hook, so a missing required input is refused without running package code and a hook need not null-check required inputs. Language workflows satisfy their own inputs, so the check does not apply to them. |
 
 ```toml
 [workflow.inputs.structure]
@@ -433,7 +444,14 @@ description = "Sampling density."
 When a workflow declares any parameters, three rules apply at submission — and
 only then, because a workflow that declares no parameters leaves the channel
 fully open. A `default` is applied for a declared name nobody supplied, so it
-is recorded verbatim in `job.json`. A supplied value whose declared `type`
+is recorded verbatim in `job.json`. Defaults are applied *after* any instantiate
+hook: the hook's parameters hold only the caller-supplied values plus any a
+language realization wires in, the declared
+defaults reach it separately (`InstantiateContext.defaults`, or the executable
+envelope's `defaults`), and a default then fills in each name still absent. So
+the hook's final parameters win over defaults, and a caller-supplied value
+stays unless the hook itself changes it. A parameter the hook sets must match
+its declared `type`, exactly like a supplied value. A supplied value whose declared `type`
 mismatches is an error, exactly like the environment channel. A supplied name
 outside the declaration is *not* an error — parameters are deliberately open —
 but it prints one warning on stderr naming it and the declared names, and the
@@ -604,7 +622,8 @@ in-process signatures:
 
 ```python
 def instantiate(context):
-    # context.payload, context.inputs, context.parameters, context.tag
+    # context.payload, context.inputs, context.parameters (caller-supplied only),
+    # context.defaults (declared defaults, read-only), context.tag
     ...
 
 
@@ -628,16 +647,18 @@ instead execute current source bytes by explicit registration consent.
 An executable instantiate hook is launched from the published, digest-pinned
 package tree. Its current working directory is the staging payload. The
 framework removes inherited `HTTK_WORKFLOW_*` variables, then supplies only
-`HTTK_WORKFLOW_WORKSPACE_DIR` with the workspace path. It sends one JSON request
+`HTTK_WORKFLOW_WORKSPACE_DIR` with the workspace path, and puts the framework's
+interpreter directory first on `PATH`. It sends one JSON request
 on stdin:
 
 ```json
 {
   "format": "httk-workflow-instantiate",
-  "format_version": 2,
+  "format_version": 3,
   "workflow": "example.relax",
   "tag": "silicon",
   "parameters": {"cutoff": 520},
+  "defaults": {"cutoff": 450, "kpoint_density": 30.0},
   "inputs": {
     "structure": {"kind": "file", "path": "files/inputs/structure/POSCAR"},
     "settings": {"kind": "value", "value": {"kpoints": [4, 4, 4]}}
@@ -645,7 +666,12 @@ on stdin:
 }
 ```
 
-`tag` is a string or `null`; `parameters` and `inputs` are JSON objects. An
+`tag` is a string or `null`; `parameters`, `defaults`, and `inputs` are JSON
+objects. `parameters` holds only the caller-supplied values (plus any a
+language realization wires in); `defaults` holds
+the manifest's declared parameter defaults, which are applied after the hook to
+every parameter still absent. Version 3 added `defaults` and stopped merging
+them into `parameters`; `httk.workflow.hookapi` accepts only version 3. An
 input descriptor is either `{"kind": "file", "path": "<payload-relative POSIX
 path>"}` or `{"kind": "value", "value": <JSON value>}`. The hook may read
 file descriptors relative to its payload working directory, write files into
@@ -712,7 +738,7 @@ Each output value must be exactly one of these discriminator wrappers:
 
 | Wrapper | Result |
 | --- | --- |
-| `{"entry": { ... }}` | A registered entry type is reconstructed as its real record. The mapping must contain a registered string `type`; an optional `id` must match the constructed record. |
+| `{"entry": { ... }}` | A registered entry type is reconstructed as its real entry. The mapping must contain a registered string `type`, which must equal the declared output's `entry_type` when one is declared; a declared `ref` naming a registered definition IRI narrows the choice, and an unrelated `ref` is ignored with a warning. A registered record that constructs itself from the mapping (`from_obj`, as `files`, `records`, and `runs` do) owns it; otherwise the mapping is the family's served OPTIMADE form (for `structures`: `lattice_vectors`, `species`, `species_at_sites`, `cartesian_site_positions`, and so on, plus `_httk_*` extensions) and is coerced through the same OPTIMADE binding a remote entry is read with. Its identity can therefore differ from the object an in-process collector builds for the same data (a POSCAR-loaded structure, for instance, carries no symmetry object where the OPTIMADE reading carries an empty one). An optional `id` must match the constructed record (for a served form, its content id). |
 | `{"value": <JSON value>}` | A `DataRecord`. If the declared output has `ref`, the referenced property definition is loaded and the value is hard-validated with `httk-store` (which is required at collect time); without `ref`, a generated `_httk_custom_*` property definition is used. |
 | `{"file": "<path>"}` | A workspace-confined `FileRecord`. The wrapper must contain exactly the `file` key, and the path must resolve to a regular file below the workspace or workdir. |
 

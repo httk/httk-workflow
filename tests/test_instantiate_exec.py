@@ -118,7 +118,9 @@ if __name__ == '__main__':
 """
 
 
-def _package(root: Path, hook: str, *, workflow: str = "tests.instantiate.exec", member: str = "hook") -> Path:
+def _package(
+    root: Path, hook: str, *, workflow: str = "tests.instantiate.exec", member: str = "hook", extra: str = ""
+) -> Path:
     root.mkdir()
     (root / "httk_workflow.toml").write_text(
         f"""[workflow]
@@ -138,6 +140,7 @@ role = "value"
 
 [workflow.inputs.object]
 role = "object"
+{extra}
 """,
         encoding="utf-8",
     )
@@ -357,3 +360,141 @@ def test_executable_manifest_and_description_report_kind(tmp_path: Path) -> None
         "kind": "executable",
         "packaged": False,
     }
+
+
+_DEFAULTS = """
+[workflow.parameters.a]
+default = 1
+
+[workflow.parameters.b]
+default = 2
+
+[workflow.parameters.c]
+default = 3
+"""
+
+
+@pytest.mark.parametrize(
+    ("member", "body"),
+    [
+        (
+            "hook",
+            """import json, os, sys
+from pathlib import Path
+request = json.loads(sys.stdin.read())
+Path('request.json').write_text(json.dumps({**request, 'PATH': os.environ['PATH']}), encoding='utf-8')
+Path('derived.txt').write_text('x', encoding='utf-8')
+print(json.dumps({'parameters': {**request['parameters'], 'b': 20}}))
+""",
+        ),
+        (
+            "hook.py",
+            """import json
+def instantiate(ctx):
+    assert ctx.parameters == {'a': 10}, ctx.parameters
+    assert dict(ctx.defaults) == {'a': 1, 'b': 2, 'c': 3}
+    try:
+        ctx.defaults['a'] = 0  # type: ignore[index]
+    except TypeError:
+        pass
+    else:
+        raise AssertionError('defaults are writable')
+    (ctx.payload / 'derived.txt').write_text('x', encoding='utf-8')
+    ctx.parameters['b'] = 20
+""",
+        ),
+    ],
+)
+def test_a_hook_sees_only_supplied_parameters_and_defaults_apply_after_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member: str, body: str
+) -> None:
+    import json
+    import os
+    import sys
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    package = _package(tmp_path / "package", _hook_source(body), member=member, extra=_DEFAULTS)
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    job = new_job(workspace, package, parameters={"a": 10})
+    # Caller-supplied a, hook-returned b, and the declared default for c only.
+    assert JobDefinition.from_path(job.payload / "job.json").parameters == {"a": 10, "b": 20, "c": 3}
+    if member == "hook":
+        request = json.loads((job.payload / "request.json").read_text(encoding="utf-8"))
+        assert request["format"] == "httk-workflow-instantiate" and request["format_version"] == 3
+        assert request["parameters"] == {"a": 10}
+        assert request["defaults"] == {"a": 1, "b": 2, "c": 3}
+        assert request["PATH"] == os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin", "/bin"])
+
+
+@pytest.mark.parametrize("member", ["hook", "hook.py"])
+def test_a_missing_required_hook_input_is_refused_before_the_hook_runs(tmp_path: Path, member: str) -> None:
+    sentinel = tmp_path / "hook-ran"
+    body = f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('ran')\n"
+    if member == "hook.py":
+        body += f"def instantiate(ctx):\n    Path({str(sentinel)!r}).write_text('ran')\n"
+    package = _package(
+        tmp_path / "package",
+        _hook_source(body),
+        member=member,
+        extra='\n[workflow.inputs.needed]\nrequired = true\n',
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(ValueError, match="workflow input 'needed' is required and was not supplied"):
+        new_job(workspace, package)
+    assert not sentinel.exists()
+
+
+def test_the_hookapi_reads_the_v3_envelope_defaults(tmp_path: Path) -> None:
+    import json
+    import subprocess
+    import sys
+
+    hook = tmp_path / "hook"
+    hook.write_text(
+        _hook_source(
+            """from httk.workflow.hookapi import instantiate_main
+instantiate_main(lambda request: {'parameters': {'seen': dict(request.defaults)}})
+"""
+        ),
+        encoding="utf-8",
+    )
+    request = {
+        "format": "httk-workflow-instantiate",
+        "format_version": 3,
+        "workflow": "tests.v3",
+        "tag": None,
+        "parameters": {},
+        "defaults": {"a": 1},
+        "inputs": {},
+    }
+    completed = subprocess.run(
+        [sys.executable, str(hook)], input=json.dumps(request), capture_output=True, text=True, check=True
+    )
+    assert json.loads(completed.stdout) == {"parameters": {"seen": {"a": 1}}}
+    stale = subprocess.run(
+        [sys.executable, str(hook)],
+        input=json.dumps({**request, "format_version": 2}),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert stale.returncode != 0 and "invalid instantiate request envelope" in stale.stderr
+
+
+@pytest.mark.parametrize(
+    ("member", "body"),
+    [
+        ("hook", "import json, sys\nsys.stdin.read()\nprint(json.dumps({'parameters': {'a': 'text'}}))\n"),
+        ("hook.py", "def instantiate(ctx):\n    ctx.parameters['a'] = 'text'\n"),
+    ],
+)
+def test_a_hook_parameter_must_match_its_declared_type(tmp_path: Path, member: str, body: str) -> None:
+    package = _package(
+        tmp_path / "package",
+        _hook_source(body),
+        member=member,
+        extra="\n[workflow.parameters.a]\ntype = 'integer'\n",
+    )
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    with pytest.raises(ValueError, match="workflow parameter 'a' does not match type 'integer'; got str"):
+        new_job(workspace, package)

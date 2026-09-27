@@ -33,6 +33,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
+from ._util import interpreter_first_path
+
 if TYPE_CHECKING:
     from .collecting import JobRecord
     from .scaffold import ResolvedWorkflow, WorkflowProvider
@@ -184,6 +186,8 @@ def run_postprocess_script(
             "HTTK_WORKFLOW_WORKSPACE_DIR": str(record.workspace_root),
             "HTTK_WORKFLOW_JOB_DIR": str(record.payload),
             "HTTK_WORKFLOW_POSTPROCESS_DIR": str(output_dir),
+            # The same interpreter-first PATH a runner and describe get.
+            "PATH": interpreter_first_path(environment.get("PATH")),
         }
     )
     if record.workdir is not None:

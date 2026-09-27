@@ -27,7 +27,7 @@ pytestmark = pytest.mark.skipif(shutil.which("perl") is None, reason="no Perl in
 
 _PERL = shutil.which("perl")
 _PERL_SDK = Path(httk.workflow.__file__).parent / "native" / "perl"
-_SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
+_SHELL = Path(httk.workflow.__file__).parent / "native" / "bash" / "httk-workflow.sh"
 
 
 def _runner(

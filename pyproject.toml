@@ -103,8 +103,10 @@ namespaces = true
 [tool.setuptools.package-data]
 "httk.workflow" = [
   "py.typed",
-  "shell/*.sh",
-  # The native C authoring SDK ships beside the shell libraries as one .h/.c
+  # The native Bash authoring SDK and the per-code Bash APIs (see docs/sdks/native_bash_api).
+  "native/bash/*.sh",
+  "codes/vasp/*.sh",
+  # The native C authoring SDK ships beside the Bash library as one .h/.c
   # pair, designed to be vendored or compiled directly beside a runner.
   "native/c/*.h",
   "native/c/*.c",

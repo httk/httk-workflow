@@ -151,8 +151,9 @@ There are two equivalent creation-time forms. For a Python runner,
 `@run.instantiate` is the in-process hook replacing v1's `ht.instantiate.py`.
 `new_job(s)` resolves it on the creating machine, after declared inputs are
 staged and before `job.json` is finalized. Its `InstantiateContext` provides the
-staging `payload`, read-only `inputs`, mutable merged `parameters`, and caller
-`tag`; `suggest_tag` supplies a tag only when the caller did not. For example:
+staging `payload`, read-only `inputs`, mutable caller-supplied `parameters`,
+the read-only declared `defaults` (applied after the hook to every parameter
+still absent), and caller `tag`; `suggest_tag` supplies a tag only when the caller did not. For example:
 
 ```python
 @run.instantiate
@@ -171,7 +172,9 @@ pre-serializes hook-consumed inputs, and sends the JSON
 `httk-workflow-instantiate` envelope on stdin. The executable returns
 `{"parameters": {...}}` and may return a string `tag`; nonzero exit or malformed
 output aborts submission. This form is language-neutral and has the same
-parameter, tag, payload, and input semantics as the Python hook. The complete
+parameter, tag, payload, and input semantics as the Python hook: `parameters`
+holds only caller-supplied values and the declared defaults arrive separately
+(`defaults`, like `ctx.defaults`), applied after the hook. The complete
 envelope and serialization rules are normative in {doc}`workflow_packages`.
 
 ## What an attempt reads

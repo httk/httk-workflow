@@ -13,8 +13,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .._util import write_json_atomic
-from ..supervision import (
+from ..._util import write_json_atomic
+from ...supervision import (
     Diagnostic,
     FollowSource,
     ProcessReport,

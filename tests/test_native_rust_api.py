@@ -34,7 +34,7 @@ _CLIPPY = shutil.which("cargo-clippy")
 pytestmark = pytest.mark.skipif(_CARGO is None, reason="no Rust toolchain (cargo) is available")
 
 _RUST_SDK = Path(httk.workflow.__file__).parent / "native" / "rust"
-_SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
+_SHELL = Path(httk.workflow.__file__).parent / "native" / "bash" / "httk-workflow.sh"
 
 
 def _cargo_env(tmp_path: Path) -> dict[str, str]:

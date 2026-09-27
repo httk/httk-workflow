@@ -195,7 +195,13 @@ def test_the_workflow_workspace_alias_is_gone() -> None:
 
 
 def test_the_vasp_helpers_live_only_in_the_vasp_package() -> None:
-    from httk.workflow import vasp
+    import importlib
+
+    from httk.workflow.codes import vasp
+
+    # The helpers moved under httk.workflow.codes with no alias left behind.
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("httk.workflow.vasp")
 
     for name in ("prepare_vasp_inputs", "read_poscar_header", "run_vasp"):
         assert callable(getattr(vasp, name))

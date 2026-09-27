@@ -9,7 +9,7 @@ two languages; this page is what they must both agree with.
 The table is enforced. `tests/test_docs_parity.py` parses it and fails the build
 when a listed Python member does not exist, when a listed Bash function is not
 defined in the packaged library, or when a public member of `Runner` or
-`Attempt`, or a function of `shell/httk-workflow.sh`, is missing a row. An
+`Attempt`, or a function of `native/bash/httk-workflow.sh`, is missing a row. An
 authoring feature that is not in this table does not exist as far as the
 documentation is concerned, and adding one to the code means adding a row here.
 
@@ -80,7 +80,7 @@ language, and compares everything both left behind.
   `protocol.JobSpec` or `runtime_utils.render_template`). `—` means the operation
   has no Python member of its own, because Python reaches it some other way (an
   attribute, an exception, the standard library).
-- **Bash** names a function of the packaged `shell/httk-workflow.sh`, sometimes
+- **Bash** names a function of the packaged `native/bash/httk-workflow.sh`, sometimes
   with the option that selects the behaviour of the row; only the function name
   is normative. `—` means the operation has no Bash function, because Bash
   reaches it through an exported environment variable instead — named in bold in

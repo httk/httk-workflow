@@ -351,3 +351,67 @@ if __name__ == "__main__":
     child_job = JobDefinition.from_path(workspace.payload_path(child.placement, child.job_key) / "job.json")
     assert child_job.runner_command == ("python3", "{package}/runner.py")
     assert (workspace.payload_path(child.placement, child.job_key) / "run" / "child.txt").is_file()
+
+
+_BASH_ENTRY = """#!/usr/bin/env bash
+set -euo pipefail
+source "$HTTK_WORKFLOW_BASH_API"
+httk_workflow_runner tests.command.bash start
+
+step_start() {
+    printf 'done\\n' >done.txt
+    httk_workflow_succeed
+}
+
+httk_workflow_main
+"""
+
+
+def _entry_package(root: Path, entry: str, source: str) -> Path:
+    _manifest(root, f"entry = '{entry}'")
+    (root / entry).write_text(source, encoding="utf-8")
+    (root / entry).chmod(0o755)
+    return root
+
+
+@pytest.mark.parametrize(
+    ("entry", "source", "workflow"),
+    [
+        ("run.py", "#!/usr/bin/env python3\n" + _PYTHON_RUNNER, "tests.command.python"),
+        ("run.sh", _BASH_ENTRY, "tests.command.bash"),
+    ],
+)
+def test_a_named_entry_runs_end_to_end_as_its_command(tmp_path: Path, entry: str, source: str, workflow: str) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    package = _entry_package(tmp_path / "package", entry, source)
+    assert parse_workflow_manifest(package).command == (f"{{package}}/{entry}",)
+    assert describe_package_runner(package) == {"workflow": workflow, "steps": ["start"]}
+    job = new_job(workspace, package)
+    document = json.loads((job.payload / "job.json").read_text(encoding="utf-8"))
+    assert document["runner"]["command"] == [f"{{package}}/{entry}"]
+    (finding,) = precheck_jobs(workspace)
+    assert finding["runner"] == {"status": "ok", "ok": True}, finding
+    marker = _run(workspace, job)
+    assert marker.kind == "succeeded", workspace.read_state(marker).get("failure")
+    assert (job.payload / "run" / "done.txt").is_file()
+
+
+def test_a_named_entry_follows_the_command_rules(tmp_path: Path) -> None:
+    package = _entry_package(tmp_path / "stray", "run.py", "#!/usr/bin/env python3\n" + _PYTHON_RUNNER)
+    (package / "run").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="entry replaces the run entry point"):
+        parse_workflow_manifest(package)
+    plain = _entry_package(tmp_path / "plain", "run.py", _PYTHON_RUNNER)
+    (plain / "run.py").chmod(0o644)
+    with pytest.raises(ValueError, match=r"\[workflow.runner\].entry program \{package\}/run.py must be executable"):
+        parse_workflow_manifest(plain)
+
+
+def test_a_named_entry_that_is_a_build_artifact_points_at_command(tmp_path: Path) -> None:
+    package = _manifest(
+        tmp_path / "package", "entry = 'relax'", "[workflow.build]\ncommand = 'make'\nartifacts = ['relax']\n"
+    )
+    (package / "relax").write_text("#!/bin/sh\n", encoding="utf-8")
+    (package / "relax").chmod(0o755)
+    with pytest.raises(ValueError, match=r'is a build artifact; use command = \["\{artifacts\}/relax"\]'):
+        parse_workflow_manifest(package)

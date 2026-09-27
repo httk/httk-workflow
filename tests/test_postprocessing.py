@@ -1,6 +1,8 @@
 """Postprocess execution and CLI coverage."""
 
 import json
+import os
+import sys
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -36,6 +38,7 @@ Path("report.json").write_text(json.dumps({
     **{name: os.environ.get(name) for name in names},
     "reserved": sorted(name for name in os.environ if name.startswith("HTTK_WORKFLOW_")),
     "user": os.environ.get("POSTPROCESS_USER"),
+    "path": os.environ.get("PATH"),
 }))
 print("postprocessed")
 """
@@ -68,6 +71,7 @@ def test_postprocess_script_observes_the_record_contract(tmp_path: Path, monkeyp
     monkeypatch.setenv("HTTK_WORKFLOW_STEP", "leak")
     monkeypatch.setenv("HTTK_WORKFLOW_IS_RESTART", "1")
     monkeypatch.setenv("POSTPROCESS_USER", "kept")
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
     result = run_postprocess_script(provider, "report", record)
 
@@ -94,6 +98,8 @@ def test_postprocess_script_observes_the_record_contract(tmp_path: Path, monkeyp
         "HTTK_WORKFLOW_WORKSPACE_DIR",
     ]
     assert report["user"] == "kept"
+    # The script gets the interpreter-first PATH a runner gets.
+    assert report["path"] == os.pathsep.join([os.path.dirname(sys.executable), "/usr/bin", "/bin"])
 
 
 def test_postprocess_script_rejects_untrusted_members_and_output_paths(tmp_path: Path) -> None:

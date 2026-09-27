@@ -42,6 +42,7 @@ job and never materializes a list of them.
 
 from __future__ import annotations
 
+import copy
 import difflib
 import hashlib
 import importlib
@@ -714,21 +715,26 @@ class InstantiateContext:
     """The mutable creation-time view passed to a runner's instantiate hook.
 
     ``payload`` is the staging root, ``inputs`` contains every supplied staged
-    input, ``parameters`` is the merged opaque knob mapping, and ``tag`` is the
-    caller's tag. The hook may write below ``payload`` and update
-    ``parameters``; use :meth:`suggest_tag` to provide a tag without overriding one
-    the caller supplied.
+    input, ``parameters`` holds only the caller-supplied knobs (plus any a
+    language realization wires in), ``defaults`` is the read-only mapping of the
+    manifest's declared parameter defaults, and ``tag`` is the caller's tag. The
+    hook may write below ``payload`` and update ``parameters``; after it returns,
+    each declared default fills in a parameter still absent. Use
+    :meth:`suggest_tag` to provide a tag without overriding one the caller
+    supplied.
 
     :param payload: Locate the payload being staged.
     :param inputs: Provide the supplied workflow inputs.
-    :param parameters: Provide the merged job parameters.
+    :param parameters: Provide the caller-supplied job parameters.
     :param tag: Preserve or suggest the job tag.
+    :param defaults: Provide the declared parameter defaults, read-only.
     """
 
     payload: Path
     inputs: Mapping[str, object]
     parameters: dict[str, object]
     tag: str | None
+    defaults: Mapping[str, object] = field(default_factory=lambda: MappingProxyType({}))
 
     def suggest_tag(self, tag: str) -> None:
         """Set a tag only when the caller did not supply one."""
@@ -806,11 +812,10 @@ def _describe(
     environment["PATH"] = interpreter_first_path(environment.get("PATH"))
     if preserve_registration_order:
         environment["HTTK_WORKFLOW_PRESERVE_STEP_ORDER"] = "1"
-    shell = Path(__file__).with_name("shell")
-    environment["HTTK_WORKFLOW_BASH_API"] = str(shell / "httk-workflow.sh")
+    environment["HTTK_WORKFLOW_BASH_API"] = str(Path(__file__).with_name("native") / "bash" / "httk-workflow.sh")
     environment["HTTK_WORKFLOW_NATIVE_API"] = str(Path(__file__).with_name("native"))
     environment["HTTK_WORKFLOW_PERL_API"] = str(Path(__file__).with_name("native") / "perl")
-    environment["HTTK_WORKFLOW_VASP_BASH_API"] = str(shell / "httk-vasp.sh")
+    environment["HTTK_WORKFLOW_VASP_BASH_API"] = str(Path(__file__).with_name("codes") / "vasp" / "httk-vasp.sh")
     # Describing is a pure read of the program, so no attempt context of a
     # surrounding job may leak into it: a runner scaffolding jobs is itself running
     # inside one.
@@ -1958,8 +1963,6 @@ def _build_payload(
     job_parameters = {**supplied_parameters, **prepared.parameters}
     declared_parameters = workflow.parameters
     if declared_parameters:
-        from .packages import _matches_input_type
-
         # A workflow that declares a name the language realization reserves
         # would smuggle its default straight into the reserved wiring, so the
         # collision is refused here — before any default is applied — exactly
@@ -1973,17 +1976,7 @@ def _build_payload(
         # A declared type is enforced, exactly like the environment channel;
         # an undeclared name only warns, because parameters are deliberately
         # open, and a declared default fills in for a name nobody supplied.
-        for parameter_name, value in supplied_parameters.items():
-            if parameter_name not in declared_parameters:
-                continue
-            parameter_type = declared_parameters[parameter_name].get("type")
-            if isinstance(parameter_type, str) and not _matches_input_type(value, parameter_type):
-                raise ValueError(
-                    f"workflow parameter {parameter_name!r} does not match type {parameter_type!r}; "
-                    f"got {type(value).__name__}. Supply a matching value — note that a command-line "
-                    f"NAME=VALUE parses VALUE as JSON when it can, so quote a literal string as "
-                    f'NAME=\'"text"\''
-                )
+        _check_parameter_types(supplied_parameters, declared_parameters)
         declared_names = ", ".join(sorted(declared_parameters))
         logger = context_logger(_LOGGER, workflow.workflow_id)
         for parameter_name in sorted(set(supplied_parameters) - set(declared_parameters)):
@@ -1992,38 +1985,16 @@ def _build_payload(
                 parameter_name,
                 declared_names,
             )
-        for parameter_name, metadata in declared_parameters.items():
-            if "default" in metadata and parameter_name not in job_parameters:
-                job_parameters[parameter_name] = metadata["default"]
-    if prepared.instantiate_exec is not None:
-        hook_inputs = _serialize_executable_inputs(destination, workflow, supplied_inputs)
-        hook_parameters, hook_tag = _run_executable_instantiate(
-            prepared.instantiate_exec,
-            destination,
-            workflow.workflow_id,
-            tag,
-            job_parameters,
-            hook_inputs,
-            workspace.root,
-        )
-        job_parameters = {**job_parameters, **hook_parameters}
-        if caller_tag is None and hook_tag is not None:
-            tag = hook_tag
-    elif prepared.instantiate is not None:
-        context = InstantiateContext(
-            payload=destination,
-            inputs=MappingProxyType(supplied_inputs),
-            parameters=job_parameters,
-            tag=tag,
-        )
-        prepared.instantiate(context)
-        job_parameters = context.parameters
-        tag = caller_tag if caller_tag is not None else context.tag
+    # Declared defaults stay out of the hook's parameters, so a hook can tell
+    # "not given" from "defaulted"; it sees them separately and they fill in
+    # after it for every name still absent.
+    defaults = {name: metadata["default"] for name, metadata in declared_parameters.items() if "default" in metadata}
     declared_input_metadata = _declared_inputs(workflow)
     # A language workflow satisfies its own inputs — a document value, a
     # maker default, a supplied override — so the generic required check is
     # scoped to packaged and directory-hook workflows, whose destinations
-    # this scaffold stages itself.
+    # this scaffold stages itself. It runs before any hook, so a missing
+    # required input is refused without running package code.
     if workflow.language is None:
         for input_name, metadata in declared_input_metadata.items():
             if not metadata["required"]:
@@ -2038,6 +2009,37 @@ def _build_payload(
                 raise ValueError(
                     f"workflow input {input_name!r} is required and was not supplied; declared inputs: {declared_names}"
                 )
+    if prepared.instantiate_exec is not None:
+        hook_inputs = _serialize_executable_inputs(destination, workflow, supplied_inputs)
+        hook_parameters, hook_tag = _run_executable_instantiate(
+            prepared.instantiate_exec,
+            destination,
+            workflow.workflow_id,
+            tag,
+            job_parameters,
+            defaults,
+            hook_inputs,
+            workspace.root,
+        )
+        job_parameters = {**job_parameters, **hook_parameters}
+        if caller_tag is None and hook_tag is not None:
+            tag = hook_tag
+    elif prepared.instantiate is not None:
+        context = InstantiateContext(
+            payload=destination,
+            inputs=MappingProxyType(supplied_inputs),
+            parameters=job_parameters,
+            tag=tag,
+            defaults=MappingProxyType(copy.deepcopy(defaults)),
+        )
+        prepared.instantiate(context)
+        job_parameters = context.parameters
+        tag = caller_tag if caller_tag is not None else context.tag
+    if prepared.instantiate_exec is not None or prepared.instantiate is not None:
+        # A hook's parameters meet the same declared types as supplied ones.
+        _check_parameter_types(job_parameters, declared_parameters)
+    for parameter_name, value in defaults.items():
+        job_parameters.setdefault(parameter_name, value)
     declared_member: dict[str, object] = {}
     if declared_parameters:
         declared_member["parameters"] = {name: dict(metadata) for name, metadata in declared_parameters.items()}
@@ -2078,6 +2080,24 @@ def _build_payload(
         if not isinstance(spec, JobSpec):
             raise ValueError("language finalize hook must return a JobSpec")
     return prepare_job_payload(destination, spec)
+
+
+def _check_parameter_types(values: Mapping[str, object], declared: Mapping[str, Mapping[str, object]]) -> None:
+    """Refuse a value whose declared ``[workflow.parameters.*] type`` it does not match."""
+
+    from .packages import _matches_input_type
+
+    for parameter_name, value in values.items():
+        if parameter_name not in declared:
+            continue
+        parameter_type = declared[parameter_name].get("type")
+        if isinstance(parameter_type, str) and not _matches_input_type(value, parameter_type):
+            raise ValueError(
+                f"workflow parameter {parameter_name!r} does not match type {parameter_type!r}; "
+                f"got {type(value).__name__}. Supply a matching value — note that a command-line "
+                f"NAME=VALUE parses VALUE as JSON when it can, so quote a literal string as "
+                f'NAME=\'"text"\''
+            )
 
 
 def _submit(
@@ -2285,6 +2305,7 @@ def _run_executable_instantiate(
     workflow_id: str,
     tag: str | None,
     parameters: Mapping[str, object],
+    defaults: Mapping[str, object],
     inputs: Mapping[str, Mapping[str, object]],
     workspace_root: Path,
 ) -> tuple[dict[str, object], str | None]:
@@ -2303,10 +2324,11 @@ def _run_executable_instantiate(
         raise ValueError(f"instantiate hook {member!r} is not executable; chmod +x")
     request = {
         "format": "httk-workflow-instantiate",
-        "format_version": 2,
+        "format_version": 3,
         "workflow": workflow_id,
         "tag": tag,
         "parameters": dict(parameters),
+        "defaults": dict(defaults),
         "inputs": {name: dict(descriptor) for name, descriptor in inputs.items()},
     }
     environment = dict(os.environ)
@@ -2314,6 +2336,8 @@ def _run_executable_instantiate(
         if variable.startswith("HTTK_WORKFLOW_"):
             environment.pop(variable)
     environment["HTTK_WORKFLOW_WORKSPACE_DIR"] = str(workspace_root)
+    # The same interpreter-first PATH a runner and describe get.
+    environment["PATH"] = interpreter_first_path(environment.get("PATH"))
     try:
         completed = subprocess.run(
             [str(source)],

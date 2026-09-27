@@ -16,7 +16,7 @@ headings = (
     "VASP relaxation workflows and task scheduling build on httk v1 contributions by Christopher Tholander",
 )
 assert all(heading not in credits.entries() for heading in headings)
-import httk.workflow.vasp
+import httk.workflow.codes.vasp
 entries = credits.entries()
 assert all(heading in entries for heading in headings)
 assert all(len(entries[heading]) == 1 for heading in headings)

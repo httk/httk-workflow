@@ -496,7 +496,7 @@ values object, never `eval`.
 ## VASP functions
 
 The `httk_vasp_*` surface corresponds directly to functions in
-`httk.workflow.vasp`:
+`httk.workflow.codes.vasp`:
 
 - `prepare`, `prepare_kpoints`, `prepare_potcar`, `get_tag`, `set_tag`, and
   `nbands`;

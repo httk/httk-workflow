@@ -8,7 +8,7 @@ either direction:
 1. every Python member the table lists really exists on :class:`Runner`,
    :class:`Attempt`, or a type exported from :mod:`httk.workflow`;
 2. every Bash function the table lists is really defined in the packaged
-   ``shell/httk-workflow.sh``;
+   ``native/bash/httk-workflow.sh``;
 3. every public member of :class:`Runner` and :class:`Attempt`, and every
    function of that shell library, really appears in the table.
 
@@ -27,7 +27,7 @@ import httk.workflow
 from httk.workflow import Attempt, Runner
 
 _DOCS = Path(__file__).resolve().parent.parent / "docs" / "sdks" / "sdk_parity.md"
-_SHELL = Path(httk.workflow.__file__).with_name("shell") / "httk-workflow.sh"
+_SHELL = Path(httk.workflow.__file__).with_name("native") / "bash" / "httk-workflow.sh"
 
 #: The table lives under this heading; everything before it is prose.
 _TABLE_HEADING = "## The table"

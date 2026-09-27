@@ -990,7 +990,9 @@ to overwrite a runner concurrently. For a file runner, `argv[0]` and Python's
 `HTTK_WORKFLOW_RUNNER_ROOT`.
 
 A shared tree runner may instead carry `runner.command`, the unexpanded
-argument vector a workflow package declares as `[workflow.runner] command`, for
+argument vector a workflow package declares as `[workflow.runner] command` (a
+package entry other than `run`, such as `run.py`, is recorded as the one-element
+`["{package}/run.py"]`), for
 example `["{artifacts}/relax"]` or `["java", "-cp", "{artifacts}/classes",
 "Relax"]`. It is a nonempty array of strings, covered by the job digest and
 forbidden for a `payload` runner. Its only placeholders are `{package}`, the
@@ -1575,10 +1577,11 @@ working directory set to the staging payload:
 ```json
 {
   "format": "httk-workflow-instantiate",
-  "format_version": 2,
+  "format_version": 3,
   "workflow": "example.relax",
   "tag": "silicon",
   "parameters": {"cutoff": 520},
+  "defaults": {"cutoff": 450, "kpoint_density": 30.0},
   "inputs": {
     "structure": {"kind": "file", "path": "files/inputs/structure/POSCAR"},
     "settings": {"kind": "value", "value": {"kpoints": [4, 4, 4]}}

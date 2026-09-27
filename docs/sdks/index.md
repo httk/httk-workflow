@@ -18,8 +18,10 @@ Single-file compiled runners are architecture-bound and should transfer only
 between matching machines. A self-contained package with a `[workflow.build]`
 declaration is the portable alternative: transfer its sources, then build once
 per platform class. Build commands and runners find the installed SDKs under
-`$HTTK_WORKFLOW_NATIVE_API`, one subdirectory per language (`c`, `cpp`,
+`$HTTK_WORKFLOW_NATIVE_API`, one subdirectory per language (`bash`, `c`, `cpp`,
 `fortran`, `rust`, `ada`, `java`, `perl`); see {doc}`../details/workflow_packages`.
+A Bash runner still sources `$HTTK_WORKFLOW_BASH_API`, which names the
+`bash/httk-workflow.sh` file there.
 Such a package names what the manager runs in `[workflow.runner]`, for example
 `command = ["{artifacts}/relax"]`, instead of carrying a `run` bridge script.
 Outside a manager, `python -c 'import httk.workflow, pathlib;

@@ -20,7 +20,7 @@ _JAVA = shutil.which("java")
 pytestmark = pytest.mark.skipif(_JAVAC is None or _JAVA is None, reason="javac and java are required")
 
 _JAVA_SDK = Path(httk.workflow.__file__).parent / "native" / "java" / "HttkWorkflow.java"
-_SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
+_SHELL = Path(httk.workflow.__file__).parent / "native" / "bash" / "httk-workflow.sh"
 
 
 def _compile(output: Path, *sources: Path) -> subprocess.CompletedProcess[str]:

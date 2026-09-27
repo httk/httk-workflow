@@ -723,3 +723,191 @@ def test_executable_exit_status_is_surfaced_after_complete_responses(tmp_path: P
     resolved, failures, exit_status = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
     assert failures == {} and resolved[0] == {}
     assert exit_status == 3
+
+
+_SILICON = "Si\n5.43\n0 0.5 0.5\n0.5 0 0.5\n0.5 0.5 0\nSi\n2\nDirect\n0 0 0\n0.25 0.25 0.25\n"
+
+
+def test_an_executable_structure_entry_is_read_through_the_optimade_binding(tmp_path: Path) -> None:
+    import sys
+    import warnings
+
+    atomistic = pytest.importorskip("httk.atomistic")
+    import httk.core
+    from httk.atomistic.models.structure.semantics import StructureSymmetry
+    from httk.core.storage.identity import project_storage_record, resolve_storage_record
+
+    (tmp_path / "CONTCAR").write_text(_SILICON, encoding="utf-8")
+    source = Path(__file__).parents[1] / "src"
+    # The collector serves the fields a POSCAR states, in their served OPTIMADE form.
+    hook = tmp_path / "collect-hook"
+    hook.write_text(
+        f"#!{sys.executable}\nimport sys, warnings; sys.path.insert(0, {str(source)!r})\n"
+        "warnings.simplefilter('ignore')\n"
+        "import httk.atomistic, httk.core\n"
+        "from httk.atomistic.entries.structures import StructureEntryProvider\n"
+        "from httk.workflow.hookapi import collect_main\n"
+        "FIELDS = ('lattice_vectors', 'dimension_types', 'nperiodic_dimensions', 'species', 'species_at_sites',\n"
+        "          'cartesian_site_positions', '_httk_basis_precision', '_httk_coordinate_precision')\n"
+        "def collect(record):\n"
+        "    structure = httk.atomistic.UnitcellStructureView(httk.core.load('CONTCAR'))\n"
+        "    (served,) = StructureEntryProvider({'relaxed': structure}).records('structures')\n"
+        "    return {'relaxed': {'entry': {'type': 'structures', **{name: served[name] for name in FIELDS}}}}\n"
+        "collect_main(collect)\n",
+        encoding="utf-8",
+    )
+    hook.chmod(0o755)
+    provider = SimpleNamespace(
+        collector_exec=hook.name,
+        directory=tmp_path,
+        outputs={"relaxed": {"role": "relaxed", "entry_type": "structures"}},
+    )
+    resolved, failures, _ = _run_executable_collector([_record(tmp_path)], provider, tmp_path)
+    assert failures == {}
+    collected = resolved[0]["relaxed"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        expected = atomistic.UnitcellStructureView(httk.core.load(str(tmp_path / "CONTCAR")))
+    record_type = resolve_storage_record(expected)
+    assert resolve_storage_record(collected) is record_type
+    actual_fields = dict(project_storage_record(record_type, collected))
+    expected_fields = dict(project_storage_record(record_type, expected))
+    # httk-atomistic: an OPTIMADE-backed structure reports an all-empty
+    # StructureSymmetry where a POSCAR-backed one reports None.
+    assert actual_fields.pop("symmetry") == StructureSymmetry()
+    assert expected_fields.pop("symmetry") is None
+    assert actual_fields == expected_fields
+
+
+def test_an_entry_output_must_match_its_declared_entry_type(tmp_path: Path) -> None:
+    provider = SimpleNamespace(outputs={"relaxed": {"role": "relaxed", "entry_type": "structures"}})
+    with pytest.raises(ValueError, match="does not match the declared entry_type 'structures'"):
+        _resolve_executable_output(
+            _record(tmp_path), provider, "relaxed", {"entry": {"type": "files", "url": "x", "name": "x"}}
+        )
+
+
+def _served_silicon(tmp_path: Path) -> tuple[dict[str, object], object]:
+    """Return the POSCAR-stated served fields of silicon and the structure they came from."""
+
+    import warnings
+
+    atomistic = pytest.importorskip("httk.atomistic")
+    import httk.core
+    from httk.atomistic.entries.structures import StructureEntryProvider
+
+    (tmp_path / "POSCAR").write_text(_SILICON, encoding="utf-8")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        structure = atomistic.UnitcellStructureView(httk.core.load(str(tmp_path / "POSCAR")))
+    (served,) = StructureEntryProvider({"silicon": structure}).records("structures")
+    fields = (
+        "lattice_vectors",
+        "dimension_types",
+        "nperiodic_dimensions",
+        "species",
+        "species_at_sites",
+        "cartesian_site_positions",
+        "_httk_basis_precision",
+        "_httk_coordinate_precision",
+    )
+    payload = json.loads(json.dumps({"type": "structures", **{name: served[name] for name in fields}}))
+    return payload, structure
+
+
+def test_a_served_entry_id_must_be_its_content_id(tmp_path: Path) -> None:
+    payload, _structure = _served_silicon(tmp_path)
+    provider = SimpleNamespace(outputs={"relaxed": {"role": "relaxed", "entry_type": "structures"}})
+    entry = _resolve_executable_output(_record(tmp_path), provider, "relaxed", {"entry": payload})
+    identified = {**payload, "id": content_id(entry)}
+    assert content_id(_resolve_executable_output(_record(tmp_path), provider, "relaxed", {"entry": identified})) == (
+        content_id(entry)
+    )
+    with pytest.raises(ValueError, match="entry output id 'other' does not match the constructed entry"):
+        _resolve_executable_output(_record(tmp_path), provider, "relaxed", {"entry": {**payload, "id": "other"}})
+
+
+def test_an_unrelated_output_ref_is_ignored_with_a_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    payload, _structure = _served_silicon(tmp_path)
+    ref = "https://example.org/types/structure"
+    provider = SimpleNamespace(outputs={"relaxed": {"role": "relaxed", "entry_type": "structures", "ref": ref}})
+    with caplog.at_level("WARNING", logger="httk.workflow.collecting"):
+        _resolve_executable_output(_record(tmp_path), provider, "relaxed", {"entry": payload})
+    assert [record.getMessage() for record in caplog.records if record.name == "httk.workflow.collecting"] == [
+        f"output ref {ref!r} names no registered structures definition; resolving the entry by its type alone"
+    ]
+
+
+def test_records_and_runs_entries_are_built_by_their_from_obj(tmp_path: Path) -> None:
+    import httk.core
+
+    data = DataRecord.from_value("https://example.org/p", "p", 3)
+    run = httk.core.Run(
+        workflow_declaration_uri=None,
+        workflow_definition_uri=None,
+        inputs=(),
+        artifacts=(),
+        outputs=(),
+        source_id="source",
+        last_modified=None,
+    )
+    provider = SimpleNamespace(outputs={"data": {"role": "data"}, "run": {"role": "run"}})
+    for role, value in (("data", data), ("run", run)):
+        emitted = json.loads(json.dumps({"type": value.type, **asdict(value)}))
+        assert _resolve_executable_output(_record(tmp_path), provider, role, {"entry": emitted}) == value
+
+
+def test_a_malformed_served_entry_degrades_only_its_job(
+    campaign: tuple[Workspace, dict[str, str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, _ = campaign
+    payload, _structure = _served_silicon(tmp_path)
+    source_record = next(iter(collecting_module.job_records(workspace)))
+    workflow_id = "tests.collect.exec-structure"
+    records = [
+        replace(source_record, job_id=job_id, job={**source_record.job, "workflow": workflow_id})
+        for job_id in ("good", "bad")
+    ]
+    package = tmp_path / "collector-package"
+    package.mkdir()
+    bad = {"type": "structures", "lattice_vectors": "x"}
+    hook = _hook(
+        package,
+        f"import json, sys\ngood = {json.dumps(payload)!r}\nbad = {json.dumps(bad)!r}\n"
+        "for line in sys.stdin:\n"
+        "    request = json.loads(line)\n"
+        "    if 'record' not in request: continue\n"
+        "    job_id = request['record']['job_id']\n"
+        "    entry = json.loads(good if job_id == 'good' else bad)\n"
+        "    print(json.dumps({'job_id': job_id, 'outputs': {'relaxed': {'entry': entry}}}), flush=True)",
+    )
+
+    def prepared_records(
+        _workspace: Workspace,
+        *,
+        states: Iterable[str],
+        placement: str | PurePosixPath | None,
+        on_skipped: Callable[[str], None] | None = None,
+    ) -> Iterator[JobRecord]:
+        del states, placement, on_skipped
+        yield from records
+
+    provider = WorkflowProvider(
+        workflow_id=workflow_id,
+        declarations={
+            "workflow": {
+                "$id": "https://example.test/workflows/exec-structure",
+                "outputs": [{"name": "relaxed", "entry_type": "structures"}],
+            }
+        },
+        directory=package,
+        outputs={"relaxed": {"entry_type": "structures", "role": "relaxed"}},
+        collector_exec=hook.name,
+    )
+    monkeypatch.setitem(scaffold_module._WORKFLOW_PROVIDERS, workflow_id, provider)
+    monkeypatch.setattr(collecting_module, "job_records", prepared_records)
+    good, degraded = collecting_module.collect(workspace)
+    assert good.missing_collector is None and set(good.outputs) == {"relaxed"}
+    assert degraded.outputs == {} and degraded.unfulfilled == ("relaxed",)
+    assert degraded.missing_collector is not None
+    assert ":bad: executable collector output failed:" in degraded.missing_collector, degraded.missing_collector

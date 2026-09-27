@@ -34,7 +34,7 @@ _CC = shutil.which("cc")
 pytestmark = pytest.mark.skipif(_CC is None, reason="no C compiler (cc) is available")
 
 _SDK = Path(httk.workflow.__file__).parent / "native" / "c"
-_SHELL = Path(httk.workflow.__file__).parent / "shell" / "httk-workflow.sh"
+_SHELL = Path(httk.workflow.__file__).parent / "native" / "bash" / "httk-workflow.sh"
 
 
 def _compile(

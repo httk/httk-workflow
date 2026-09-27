@@ -155,10 +155,10 @@ _INTERNAL_MODULES = (
     "languages.jobflow.jobflow_runner",
     "languages.httk_v1.v1_runner",
     # The VASP facade is public; the cohesive modules it re-exports are not.
-    "vasp.inputs",
-    "vasp.diagnostics",
-    "vasp.remedies",
-    "vasp.reports",
+    "codes.vasp.inputs",
+    "codes.vasp.diagnostics",
+    "codes.vasp.remedies",
+    "codes.vasp.reports",
 )
 nitpick_ignore_regex = [
     (r"py:.*", r"httk\.workflow\.(" + "|".join(_INTERNAL_MODULES) + r")(\..+)?"),
@@ -185,7 +185,7 @@ suppress_warnings = ["myst.xref_missing", "autoapi.python_import_resolution"]
 # 2. Within a documented module, only the names it lists in ``__all__`` appear.
 #    A module without ``__all__`` (the two namespace packages) is documented by
 #    the underscore rule alone. This is what drops the helpers a package merely
-#    imports (for example the supervision types :mod:`httk.workflow.vasp` uses)
+#    imports (for example the supervision types :mod:`httk.workflow.codes.vasp` uses)
 #    without any per-name suppression list.
 PUBLIC_MODULES = frozenset(
     {
@@ -214,7 +214,8 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.projects",
         "httk.workflow.git_workflows",
         # Domain and compatibility consumers.
-        "httk.workflow.vasp",
+        "httk.workflow.codes",
+        "httk.workflow.codes.vasp",
         "httk.workflow.compat",
         "httk.workflow.compat.v1",
         "httk.workflow.languages",

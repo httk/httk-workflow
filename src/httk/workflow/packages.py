@@ -128,10 +128,11 @@ def _collect_member(directory: Path, value: object, path: str) -> tuple[str, boo
     return member, True
 
 
-def _runner_command(root: Path, value: object, build: BuildSpec | None) -> tuple[str, ...]:
-    """Validate ``[workflow.runner].command`` against the package and its build."""
+def _runner_command(
+    root: Path, value: object, build: BuildSpec | None, path: str = "[workflow.runner].command"
+) -> tuple[str, ...]:
+    """Validate ``[workflow.runner].command`` (or a named entry) against the package and its build."""
 
-    path = "[workflow.runner].command"
     try:
         command = validate_runner_command(value, path)
         references = [runner_command_reference(element, path) for element in command]
@@ -149,7 +150,8 @@ def _runner_command(root: Path, value: object, build: BuildSpec | None) -> tuple
         if reference.name == "package":
             member = _member(root, relative, f"{path} reference {{package}}/{relative}")
             if is_artifact(member):
-                raise _error(root, f"{path} reference {{package}}/{relative} is a build artifact; use {{artifacts}}")
+                remedy = f'use command = ["{{artifacts}}/{relative}"]' if path.endswith(".entry") else "use {artifacts}"
+                raise _error(root, f"{path} reference {{package}}/{relative} is a build artifact; {remedy}")
             if index == 0 and not os.access(root / member, os.X_OK):
                 raise _error(root, f"{path} program {{package}}/{relative} must be executable (chmod +x)")
         elif not is_artifact(relative):
@@ -716,9 +718,13 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
                 raise _error(root, "[workflow.runner] give either entry= or command=, not both")
             command = _runner_command(root, runner["command"], read_build_spec(root))
         else:
-            entry = _member(root, runner.get("entry", "run"), "[workflow.runner].entry")
-            if entry != "run":
-                raise _error(root, "custom entries are not yet supported; the tree entry point must be named run")
+            member = _member(root, runner.get("entry", "run"), "[workflow.runner].entry")
+            if member != "run":
+                # A named entry is exactly the one-element command running it, so a
+                # job records it as runner.command and the manager needs no new path.
+                command = _runner_command(
+                    root, [f"{{package}}/{member}"], read_build_spec(root), "[workflow.runner].entry"
+                )
         steps_raw = runner.get("steps")
         if (
             not isinstance(steps_raw, list)

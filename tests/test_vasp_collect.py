@@ -10,12 +10,12 @@ pytest.importorskip("httk.atomistic")
 
 import httk.core
 
-from httk.workflow.collecting import JobRecord
-from httk.workflow.vasp.collect import (
+from httk.workflow.codes.vasp.collect import (
     collect_vasp_relax,
     collect_vasp_relax_static,
     collect_vasp_static,
 )
+from httk.workflow.collecting import JobRecord
 
 _POSCAR = """silicon
 1.0

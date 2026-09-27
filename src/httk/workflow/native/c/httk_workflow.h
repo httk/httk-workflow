@@ -8,7 +8,7 @@
  *
  * A C runner declares its workflow and its steps once, implements one handler
  * per declared step, and ends by handing control to httk_workflow_main, exactly
- * like the Bash SDK in shell/httk-workflow.sh:
+ * like the Bash SDK in native/bash/httk-workflow.sh:
  *
  *     #include "httk_workflow.h"
  *

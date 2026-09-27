@@ -327,7 +327,7 @@ def test_both_runners_describe_themselves_with_the_same_bytes(tmp_path: Path) ->
     environment = os.environ.copy()
     environment["HTTK_WORKFLOW_DESCRIBE"] = "1"
     environment["HTTK_WORKFLOW_BASH_API"] = str(
-        Path(__file__).parents[1] / "src" / "httk" / "workflow" / "shell" / "httk-workflow.sh"
+        Path(__file__).parents[1] / "src" / "httk" / "workflow" / "native" / "bash" / "httk-workflow.sh"
     )
     # Describing a runner is a pure read of the program itself: neither language
     # needs an attempt context, a workspace, or even the manager's interpreter.

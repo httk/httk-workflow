@@ -1,6 +1,6 @@
 """Expose the command bridge behind the native Bash API.
 
-Every function of the packaged ``shell/httk-workflow.sh`` library is one
+Every function of the packaged ``native/bash/httk-workflow.sh`` library is one
 invocation of one subcommand of this bridge, and every subcommand publishes
 through :class:`httk.workflow.Attempt` and
 :class:`httk.workflow.runtime_builders.OutcomeDraft`. A Bash runner and a Python

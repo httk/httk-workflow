@@ -35,7 +35,7 @@ from httk.workflow.protocol import JobDefinition, JobSpec, prepare_job_payload
 from httk.workflow.transfers import _payload_digest
 
 _SRC = str(Path(__file__).parents[1] / "src")
-_SHELL = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "shell" / "httk-workflow.sh"
+_SHELL = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "native" / "bash" / "httk-workflow.sh"
 
 # One plausible declaration document. Nothing here reads any of it: the members
 # that say which vocabulary and which version it follows live inside the document
