@@ -1032,11 +1032,12 @@ def _entry_record(value: Mapping[str, object], declared: Mapping[str, object]) -
     ``ref`` naming one of their definition IRIs narrows the choice. A record that
     constructs itself from its mapping (``from_obj``) owns the emitted form.
     Otherwise the form is the family's served OPTIMADE form, and the family's
-    OPTIMADE entry binding builds it — the same backend and view that read the
-    entry from a remote service. Its identity can differ from the object an
-    in-process collector builds for the same data (for example from a POSCAR).
+    OPTIMADE entry binding builds it through
+    :func:`httk.core.optimade.served_entry` — the same backend and view that
+    read the entry from a remote service.
     """
 
+    from httk.core.optimade import served_entry
     from httk.core.register import (
         entry_family_info,
         entry_record_info,
@@ -1117,45 +1118,15 @@ def _entry_record(value: Mapping[str, object], declared: Mapping[str, object]) -
         binding = optimade_entry_binding(definition_id) if isinstance(definition_id, str) else None
         if binding is None:
             continue
-        result = _served_entry(entry_type, fields, family, cast(str, definition_id), binding)
+        factory = getattr(family, "entry_type_definition", None)
+        definition = cast(Any, factory)() if callable(factory) else definition_id
+        result = served_entry(entry_type, fields, definition=definition, entry_id="collected")
         if expected_id is not None and expected_id != content_id(result):
             raise ValueError(f"entry output id {expected_id!r} does not match the constructed entry")
         return result
     if families or records:
         raise ValueError(f"entry type {entry_type!r} has no record or OPTIMADE binding that can construct it")
     raise ValueError(f"unknown entry type {entry_type!r}; known types: {', '.join(sorted(known)) or '(none)'}")
-
-
-def _served_entry(
-    entry_type: str, attributes: Mapping[str, object], family: type, definition_id: str, binding: Any
-) -> object:
-    """Build one served OPTIMADE entry through its family's entry binding.
-
-    The schema snapshot declares every property of the family's (extended)
-    definition by IRI, exactly as this entry would be served locally, so both
-    standard names and ``_httk_*`` extensions keep their meaning.
-    """
-
-    from httk.core import EntryTypeDefinition, load_entry_type_definition
-    from httk.core.optimade import OptimadeDocument, OptimadeResource, OptimadeSchemaSnapshot
-
-    factory = getattr(family, "entry_type_definition", None)
-    definition = factory() if callable(factory) else load_entry_type_definition(definition_id)
-    if not isinstance(definition, EntryTypeDefinition):
-        raise ValueError(f"{family.__name__}.entry_type_definition() must return an EntryTypeDefinition")
-    properties = {
-        name: {"$id": prop.definition_id} for name, prop in definition.properties.items() if prop.definition_id
-    }
-    document = OptimadeDocument(
-        json.dumps({"data": {"id": "collected", "type": entry_type, "attributes": dict(attributes)}}),
-        "about:httk-workflow-collect",
-    )
-    info = OptimadeDocument(
-        json.dumps({"meta": {"api_version": "1.3.0"}, "data": {"properties": properties}}),
-        "about:httk-workflow-collect/info",
-    )
-    resource = OptimadeResource(document, 0, OptimadeSchemaSnapshot(entry_type, info))
-    return binding.resolve_view()(binding.resolve_backend()(resource))
 
 
 def _resolve_executable_output(record: JobRecord, provider: object, role: str, value: object) -> object:

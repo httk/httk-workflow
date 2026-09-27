@@ -728,13 +728,12 @@ def test_executable_exit_status_is_surfaced_after_complete_responses(tmp_path: P
 _SILICON = "Si\n5.43\n0 0.5 0.5\n0.5 0 0.5\n0.5 0.5 0\nSi\n2\nDirect\n0 0 0\n0.25 0.25 0.25\n"
 
 
-def test_an_executable_structure_entry_is_read_through_the_optimade_binding(tmp_path: Path) -> None:
+def test_an_executable_structure_entry_stores_like_the_python_collector(tmp_path: Path) -> None:
     import sys
     import warnings
 
     atomistic = pytest.importorskip("httk.atomistic")
     import httk.core
-    from httk.atomistic.models.structure.semantics import StructureSymmetry
     from httk.core.storage.identity import project_storage_record, resolve_storage_record
 
     (tmp_path / "CONTCAR").write_text(_SILICON, encoding="utf-8")
@@ -770,13 +769,8 @@ def test_an_executable_structure_entry_is_read_through_the_optimade_binding(tmp_
         expected = atomistic.UnitcellStructureView(httk.core.load(str(tmp_path / "CONTCAR")))
     record_type = resolve_storage_record(expected)
     assert resolve_storage_record(collected) is record_type
-    actual_fields = dict(project_storage_record(record_type, collected))
-    expected_fields = dict(project_storage_record(record_type, expected))
-    # httk-atomistic: an OPTIMADE-backed structure reports an all-empty
-    # StructureSymmetry where a POSCAR-backed one reports None.
-    assert actual_fields.pop("symmetry") == StructureSymmetry()
-    assert expected_fields.pop("symmetry") is None
-    assert actual_fields == expected_fields
+    assert project_storage_record(record_type, collected) == project_storage_record(record_type, expected)
+    assert content_id(collected) == content_id(expected)
 
 
 def test_an_entry_output_must_match_its_declared_entry_type(tmp_path: Path) -> None:
