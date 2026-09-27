@@ -9,7 +9,7 @@ from typing import Any, cast
 import pytest
 from httk.core.digests import tree_digest
 
-from httk.workflow import Workspace, languages, scaffold
+from httk.workflow import Workspace, compat, scaffold
 from httk.workflow.models import MAXIMUM_DECLARATIONS_BYTES, JobDefinition
 from httk.workflow.packages import (
     load_workflow_package,
@@ -114,7 +114,7 @@ def _language_package(root: Path, language: str = "cwl", manifest_extra: str = "
 name = "tests.{language}"
 
 [workflow.runner]
-language = "{language}"
+format = "{language}"
 document = "{document}"
 {manifest_extra}
 
@@ -286,7 +286,7 @@ def test_cwl_language_manifest_uses_registry_defaults(tmp_path: Path) -> None:
     assert provider.document == "echo.cwl"
     assert provider.steps == ("start", "enter", "advance", "collect")
     assert provider.instantiate is True and provider.inputs == {"message": None}
-    assert provider.collector == "httk.workflow.languages.cwl:collect"
+    assert provider.collector == "httk.workflow.compat.cwl:collect"
     assert workflow_declaration_from_manifest(provider)["inputs"] == [{"name": "message", "entry_type": "strings"}]
 
 
@@ -312,7 +312,7 @@ def _jobflow_package(root: Path, runner: str, *, document: bool = False) -> Path
 name = "tests.jobflow"
 
 [workflow.runner]
-language = "jobflow"
+format = "jobflow"
 {document_line}{runner}
 
 [workflow.inputs.structure]
@@ -339,7 +339,7 @@ def test_jobflow_language_manifest_accepts_maker_and_open_ports(tmp_path: Path) 
     assert provider.steps == ("start", "advance", "enter")
     assert provider.runner_options == {"maker": "atomate2.vasp.flows.core:DoubleRelaxMaker"}
     assert provider.inputs == {"structure": None}
-    assert provider.collector == "httk.workflow.languages.jobflow:collect"
+    assert provider.collector == "httk.workflow.compat.jobflow:collect"
 
 
 def test_jobflow_manifest_rejects_duplicate_input_ports(tmp_path: Path) -> None:
@@ -391,7 +391,7 @@ def test_jobflow_manifest_preserves_declared_maker_parameters(tmp_path: Path) ->
 def test_language_environment_declarations_are_under_manifest_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    original = languages.language
+    original = compat.language
 
     def language_with_environment(name: str):
         return replace(
@@ -402,7 +402,7 @@ def test_language_environment_declarations_are_under_manifest_values(
             },
         )
 
-    monkeypatch.setattr(languages, "language", language_with_environment)
+    monkeypatch.setattr(compat, "language", language_with_environment)
     package = _language_package(
         tmp_path / "language-environment",
         manifest_extra='''
@@ -583,7 +583,7 @@ def test_required_and_forbidden_language_documents_remain_enforced(tmp_path: Pat
 name = "tests.v1"
 
 [workflow.runner]
-language = "httk-v1"
+format = "httk-v1"
 document = "maker.json"
 ''',
         encoding="utf-8",
@@ -684,9 +684,9 @@ description = ""
 @pytest.mark.parametrize(
     ("extra", "message"),
     [
-        ('entry = "run"', "entry is implied by language"),
-        ('steps = ["start"]', "steps is implied by language"),
-        ('initial_step = "start"', "initial_step is implied by language"),
+        ('entry = "run"', "entry is implied by format"),
+        ('steps = ["start"]', "steps is implied by format"),
+        ('initial_step = "start"', "initial_step is implied by format"),
     ],
 )
 def test_language_runner_fields_are_forbidden(tmp_path: Path, extra: str, message: str) -> None:
@@ -718,7 +718,7 @@ def test_language_manifest_forbids_instantiate_and_destinations(tmp_path: Path) 
     "change",
     [
         'document = "missing.cwl"',
-        'language = "unknown"\ndocument = "echo.cwl"',
+        'format = "unknown"\ndocument = "echo.cwl"',
         'modules = []',
     ],
 )
@@ -728,9 +728,9 @@ def test_language_manifest_reports_missing_or_invalid_runner_data(tmp_path: Path
     if change.startswith("document"):
         manifest = manifest.replace('document = "echo.cwl"', change)
         message = "document.*does not exist"
-    elif change.startswith("language"):
-        manifest = manifest.replace('language = "cwl"\ndocument = "echo.cwl"', change)
-        message = "available languages.*cwl.*pwd"
+    elif change.startswith("format"):
+        manifest = manifest.replace('format = "cwl"\ndocument = "echo.cwl"', change)
+        message = "available formats.*cwl.*pwd"
     else:
         manifest = manifest.replace('document = "echo.cwl"', 'document = "echo.cwl"\n' + change)
         message = "unknown runner option"
@@ -808,7 +808,7 @@ def test_language_resolution_scaffolds_without_publishing(tmp_path: Path) -> Non
         _ = resolved.store_name
     job = new_job(Workspace.initialize(tmp_path / "workspace"), package)
     definition = JobDefinition.from_path(job.payload / "job.json")
-    assert definition.runner_path.as_posix() == "pkg:httk.workflow.languages.cwl/cwl_runner.py"
+    assert definition.runner_path.as_posix() == "pkg:httk.workflow.compat.cwl/cwl_runner.py"
     assert definition.runner_source == "installed"
     assert definition.parameters["workflow_language"] == "cwl"
     assert definition.parameters["cwl_document"] == "files/workflow.cwl.json"
@@ -997,9 +997,9 @@ def test_load_register_alias_and_register_false(tmp_path: Path, monkeypatch: pyt
 
 def test_workflow_package_precedes_document_matching(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     package = _package(tmp_path / "package")
-    from httk.workflow import languages
+    from httk.workflow import compat
 
-    monkeypatch.setattr(languages, "match_document", lambda path: pytest.fail("package reached document matching"))
+    monkeypatch.setattr(compat, "match_document", lambda path: pytest.fail("package reached document matching"))
 
     assert resolve_workflow(package).workflow_id == "tests.package"
 

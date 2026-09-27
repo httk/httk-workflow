@@ -112,7 +112,7 @@ with the static tags; the Bash counterpart is the Bash VASP API below.
   (`run_vasp`), and the result collectors in `httk.workflow.codes.vasp.collect`. See
   {doc}`runtime_helpers`.
 - The Bash VASP API: a Bash runner sources `$HTTK_WORKFLOW_VASP_BASH_API` after
-  `$HTTK_WORKFLOW_BASH_API`; see {doc}`sdks/native_bash_api`.
+  `$HTTK_WORKFLOW_BASH_API`; see {doc}`sdks/bash_api`.
 
 A group whose practice differs copies a workflow package from the repository
 and edits it, or keeps the workflows and registers its own remedy policy.

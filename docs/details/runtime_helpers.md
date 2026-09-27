@@ -361,7 +361,7 @@ JSON lines and emits `httk-workflow-checker-result` version 2 JSON lines.
 Commands and checker commands are always argument arrays: this API deliberately
 does not reproduce the *httk* v1 exit-code and `ht.nextstep` interface.
 
-Native Bash runners use the same protocol through {doc}`/sdks/native_bash_api`.
+Native Bash runners use the same protocol through {doc}`/sdks/bash_api`.
 
 ## VASP files
 

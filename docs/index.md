@@ -45,7 +45,7 @@ directory to a finished relaxation, no runner written and no VASP required.
 - {doc}`declarations` — saying what a workflow *is*, for a data layer
 - {doc}`provenance` — turning one `JobRecord` into one `httk.core.Run`
 - {doc}`collecting` — collecting provider-produced outputs and products
-- {doc}`workflow_languages` — CWL, PWD, jobflow, and httk-v1 runner realizations
+- {doc}`workflow_compat` — compatibility with other workflow systems: CWL, PWD, jobflow, and httk-v1 (`format = ...`)
 - {doc}`notebooks/examples` — worked examples as a notebook
 
 **Orchestration and management** — driving and inspecting a workspace
@@ -115,7 +115,7 @@ workflow_uris
 declarations
 provenance
 collecting
-workflow_languages
+workflow_compat
 taskmanager
 workflow_cli
 sealing

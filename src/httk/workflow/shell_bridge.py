@@ -1,6 +1,6 @@
-"""Expose the command bridge behind the native Bash API.
+"""Expose the command bridge behind the Bash API.
 
-Every function of the packaged ``native/bash/httk-workflow.sh`` library is one
+Every function of the packaged ``languages/bash/httk-workflow.sh`` library is one
 invocation of one subcommand of this bridge, and every subcommand publishes
 through :class:`httk.workflow.Attempt` and
 :class:`httk.workflow.runtime_builders.OutcomeDraft`. A Bash runner and a Python
@@ -10,7 +10,7 @@ implementation.
 This module is the documented surface of that contract. The implementation lives
 in the private ``httk.workflow._shell_bridge``, which is what the shell library
 still executes; both names refer to the same objects, and the private one keeps
-working. See the native Bash API guide in the httk-workflow documentation for
+working. See the Bash API guide in the httk-workflow documentation for
 the subcommands themselves.
 
 Exit codes are uniform across every subcommand: ``0`` when the call succeeded,

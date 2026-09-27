@@ -5,8 +5,8 @@ from typing import Any, cast
 import pytest
 
 from httk.workflow import Attempt, TaskManager, Workspace, collect, new_job, new_jobs
-from httk.workflow.languages.httk_v1 import v1_runner
-from httk.workflow.languages.httk_v1.v1_runner import _continue_with_children, _task_directories, replay_v1_atomic
+from httk.workflow.compat.v1 import v1_runner
+from httk.workflow.compat.v1.v1_runner import _continue_with_children, _task_directories, replay_v1_atomic
 from httk.workflow.packages import load_workflow_package
 from httk.workflow.protocol import JobDefinition
 from httk.workflow.runtime_builders import JobState
@@ -20,7 +20,7 @@ def _legacy_source(root: Path, source: str, *, program: str = "ht_steps") -> Pat
         """[workflow]
 name = "tests.v1.legacy"
 [workflow.runner]
-language = "httk-v1"
+format = "httk-v1"
 attempts = 10
 [workflow.environment."httk_v1.log_compression"]
 default = "none"
@@ -553,7 +553,7 @@ _V1_MANIFEST = '''
 name = "tests.v1.package"
 
 [workflow.runner]
-language = "httk-v1"
+format = "httk-v1"
 taskset = "default"
 attempts = 2
 

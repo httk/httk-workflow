@@ -1,7 +1,7 @@
 """Lifecycle guarantees of :mod:`httk.workflow.supervision`.
 
 The protocol-level behaviour of a supervised command is covered in
-:mod:`tests.test_native_bash_api`; this module covers what has to hold when a
+:mod:`tests.test_bash_api`; this module covers what has to hold when a
 run goes wrong: no orphaned process group, no torn checker input, no unbounded
 memory, exactly one escalation to SIGKILL, a calm event cadence, and a followed
 file that survives rotation.

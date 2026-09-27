@@ -17,7 +17,7 @@
 set -euo pipefail
 
 # The manager exports HTTK_WORKFLOW_BASH_API; sourcing it is what makes the
-# httk_workflow_* functions of the native Bash API available.
+# httk_workflow_* functions of the Bash API available.
 source "$HTTK_WORKFLOW_BASH_API"
 
 # The workflow name and every step this runner implements, declared before any

@@ -103,30 +103,30 @@ namespaces = true
 [tool.setuptools.package-data]
 "httk.workflow" = [
   "py.typed",
-  # The native Bash authoring SDK and the per-code Bash APIs (see docs/sdks/native_bash_api).
-  "native/bash/*.sh",
+  # The Bash authoring SDK and the per-code Bash APIs (see docs/sdks/bash_api).
+  "languages/bash/*.sh",
   "codes/vasp/*.sh",
-  # The native C authoring SDK ships beside the Bash library as one .h/.c
+  # The C authoring SDK ships beside the Bash library as one .h/.c
   # pair, designed to be vendored or compiled directly beside a runner.
-  "native/c/*.h",
-  "native/c/*.c",
-  # The native Fortran SDK is one module wrapping that C pair over iso_c_binding;
-  # it ships beside it, compiled with a runner and the C source (see docs/sdks/native_fortran_api).
-  "native/fortran/*.f90",
-  # The native Rust SDK is a std-only crate (no crates.io deps), a bridge client
+  "languages/c/*.h",
+  "languages/c/*.c",
+  # The Fortran SDK is one module wrapping that C pair over iso_c_binding;
+  # it ships beside it, compiled with a runner and the C source (see docs/sdks/fortran_api).
+  "languages/fortran/*.f90",
+  # The Rust SDK is a std-only crate (no crates.io deps), a bridge client
   # like the Bash and C ones rather than FFI over them; it ships as its Cargo
-  # manifest and single source file, path-depended or vendored (see docs/sdks/native_rust_api).
-  "native/rust/Cargo.toml",
-  "native/rust/src/*.rs",
-  # The native Perl SDK is one pure-core module, loaded directly by interpreted runners.
-  "native/perl/*.pm",
-  # The native Ada SDK is an Ada 2012 spec/body binding over the C SDK.
-  "native/ada/*.ads",
-  "native/ada/*.adb",
-  # The native C++ SDK is a header-only C++17 RAII wrapper over the C SDK.
-  "native/cpp/*.hpp",
-  # The native Java SDK is one java.base-only source file, compiled beside a runner.
-  "native/java/*.java",
+  # manifest and single source file, path-depended or vendored (see docs/sdks/rust_api).
+  "languages/rust/Cargo.toml",
+  "languages/rust/src/*.rs",
+  # The Perl SDK is one pure-core module, loaded directly by interpreted runners.
+  "languages/perl/*.pm",
+  # The Ada SDK is an Ada 2012 spec/body binding over the C SDK.
+  "languages/ada/*.ads",
+  "languages/ada/*.adb",
+  # The C++ SDK is a header-only C++17 RAII wrapper over the C SDK.
+  "languages/cpp/*.hpp",
+  # The Java SDK is one java.base-only source file, compiled beside a runner.
+  "languages/java/*.java",
   "adapter_templates/*/remote.json",
   "adapter_templates/*/adapter",
   "launch_templates/*/launcher.json",
@@ -143,10 +143,10 @@ namespaces = true
   "v1_runtime/README.md",
   "v1_runtime/compat/*.sh",
 ]
-# httk.workflow.languages.cwl and httk.workflow.languages.pwd follow the same rule and
+# httk.workflow.compat.cwl and httk.workflow.compat.pwd follow the same rule and
 # need no entry of their own: cwl_runner.py and pwd_runner.py are modules of those
-# packages, so a job referencing pkg:httk.workflow.languages.cwl/... or
-# pkg:httk.workflow.languages.pwd/... finds them wherever the package was installed.
+# packages, so a job referencing pkg:httk.workflow.compat.cwl/... or
+# pkg:httk.workflow.compat.pwd/... finds them wherever the package was installed.
 # Nothing beside them is data.
 
 [tool.pytest.ini_options]

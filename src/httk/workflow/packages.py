@@ -19,7 +19,7 @@ from httk.core.building import BuildSpec, artifact_excluder, read_manifest_build
 from httk.core.digests import tree_digest
 from httk.core.requirements import Requirement, parse_requirements
 
-from . import languages
+from . import compat
 from ._util import validate_inputs
 from .errors import FormatError
 from .models import (
@@ -211,7 +211,7 @@ def _validate_input_table(
     _unknown(raw, {"destination", "description", "entry_type", "ref", "role", "port", "required"}, path, directory)
     destination = raw.get("destination")
     if language and destination is not None:
-        raise _error(directory, f"{path}.destination is implied by the language")
+        raise _error(directory, f"{path}.destination is implied by the format")
     if destination is not None:
         try:
             validate_inputs({name: destination})
@@ -224,7 +224,7 @@ def _validate_input_table(
         port = _string(raw, "port", path, directory)
         assert port is not None
         if not allow_port:
-            raise _error(directory, f"{path}.port is only valid for a language workflow with a document")
+            raise _error(directory, f"{path}.port is only valid with [workflow.runner].format and a document")
         result["port"] = port
     elif allow_port:
         result["port"] = name
@@ -402,7 +402,7 @@ def _validate_outputs(
             port = _string(table, "port", path, directory)
             assert port is not None
             if not allow_port:
-                raise _error(directory, f"{path}.port is only valid for a language workflow with a document")
+                raise _error(directory, f"{path}.port is only valid with [workflow.runner].format and a document")
             entry["port"] = port
         elif allow_port:
             entry["port"] = output
@@ -659,36 +659,36 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         short_name, workflow_id = workflow_id, _uri
 
     runner = _table(workflow.get("runner"), "[workflow.runner]", root)
-    language_name = _optional_string(runner, "language", "[workflow.runner]", root)
+    language_name = _optional_string(runner, "format", "[workflow.runner]", root)
     lang = None
     document_member: str | None = None
     runner_options: dict[str, object] = {}
     if language_name is not None:
         try:
-            lang = languages.language(language_name)
+            lang = compat.language(language_name)
         except ValueError as exc:
-            raise _error(root, f"[workflow.runner].language: {exc}") from exc
+            raise _error(root, f"[workflow.runner].format: {exc}") from exc
         for key in ("entry", "command", "steps", "initial_step"):
             if key in runner:
-                raise _error(root, f"[workflow.runner].{key} is implied by language {language_name!r}")
+                raise _error(root, f"[workflow.runner].{key} is implied by format {language_name!r}")
         if "instantiate" in workflow:
-            raise _error(root, f"[workflow.instantiate] is implied by language {language_name!r}")
+            raise _error(root, f"[workflow.instantiate] is implied by format {language_name!r}")
         if lang.document_policy == "required":
             if "document" not in runner:
-                raise _error(root, f"workflow language {language_name!r} requires [workflow.runner].document")
+                raise _error(root, f"workflow format {language_name!r} requires [workflow.runner].document")
             document_member = _member(root, runner.get("document"), "[workflow.runner].document")
         elif lang.document_policy == "forbidden" and "document" in runner:
-            raise _error(root, f"[workflow.runner].document is not used by language {language_name!r}")
+            raise _error(root, f"[workflow.runner].document is not used by format {language_name!r}")
         elif lang.document_policy == "optional" and "document" in runner:
             document_member = _member(root, runner.get("document"), "[workflow.runner].document")
         if not lang.allows_modes:
             for mode in ("data_mode", "workdir_mode"):
                 if mode in runner:
-                    raise _error(root, f"[workflow.runner].{mode} is not supported by language {language_name!r}")
+                    raise _error(root, f"[workflow.runner].{mode} is not supported by format {language_name!r}")
         runner_options = {
             key: value
             for key, value in runner.items()
-            if key not in {"language", "document", "data_mode", "workdir_mode"}
+            if key not in {"format", "document", "data_mode", "workdir_mode"}
         }
         try:
             lang.validate_runner(runner_options, root)
@@ -845,7 +845,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         allow_port=lang is not None and (document_member is not None or lang.open_ports),
     )
     if lang is not None and (document_member is not None or lang.open_ports):
-        static_ports: languages.LanguagePorts | None = None
+        static_ports: compat.LanguagePorts | None = None
         if document_member is not None and not lang.open_ports:
             document_path = (root / document_member).resolve()
             try:
@@ -926,7 +926,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         requires=requires,
         _input_metadata=input_metadata,
         collector=(
-            f"httk.workflow.languages.{language_name.replace('-', '_')}:collect"
+            f"{lang.collect.__module__}:{lang.collect.__qualname__}"
             if language_name is not None and lang is not None and lang.has_default_collector
             else None
         ),

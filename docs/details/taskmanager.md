@@ -144,7 +144,7 @@ workspace settings, or declared defaults, plus runner-reference problems, for
 pending jobs. It also measures each pending job against the workspace's live
 managers: a job **no live manager can claim** names the closest manager's unmet
 requirements (the same wording `job why` uses, including a runner-module
-allowlist a manager does not carry), a **language job** (the collect gate's
+allowlist a manager does not carry), a job of a compat **format** (the collect gate's
 `workflow_realization = language` pair) whose engine modules are absent names the
 pip extra to install (for example `pip install httk-workflow[jobflow]`) — a
 failure only when no live manager serves its executor, since the extras belong on
@@ -854,7 +854,7 @@ the context supplied by `HTTK_WORKFLOW_CONTEXT` and publishes
 `outcome.tmp.<nonce>/` as `outcome.ready/` beneath
 `HTTK_WORKFLOW_CONTROL_DIR`. See the
 {doc}`workflow_filesystem_api` for the complete protocol, and
-{doc}`runtime_helpers`, {doc}`/sdks/native_bash_api`, or the {doc}`/sdks/sdk_parity` table
+{doc}`runtime_helpers`, {doc}`/sdks/bash_api`, or the {doc}`/sdks/sdk_parity` table
 for the two authoring SDKs that implement it.
 
 The manager puts the directory of its own interpreter first on the runner's

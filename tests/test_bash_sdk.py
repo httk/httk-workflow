@@ -29,7 +29,7 @@ from httk.workflow import (
 from httk.workflow.protocol import JobSpec, ReplayableWorkdirBatch, prepare_job_payload
 from httk.workflow.supervision import ProcessSupervisor
 
-_SHELL = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "native" / "bash" / "httk-workflow.sh"
+_SHELL = Path(__file__).parents[1] / "src" / "httk" / "workflow" / "languages" / "bash" / "httk-workflow.sh"
 
 
 @dataclass(frozen=True)

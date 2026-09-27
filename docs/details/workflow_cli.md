@@ -225,8 +225,8 @@ activations at step 'X'; K after unclean exits` — summarizing the journal; a
 threshold without progressing; and any **pending** operator request still in
 `requests/ready`, or the reason recorded for the most recent **retired** one.
 
-Language documents use `job new --from-runner DOCUMENT`; see
-{doc}`/workflow_languages` for PWD, CWL, jobflow, and httk-v1 details.
+CWL, PWD, and jobflow documents use `job new --from-runner DOCUMENT`; see
+{doc}`/workflow_compat` for PWD, CWL, jobflow, and httk-v1 details.
 
 ### `collect` — the finished jobs, as summaries
 
@@ -370,9 +370,9 @@ against the **live managers** the workspace actually publishes:
   allowlist, not a fixed default. When no manager is live at all, one
   workspace-level `manager_notice` replaces per-job claim findings, and does not
   fail the run;
-- **language engine** — a language job (the collect gate's pair,
+- **format engine** — a job of a compat format (the collect gate's pair,
   `workflow_realization = language` with a `workflow_language`) has each module
-  that language needs checked (without importing it) and names the pip extra to
+  that format needs checked (without importing it) and names the pip extra to
   install, for example `pip install httk-workflow[jobflow]`. Because the extras
   belong on the machine that runs the job, an absent module is only a problem
   when no live manager serves the job's executor; when one does, the check is
@@ -687,7 +687,7 @@ children always inherit their parent's workspace. See {doc}`/campaigns`.
 ## Creating jobs
 
 `job new` scaffolds and submits jobs from a registered or packaged workflow name,
-a runner file, a package directory, or a bare language document — and needs no
+a runner file, a package directory, or a bare CWL, PWD, or jobflow document — and needs no
 prepared payload:
 
 ```console
@@ -710,7 +710,7 @@ single-stage and chained result layouts.
 
 `--parameter NAME=VALUE` supplies an opaque implementation knob;
 `--environment NAME=VALUE` overrides one declared workflow environment entry;
-and `--format LANG` selects the language of a bare document.
+and `--format FORMAT` selects the format of a bare document.
 With `--from-command TEMPLATE`, `shlex`-style words are turned into a published
 one-step Bash runner; each `{name}` placeholder must have a matching
 `--parameter NAME=VALUE` or `--file NAME=PATH`. Parameter placeholders resolve
@@ -759,16 +759,16 @@ tag. `--file
 NAME=PATH` stages anything else, `--input NAME=PATH` stages one declared input,
 and the command prints one
 tab-separated `job_key<TAB>payload` line per job, or `--json` reports. Any
-preparation warning a language raises (for example a CWL `DockerRequirement`) is
+preparation warning a format realization raises (for example a CWL `DockerRequirement`) is
 printed once as `httk workflow: warning: …` on stderr. The runner
 file is published into the workspace runner store and pinned by digest unless
 `--publish installed` names a packaged runner where it is installed. See
 {doc}`/quickstart`.
 
-## Running language documents
+## Running workflow documents
 
 Run a PWD, CWL, or jobflow document directly with `job new --from-runner DOCUMENT`;
-the document is resolved as a language realization:
+the document is resolved as a format realization:
 
 ```console
 httk job new --workspace WS --from-runner flow.cwl --input message=echo
@@ -778,10 +778,10 @@ httk job new --workspace WS --from-runner maker.json
 
 The same `--format` option accepts `cwl`, `pwd`, `jobflow`, and `httk-v1` for
 bare document inputs. Manifest packages and registered ids reject the option
-because their language is already known.
+because their format is already declared.
 
-See {doc}`/workflow_languages` for package manifests, bare-document rules,
-the supported CWL subset, PWD security, jobflow Makers, and language collection.
+See {doc}`/workflow_compat` for package manifests, bare-document rules,
+the supported CWL subset, PWD security, jobflow Makers, and format default collection.
 
 Harvest old v1 results without submitting them:
 

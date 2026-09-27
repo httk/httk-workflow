@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 
 from httk.core.digests import sha256_file, tree_digest
 
-from . import languages
+from . import compat
 from ._manager_runners import check_runner_reference, contained, runner_command_problem, runner_module_allowed
 from ._manager_scheduling import unmet_job_requirements
 from .errors import WorkflowError
@@ -262,15 +262,15 @@ def _language_finding(job: JobDefinition, managers: Sequence[ManagerRecord]) -> 
     if not isinstance(name, str):
         return None
     try:
-        language = languages.language(name)
+        language = compat.language(name)
     except ValueError:
-        problem = f"workflow language {name!r} is not available in this installation"
+        problem = f"workflow format {name!r} is not available in this installation"
         return {"status": "problem", "problem": problem}
     missing = [module for module in language.required_modules if _find_module_spec_without_import(module) is None]
     if not missing:
         return None
     problem = (
-        f"workflow language {language.name} needs Python module(s) {', '.join(missing)}; "
+        f"workflow format {language.name} needs Python module(s) {', '.join(missing)}; "
         f"install them with 'pip install httk-workflow[{language.name}]'"
     )
     if language.name == "jobflow":

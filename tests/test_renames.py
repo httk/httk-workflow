@@ -11,7 +11,13 @@ wrong no other test would notice:
 * the per-user remote definitions and identity keys moved from the data home to
   the configuration home;
 * ``WorkflowWorkspace`` became ``Workspace``, and the packaged VASP workflows
-  left the distribution for https://github.com/httk/workflows-vasp.
+  left the distribution for https://github.com/httk/workflows-vasp;
+* the workflow-system realizations moved from ``httk.workflow.languages`` into
+  ``httk.workflow.compat`` (the httk-v1 one merged into ``compat.v1``), and the
+  manifest key ``[workflow.runner] language`` became ``format``;
+* the non-Python runner SDKs moved from ``httk/workflow/native`` to
+  ``httk/workflow/languages``, exported as ``HTTK_WORKFLOW_LANGUAGES_DIR``
+  instead of ``HTTK_WORKFLOW_NATIVE_API``.
 
 The superseded spellings are now **removed**, not merely hidden. This module
 asserts both halves: the canonical spellings work, and the old ones are gone —
@@ -262,3 +268,45 @@ def test_retired_lifecycle_spellings_are_gone() -> None:
         if path.name in {"_transfer.py", "adapters.py"}:
             continue
         assert not retired.search(path.read_text(encoding="utf-8")), path
+
+
+def test_the_workflow_system_realizations_live_in_compat(tmp_path: Path) -> None:
+    import importlib
+
+    from httk.workflow import compat
+    from httk.workflow.packages import parse_workflow_manifest
+
+    for module in (
+        "httk.workflow.languages.cwl",
+        "httk.workflow.languages.pwd",
+        "httk.workflow.languages.jobflow",
+        "httk.workflow.languages.httk_v1",
+    ):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(module)
+    assert compat.available_languages() == ("cwl", "httk-v1", "jobflow", "pwd")
+    assert compat.language("httk-v1") is importlib.import_module("httk.workflow.compat.v1.realization").LANGUAGE
+
+    package = tmp_path / "legacy"
+    package.mkdir()
+    (package / "ht_run").write_text("#!/bin/sh\n", encoding="utf-8")
+    (package / "httk_workflow.toml").write_text(
+        '[workflow]\nname = "tests.legacy"\n\n[workflow.runner]\nlanguage = "httk-v1"\n', encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match=r"unknown key \[workflow\.runner\.language\]"):
+        parse_workflow_manifest(package)
+
+
+def test_the_language_sdks_live_in_languages() -> None:
+    import importlib
+
+    from httk.workflow import _runner_builds
+
+    root = Path(httk.workflow.__file__).parent
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("httk.workflow.native")
+    assert not (root / "native").exists()
+    assert (root / "languages" / "c" / "httk_workflow.h").is_file()
+    assert not (root / "languages" / "__init__.py").exists()
+    assert _runner_builds._environment()["HTTK_WORKFLOW_LANGUAGES_DIR"] == str(root / "languages")
+    assert "HTTK_WORKFLOW_NATIVE_API" not in _runner_builds._environment()

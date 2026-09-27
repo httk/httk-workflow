@@ -44,7 +44,7 @@ This is a distinct tool from the two nearby ones:
   short name of a workflow installed that way, such as `vasp.relax`;
 - a **runner file** of your own (`./elastic_constant.py`);
 - a **workflow package directory** (one holding `httk_workflow.toml`);
-- a **bare language document** (a CWL file, a jobflow document, …).
+- a **bare workflow document** of a compat format (a CWL file, a jobflow document, …).
 
 Where the runner ends up depends on what it is. A registered packaged workflow is
 referenced through the reserved `pkg:` form, so **nothing is copied** into the
@@ -162,7 +162,7 @@ gathering step.
 
 ## Where to go next
 
-- {doc}`sdks/native_bash_api` — `httk_workflow_call` and the rest of the Bash
+- {doc}`sdks/bash_api` — `httk_workflow_call` and the rest of the Bash
   authoring SDK.
 - {doc}`campaigns` — `ChildSpec` fan-out and partitioning, the other way one job
   becomes many.

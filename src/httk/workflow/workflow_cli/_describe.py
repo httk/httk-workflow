@@ -406,8 +406,8 @@ def build_describe_parser(
     )
     describe.add_argument(
         "--format",
-        metavar="LANG",
-        help="force LANG for a bare workflow document or directory",
+        metavar="FORMAT",
+        help="force FORMAT (cwl, pwd, jobflow, httk-v1) for a bare workflow document or directory",
     )
     describe.add_argument("--json", action="store_true", help="print descriptions as one JSON array")
 

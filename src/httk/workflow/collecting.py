@@ -58,7 +58,7 @@ from urllib.parse import unquote
 from httk.core.digests import sha256_file, tree_digest
 from httk.core.storage import content_id
 
-from . import languages
+from . import compat
 from ._util import read_json, require_mapping, require_string
 from .errors import FormatError
 from .hookapi import COLLECT_STREAM_FORMAT, COLLECT_STREAM_VERSION
@@ -1149,7 +1149,7 @@ def _resolve_executable_output(record: JobRecord, provider: object, role: str, v
             definition = _core().load_property_definition(ref)
             validation.validate_property(definition, raw)
             return _core().DataRecord.from_value(definition.definition_id, definition.name, raw)
-        from .languages import _data_record
+        from .compat import _data_record
 
         return _data_record(role, raw)
     if keys == {"file"} and isinstance(value.get("file"), str):
@@ -1735,13 +1735,13 @@ def collect(
                     continue
                 if provider is None and language_realization and isinstance(language_name, str):
                     try:
-                        lang = languages.language(language_name)
+                        lang = compat.language(language_name)
                         if not lang.has_default_collector:
                             results[index] = _degraded_job(
                                 record,
                                 provider,
                                 run,
-                                f"{identity}: workflow language {language_name!r} has no default collector; "
+                                f"{identity}: workflow format {language_name!r} has no default collector; "
                                 "its package declares [workflow.collect]",
                             )
                             continue
@@ -1753,7 +1753,7 @@ def collect(
                             record,
                             provider,
                             run,
-                            f"{identity}: workflow language {language_name!r} collector unavailable: {exc}",
+                            f"{identity}: workflow format {language_name!r} collector unavailable: {exc}",
                         )
                         continue
             if adapter is None:
@@ -1793,7 +1793,7 @@ def collect(
 
                 if fallback and isinstance(exc, _PinnedTreeError):
                     results[index] = _degraded_job(record, provider, run, f"pinned runner tree was modified: {exc}")
-                elif isinstance(exc, languages.LanguageOutputsMissingError):
+                elif isinstance(exc, compat.LanguageOutputsMissingError):
                     results[index] = _degraded_job(record, provider, run, str(exc))
                 else:
                     results[index] = _degraded_job(record, provider, run, f"{identity}: collector failed: {exc}")

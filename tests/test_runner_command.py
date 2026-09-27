@@ -66,8 +66,8 @@ def _c_package(root: Path) -> Path:
     )
     (root / "relax.c").write_text(_C_RUNNER, encoding="utf-8")
     (root / "build.sh").write_text(
-        '#!/bin/sh\nset -e\ncc -std=c99 -I"$HTTK_WORKFLOW_NATIVE_API/c" -o relax relax.c '
-        '"$HTTK_WORKFLOW_NATIVE_API/c/httk_workflow.c"\n',
+        '#!/bin/sh\nset -e\ncc -std=c99 -I"$HTTK_WORKFLOW_LANGUAGES_DIR/c" -o relax relax.c '
+        '"$HTTK_WORKFLOW_LANGUAGES_DIR/c/httk_workflow.c"\n',
         encoding="utf-8",
     )
     (root / "build.sh").chmod(0o755)
@@ -225,8 +225,10 @@ def test_describe_runs_the_command_only_with_artifacts(tmp_path: Path) -> None:
     package = _c_package(tmp_path / "package")
     with pytest.raises(ValueError, match="no build artifacts"):
         describe_package_runner(package)
-    native = str(Path(httk.workflow.__file__).parent / "native")
-    subprocess.run(["./build.sh"], cwd=package, env={**os.environ, "HTTK_WORKFLOW_NATIVE_API": native}, check=True)
+    languages = str(Path(httk.workflow.__file__).parent / "languages")
+    subprocess.run(
+        ["./build.sh"], cwd=package, env={**os.environ, "HTTK_WORKFLOW_LANGUAGES_DIR": languages}, check=True
+    )
     assert describe_package_runner(package, artifacts=package) == {"workflow": "tests.command.c", "steps": ["start"]}
 
 

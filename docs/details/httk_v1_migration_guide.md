@@ -793,7 +793,7 @@ Use a manifest that makes the v1 contract explicit:
 name = "legacy.silicon-relax"
 
 [workflow.runner]
-language = "httk-v1"
+format = "httk-v1"
 taskset = "vasp"
 attempts = 10
 
@@ -896,5 +896,5 @@ still needs it.
 - [ ] Every `ht.instantiate.py` is converted to declared parameters or `@run.instantiate`.
 - [ ] New production submissions use native payloads and new UUIDs.
 
-For API details, continue with {doc}`/sdks/native_bash_api`,
+For API details, continue with {doc}`/sdks/bash_api`,
 {doc}`runtime_helpers`, and {doc}`workflow_filesystem_api`.

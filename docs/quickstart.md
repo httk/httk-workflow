@@ -216,8 +216,8 @@ overwrite a name already pointing somewhere else.
   `examples/defect_campaign.sh`.
 - {doc}`workflow_packages` — authoring a directory workflow with hooks and a
   manifest.
-- {doc}`sdks/native_bash_api` — the same runner protocol from Bash.
-- {doc}`workflow_languages` — a Python Workflow Definition, CWL workflow,
+- {doc}`sdks/bash_api` — the same runner protocol from Bash.
+- {doc}`workflow_compat` — a Python Workflow Definition, CWL workflow,
   jobflow Maker document, or explicitly selected httk-v1 template becomes one
   job with `httk job new --from-runner DOCUMENT`, without being rewritten
   and without a runner file.

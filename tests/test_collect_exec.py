@@ -26,8 +26,8 @@ from httk.workflow.collecting import (
     _resolve_executable_output,
     _run_executable_collector,
 )
-from httk.workflow.languages import _data_record
-from httk.workflow.languages.cwl import _file_record
+from httk.workflow.compat import _data_record
+from httk.workflow.compat.cwl import _file_record
 from httk.workflow.packages import parse_workflow_manifest
 from httk.workflow.scaffold import WorkflowProvider
 from httk.workflow.workflow_cli._describe import _workflow_description
@@ -700,7 +700,7 @@ def test_collect_manifest_rejects_non_executable_non_python(tmp_path: Path) -> N
 
 
 def test_truncated_outputs_document_degrades_the_job(tmp_path: Path) -> None:
-    from httk.workflow.languages import LanguageOutputsMissingError, _load_outputs
+    from httk.workflow.compat import LanguageOutputsMissingError, _load_outputs
 
     # A published-but-truncated JSON document must degrade this one job, not
     # abort the whole sweep with a bare JSONDecodeError.

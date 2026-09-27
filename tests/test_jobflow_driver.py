@@ -19,7 +19,7 @@ from jobflow.managers.local import run_locally
 from maggma.stores import MemoryStore
 from monty.json import MontyDecoder, jsanitize
 
-from httk.workflow.languages.jobflow._driver import (
+from httk.workflow.compat.jobflow._driver import (
     DriverState,
     load_spooled_job,
     merge_documents,

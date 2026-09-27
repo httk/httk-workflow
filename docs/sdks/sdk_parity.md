@@ -3,60 +3,60 @@
 *For runner authors in either language.* One table, below, is the **normative**
 list of the authoring surface: every operation a step can perform, spelled in
 Python and in Bash, with the protocol artifact it produces. The prose guides —
-{doc}`../runtime_helpers` for Python and {doc}`native_bash_api` for Bash — teach the
+{doc}`../runtime_helpers` for Python and {doc}`bash_api` for Bash — teach the
 two languages; this page is what they must both agree with.
 
 The table is enforced. `tests/test_docs_parity.py` parses it and fails the build
 when a listed Python member does not exist, when a listed Bash function is not
 defined in the packaged library, or when a public member of `Runner` or
-`Attempt`, or a function of `native/bash/httk-workflow.sh`, is missing a row. An
+`Attempt`, or a function of `languages/bash/httk-workflow.sh`, is missing a row. An
 authoring feature that is not in this table does not exist as far as the
 documentation is concerned, and adding one to the code means adding a row here.
 
-A third language SDK, {doc}`in C <native_c_api>`, is a bridge client of this same
+A third language SDK, {doc}`in C <c_api>`, is a bridge client of this same
 surface: like the Bash functions, each `httk_workflow_*` C function is one
 invocation of one {py:mod}`httk.workflow.shell_bridge` subcommand, so a C runner
 publishes the same bytes too. Its own function-by-function mapping to the Python
-and Bash columns below lives in {doc}`native_c_api`, which is the reference and
+and Bash columns below lives in {doc}`c_api`, which is the reference and
 the foundation the Fortran bindings build on.
 
-A fourth SDK, {doc}`in modern Fortran <native_fortran_api>`, adds no new bridge
+A fourth SDK, {doc}`in modern Fortran <fortran_api>`, adds no new bridge
 protocol at all: it is `iso_c_binding` bindings over that C library plus an
 idiomatic Fortran module, so the C `httk_workflow_main` owns dispatch and every
 verb reaches the same subcommand. A Fortran runner therefore publishes the same
 bytes as the C, Bash, and Python runners; its Fortran-to-C mapping lives in
-{doc}`native_fortran_api`.
+{doc}`fortran_api`.
 
-A fifth SDK, {doc}`in safe Rust <native_rust_api>`, is a bridge client of this
+A fifth SDK, {doc}`in safe Rust <rust_api>`, is a bridge client of this
 same surface, but — unlike the Fortran one — it is not FFI over the C library: it
 is a std-only, dependency-free reimplementation of the same thin pattern in safe
 Rust, so `cargo build --offline` needs no network. Each `Attempt` method is one
 invocation of one {py:mod}`httk.workflow.shell_bridge` subcommand, so a Rust
 runner publishes the same bytes too; its Rust-to-C mapping lives in
-{doc}`native_rust_api`.
+{doc}`rust_api`.
 
-A sixth SDK, {doc}`in pure Perl <native_perl_api>`, is another thin bridge client:
+A sixth SDK, {doc}`in pure Perl <perl_api>`, is another thin bridge client:
 its object-shaped `Runner` and `Attempt` surface uses core Perl only, and each
 bridge-backed method invokes the same {py:mod}`httk.workflow.shell_bridge`
-subcommand. Its Perl-to-Python/Bash mapping lives in {doc}`native_perl_api`.
+subcommand. Its Perl-to-Python/Bash mapping lives in {doc}`perl_api`.
 
-A seventh SDK, {doc}`in Ada <native_ada_api>`, is another thin binding client:
+A seventh SDK, {doc}`in Ada <ada_api>`, is another thin binding client:
 its `Interfaces.C` package wraps the existing C library, whose bridge-backed
 methods invoke the same {py:mod}`httk.workflow.shell_bridge` subcommand. The C
 library owns Ada registration and dispatch, so its Ada-to-C mapping lives in
-{doc}`native_ada_api` and no Ada protocol implementation is introduced.
+{doc}`ada_api` and no Ada protocol implementation is introduced.
 
-An eighth SDK, {doc}`in C++ <native_cpp_api>`, is a header-only C++17 binding
+An eighth SDK, {doc}`in C++ <cpp_api>`, is a header-only C++17 binding
 client over the same C library. Its RAII string wrapper and `Runner` builder add
 no bridge protocol or dispatch implementation: the C library owns registration
 and `httk_workflow_main`, while every verb reaches the same
 {py:mod}`httk.workflow.shell_bridge` subcommand. Its C++-to-C mapping lives in
-{doc}`native_cpp_api`.
+{doc}`cpp_api`.
 
-A ninth SDK, {doc}`in Java <native_java_api>`, is a standalone `java.base`-only
+A ninth SDK, {doc}`in Java <java_api>`, is a standalone `java.base`-only
 reimplementation of the same thin bridge-client pattern. Its `ProcessBuilder`
 argv is list-form and never uses JNI, C linkage, or a shell; only `--describe`
-is native. Its Java-to-Python/Bash mapping lives in {doc}`native_java_api`.
+is native. Its Java-to-Python/Bash mapping lives in {doc}`java_api`.
 
 One thing the SDKs do *not* share is the `error.json` breadcrumb's `exception`
 label for a handler that ends abnormally: Bash records `ShellError`, C records
@@ -80,7 +80,7 @@ language, and compares everything both left behind.
   `protocol.JobSpec` or `runtime_utils.render_template`). `—` means the operation
   has no Python member of its own, because Python reaches it some other way (an
   attribute, an exception, the standard library).
-- **Bash** names a function of the packaged `native/bash/httk-workflow.sh`, sometimes
+- **Bash** names a function of the packaged `languages/bash/httk-workflow.sh`, sometimes
   with the option that selects the behaviour of the row; only the function name
   is normative. `—` means the operation has no Bash function, because Bash
   reaches it through an exported environment variable instead — named in bold in
@@ -188,7 +188,7 @@ The functions that run a program report the classified outcome of *that program*
 instead: `22` for a nonzero exit, `124` for a timeout whose process group was
 terminated, `125` when a checker or diagnostic stopped it — which is also what
 the manager's launcher reports for a runner it could not start at all. The VASP
-functions add `20`, `21`, and `3`; see {doc}`native_bash_api`.
+functions add `20`, `21`, and `3`; see {doc}`bash_api`.
 
 `httk_workflow_main` owns the exit status of a Bash runner, which is why the
 outcome functions return rather than exit. `Runner.main` owns it in Python, and

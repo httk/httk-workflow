@@ -297,11 +297,11 @@ malformed or non-UTF-8 responses degrade only their individual job. A declared o
 `.py` hooks keep the in-process path and the same successful assembled-output
 semantics; their ordinary per-job exceptions degrade that job as well.
 
-### Language fallback and degradation
+### Format fallback and degradation
 
-For a language job, provider dispatch is followed by the job's own
+For a job of a compat format (`workflow_realization = "language"`), provider dispatch is followed by the job's own
 `workflow_language` parameter. A provider-less CWL, PWD, or jobflow job then
-uses the language default collector: its output document is read from the
+uses the format's default collector: its output document is read from the
 workdir or transactional data tree, ports are mapped to declared roles, and
 values become `DataRecord` objects. CWL `File` values are accepted only when
 their paths remain inside the workspace, workdir, or data tree; the result
@@ -309,12 +309,12 @@ records a file descriptor and sha256. Jobflow reads `jobflow-outputs.json`.
 
 A package with a custom hook records `workflow_collect = "package"`.
 Provider-less collection of that job degrades with a registration hint; it
-does not silently run the language default. httk-v1 has no default at all and
+does not silently run the format default. httk-v1 has no default at all and
 degrades with a message to declare `[workflow.collect]` when submitted as a
 manifest package. A bare v1 directory is not submitted by the `job new` CLI;
 use `--workflow-dir` with a manifest or `remote import-v1`. The
 `allow_job_collector` pinned-tree fallback is attempted only after this
-language fallback, and only with a matching digest and manifest. Any
+format fallback, and only with a matching digest and manifest. Any
 per-job collector, load, or assembly failure degrades that job and does not
 stop the sweep; `fail_fast=True` (or `--fail-fast`) stops at the first such
 job. Interrupts, missing Python dependencies, and unavailable definition

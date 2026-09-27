@@ -17,19 +17,20 @@ in its `__all__` — rather than every source object. The three layers are:
   `httk.workflow.manifests`, `httk.workflow.hygiene`, `httk.workflow.adapters`,
   `httk.workflow.adapter_protocol`, `httk.workflow.configuration`, and
   `httk.workflow.projects`, plus the domain and compatibility consumers
-  `httk.workflow.codes.vasp` and the `httk.workflow.compat` engines
-  (`httk.workflow.compat.v1`, `httk.workflow.languages.cwl`,
-  `httk.workflow.languages.pwd`, `httk.workflow.languages.jobflow`, and
-  `httk.workflow.languages.httk_v1`). The language registration modules are
+  `httk.workflow.codes.vasp` and the `httk.workflow.compat` registry and
+  consumers (`httk.workflow.compat.cwl`, `httk.workflow.compat.pwd`,
+  `httk.workflow.compat.jobflow`, and `httk.workflow.compat.v1` with its
+  `httk.workflow.compat.v1.realization`). The registration modules are
   public; their packaged runner modules are internal implementation details.
 
 ```{toctree}
 :maxdepth: 2
 
 autoapi/httk/workflow/index
-autoapi/httk/workflow/languages/index
-autoapi/httk/workflow/languages/cwl/index
-autoapi/httk/workflow/languages/pwd/index
-autoapi/httk/workflow/languages/jobflow/index
-autoapi/httk/workflow/languages/httk_v1/index
+autoapi/httk/workflow/compat/index
+autoapi/httk/workflow/compat/cwl/index
+autoapi/httk/workflow/compat/pwd/index
+autoapi/httk/workflow/compat/jobflow/index
+autoapi/httk/workflow/compat/v1/index
+autoapi/httk/workflow/compat/v1/realization/index
 ```

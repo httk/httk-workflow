@@ -5,8 +5,8 @@ the ordinary httk-workflow engine.*
 
 The primary path is a converted workflow package: put the legacy task files and
 an `httk_workflow.toml` manifest in one directory, then submit it with the
-normal `job new` command. The package language prepares an ordinary job with a
-packaged `httk.workflow.languages.httk_v1.v1_runner` path runner. It has no special
+normal `job new` command. The package format prepares an ordinary job with a
+packaged `httk.workflow.compat.v1.v1_runner` path runner. It has no special
 manager, capability, or executor; run it with the normal manager and select its
 claim pool with `--pool`.
 
@@ -19,14 +19,14 @@ httk workflow run --workspace WORKSPACE --pool vasp
 
 ## Converted packages
 
-A v1 package selects the language and may set the task pool and retry budget:
+A v1 package selects the `httk-v1` format and may set the task pool and retry budget:
 
 ```toml
 [workflow]
 name = "legacy.silicon"
 
 [workflow.runner]
-language = "httk-v1"
+format = "httk-v1"
 taskset = "vasp"
 attempts = 10
 
@@ -46,7 +46,7 @@ the template and instantiator; path-valued structure inputs are loaded through
 
 `taskset` becomes the job's claim pool and `attempts` is the legacy retry
 budget. The realization forces a persistent `ht.run.current` workdir and no
-transactional data. It has no language-default collector, so a package that
+transactional data. It has no format-default collector, so a package that
 needs collection declares `[workflow.collect]`.
 
 ## Runtime fidelity
@@ -91,7 +91,7 @@ are authoritative.
 
 ## Environment knobs
 
-The v1 language declares these workflow environment entries:
+The v1 realization declares these workflow environment entries:
 
 | Name | Type | Default | Meaning |
 | --- | --- | --- | --- |

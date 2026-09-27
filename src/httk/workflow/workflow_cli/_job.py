@@ -1813,7 +1813,7 @@ def build_job_parser(
     workflow_group.add_argument(
         "--from-runner",
         metavar="FILE",
-        help="submit a single-file runner or language document from FILE",
+        help="submit a single-file runner or workflow document (cwl, pwd, jobflow) from FILE",
     )
     workflow_group.add_argument(
         "--from-command",
@@ -1844,8 +1844,11 @@ def build_job_parser(
     )
     new.add_argument(
         "--format",
-        metavar="LANG",
-        help="force LANG for a bare workflow document (not a registered or manifest workflow)",
+        metavar="FORMAT",
+        help=(
+            "force FORMAT (cwl, pwd, jobflow, httk-v1) for a bare workflow document "
+            "(not a registered or manifest workflow)"
+        ),
     )
     new.add_argument(
         "--file",

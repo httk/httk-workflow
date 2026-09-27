@@ -57,7 +57,7 @@ python -m pip install httk-workflow
 ```
 
 One optional extra exists. `httk-workflow[cwl]` adds the CWL *parser* needed to
-prepare the CWL language realization; executing the normalized plan needs
+prepare the CWL realization; executing the normalized plan needs
 nothing extra, so the extra belongs only on the machine that creates the job.
 Python Workflow Definition documents need no extra at all.
 
@@ -93,10 +93,10 @@ local clone. Module CI does not set it yet, so these tests skip there.
   to spawn and which step runs next, so a two-step relaxation and a
   partitioned child campaign are the same engine —
   [runners in Python](docs/runtime_helpers.md),
-  [in Bash](docs/sdks/native_bash_api.md),
-  [in C](docs/sdks/native_c_api.md),
-  [in modern Fortran](docs/sdks/native_fortran_api.md), or
-  [in safe Rust](docs/sdks/native_rust_api.md), with a
+  [in Bash](docs/sdks/bash_api.md),
+  [in C](docs/sdks/c_api.md),
+  [in modern Fortran](docs/sdks/fortran_api.md), or
+  [in safe Rust](docs/sdks/rust_api.md), with a
   [normative parity table](docs/sdks/sdk_parity.md) between the language SDKs.
 - **Recovers instead of cleaning up.** One atomically renamed state marker per
   job is the source of truth, so an interrupted manager, node, or calculation is
@@ -108,7 +108,7 @@ local clone. Module CI does not set it yet, so these tests skip there.
   the VASP helper API they build on — see [`docs/vasp_runners.md`](docs/vasp_runners.md).
 - **Runs workflows written elsewhere.** Python Workflow Definition and CWL
   documents become ordinary jobs; see
-  [`docs/workflow_languages.md`](docs/workflow_languages.md).
+  [`docs/workflow_compat.md`](docs/workflow_compat.md).
 - **Reaches other machines.** Versioned [remote adapters](docs/remotes.md)
   transport files and run commands on a cluster; the workspace's [launcher](docs/launchers.md)
   starts its managers, and crash-recoverable detached transfer fetches results back.

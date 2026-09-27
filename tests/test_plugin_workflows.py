@@ -124,7 +124,7 @@ def test_manifest_step_resources_require_an_executable_runner_steps_list(tmp_pat
     (package / "document.json").write_text("{}", encoding="utf-8")
     (package / "httk_workflow.toml").write_text(
         '[workflow]\nname = "test.resources"\n'
-        '[workflow.runner]\nlanguage = "httk-v1"\n'
+        '[workflow.runner]\nformat = "httk-v1"\n'
         '[workflow.steps.start.resources]\nprocs = 1\n',
         encoding="utf-8",
     )

@@ -69,7 +69,7 @@ from httk.core.requirements import check_requirements, parse_requirements
 
 if TYPE_CHECKING:
     from .collecting import JobRecord
-    from .languages import LanguageRequest
+    from .compat import LanguageRequest
 
 from ._util import interpreter_first_path, validate_inputs
 from .errors import FormatError
@@ -812,9 +812,9 @@ def _describe(
     environment["PATH"] = interpreter_first_path(environment.get("PATH"))
     if preserve_registration_order:
         environment["HTTK_WORKFLOW_PRESERVE_STEP_ORDER"] = "1"
-    environment["HTTK_WORKFLOW_BASH_API"] = str(Path(__file__).with_name("native") / "bash" / "httk-workflow.sh")
-    environment["HTTK_WORKFLOW_NATIVE_API"] = str(Path(__file__).with_name("native"))
-    environment["HTTK_WORKFLOW_PERL_API"] = str(Path(__file__).with_name("native") / "perl")
+    environment["HTTK_WORKFLOW_BASH_API"] = str(Path(__file__).with_name("languages") / "bash" / "httk-workflow.sh")
+    environment["HTTK_WORKFLOW_LANGUAGES_DIR"] = str(Path(__file__).with_name("languages"))
+    environment["HTTK_WORKFLOW_PERL_API"] = str(Path(__file__).with_name("languages") / "perl")
     environment["HTTK_WORKFLOW_VASP_BASH_API"] = str(Path(__file__).with_name("codes") / "vasp" / "httk-vasp.sh")
     # Describing is a pure read of the program, so no attempt context of a
     # surrounding job may leak into it: a runner scaffolding jobs is itself running
@@ -1136,20 +1136,20 @@ def resolve_workflow(
                 _input_metadata=provider._input_metadata,
             )
         elif path.exists():
-            from . import languages
+            from . import compat
 
             resolved_path = path.resolve()
             if format is None:
-                lang = languages.match_document(resolved_path)
+                lang = compat.match_document(resolved_path)
             else:
-                lang = languages.language(format)
+                lang = compat.language(format)
                 if lang.document_policy == "forbidden" and not resolved_path.is_dir():
                     raise ValueError(
-                        f"workflow language {lang.name!r} forbids documents; --format {format!r} requires a directory target"
+                        f"workflow format {lang.name!r} forbids documents; --format {format!r} requires a directory target"
                     )
                 if lang.document_policy != "forbidden" and not resolved_path.is_file():
                     raise ValueError(
-                        f"workflow language {lang.name!r} expects a document file for --format {format!r}: {resolved_path}"
+                        f"workflow format {lang.name!r} expects a document file for --format {format!r}: {resolved_path}"
                     )
             if lang is not None:
                 ports = lang.ports(resolved_path)
@@ -1521,9 +1521,9 @@ def _prepare(
 
     resolved = resolve_workflow(workflow, workflow_id=workflow_id, step=step, data_mode=data_mode, format=format)
     if resolved.language is not None:
-        from . import languages
+        from . import compat
 
-        lang = languages.language(resolved.language)
+        lang = compat.language(resolved.language)
         scaffolded = lang.prepare(_language_request(resolved))
         if scaffolded.runner is not None:
             runner = scaffolded.runner
@@ -1631,7 +1631,7 @@ def _prepare(
 def _language_request(resolved: ResolvedWorkflow) -> LanguageRequest:
     """Build the language request, including package-only exclusions."""
 
-    from . import languages
+    from . import compat
 
     excluded: tuple[str, ...] = ()
     if resolved.directory is not None:
@@ -1643,7 +1643,7 @@ def _language_request(resolved: ResolvedWorkflow) -> LanguageRequest:
         if not (resolved.directory / MANIFEST_NAME).is_file():
             members = []
         excluded = tuple(dict.fromkeys(members))
-    return languages.LanguageRequest(
+    return compat.LanguageRequest(
         workflow_id=resolved.workflow_id,
         directory=resolved.directory,
         document=resolved.document_path,
@@ -2401,9 +2401,9 @@ def _stage_inputs(
             names = ", ".join(declared) or "none"
             hint = ""
             if not declared and workflow.language is not None and workflow.directory is None:
-                from . import languages
+                from . import compat
 
-                if languages.language(workflow.language).open_ports:
+                if compat.language(workflow.language).open_ports:
                     hint = (
                         f"; this bare {workflow.language} document declares no ports — "
                         "declare inputs in an httk_workflow.toml package to pass them"

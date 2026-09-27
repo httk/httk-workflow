@@ -31,8 +31,8 @@ from httk.workflow import (
 from httk.workflow import collecting as collecting_module
 from httk.workflow import scaffold as scaffold_module
 from httk.workflow.collecting import COLLECT_FORMAT, module_distribution
-from httk.workflow.languages import runner_path, runner_reference
-from httk.workflow.languages.pwd import PACKAGE, RUNNER
+from httk.workflow.compat import runner_path, runner_reference
+from httk.workflow.compat.pwd import PACKAGE, RUNNER
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.scaffold import WorkflowProvider
 from httk.workflow.workflow_cli import command

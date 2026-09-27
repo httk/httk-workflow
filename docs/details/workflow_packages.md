@@ -59,27 +59,28 @@ httk job new --workspace WS --workflow-dir ./my-workflow --input structure=POSCA
 ## Runner realizations
 
 `[workflow.runner]` selects one of four forms. The executable form is the
-ordinary package runner. The language forms delegate instantiate, run, and
-default collection to the registered language realization.
+ordinary package runner. The `format` forms delegate instantiate, run, and
+default collection to the registered realization in `httk.workflow.compat`
+(see {doc}`/workflow_compat`).
 
 | Form | Manifest selector | Required/allowed members | Runner contract |
 | --- | --- | --- | --- |
-| executable entry | no `language` | `entry` or `command`, `steps`, `initial_step`, `data_mode`, `workdir_mode` | the package entry (default `run`) or the declared `command`, plus the declared step set |
-| document language | `language = "cwl"` or `"pwd"` and `document` | language keys only; `port` is allowed on document inputs/outputs | installed `cwl_runner.py` or `pwd_runner.py` |
-| jobflow | `language = "jobflow"` and `maker` or `document` | `maker` or `document` (exactly one); `port` is allowed on inputs/outputs; no mode keys | installed `jobflow_runner.py` |
-| httk-v1 | `language = "httk-v1"` and no `document` | `taskset`, `attempts`; no mode keys | package snapshot plus `pkg:httk.workflow.languages.httk_v1/v1_runner.py` through the ordinary `path` runner |
+| executable entry | no `format` | `entry` or `command`, `steps`, `initial_step`, `data_mode`, `workdir_mode` | the package entry (default `run`) or the declared `command`, plus the declared step set |
+| document format | `format = "cwl"` or `"pwd"` and `document` | format keys only; `port` is allowed on document inputs/outputs | installed `cwl_runner.py` or `pwd_runner.py` |
+| jobflow | `format = "jobflow"` and `maker` or `document` | `maker` or `document` (exactly one); `port` is allowed on inputs/outputs; no mode keys | installed `jobflow_runner.py` |
+| httk-v1 | `format = "httk-v1"` and no `document` | `taskset`, `attempts`; no mode keys | package snapshot plus `pkg:httk.workflow.compat.v1/v1_runner.py` through the ordinary `path` runner |
 
-For language forms, `entry`, `command`, `steps`, and `initial_step` are forbidden because
-the language supplies built-in steps. `[workflow.instantiate]` is forbidden
-because language inputs are hook-consumed. `destination` is forbidden on
+For `format` forms, `entry`, `command`, `steps`, and `initial_step` are forbidden because
+the realization supplies built-in steps. `[workflow.instantiate]` is forbidden
+because their inputs are hook-consumed. `destination` is forbidden on
 CWL/PWD, jobflow, and httk-v1 inputs; an omitted v1 destination is an
-`ht.instantiate.py` global. Language workflows may declare
+`ht.instantiate.py` global. These workflows may declare
 `[workflow.collect]` to override the default. CWL and PWD have defaults;
 jobflow has a default; httk-v1 has none and normally declares a hook.
 
-Language manifests cannot set `data_mode` or `workdir_mode` for jobflow or
+`format` manifests cannot set `data_mode` or `workdir_mode` for jobflow or
 httk-v1. Jobflow pins the workdir persistent; httk-v1 forces `none` and
-persistent `ht.run.current`. Unknown language keys are errors.
+persistent `ht.run.current`. Unknown format keys are errors.
 
 ## `httk_workflow.toml` reference
 
@@ -143,7 +144,7 @@ interpreter-first `PATH`.
 
 ### `[workflow.runner]`: executable form
 
-With no `language`, the table is a normal executable runner. `steps` is a
+With no `format`, the table is a normal executable runner. `steps` is a
 nonempty list; if `initial_step` is omitted, `start` is selected when present,
 or the sole step is selected. Otherwise `initial_step` is required.
 
@@ -211,8 +212,8 @@ build registration, so for a compiled package it reports the manifest alone.
 names are validated labels, values are not booleans, and units are opaque. An
 executable runner may add `[workflow.steps.NAME]` tables, each allowing only a
 `resources` table. `NAME` must occur in `[workflow.runner].steps`; an unknown
-name is an error. `[workflow.steps]` is rejected for language runners because
-their step set is supplied by the language.
+name is an error. `[workflow.steps]` is rejected for `format` runners because
+their step set is supplied by the realization.
 
 For example, a manifest can set workflow defaults and denser per-step
 requirements together:
@@ -232,12 +233,12 @@ resources = { procs = 1, mem = 2000, matlab_license_slots = 1 }
 The `relax` and `analyse` declarations override the defaults for those steps;
 the manager's advertised capacities determine whether each activation fits.
 
-### `[workflow.runner]`: language vocabulary
+### `[workflow.runner]`: format vocabulary
 
 | Key | CWL/PWD | jobflow | httk-v1 | Meaning |
 | --- | --- | --- | --- | --- |
-| `language` | required: `"cwl"` or `"pwd"` | required: `"jobflow"` | required: `"httk-v1"` | Select the realization. |
-| `document` | required, relative regular member | optional, relative regular member; mutually exclusive with `maker` | forbidden | Language document member. |
+| `format` | required: `"cwl"` or `"pwd"` | required: `"jobflow"` | required: `"httk-v1"` | Select the realization. |
+| `document` | required, relative regular member | optional, relative regular member; mutually exclusive with `maker` | forbidden | Format document member. |
 | `maker` | forbidden | required when `document` is omitted; `module:Class` Maker spec | forbidden | Import a Maker class for the jobflow root. |
 | `port` | optional on an input/output table | optional on an input/output table | forbidden | Alias a manifest name to a document or jobflow port. |
 | `modules` | PWD only, list of relative `.py` members | forbidden | forbidden | Package Python modules to stage. |
@@ -245,10 +246,10 @@ the manager's advertised capacities determine whether each activation fits.
 | `allowed_modules` | PWD only, list of module prefixes | forbidden | forbidden | PWD import allowlist. |
 | `taskset` | forbidden | forbidden | label, default `"default"` | v1 claim pool. |
 | `attempts` | forbidden | forbidden | integer, default `10` | v1 retry budget. |
-| `entry`, `steps`, `initial_step` | forbidden | forbidden | forbidden | Built-in language steps. |
+| `entry`, `steps`, `initial_step` | forbidden | forbidden | forbidden | Built-in realization steps. |
 | `data_mode`, `workdir_mode` | allowed only in executable form | forbidden; jobflow pins a persistent workdir | forbidden | v1 forces `none`/persistent. |
 
-For a document language, each effective input and output port must exist in the
+For a document format, each effective input and output port must exist in the
 document and may occur only once. `port` defaults to the manifest name. Jobflow
 has open ports because Maker `make()` signatures are not inspected during
 manifest preparation. Preparing a `maker`-form job imports the named module on
@@ -273,15 +274,15 @@ covers that directory's subtree; patterns are evaluated against relative paths.
 The patterns may not strip `run` or `httk_workflow.toml`, so a committed
 `run` entry and the manifest remain in the source package. The build command runs in
 a copy of the published source tree and can use only files inside that package
-and the installed native SDKs. Every `HTTK_WORKFLOW_*` variable is removed from
-its environment except `HTTK_WORKFLOW_NATIVE_API`, the absolute path of the
-installed `httk/workflow/native` directory with one subdirectory per SDK (`c`,
+and the installed language SDKs. Every `HTTK_WORKFLOW_*` variable is removed from
+its environment except `HTTK_WORKFLOW_LANGUAGES_DIR`, the absolute path of the
+installed `httk/workflow/languages` directory with one subdirectory per SDK (`c`,
 `cpp`, `fortran`, `rust`, `ada`, `java`, `perl`). A C package, for example,
-builds with `cc -I"$HTTK_WORKFLOW_NATIVE_API/c" relax.c
-"$HTTK_WORKFLOW_NATIVE_API/c/httk_workflow.c" -o relax`. The source digest does
+builds with `cc -I"$HTTK_WORKFLOW_LANGUAGES_DIR/c" relax.c
+"$HTTK_WORKFLOW_LANGUAGES_DIR/c/httk_workflow.c" -o relax`. The source digest does
 not cover that SDK, so re-register builds after upgrading *httk-workflow*; a
 package that must not depend on the installed SDK vendors it instead. The
-manager exports the same variable to every attempt. The native relax packages of
+manager exports the same variable to every attempt. The per-language relax packages of
 [workflows-vasp-other-languages](https://github.com/httk/workflows-vasp-other-languages)
 are complete examples.
 
@@ -407,12 +408,12 @@ Every input table accepts these keys:
 
 | Key | Meaning |
 | --- | --- |
-| `destination` | Optional payload-relative destination for executable runners. Omit it when `[workflow.instantiate]` consumes the value. Language runners forbid it because the language hook consumes every input; for httk-v1 an omitted destination is an `ht.instantiate.py` global. |
+| `destination` | Optional payload-relative destination for executable runners. Omit it when `[workflow.instantiate]` consumes the value. `format` runners forbid it because the realization's hook consumes every input; for httk-v1 an omitted destination is an `ht.instantiate.py` global. |
 | `description` | Optional input description. |
 | `entry_type` | Optional declaration entry type. |
 | `ref` | Optional declaration reference. |
 | `role` | Optional declaration role; defaults to the input key. |
-| `required` | Optional boolean. Defaults to `true` when the input declares `entry_type` and `false` otherwise. A required input must be supplied at submission — for an input with a `destination`, staging that destination (including a directly staged file) satisfies it; for a hook-consumed input, the value must be supplied. The check runs before any instantiate hook, so a missing required input is refused without running package code and a hook need not null-check required inputs. Language workflows satisfy their own inputs, so the check does not apply to them. |
+| `required` | Optional boolean. Defaults to `true` when the input declares `entry_type` and `false` otherwise. A required input must be supplied at submission — for an input with a `destination`, staging that destination (including a directly staged file) satisfies it; for a hook-consumed input, the value must be supplied. The check runs before any instantiate hook, so a missing required input is refused without running package code and a hook need not null-check required inputs. `format` workflows satisfy their own inputs, so the check does not apply to them. |
 
 ```toml
 [workflow.inputs.structure]
@@ -446,7 +447,7 @@ only then, because a workflow that declares no parameters leaves the channel
 fully open. A `default` is applied for a declared name nobody supplied, so it
 is recorded verbatim in `job.json`. Defaults are applied *after* any instantiate
 hook: the hook's parameters hold only the caller-supplied values plus any a
-language realization wires in, the declared
+format realization wires in, the declared
 defaults reach it separately (`InstantiateContext.defaults`, or the executable
 envelope's `defaults`), and a default then fills in each name still absent. So
 the hook's final parameters win over defaults, and a caller-supplied value
@@ -463,7 +464,7 @@ mirroring the environment member's shape, so a later precheck can read them.
 
 Environment entries are declared, typed workflow settings consumed by a
 runner. Each table accepts `type`, `description`, `default`, and `setting`.
-Language realizations may contribute entries automatically; manifest entries
+Format realizations may contribute entries automatically; manifest entries
 override entries with the same name. The `httk-v1` realization contributes its
 four `httk_v1.*` entries.
 `type` may be `string`, `number`, `integer`, `boolean`, `array`, or `object`;
@@ -668,7 +669,7 @@ on stdin:
 
 `tag` is a string or `null`; `parameters`, `defaults`, and `inputs` are JSON
 objects. `parameters` holds only the caller-supplied values (plus any a
-language realization wires in); `defaults` holds
+format realization wires in); `defaults` holds
 the manifest's declared parameter defaults, which are applied after the hook to
 every parameter still absent. Version 3 added `defaults` and stopped merging
 them into `parameters`; `httk.workflow.hookapi` accepts only version 3. An
@@ -858,10 +859,10 @@ and records the full digest in `job.json`. Republish of identical content is an
 idempotent no-op; changed content cannot replace an existing name without an
 explicit replacement. The manager verifies the same digest before execution.
 
-`publish=` is ignored for language workflows: CWL/PWD/jobflow and httk-v1 use
-their installed language runners. `new_jobs` and CLI
-`--input-from` campaigns prepare a language package once and instantiate it per
-job. Language-produced parameter names are reserved and collisions fail
+`publish=` is ignored for `format` workflows: CWL/PWD/jobflow and httk-v1 use
+their installed realization runners. `new_jobs` and CLI
+`--input-from` campaigns prepare a format package once and instantiate it per
+job. Realization-produced parameter names are reserved and collisions fail
 loudly. httk-v1 snapshots the complete package at preparation, so edits made
 after preparation do not change later jobs; symlinks are rejected.
 

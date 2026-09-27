@@ -1,12 +1,13 @@
-"""Compatibility support for reading instantiated httk v1 task trees."""
+"""Compatibility with httk v1: run v1 task packages and read finished v1 task trees.
 
-import os
-import sys
-from collections.abc import Mapping
+:mod:`httk.workflow.compat.v1.realization` realizes a v1 task package
+declaring ``format = "httk-v1"`` through the ordinary runner path; it is
+imported only by the format registry, not by this package. The reader
+functions here collect finished v1 result trees.
+"""
+
 from importlib.resources import files
 from pathlib import Path
-
-from httk.workflow.protocol import FormatError
 
 __all__ = [
     "V1_PRIORITY_MAP",
@@ -44,28 +45,6 @@ def legacy_priority(value: int) -> int:
         return V1_PRIORITY_MAP[value]
     except KeyError as exc:
         raise ValueError("legacy priority must be 1 through 5") from exc
-
-
-def _execute_instantiator(payload: Path, globals_: Mapping[str, object]) -> None:
-    """Execute the trusted legacy instantiator in its payload directory."""
-
-    script = payload / "ht.instantiate.py"
-    if not script.is_file():
-        raise FormatError("instantiate_globals were supplied but ht.instantiate.py is missing")
-    namespace = dict(globals_)
-    namespace.setdefault("__file__", str(script))
-    namespace.setdefault("__name__", "__httk_v1_instantiate__")
-    old_cwd = Path.cwd()
-    old_argv = sys.argv
-    try:
-        os.chdir(payload)
-        sys.argv = [str(script)]
-        code = compile(script.read_bytes(), str(script), "exec")
-        exec(code, namespace, namespace)  # noqa: S102 - v1 definitions are trusted input
-    finally:
-        sys.argv = old_argv
-        os.chdir(old_cwd)
-    script.unlink()
 
 
 from .reader import (

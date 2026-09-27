@@ -1534,7 +1534,7 @@ HTTK_WORKFLOW_DURABLE=0|1
 HTTK_WORKFLOW_ATTEMPT_REASON=<reason>
 HTTK_WORKFLOW_STEP=<current step>
 HTTK_WORKFLOW_PYTHON=<manager Python interpreter>
-HTTK_WORKFLOW_BASH_API=<absolute native workflow Bash library>
+HTTK_WORKFLOW_BASH_API=<absolute packaged workflow Bash library>
 HTTK_WORKFLOW_RUNNER_ROOT=<absolute shared runner file or tree root>
 ```
 
@@ -1558,7 +1558,9 @@ that needs one MUST treat its absence as a missing dependency of that library
 rather than as a protocol violation. The ones this implementation exports are:
 
 ```text
-HTTK_WORKFLOW_VASP_BASH_API=<absolute native VASP Bash library>
+HTTK_WORKFLOW_VASP_BASH_API=<absolute packaged VASP Bash library>
+HTTK_WORKFLOW_PERL_API=<absolute packaged Perl SDK directory>
+HTTK_WORKFLOW_LANGUAGES_DIR=<absolute installed httk/workflow/languages directory>
 HTTK_WORKFLOW_RUNNER_ARTIFACTS=<absolute registered build-artifacts directory>
 ```
 
@@ -2866,7 +2868,7 @@ rule.
 
 ## Relationship to *httk* v1
 
-The packaged `httk.workflow.languages.httk_v1.v1_runner` is an ordinary
+The packaged `httk.workflow.compat.v1.v1_runner` is an ordinary
 installed `path` runner used by converted packages. The normal manager applies
 the following mapping for instantiated *httk* v1 task templates:
 

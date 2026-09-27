@@ -148,12 +148,11 @@ _INTERNAL_MODULES = (
     "adapter_runtime",
     "cli",
     "workflow_cli",
-    # Language runners are internal; the language registration modules are
-    # public.
-    "languages.cwl.cwl_runner",
-    "languages.pwd.pwd_runner",
-    "languages.jobflow.jobflow_runner",
-    "languages.httk_v1.v1_runner",
+    # Compat runners are internal; the registration modules are public.
+    "compat.cwl.cwl_runner",
+    "compat.pwd.pwd_runner",
+    "compat.jobflow.jobflow_runner",
+    "compat.v1.v1_runner",
     # The VASP facade is public; the cohesive modules it re-exports are not.
     "codes.vasp.inputs",
     "codes.vasp.diagnostics",
@@ -217,12 +216,11 @@ PUBLIC_MODULES = frozenset(
         "httk.workflow.codes",
         "httk.workflow.codes.vasp",
         "httk.workflow.compat",
+        "httk.workflow.compat.cwl",
+        "httk.workflow.compat.pwd",
+        "httk.workflow.compat.jobflow",
         "httk.workflow.compat.v1",
-        "httk.workflow.languages",
-        "httk.workflow.languages.cwl",
-        "httk.workflow.languages.pwd",
-        "httk.workflow.languages.jobflow",
-        "httk.workflow.languages.httk_v1",
+        "httk.workflow.compat.v1.realization",
     }
 )
 

@@ -1,7 +1,7 @@
-"""Private command bridge used by the packaged native Bash libraries.
+"""Private command bridge used by the packaged Bash libraries.
 
 The bridge is the language-agnostic half of the Bash authoring SDK: every Bash
-function in ``native/bash/httk-workflow.sh`` is one invocation of one subcommand here,
+function in ``languages/bash/httk-workflow.sh`` is one invocation of one subcommand here,
 and every subcommand does its work through :class:`httk.workflow.Attempt` and
 :class:`httk.workflow.OutcomeDraft`. A Bash runner and a Python runner therefore
 publish the same bytes, because they publish through exactly one implementation.

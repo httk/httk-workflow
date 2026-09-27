@@ -237,7 +237,7 @@ def _compiled_package(root: Path) -> Path:
         "context = json.loads(os.environ['HTTK_WORKFLOW_CONTEXT'])\n"
         "workdir = Path(os.environ['HTTK_WORKFLOW_WORKDIR'])\n"
         "(workdir / 'used-artifact').write_text('yes')\n"
-        "(workdir / 'native-api').write_text(os.environ['HTTK_WORKFLOW_NATIVE_API'])\n"
+        "(workdir / 'languages-dir').write_text(os.environ['HTTK_WORKFLOW_LANGUAGES_DIR'])\n"
         "control = Path(os.environ['HTTK_WORKFLOW_CONTROL_DIR'])\n"
         "draft = control / 'outcome.tmp'\n"
         "draft.mkdir()\n"
@@ -293,10 +293,10 @@ def test_manager_reports_runner_not_built_then_uses_registered_artifact(tmp_path
     assert (workspace.payload_path(marker.placement, marker.job_key) / "run" / "used-artifact").read_text() == "yes"
 
 
-def test_build_and_attempt_environments_carry_only_the_native_api(
+def test_build_and_attempt_environments_carry_only_the_languages_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An external package finds the installed native SDKs at build and at run time."""
+    """An external package finds the installed language SDKs at build and at run time."""
 
     monkeypatch.setenv("HTTK_WORKFLOW_JOB_DIR", "/stray")
     workspace = Workspace.initialize(tmp_path / "workspace")
@@ -304,7 +304,7 @@ def test_build_and_attempt_environments_carry_only_the_native_api(
     _script(
         package / "build.sh",
         "mkdir -p build; cp runner.py build/runner.py; chmod +x build/runner.py\n"
-        'printf %s "$HTTK_WORKFLOW_NATIVE_API" > build/native-api\n'
+        'printf %s "$HTTK_WORKFLOW_LANGUAGES_DIR" > build/languages-dir\n'
         'printf %s "${HTTK_WORKFLOW_JOB_DIR-unset}" > build/stray',
     )
     job = new_job(workspace, package)
@@ -317,15 +317,15 @@ def test_build_and_attempt_environments_carry_only_the_native_api(
         source_sha256=str(job.runner["sha256"]),
     )
     assert (artifacts / "build" / "stray").read_text(encoding="utf-8") == "unset"
-    native = Path((artifacts / "build" / "native-api").read_text(encoding="utf-8"))
-    assert native.is_absolute() and (native / "c" / "httk_workflow.h").is_file()
+    languages = Path((artifacts / "build" / "languages-dir").read_text(encoding="utf-8"))
+    assert languages.is_absolute() and (languages / "c" / "httk_workflow.h").is_file()
 
     with TaskManager(workspace, heartbeat_interval=0.01) as manager:
         manager.run_until_idle()
     marker = workspace.find_marker_by_id(job.job_id)
     assert marker is not None and marker.kind == "succeeded"
     workdir = workspace.payload_path(marker.placement, marker.job_key) / "run"
-    assert Path((workdir / "native-api").read_text(encoding="utf-8")) == native
+    assert Path((workdir / "languages-dir").read_text(encoding="utf-8")) == languages
 
 
 def test_workflow_build_prefers_in_workspace_packages_and_resolves_job_globs(tmp_path: Path, capsys) -> None:

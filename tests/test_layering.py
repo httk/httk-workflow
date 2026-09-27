@@ -2,8 +2,9 @@
 
 *httk-workflow* has one common execution implementation — the Attempt layer, the
 manager, and the modules that own the filesystem protocol — and several
-consumers that publish through it: the VASP domain package, the ``v1``
-compatibility engine, and the CWL and PWD language engines. The binding rule is
+consumers that publish through it: the VASP domain package and the
+:mod:`httk.workflow.compat` consumers (the ``v1`` engine and the CWL, PWD, and
+jobflow realizations). The binding rule is
 directional. A consumer may use the common execution API (the root package and
 :mod:`httk.workflow.protocol`); the common execution API must never learn which
 language or scientific domain uses it, and one consumer must never reach into
@@ -37,23 +38,15 @@ COMMON_LAYER = (
     "postprocessing",
 )
 
-#: The consumer packages. None may import another. The future ``httk_v1``
-#: language module is owned by the v1 consumer and may import it one-way.
+#: The consumer packages. None may import another. The registry root
+#: :mod:`httk.workflow.compat` is common, not a consumer.
 CONSUMER_ENGINES = (
     "httk.workflow.codes.vasp",
     "httk.workflow.compat.v1",
-    "httk.workflow.languages.cwl",
-    "httk.workflow.languages.pwd",
-    "httk.workflow.languages.jobflow",
+    "httk.workflow.compat.cwl",
+    "httk.workflow.compat.pwd",
+    "httk.workflow.compat.jobflow",
 )
-
-CONSUMER_OWNERS = {
-    "httk.workflow.codes.vasp": ("httk.workflow.codes.vasp",),
-    "httk.workflow.compat.v1": ("httk.workflow.compat.v1", "httk.workflow.languages.httk_v1"),
-    "httk.workflow.languages.cwl": ("httk.workflow.languages.cwl",),
-    "httk.workflow.languages.pwd": ("httk.workflow.languages.pwd",),
-    "httk.workflow.languages.jobflow": ("httk.workflow.languages.jobflow",),
-}
 
 #: Generic machinery a consumer must never reach up into: the manager sees only
 #: ordinary jobs, and introspection and the CLI sit above execution.
@@ -130,7 +123,7 @@ def test_common_layer_never_imports_a_consumer() -> None:
     """No common-layer module may name a consumer."""
 
     paths = [WORKFLOW / f"{name}.py" for name in COMMON_LAYER]
-    paths.append(WORKFLOW / "languages" / "__init__.py")
+    paths.append(WORKFLOW / "compat" / "__init__.py")
     for path in paths:
         offending = sorted(
             imported
@@ -140,44 +133,54 @@ def test_common_layer_never_imports_a_consumer() -> None:
         assert offending == [], f"{_module_name(path)} imports a consumer: {offending}"
 
 
-def test_languages_registry_is_common_and_lazy() -> None:
-    """The registry root does not import any language package at import time."""
+def test_compat_registry_is_common_and_lazy() -> None:
+    """The registry root does not import any consumer package at import time."""
 
-    path = WORKFLOW / "languages" / "__init__.py"
+    path = WORKFLOW / "compat" / "__init__.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
     imported = set(_imported_modules(path))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module == "httk.workflow.languages":
+        elif isinstance(node, ast.ImportFrom) and node.module == "httk.workflow.compat":
             imported.update(f"{node.module}.{alias.name}" for alias in node.names)
     assert not any(
-        _names(f"httk.workflow.languages.{name}", item) for name in ("cwl", "pwd", "jobflow") for item in imported
+        _names(f"httk.workflow.compat.{name}", item) for name in ("cwl", "pwd", "jobflow", "v1") for item in imported
     )
+
+
+def test_the_v1_reader_does_not_load_the_v1_realization() -> None:
+    """``httk workflow v1 collect`` imports the reader; only the registry imports the realization."""
+
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys, httk.workflow.compat.v1, httk.workflow.workflow_cli; "
+        "assert 'httk.workflow.compat.v1.realization' not in sys.modules; "
+        "from httk.workflow import compat; "
+        "assert compat.language('httk-v1') is sys.modules['httk.workflow.compat.v1.realization'].LANGUAGE"
+    )
+    subprocess.run([sys.executable, "-c", probe], check=True, env={"PYTHONPATH": str(SRC)})
+    for path in (WORKFLOW / "compat" / "v1").glob("*.py"):
+        if path.name != "realization.py":
+            assert not any(_names("httk.workflow.compat.v1.realization", item) for item in _imported_modules(path)), (
+                f"{_module_name(path)} imports the v1 realization"
+            )
 
 
 def _consumer_modules() -> list[Path]:
     """Return every consumer module whose imports the rule constrains."""
 
     paths: list[Path] = sorted((WORKFLOW / "codes").rglob("*.py"))
-    paths.extend(sorted((WORKFLOW / "compat").rglob("*.py")))
-    for name in ("cwl", "pwd", "jobflow", "httk_v1"):
-        package = WORKFLOW / "languages" / name
-        if package.is_dir():
-            paths.extend(sorted(package.rglob("*.py")))
-    future_module = WORKFLOW / "languages" / "httk_v1.py"
-    if future_module.is_file():
-        paths.append(future_module)
+    paths.extend(sorted(path for path in (WORKFLOW / "compat").rglob("*.py") if path.parent != WORKFLOW / "compat"))
     return paths
 
 
 def _consumer_owner(module: str) -> str | None:
-    """Return the consumer owning *module*, including the future v1 module."""
+    """Return the consumer owning *module*."""
 
-    return next(
-        (owner for owner, members in CONSUMER_OWNERS.items() if any(_names(member, module) for member in members)),
-        None,
-    )
+    return next((engine for engine in CONSUMER_ENGINES if _names(engine, module)), None)
 
 
 def test_consumers_do_not_reach_into_generic_or_each_other() -> None:
@@ -242,4 +245,4 @@ def test_scaffold_holds_no_vasp_knowledge() -> None:
         assert token not in source, f"scaffold must not name the VASP domain: {token!r}"
     for imported in _imported_modules(WORKFLOW / "scaffold.py"):
         assert not _names("httk.workflow.codes.vasp", imported)
-        assert not _names("httk.workflow.compat", imported)
+        assert not any(_names(engine, imported) for engine in CONSUMER_ENGINES)

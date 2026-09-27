@@ -51,7 +51,7 @@ postprocessed); and compiled
 workflows declare `[workflow.build]` (sources-only digests, binaries built and
 registered per machine with `httk workflow build`).
 An instantiate hook's parameters are the caller-supplied values plus any a
-language realization wires in; the declared defaults reach it separately and
+format realization wires in; the declared defaults reach it separately and
 fill in every parameter still absent after it returns.
 
 The `[workflow.build]` vocabulary and engine are shared `httk.core.building`
@@ -75,4 +75,4 @@ which fetches and installs it; see {doc}`workflow_uris`.
 
 The full guide, {doc}`details/workflow_packages`, is the manifest reference:
 every table and key, hook envelopes, output declarations and provenance,
-language realizations, and the build-registration mechanics.
+format realizations, and the build-registration mechanics.

@@ -9,12 +9,17 @@ The package presents three layers, each with its own import home:
   :class:`Attempt`, and the small set of job and result types below are exported
   here; the lower-level runtime helpers live in :mod:`httk.workflow.runtime` and
   :mod:`httk.workflow.runtime_utils`, and job scaffolding in
-  :mod:`httk.workflow.scaffold`.
+  :mod:`httk.workflow.scaffold`. Python, the host language, has its SDK in
+  :mod:`httk.workflow.sdk`; the runner SDKs for the other programming languages
+  (Ada, Bash, C, C++, Fortran, Java, Perl, Rust) ship as data files in the
+  installed ``httk/workflow/languages`` directory, which the manager exports as
+  ``HTTK_WORKFLOW_LANGUAGES_DIR``.
 * **Orchestration and management** — :class:`Workspace`, :class:`TaskManager`,
   and :func:`job_records` drive and inspect a running workspace. The management
   operations that surround them (transfers, manifests, hygiene, configuration,
-  adapters, supervision, and the VASP and v1 compatibility surfaces) live in
-  their own named submodules rather than in this root.
+  adapters, supervision, the VASP helpers, and the :mod:`httk.workflow.compat`
+  consumers of other workflow systems) live in their own named submodules
+  rather than in this root.
 
 The normal lifecycle is instantiate a job, run it, then collect its outputs.
 Only the deliberate top-level surface is re-exported here; everything else is

@@ -29,18 +29,18 @@ from .workspace import Workspace
 BUILD_DIRECTORY = "runner-builds"
 
 
-# The one workflow variable a build sees: the installed native SDK directory.
-_NATIVE_API = {"HTTK_WORKFLOW_NATIVE_API": str(Path(__file__).with_name("native"))}
+# The one workflow variable a build sees: the installed language SDK directory.
+_LANGUAGES_DIR = {"HTTK_WORKFLOW_LANGUAGES_DIR": str(Path(__file__).with_name("languages"))}
 
 
 def _environment() -> dict[str, str]:
-    """Return the build environment without workflow runtime variables, except the native SDK path."""
+    """Return the build environment without workflow runtime variables, except the language SDK directory."""
 
     environment = dict(os.environ)
     for key in tuple(environment):
         if key.startswith("HTTK_WORKFLOW_"):
             environment.pop(key)
-    environment.update(_NATIVE_API)
+    environment.update(_LANGUAGES_DIR)
     return environment
 
 
@@ -134,7 +134,7 @@ def register_build(
                 source,
                 verified_spec,
                 strip_env_prefixes=("HTTK_WORKFLOW_",),
-                env=_NATIVE_API,
+                env=_LANGUAGES_DIR,
                 log_path=log_path,
                 stdout_to_stderr=stdout_to_stderr,
             )
