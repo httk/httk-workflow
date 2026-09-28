@@ -60,7 +60,7 @@ from httk.core.storage import content_id
 
 from . import compat
 from ._util import read_json, require_mapping, require_string
-from .errors import FormatError
+from .errors import FormatError, WorkflowError
 from .hookapi import COLLECT_STREAM_FORMAT, COLLECT_STREAM_VERSION
 from .introspection import (
     _job_of,
@@ -165,6 +165,12 @@ class CollectedJob:
         status observed after complete responses, or leave it unset.
     :param identity_stable: Report whether a v1-harvested job's identity is
         manifest-backed, or leave it unset for live collection.
+    :param run_only: Report that the job's workflow has nothing to collect (no
+        collector and no declared outputs): the collection is complete and its
+        only product is the job's run.
+    :param child_runs: Name the child jobs this job spawned, as ``(label,
+        run source id)`` pairs read from its spawn records, so a store can link
+        this job's run to theirs.
     """
 
     workflow_id: str
@@ -177,6 +183,8 @@ class CollectedJob:
     products_unlinked: tuple[str, ...] = ()
     collector_exit_status: int | None = None
     identity_stable: bool | None = None
+    run_only: bool = False
+    child_runs: tuple[tuple[str, str], ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -1479,7 +1487,9 @@ def _job_collector(
             f"job-pinned collector manifest name {provider.workflow_id!r} does not match job workflow {workflow_id!r}",
         )
     if provider.collect_file is None:
-        return None, None, "job-pinned workflow tree has no collect hook"
+        # The verified pinned provider is returned so a caller can tell a
+        # workflow with nothing to collect from one whose collector is missing.
+        return None, provider, "job-pinned workflow tree has no collect hook"
     if provider.collector_exec is not None:
         return None, provider, None
     return (
@@ -1614,6 +1624,32 @@ def _degraded_job(record: JobRecord, provider: object | None, run: httk.core.Run
     workflow_id = workflow_id if isinstance(workflow_id, str) else ""
     unfulfilled = tuple(_output_roles(_job_workflow_document(record, provider)))
     return CollectedJob(workflow_id, {}, unfulfilled, run, (), record, reason)
+
+
+def _nothing_to_collect(record: JobRecord, provider: WorkflowProvider) -> bool:
+    """Report whether a known workflow has no collector and declares no outputs."""
+
+    if provider.collector is not None or provider.collector_exec is not None:
+        return False
+    return not _output_roles(_job_workflow_document(record, provider))
+
+
+def _child_runs(record: JobRecord) -> tuple[tuple[str, str], ...]:
+    """Return the ``(label, run source id)`` of every child this job spawned.
+
+    The parent's spawn records name each child it registered, so linking the
+    parent's run to its children's runs needs no scan. A child's run source id is
+    ``"<workspace_id>:<job_id>"``, exactly as :func:`~httk.workflow.provenance.run_record` forms it.
+    """
+
+    from ._job_tree import spawned_children
+
+    try:
+        children = spawned_children(Path(record.payload))
+    except (WorkflowError, OSError) as exc:
+        _LOGGER.warning("ignoring unreadable spawn records of job %s: %s", record.job_id, exc)
+        return ()
+    return tuple((str(entry["label"]), f"{record.workspace_id}:{entry['job_id']}") for entry in children)
 
 
 def _validate_batch_size(value: object) -> int:
@@ -1756,6 +1792,17 @@ def collect(
                             f"{identity}: workflow format {language_name!r} collector unavailable: {exc}",
                         )
                         continue
+            if (
+                adapter is None
+                and provider is not None
+                and not allow_job_collector
+                and _nothing_to_collect(record, provider)
+            ):
+                # A workflow without a collector or declared outputs completes
+                # collection with its run as the only product. With the pinned
+                # fallback enabled, the job's own pinned tree decides instead.
+                results[index] = CollectedJob(workflow_id, {}, (), run, (), record, run_only=True)
+                continue
             if adapter is None:
                 if not allow_job_collector:
                     reason = (
@@ -1773,6 +1820,15 @@ def collect(
                         raise ValueError(f"{identity}: executable collector has no trusted package directory")
                     key = f"{fallback_provider.directory.resolve()}:{fallback_provider.collector_exec}"
                     executable_groups.setdefault(key, []).append((index, record, fallback_provider, run))
+                    continue
+                # A job pinned to a workspace tree is decided by that verified
+                # tree (a refused one decides nothing); any other job by the
+                # registered provider.
+                runner = record.job.get("runner")
+                pinned = isinstance(runner, Mapping) and runner.get("source") == "workspace"
+                deciding = fallback_provider if pinned else provider
+                if adapter is None and deciding is not None and _nothing_to_collect(record, deciding):
+                    results[index] = CollectedJob(workflow_id, {}, (), run, (), record, run_only=True)
                     continue
                 if adapter is None or fallback_provider is None:
                     results[index] = _degraded_job(
@@ -1825,4 +1881,5 @@ def collect(
             assert result is not None
             if fail_fast and result.missing_collector is not None:
                 raise ValueError(result.missing_collector)
-            yield result
+            child_runs = _child_runs(result.record)
+            yield replace(result, child_runs=child_runs) if child_runs else result

@@ -4,7 +4,7 @@ import argparse
 import contextlib
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, cast
@@ -107,6 +107,84 @@ def _rewrite_run_edges(run: Run, store: Any, remap: dict[str, str]) -> Run:
     )
 
 
+def _children_first(items: Sequence[CollectedJob]) -> list[int]:
+    """Order a sweep so every job comes after the children it spawned in it."""
+
+    by_source = {item.run.source_id: index for index, item in enumerate(items) if item.run.source_id is not None}
+    ordered: list[int] = []
+    placed: set[int] = set()
+
+    def place(index: int, visiting: set[int]) -> None:
+        if index in placed or index in visiting:
+            return
+        visiting.add(index)
+        for _label, source in items[index].child_runs:
+            child = by_source.get(source)
+            if child is not None:
+                place(child, visiting)
+        placed.add(index)
+        ordered.append(index)
+
+    for index in range(len(items)):
+        place(index, set())
+    return ordered
+
+
+def _latest_stored_run(store: Any, source_id: str) -> Run | None:
+    """Return the latest stored revision of the run of one job, by its source id."""
+
+    family = next((candidate for candidate in store.entry_records if getattr(candidate, "type", None) == "runs"), None)
+    if family is None:
+        return None
+    for record_type in store.entry_records[family]:
+        searcher = store.searcher(only_latest=True)
+        variable = searcher.variable(record_type)
+        searcher.add(variable.source_id == source_id)
+        row = searcher.results(entry=variable).first()
+        if row is not None and isinstance(getattr(row.entry, "id", None), str):
+            return cast(Run, row.entry)
+    return None
+
+
+def _with_child_runs(
+    run: Run,
+    item: CollectedJob,
+    store: Any,
+    run_ids_by_source: Mapping[str, str],
+    in_sweep: set[str],
+    stored_cache: dict[str, str | None],
+) -> Run:
+    """Add a ``has_artifact`` edge from *run* to the run of each child *item* spawned.
+
+    A child counts when its run was stored earlier in this sweep, or, when it is
+    not part of this sweep at all, by an earlier one; a child of this sweep that
+    was not stored now (degraded, skipped, or failed) is left out rather than
+    linked to a stale run, as is a child never collected. The spawn label names
+    the edge, or the child's run source id when the label would repeat one
+    already on the artifact side.
+    """
+
+    if not item.child_runs:
+        return run
+    labels = {edge.label for edge in run.artifacts}
+    edges = list(run.artifacts)
+    for label, source in item.child_runs:
+        child_run = run_ids_by_source.get(source)
+        if child_run is None and source not in in_sweep:
+            if source not in stored_cache:
+                stored = _latest_stored_run(store, source)
+                stored_cache[source] = None if stored is None else stored.id
+            child_run = stored_cache[source]
+        if child_run is None:
+            continue
+        name = label if label not in labels else source
+        if name in labels:
+            continue
+        labels.add(name)
+        edges.append(RunEdge(name, "runs", child_run))
+    return replace(run, artifacts=tuple(edges))
+
+
 def _collected_mapping(item: CollectedJob) -> dict[str, object]:
     outputs = item.outputs
 
@@ -153,6 +231,10 @@ def _collected_mapping(item: CollectedJob) -> dict[str, object]:
         mapping["collector_exit_status"] = item.collector_exit_status
     if item.identity_stable is not None:
         mapping["identity_stable"] = item.identity_stable
+    if item.run_only:
+        mapping["run_only"] = True
+    if item.child_runs:
+        mapping["children"] = [{"label": label, "run_source_id": source} for label, source in item.child_runs]
     return mapping
 
 
@@ -426,8 +508,16 @@ def _store_collected(
     id_series: str,
     ledger_path: str | None = None,
     ledger_keys: Sequence[tuple[str, bytes]] = (),
+    bare_runs: bool = True,
 ) -> list[dict[str, object]]:
     """Save one bounded collected sweep into a file-backed SQLite store.
+
+    Every job's run is stored, including the run of a job whose workflow has
+    nothing to collect (a *bare* run) unless *bare_runs* is off, so parent and
+    child jobs alike leave provenance naming their workflow declarations. A
+    parent's run gains one ``has_artifact`` edge to the run of each child it
+    spawned that is stored in this sweep or already in the store; children are
+    stored first so their run ids exist when the parent's run is written.
 
     :param items: The collected jobs to store.
     :param path: The SQLite store file path.
@@ -436,6 +526,7 @@ def _store_collected(
     :param ledger_path: An id-ledger database to allocate stable ids
         through, or ``None`` to let the store mint ids directly.
     :param ledger_keys: The signing keys each appended segment is signed with.
+    :param bare_runs: Store the runs of jobs whose workflows have nothing to collect.
     :return: One report mapping per collected job.
     """
 
@@ -544,6 +635,10 @@ def _store_collected(
         # must hold the store-minted id of the entry it describes.
         for index, item in enumerate(items):
             report = reports[index]
+            if item.run_only and not bare_runs:
+                report["stored"] = None
+                report["skipped"] = "run-only"
+                continue
             if item.missing_collector is not None:
                 # A degraded job produced no outputs: store nothing, and never a
                 # bare Run, so the store cannot fill with empty provenance.
@@ -575,8 +670,13 @@ def _store_collected(
             except Exception as exc:
                 report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
         # Pass two resolves all run and product references after every output
-        # in the sweep has contributed to the shared remap.
-        for index, item in enumerate(items):
+        # in the sweep has contributed to the shared remap. Children go first, so
+        # a parent's run can name the runs of the children it spawned.
+        run_ids_by_source: dict[str, str] = {}
+        in_sweep = {item.run.source_id for item in items if item.run.source_id is not None}
+        stored_cache: dict[str, str | None] = {}
+        for index in _children_first(items):
+            item = items[index]
             report = reports[index]
             if index not in stored_output_ids:
                 continue
@@ -600,7 +700,14 @@ def _store_collected(
                     # publish the pending ids only after the transaction commits (as in
                     # pass one), so a rolled-back record is never referenced by a later job.
                     job_remap = {**remap, **pending_remap}
-                    rewritten_run = _rewrite_run_edges(item.run, store, job_remap)
+                    rewritten_run = _with_child_runs(
+                        _rewrite_run_edges(item.run, store, job_remap),
+                        item,
+                        store,
+                        run_ids_by_source,
+                        in_sweep,
+                        stored_cache,
+                    )
                     rewritten_products = tuple(
                         replace(
                             product,
@@ -613,24 +720,38 @@ def _store_collected(
                     # at, so it takes a ledger id too, keyed by the bare job
                     # coordinate.  The edges were already rewritten above; the
                     # run's own id is orthogonal to them.
-                    run_chosen = (
-                        _ledger_entry_id(
-                            ledger,
-                            store,
-                            type_to_family,
-                            item,
-                            None,
-                            rewritten_run,
-                            getattr(rewritten_run, "id", None),
-                            content_to_ledger,
-                            warned_unstable,
-                        )
-                        if ledger is not None
-                        else None
+                    # A job collected before is revised, never duplicated: its run
+                    # may have changed since (a parent whose children have since
+                    # been collected gains their edges), and the new revision
+                    # extends the same lineage under the same entry id.
+                    predecessor = (
+                        None if rewritten_run.source_id is None else _latest_stored_run(store, rewritten_run.source_id)
                     )
-                    if run_chosen is not None:
-                        rewritten_run = replace(rewritten_run, id=run_chosen)
-                    run_sid = store.save(rewritten_run)
+                    if predecessor is not None:
+                        rewritten_run = replace(rewritten_run, id=predecessor.id)
+                        if content_id(predecessor) == content_id(rewritten_run):
+                            run_sid = store.save(rewritten_run)
+                        else:
+                            run_sid = store.replace(predecessor, rewritten_run)
+                    else:
+                        run_chosen = (
+                            _ledger_entry_id(
+                                ledger,
+                                store,
+                                type_to_family,
+                                item,
+                                None,
+                                rewritten_run,
+                                getattr(rewritten_run, "id", None),
+                                content_to_ledger,
+                                warned_unstable,
+                            )
+                            if ledger is not None
+                            else None
+                        )
+                        if run_chosen is not None:
+                            rewritten_run = replace(rewritten_run, id=run_chosen)
+                        run_sid = store.save(rewritten_run)
                     fetched_run = store.fetch(type(rewritten_run), run_sid)
                     run_id = getattr(fetched_run, "id", None)
                     if not isinstance(run_id, str):
@@ -638,6 +759,8 @@ def _store_collected(
                     for product in rewritten_products:
                         store.save(product)
                 remap.update(pending_remap)
+                if item.run.source_id is not None:
+                    run_ids_by_source[item.run.source_id] = run_id
                 report["stored"] = {"entries": entry_ids, "run": run_id}
             except Exception as exc:
                 report["storage_error"] = f"could not store job {item.record.job_id}: {exc}"
@@ -695,6 +818,8 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
         raise ValueError("--into cannot be combined with --raw")
     if arguments.into is not None and arguments.id_base is None:
         raise ValueError("--id-base is required with --into")
+    if arguments.into is None and arguments.no_bare_runs:
+        raise ValueError("--no-bare-runs only applies with --into")
     if arguments.degraded and arguments.raw:
         raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
     skipped = 0
@@ -739,6 +864,7 @@ def handle_collect(arguments: argparse.Namespace, context: CLIContext) -> int:
             id_series=arguments.id_series,
             ledger_path=ledger_path,
             ledger_keys=ledger_keys,
+            bare_runs=not arguments.no_bare_runs,
         )
         for item, report in zip(items, reports):
             degraded += item.missing_collector is not None
@@ -822,6 +948,11 @@ def build_collect_parser(subparsers: "argparse._SubParsersAction[argparse.Argume
         metavar="SERIES",
         default="1",
         help="entry-id campaign series (default: 1)",
+    )
+    parser.add_argument(
+        "--no-bare-runs",
+        action="store_true",
+        help="with --into, store no run for a job whose workflow has nothing to collect (default: store one)",
     )
     parser.add_argument(
         "--no-id-ledger",

@@ -88,12 +88,15 @@ store.save(run)  # the httk-store side
 The resulting `Run.source_id` is the executing system's identity for the job,
 formatted by httk-workflow as `"<workspace_id>:<job_id>"`. It participates in
 content identity, so repeated collection of one job deduplicates while distinct
-jobs remain distinct. `Run.immutable_id` is left `None` for `httk-store` to
-mint as its own per-revision identifier.
+jobs remain distinct; `collect --into` stores a job's changed run as a new
+revision of the same entry rather than a second entry. `Run.immutable_id` is
+left `None` for `httk-store` to mint as its own per-revision identifier.
 
 `run_record` does not fold children into the parent run. Each child collects to
-its own `Run`; a parent names child products explicitly in its observed
-declaration. Runner identity, the attempt timeline, and failure remain on the
+its own `Run`, including a child that only called or spawned further jobs, and
+`collect --into` links them: the parent's stored run gains a `has_artifact`
+edge of type `runs` to each child's run (see {doc}`collecting`). A parent still
+names child *products* explicitly in its observed declaration. Runner identity, the attempt timeline, and failure remain on the
 `JobRecord` for callers that need them.
 
 For directory workflows, the runner tree digest and generated or external

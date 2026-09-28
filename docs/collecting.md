@@ -13,6 +13,14 @@ why, `outputs` is empty, and `unfulfilled` names **every** declared output role,
 so a degradation is never mistaken for a complete collection that happened to
 declare no outputs.
 
+A workflow that has nothing to collect, because its registered provider has
+no collector and declares no outputs, is not degraded: its `CollectedJob` is a
+complete collection with `run_only` set, no outputs, and the job's run as its
+only product. Orchestrating workflows that only spawn or call others, and the
+small steps they call, are typically like this. Every `CollectedJob` also
+carries `child_runs`: one `(label, run source id)` pair per child the job
+spawned or called, read from its spawn records.
+
 When a collected output role is a file-valued single result, its run edge points
 to a standard `files` entry (`type = "files"`); file lists remain values within
 their role record.
@@ -191,8 +199,29 @@ With `--into PATH --id-base BASE`, each collected job's entries, run, and produc
 saved into a file-backed SQLite store, and its report gains
 `"stored": {...}`. A degraded job stores nothing — its report carries
 `"stored": null, "skipped": "degraded"` and **no** empty `Run` is written, so the
-store never fills with contentless provenance. A job whose entries cannot be
-stored keeps a `"storage_error"` and fails the exit code.
+store never fills with provenance of work that could not be read. A job whose
+entries cannot be stored keeps a `"storage_error"` and fails the exit code.
+
+A `run_only` job stores its run by default, so a parent that only orchestrates
+and every job it spawned or called each leave one `runs` entry (served as
+`_httk_runs`) naming their own workflow declaration (and, for a commit-pinned
+git workflow, its definition). `--no-bare-runs` opts out: such jobs then report
+`"stored": null, "skipped": "run-only"`. Their report lines carry
+`"run_only": true`, and a job that spawned children lists them as
+`"children": [{"label", "run_source_id"}]`.
+
+A parent's stored run gains one `has_artifact` edge of type `runs` to the run of
+each child it spawned or called, detached children included (detaching changes
+where a child may move, not who created it), labelled by the spawn label (or by
+the child's run source id if that label is already taken on the artifact side).
+The sweep stores children before their parents so those runs exist. A child
+collected in this sweep but not stored (degraded or skipped) is left out, as is
+one never collected; one stored by an earlier sweep is linked.
+
+Each job has one run entry. When a job is collected again and its run has
+changed, for example a parent whose children have been collected since, the new
+run is stored as a revision of the same entry (same entry id, one lineage)
+rather than as a second entry; unchanged runs deduplicate.
 
 `--id-base` is required with `--into` and names the dot-separated namespace used
 for minted entry ids; `--id-series` selects the campaign series and defaults to
@@ -268,8 +297,15 @@ when the fallback is enabled; the embedded declaration supplies only the
 immutable Run facts. Old jobs without that declaration fall back to
 the currently registered provider declaration, so their role interpretation is
 necessarily live rather than historical. A workflow
-without a provider or collector is represented as a degraded `CollectedJob`
-with `missing_collector` set. With `--allow-job-collector`, collecting
+without a provider, or whose provider has no collector but declares outputs, is
+represented as a degraded `CollectedJob` with `missing_collector` set; one whose
+provider has neither is `run_only` (see above). A job whose provider is not
+registered on the collecting machine stays degraded rather than run-only,
+because a collector may exist for it elsewhere; with `--allow-job-collector`, a
+job pinned to a workspace package tree is decided by that verified tree
+instead, so an unregistered package with nothing to collect is `run_only` too.
+A job run from a bare runner file of your own has no manifest to decide from and
+stays degraded. With `--allow-job-collector`, collecting
 can inspect the job-pinned package tree, validate its own manifest and digest,
 and load that tree's collect hook; refusals degrade only that job. See
 {doc}`workflow_packages` for the trust tiers and package hook contract.

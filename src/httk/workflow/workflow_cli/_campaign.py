@@ -124,6 +124,8 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
         raise ValueError("--into cannot be combined with --raw")
     if arguments.into is not None and arguments.id_base is None:
         raise ValueError("--id-base is required with --into")
+    if arguments.into is None and arguments.no_bare_runs:
+        raise ValueError("--no-bare-runs only applies with --into")
     if arguments.degraded and arguments.raw:
         raise ValueError("--degraded filters collected summaries and cannot be combined with --raw")
     config = read_campaign(context.cwd)
@@ -174,7 +176,13 @@ def handle_campaign_collect(arguments: argparse.Namespace, context: CLIContext) 
                     batch_size=arguments.batch_size,
                 )
             )
-        reports = _store_collected(items, arguments.into, id_base=arguments.id_base, id_series=arguments.id_series)
+        reports = _store_collected(
+            items,
+            arguments.into,
+            id_base=arguments.id_base,
+            id_series=arguments.id_series,
+            bare_runs=not arguments.no_bare_runs,
+        )
         for item, report in zip(items, reports):
             degraded += item.missing_collector is not None
             collected += item.missing_collector is None
@@ -404,6 +412,11 @@ def build_campaign_parser(
         "--into",
         metavar="PATH",
         help="save collected entries, runs, and products into a file-backed SQLite store",
+    )
+    collect_parser.add_argument(
+        "--no-bare-runs",
+        action="store_true",
+        help="with --into, store no run for a job whose workflow has nothing to collect (default: store one)",
     )
     collect_parser.add_argument(
         "--id-base",
