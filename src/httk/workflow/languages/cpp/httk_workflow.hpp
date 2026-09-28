@@ -114,6 +114,12 @@ public:
     static std::optional<std::string> parameter(const std::string& name, const std::string& fallback) {
         return named_read(httk_workflow_parameter, name, fallback.c_str());
     }
+    static bool stage_input(const std::string& name, const std::string& destination) {
+        return staged(httk_workflow_stage_input(name.c_str(), destination.c_str(), nullptr));
+    }
+    static bool stage_input(const std::string& name, const std::string& destination, const std::string& fallback) {
+        return staged(httk_workflow_stage_input(name.c_str(), destination.c_str(), fallback.c_str()));
+    }
     static std::optional<std::string> setting(const std::string& name) {
         return named_read(httk_workflow_setting, name, nullptr);
     }
@@ -267,6 +273,12 @@ private:
         if (status == HTTK_WORKFLOW_ABSENT) return std::nullopt;
         if (status != HTTK_WORKFLOW_OK) throw BridgeError(status);
         return value ? std::optional<std::string>(std::string(value.get())) : std::nullopt;
+    }
+
+    static bool staged(int status) {
+        if (status == HTTK_WORKFLOW_OK) return true;
+        if (status == HTTK_WORKFLOW_ABSENT) return false;
+        throw BridgeError(status);
     }
 
     static std::string required_result(char* output, int status) {

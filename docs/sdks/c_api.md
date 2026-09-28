@@ -153,6 +153,7 @@ bridge exit status out-parameter.
 | `httk_workflow_parameter(name, fallback, status)` | `httk_workflow_parameter` | `Attempt.parameter` |
 | `httk_workflow_setting(name, fallback, status)` | `httk_workflow_setting` | `Attempt.setting` |
 | `httk_workflow_environment(name, fallback, status)` | `httk_workflow_environment` | `Attempt.environment` |
+| `httk_workflow_stage_input(name, destination, fallback)` | `httk_workflow_stage_input` | `Attempt.stage_input` |
 | `httk_workflow_state_get(name, status)` | `httk_workflow_state_get` | `JobState.read` |
 | `httk_workflow_state_set(name, value)` | `httk_workflow_state_set` | `JobState.set` |
 | `httk_workflow_state_delete(name)` | `httk_workflow_state_delete` | `JobState.delete` |
@@ -182,6 +183,17 @@ bridge exit status out-parameter.
 | `httk_template_render(template, output, values)` | `httk_template_render` | `render_template` |
 | `httk_compress(args)` | `httk_compress` | `compress_files` |
 | `httk_decompress(args)` | `httk_decompress` | `decompress_files` |
+| `httk_copy_file(source, destination)` | — | `shutil.copyfile` |
+| `httk_file_exists(path)` | — | `Path.is_file` |
+| `httk_join_path(a, b)` | — | `Path.__truediv__` |
+
+The last three rows are local helpers that never call the bridge: they exist
+because C has no standard way to copy a file, test for a regular file, or join
+paths. `httk_join_path` returns a malloc'd string under the memory-ownership
+rules above, and `httk_copy_file` reports `HTTK_WORKFLOW_OK` or
+`HTTK_WORKFLOW_REFUSED` like the bridge verbs. It is refused when the source is
+not a regular file or names the same file as the destination; a copy refused
+mid-way may leave a partial destination, as `shutil.copyfile` does.
 
 The `httk_vasp_*` surface of the Bash SDK has no dedicated C wrappers; a C runner
 that needs a VASP subcommand reaches it through `httk_workflow_invoke` with the

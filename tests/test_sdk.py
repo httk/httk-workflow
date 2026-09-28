@@ -1049,6 +1049,29 @@ def test_data_operations_refuse_a_job_without_transactional_data(tmp_path: Path)
     assert not list(attempt.control.glob("outcome.tmp.*"))
 
 
+def test_stage_input_copies_the_payload_file_a_parameter_names(tmp_path: Path) -> None:
+    attempt = _attempt(tmp_path, step="relax", parameters={"structure": "files/POSCAR", "encut": 520})
+    (attempt.payload / "files" / "POSCAR").write_bytes(b"Si\n1.0\n")
+
+    staged = attempt.stage_input("structure", "POSCAR")
+    assert staged is not None
+    assert staged == attempt.workdir / "POSCAR"
+    assert staged.read_bytes() == b"Si\n1.0\n"
+    nested = attempt.stage_input("poscar", "inputs/POSCAR", "files/POSCAR")
+    assert nested is not None
+    assert nested == attempt.workdir / "inputs" / "POSCAR"
+    assert nested.read_bytes() == b"Si\n1.0\n"
+
+    assert attempt.stage_input("incar", "INCAR", "files/INCAR") is None
+    assert not (attempt.workdir / "INCAR").exists()
+    with pytest.raises(KeyError, match="job parameter 'incar' is not defined"):
+        attempt.stage_input("incar", "INCAR")
+    with pytest.raises(
+        ValueError, match=r"parameter 'encut' \(or its default\) must name a payload-relative path, not int"
+    ):
+        attempt.stage_input("encut", "ENCUT")
+
+
 def test_job_inputs_round_trip_and_are_bounded(tmp_path: Path) -> None:
     attempt = _attempt(tmp_path, step="relax", parameters={"encut": 520, "species": ["Si", "O"], "spin": None})
     assert attempt.parameter("encut") == 520

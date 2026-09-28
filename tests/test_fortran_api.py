@@ -155,7 +155,9 @@ class _Attempt:
         return json.loads((self.control / "error.json").read_text(encoding="utf-8"))
 
 
-def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -> _Attempt:
+def _attempt(
+    tmp_path: Path, *, step: str, data_generation: int | None = None, parameters: dict[str, object] | None = None
+) -> _Attempt:
     """Fabricate one attempt of one job, without a manager (mirrors test_c_api)."""
 
     payload = tmp_path / "payload"
@@ -169,6 +171,7 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
             workflow="tests.fortran",
             runner_path="files/runner",
             initial_step=step,
+            parameters=parameters or {},
             data_mode="none" if data_generation is None else "transactional",
         ),
     )
@@ -428,3 +431,32 @@ def test_a_runner_can_be_registered_twice(tmp_path: Path) -> None:
         "steps": ["beta", "gamma"],
         "workflow": "w.second",
     }
+
+
+def test_stage_input_copy_file_and_getenv(tmp_path: Path) -> None:
+    """The runner helpers: stage (0/1/2), local copy (0), and getenv with fallbacks."""
+
+    body = """character(len=128) :: line
+    write (line, '(I0,1X,I0,1X,I0)') httk_workflow_stage_input("poscar", "POSCAR", "files/POSCAR"), &
+      httk_workflow_stage_input("incar", "INCAR", "files/INCAR"), httk_copy_file("POSCAR", "COPY")
+    call ignore(httk_workflow_log("probe", "RC " // trim(line)))
+    write (line, '(I0)') httk_workflow_stage_input("encut", "X")
+    call ignore(httk_workflow_log("probe", "REFUSED " // trim(line)))
+    call ignore(httk_workflow_log("probe", "SET [" // httk_getenv("HTTK_TEST_GETENV") // "]"))
+    call ignore(httk_workflow_log("probe", "UNSET [" // httk_getenv("HTTK_TEST_GETENV_UNSET", "fb") // "]"))
+    call ignore(httk_workflow_log("probe", "BARE [" // httk_getenv("HTTK_TEST_GETENV_UNSET") // "]"))
+    call ignore(httk_workflow_succeed())
+    code = 0"""
+    binary = _write_runner(tmp_path, "tests.fortran.helpers", {"probe": body})
+    attempt = _attempt(tmp_path, step="probe", parameters={"encut": 520})
+    (attempt.payload / "files" / "POSCAR").write_bytes(b"Si\n1.0\n")
+    attempt.environment["HTTK_TEST_GETENV"] = "value"
+    attempt.environment.pop("HTTK_TEST_GETENV_UNSET", None)
+
+    completed = attempt.run(binary)
+    assert completed.returncode == 0, completed.stderr
+    for expected in ("RC 0 1 0", "REFUSED 2", "SET [value]", "UNSET [fb]", "BARE []"):
+        assert expected in completed.stderr, completed.stderr
+    assert (attempt.workdir / "POSCAR").read_bytes() == b"Si\n1.0\n"
+    assert (attempt.workdir / "COPY").read_bytes() == b"Si\n1.0\n"
+    assert attempt.outcome()["action"] == "succeed"

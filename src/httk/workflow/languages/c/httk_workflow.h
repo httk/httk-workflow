@@ -156,6 +156,14 @@ char *httk_workflow_parameter(const char *name, const char *fallback, int *statu
 char *httk_workflow_setting(const char *name, const char *fallback, int *status);
 /* One declared workflow environment value, with an optional default. */
 char *httk_workflow_environment(const char *name, const char *fallback, int *status);
+/*
+ * Copy the payload file that job parameter `name` names (payload-relative; `fallback`
+ * is the default path when the parameter is absent, or NULL for none) to
+ * `destination` in the workdir, byte for byte. Returns HTTK_WORKFLOW_OK when staged,
+ * HTTK_WORKFLOW_ABSENT when the payload has no such file (or the parameter is absent
+ * without a fallback), HTTK_WORKFLOW_REFUSED otherwise.
+ */
+int httk_workflow_stage_input(const char *name, const char *destination, const char *fallback);
 /* One key of the job's JSON state; absent (status 1) when unset. */
 char *httk_workflow_state_get(const char *name, int *status);
 /* One workflow declaration: the observed document, else the declared one. */
@@ -256,6 +264,21 @@ int httk_template_render(const char *template_file, const char *output, const ch
 int httk_compress(const char *const *args);
 /* Decompress named files; `args` carries --remove-source and the paths. */
 int httk_decompress(const char *const *args);
+
+/* --- Files and paths (local; no bridge) ------------------------------------ */
+
+/*
+ * Copy one file byte for byte, replacing `destination`; HTTK_WORKFLOW_OK or
+ * HTTK_WORKFLOW_REFUSED. Refused when the source is not a regular file or names the
+ * same file as the destination; a copy refused mid-way may leave a partial
+ * destination, as shutil.copyfile does.
+ */
+int httk_copy_file(const char *source, const char *destination);
+/* 1 when `path` names an existing regular file (following symlinks), else 0. */
+int httk_file_exists(const char *path);
+/* `a` "/" `b` as a malloc'd string the caller frees (NULL on allocation failure);
+ * `b` itself (copied) when `b` is absolute, and no doubled "/" when `a` ends in one. */
+char *httk_join_path(const char *a, const char *b);
 
 #ifdef __cplusplus
 }

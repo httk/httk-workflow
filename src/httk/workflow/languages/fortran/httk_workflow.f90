@@ -81,6 +81,7 @@ module httk_workflow
   public :: httk_workflow_invoke
   public :: httk_workflow_context, httk_workflow_parameter, httk_workflow_setting
   public :: httk_workflow_environment, httk_workflow_state_get
+  public :: httk_workflow_stage_input, httk_copy_file, httk_getenv
   public :: httk_workflow_declaration, httk_workflow_children, httk_workflow_child
   public :: httk_workflow_state_set, httk_workflow_state_delete, httk_workflow_state_merge
   public :: httk_workflow_declare, httk_workflow_runlog_note, httk_workflow_runlog_headline
@@ -160,6 +161,18 @@ module httk_workflow
       type(c_ptr), value :: name, fallback
       integer(c_int), intent(out) :: status
       type(c_ptr) :: p
+    end function
+
+    function c_stage_input(name, destination, fallback) bind(c, name="httk_workflow_stage_input") result(rc)
+      import :: c_ptr, c_int
+      type(c_ptr), value :: name, destination, fallback
+      integer(c_int) :: rc
+    end function
+
+    function c_copy_file(source, destination) bind(c, name="httk_copy_file") result(rc)
+      import :: c_ptr, c_int
+      type(c_ptr), value :: source, destination
+      integer(c_int) :: rc
     end function
 
     function c_state_get(name, status) bind(c, name="httk_workflow_state_get") result(p)
@@ -642,6 +655,60 @@ contains
     call take(c_environment(c_loc(bname), pfall, st), value)
     if (present(status)) status = int(st)
   end subroutine
+
+  ! Copy the payload file job parameter `name` names (payload-relative; `fallback`
+  ! is the default path when the parameter is absent) to `destination` in the
+  ! workdir. HTTK_WORKFLOW_OK when staged, HTTK_WORKFLOW_ABSENT when there is no
+  ! such file (or no parameter and no fallback), HTTK_WORKFLOW_REFUSED otherwise.
+  function httk_workflow_stage_input(name, destination, fallback) result(rc)
+    character(len=*), intent(in) :: name, destination
+    character(len=*), intent(in), optional :: fallback
+    integer :: rc
+    character(kind=c_char), allocatable, target :: bname(:), bdest(:), bfall(:)
+    type(c_ptr) :: pfall
+    bname = cstr(name)
+    bdest = cstr(destination)
+    if (present(fallback)) then
+      bfall = cstr(fallback)
+      pfall = c_loc(bfall)
+    else
+      pfall = c_null_ptr
+    end if
+    rc = int(c_stage_input(c_loc(bname), c_loc(bdest), pfall))
+  end function
+
+  ! Copy one local file byte for byte, replacing `destination` (no bridge);
+  ! HTTK_WORKFLOW_OK or HTTK_WORKFLOW_REFUSED. Refused when the source is not a
+  ! regular file or names the same file as the destination; a copy refused
+  ! mid-way may leave a partial destination, as shutil.copyfile does.
+  function httk_copy_file(source, destination) result(rc)
+    character(len=*), intent(in) :: source, destination
+    integer :: rc
+    character(kind=c_char), allocatable, target :: bsrc(:), bdest(:)
+    bsrc = cstr(source)
+    bdest = cstr(destination)
+    rc = int(c_copy_file(c_loc(bsrc), c_loc(bdest)))
+  end function
+
+  ! A process environment variable (pure Fortran, no bridge): its value when set
+  ! and non-empty, otherwise `fallback` (default ""). Always allocated.
+  function httk_getenv(name, fallback) result(value)
+    character(len=*), intent(in) :: name
+    character(len=*), intent(in), optional :: fallback
+    character(len=:), allocatable :: value
+    integer :: length, st
+    call get_environment_variable(name, length=length, status=st)
+    if (st /= 0 .or. length == 0) then
+      if (present(fallback)) then
+        value = fallback
+      else
+        value = ""
+      end if
+      return
+    end if
+    allocate (character(len=length) :: value)
+    call get_environment_variable(name, value=value)
+  end function
 
   ! One key of the job's JSON state; absent (status 1, unallocated) when unset.
   subroutine httk_workflow_state_get(name, value, status)

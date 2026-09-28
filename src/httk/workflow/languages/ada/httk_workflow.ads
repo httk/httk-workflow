@@ -36,6 +36,8 @@ package Httk_Workflow is
    procedure Httk_Workflow_Parameter
      (Name : String; Fallback : String; Value : out U.Unbounded_String;
       Present : out Boolean; Status : out C.int);
+   function Httk_Workflow_Stage_Input (Name : String; Destination : String) return C.int;
+   function Httk_Workflow_Stage_Input (Name : String; Destination : String; Fallback : String) return C.int;
    procedure Httk_Workflow_Setting
      (Name : String; Value : out U.Unbounded_String; Present : out Boolean; Status : out C.int);
    procedure Httk_Workflow_Setting

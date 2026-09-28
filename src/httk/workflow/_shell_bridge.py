@@ -108,6 +108,10 @@ def _parser() -> argparse.ArgumentParser:
     job_input = commands.add_parser("parameter")
     job_input.add_argument("name")
     job_input.add_argument("--default")
+    stage_input = commands.add_parser("stage-input")
+    stage_input.add_argument("name")
+    stage_input.add_argument("destination")
+    stage_input.add_argument("--default")
     setting = commands.add_parser("setting")
     setting.add_argument("name")
     setting.add_argument("--default")
@@ -697,6 +701,17 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
                 _print(attempt.parameter(arguments.name, _value(arguments.default)))
         except KeyError as exc:
             raise _Absent(str(exc.args[0])) from exc
+    elif command == "stage-input":
+        attempt = _attempt()
+        try:
+            if arguments.default is None:
+                staged = attempt.stage_input(arguments.name, arguments.destination)
+            else:
+                staged = attempt.stage_input(arguments.name, arguments.destination, arguments.default)
+        except KeyError as exc:
+            raise _Absent(str(exc.args[0])) from exc
+        if staged is None:
+            raise _Absent()
     elif command == "setting":
         attempt = _attempt()
         absent = object()

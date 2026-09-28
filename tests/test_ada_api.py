@@ -185,7 +185,9 @@ class _Attempt:
         return json.loads((self.control / "error.json").read_text(encoding="utf-8"))
 
 
-def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -> _Attempt:
+def _attempt(
+    tmp_path: Path, *, step: str, parameters: dict[str, object] | None = None, data_generation: int | None = None
+) -> _Attempt:
     """Fabricate one attempt without a manager (mirrors the other language SDK tests)."""
 
     payload = tmp_path / "payload"
@@ -200,6 +202,7 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
             runner_path="files/runner",
             initial_step=step,
             data_mode="none" if data_generation is None else "transactional",
+            parameters=parameters or {},
         ),
     )
     control = payload / f"attempts/{uuid.uuid4()}"
@@ -381,3 +384,24 @@ def test_absent_and_refused_reads_stay_distinct(tmp_path: Path) -> None:
     assert completed.returncode == 0, completed.stderr
     assert "ABSENT  1" in completed.stderr
     assert "REFUSED  2" in completed.stderr
+
+
+def test_stage_input_copies_a_payload_file_or_answers_absent(tmp_path: Path) -> None:
+    """Staged is 0; no such payload file or parameter is 1; a non-string parameter is refused."""
+
+    body = """if Httk_Workflow.Httk_Workflow_Stage_Input ("poscar", "POSCAR", "files/POSCAR") /= 0 then return 10; end if;
+      if Httk_Workflow.Httk_Workflow_Stage_Input ("incar", "INCAR", "files/INCAR") /= 1 then return 11; end if;
+      if Httk_Workflow.Httk_Workflow_Stage_Input ("missing", "X") /= 1 then return 12; end if;
+      if Httk_Workflow.Httk_Workflow_Stage_Input ("encut", "X") /= Httk_Workflow.HTTK_WORKFLOW_REFUSED then
+        return 13;
+      end if;
+      if Httk_Workflow.Httk_Workflow_Succeed /= 0 then null; end if;
+      return 0;"""
+    binary = _write_runner(tmp_path, "tests.ada", {"start": body})
+    attempt = _attempt(tmp_path, step="start", parameters={"encut": 520})
+    (attempt.payload / "files" / "POSCAR").write_bytes(b"Si\n1.0\n")
+
+    completed = attempt.run(binary)
+    assert completed.returncode == 0, completed.stderr
+    assert (attempt.workdir / "POSCAR").read_bytes() == b"Si\n1.0\n"
+    assert attempt.outcome()["action"] == "succeed"

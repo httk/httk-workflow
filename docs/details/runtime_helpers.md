@@ -185,6 +185,7 @@ envelope and serialization rules are normative in {doc}`workflow_packages`.
 | `a.step` | the step this attempt runs |
 | `a.payload`, `a.workdir`, `a.workspace`, `a.data` | absolute paths; `a.data` is set only for a transactional job |
 | `a.job`, `a.parameters`, `a.parameter(name[, default])` | the job definition and its opaque implementation `parameters` object |
+| `a.stage_input(name, destination[, default])` | copies the payload file parameter `name` names into the workdir at `destination`; `None` when the payload has no such file |
 | `a.state` | dict-like JSON state that belongs to the **job** |
 | `a.log` | the append-only structured run log of the job payload (`logs/runlog.jsonl`) |
 | `a.children` | the typed children of the join that started this activation |

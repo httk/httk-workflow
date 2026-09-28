@@ -227,6 +227,14 @@ sub parameter {
     return $self->_read_named('parameter', $name, $rest[0], @rest ? 1 : 0);
 }
 
+sub stage_input {
+    my ($self, $name, $destination, @fallback) = @_;
+    my $status = $self->_command('stage-input', $name, $destination, @fallback ? ('--default', $fallback[0]) : ());
+    return 1 if $status == 0;
+    return 0 if $status == 1;
+    die HttkWorkflow::BridgeError->new('Refused', 'the httk-workflow bridge refused the call');
+}
+
 sub setting {
     my ($self, $name, @rest) = @_;
     return $self->_read_named('setting', $name, $rest[0], @rest ? 1 : 0);

@@ -83,7 +83,9 @@ class _Attempt:
         return json.loads((self.control / "error.json").read_text(encoding="utf-8"))
 
 
-def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -> _Attempt:
+def _attempt(
+    tmp_path: Path, *, step: str, parameters: dict[str, object] | None = None, data_generation: int | None = None
+) -> _Attempt:
     """Fabricate one attempt of one job, without a manager (mirrors test_rust_api)."""
 
     payload = tmp_path / "payload"
@@ -98,6 +100,7 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
             runner_path="files/runner",
             initial_step=step,
             data_mode="none" if data_generation is None else "transactional",
+            parameters=parameters or {},
         ),
     )
     control = payload / f"attempts/{uuid.uuid4()}"
@@ -289,3 +292,22 @@ def test_a_handler_returning_nonzero_leaves_a_perl_error_breadcrumb(tmp_path: Pa
     assert breadcrumb["step"] == "explode"
     assert breadcrumb["exception"] == "PerlError"
     assert breadcrumb["message"] == "explode exited with status 3"
+
+
+def test_stage_input_copies_a_payload_file_or_answers_false(tmp_path: Path) -> None:
+    body = (
+        "print $attempt->stage_input('poscar', 'POSCAR', 'files/POSCAR'), "
+        "$attempt->stage_input('incar', 'INCAR', 'files/INCAR'), "
+        "$attempt->stage_input('missing', 'X'), \"\\n\"; "
+        "eval { $attempt->stage_input('encut', 'X'); 1 } or print ref($@), ' ', $@->kind(), \"\\n\"; "
+        "$attempt->succeed();"
+    )
+    runner = _runner(tmp_path, steps=("start",), handlers={"start": body})
+    attempt = _attempt(tmp_path, step="start", parameters={"encut": 520})
+    (attempt.payload / "files" / "POSCAR").write_bytes(b"Si\n1.0\n")
+
+    completed = attempt.run(runner)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "100\nHttkWorkflow::BridgeError Refused\n"
+    assert (attempt.workdir / "POSCAR").read_bytes() == b"Si\n1.0\n"
+    assert attempt.outcome()["action"] == "succeed"

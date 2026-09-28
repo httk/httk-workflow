@@ -292,3 +292,23 @@ def test_handler_endings_map_to_no_outcome_and_structured_failure(tmp_path: Path
     completed = failed.run(classes)
     assert completed.returncode == 0, completed.stderr
     assert failed.outcome()["failure"] == {"code": "tests.broken", "message": "it broke"}
+
+
+def test_stage_input_copies_a_payload_file_or_answers_false(tmp_path: Path) -> None:
+    body = (
+        'System.out.println(attempt.stageInput("poscar", "POSCAR", "files/POSCAR")); '
+        'System.out.println(attempt.stageInput("incar", "INCAR", "files/INCAR")); '
+        'System.out.println(attempt.stageInput("missing", "X")); '
+        'try { attempt.stageInput("encut", "X"); } '
+        "catch (HttkWorkflow.BridgeError error) { System.out.println(error.kind()); } "
+        "attempt.succeed(); return 0;"
+    )
+    classes = _write_runner(tmp_path, "tests.java", {"start": body})
+    attempt = _attempt(tmp_path, step="start", parameters={"encut": 520})
+    (attempt.payload / "files" / "POSCAR").write_bytes(b"Si\n1.0\n")
+
+    completed = attempt.run(classes)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["true", "false", "false", "Refused"]
+    assert (attempt.workdir / "POSCAR").read_bytes() == b"Si\n1.0\n"
+    assert attempt.outcome()["action"] == "succeed"

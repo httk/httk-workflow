@@ -437,3 +437,71 @@ def test_a_signal_storm_mid_verb_does_not_corrupt_dispatch(tmp_path: Path) -> No
     assert completed.returncode == 0, completed.stderr
     # begin's capture survived the EINTR storm: the real step ran, no spurious fail.
     assert attempt.outcome()["action"] == "succeed"
+
+
+_STAGE_RUNNER = r"""#include <stdio.h>
+#include "httk_workflow.h"
+static int step_go(void) {
+    int staged = httk_workflow_stage_input("poscar", "POSCAR", "files/POSCAR");
+    int missing = httk_workflow_stage_input("incar", "INCAR", "files/INCAR");
+    int absent = httk_workflow_stage_input("nothing", "X", NULL);
+    FILE *record = fopen("statuses", "w");
+    if (record == NULL) return 1;
+    fprintf(record, "%d %d %d", staged, missing, absent);
+    fclose(record);
+    return httk_workflow_succeed();
+}
+int main(int argc, char **argv) {
+    static const httk_workflow_step steps[] = {{"go", step_go}};
+    if (httk_workflow_runner("tests.c.stage", steps, 1) != 0) return 2;
+    return httk_workflow_main(argc, argv);
+}
+"""
+
+
+def test_stage_input_forwards_to_the_bridge(tmp_path: Path) -> None:
+    binary = _compile_source(tmp_path, _STAGE_RUNNER, "stage")
+    attempt = _attempt(tmp_path, step="go")
+    (attempt.payload / "files" / "POSCAR").write_bytes(b"Si\n1.0\n")
+
+    completed = attempt.run(binary)
+    assert completed.returncode == 0, completed.stderr
+    assert (attempt.workdir / "statuses").read_text(encoding="utf-8") == "0 1 1"
+    assert (attempt.workdir / "POSCAR").read_bytes() == b"Si\n1.0\n"
+    assert not (attempt.workdir / "INCAR").exists()
+    assert attempt.outcome()["action"] == "succeed"
+
+
+_FILES_PROGRAM = r"""#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "httk_workflow.h"
+static int joined(const char *a, const char *b, const char *want) {
+    char *got = httk_join_path(a, b);
+    int ok = got != NULL && strcmp(got, want) == 0;
+    free(got);
+    return ok;
+}
+int main(void) {
+    FILE *f = fopen("source", "wb");
+    if (f == NULL) return 1;
+    fputs("payload\n", f);
+    fclose(f);
+    if (httk_copy_file("source", "copy") != HTTK_WORKFLOW_OK) return 2;
+    if (httk_copy_file("missing", "never") != HTTK_WORKFLOW_REFUSED) return 3;
+    if (httk_copy_file("source", "./source") != HTTK_WORKFLOW_REFUSED) return 6;
+    if (httk_copy_file(".", "never") != HTTK_WORKFLOW_REFUSED) return 7;
+    if (httk_file_exists("copy") != 1 || httk_file_exists(".") != 0 || httk_file_exists("missing") != 0) return 4;
+    if (!joined("a", "b", "a/b") || !joined("a/", "b", "a/b") || !joined("a", "/abs", "/abs")) return 5;
+    return 0;
+}
+"""
+
+
+def test_the_local_file_helpers(tmp_path: Path) -> None:
+    binary = _compile_source(tmp_path, _FILES_PROGRAM, "files")
+    completed = subprocess.run([str(binary)], cwd=tmp_path, text=True, capture_output=True, check=False)
+    assert completed.returncode == 0, completed
+    assert (tmp_path / "copy").read_bytes() == b"payload\n"
+    assert (tmp_path / "source").read_bytes() == b"payload\n"  # the same-file copy kept it
+    assert not (tmp_path / "never").exists()

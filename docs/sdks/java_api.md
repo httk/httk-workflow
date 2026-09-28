@@ -83,6 +83,7 @@ removed; stderr and stdin remain inherited.
 | `Runner(String, steps)`, `step`, `main` | runner registration and dispatch |
 | `invoke` | caller-supplied verb and arguments |
 | `context`, `parameter`, `setting`, `environment` | same-named reads |
+| `stageInput` | `stage-input` |
 | `stateGet`, `stateSet`, `stateDelete`, `stateMerge` | `state-get`, `state-set`, `state-delete`, `state-merge` |
 | `declaration`, `declare` | `declaration`, `declare` |
 | `runlogNote`, `runlogHeadline`, `runlogAppend` | `runlog` |

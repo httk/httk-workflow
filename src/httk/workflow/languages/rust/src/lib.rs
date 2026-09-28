@@ -443,6 +443,20 @@ impl Attempt {
         self.read_named("parameter", name, fallback)
     }
 
+    /// Copy the payload file that parameter `name` (or `fallback`) names into
+    /// the workdir as `destination`; `Ok(false)` when there is no such file.
+    pub fn stage_input(&self, name: &str, destination: &str, fallback: Option<&str>) -> Result<bool, BridgeError> {
+        let mut argv = vec!["stage-input", name, destination];
+        if let Some(fallback) = fallback {
+            argv.extend(["--default", fallback]);
+        }
+        match self.command(&argv)? {
+            OK => Ok(true),
+            ABSENT => Ok(false),
+            _ => Err(BridgeError::Refused),
+        }
+    }
+
     /// One resolved application setting, with an optional default.
     pub fn setting(&self, name: &str, fallback: Option<&str>) -> Result<Option<String>, BridgeError> {
         self.read_named("setting", name, fallback)

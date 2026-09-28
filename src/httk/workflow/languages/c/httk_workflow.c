@@ -444,6 +444,12 @@ char *httk_workflow_environment(const char *name, const char *fallback, int *sta
     return read_named("environment", name, fallback, status);
 }
 
+int httk_workflow_stage_input(const char *name, const char *destination, const char *fallback) {
+    const char *prefix[] = {"stage-input", name, destination, NULL};
+    const char *tail[] = {"--default", fallback, NULL};
+    return call(NULL, prefix, fallback != NULL ? tail : NULL);
+}
+
 char *httk_workflow_state_get(const char *name, int *status) {
     const char *prefix[] = {"state-get", name, NULL};
     return read_value(prefix, NULL, status);
@@ -617,4 +623,70 @@ int httk_compress(const char *const *args) {
 int httk_decompress(const char *const *args) {
     const char *prefix[] = {"decompress", NULL};
     return call(NULL, prefix, args);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Files and paths (local; no bridge).                                        */
+/* ------------------------------------------------------------------------- */
+
+int httk_copy_file(const char *source, const char *destination) {
+    if (source == NULL || destination == NULL) {
+        return HTTK_WORKFLOW_REFUSED;
+    }
+    FILE *in = fopen(source, "rb");
+    if (in == NULL) {
+        return HTTK_WORKFLOW_REFUSED;
+    }
+    /* Refuse before "wb" truncates anything: a non-file source, or the same file. */
+    struct stat src, dst;
+    if (fstat(fileno(in), &src) != 0 || !S_ISREG(src.st_mode) ||
+        (stat(destination, &dst) == 0 && dst.st_dev == src.st_dev && dst.st_ino == src.st_ino)) {
+        fclose(in);
+        return HTTK_WORKFLOW_REFUSED;
+    }
+    FILE *out = fopen(destination, "wb");
+    if (out == NULL) {
+        fclose(in);
+        return HTTK_WORKFLOW_REFUSED;
+    }
+    char buffer[8192];
+    size_t got;
+    int status = HTTK_WORKFLOW_OK;
+    while ((got = fread(buffer, 1, sizeof buffer, in)) > 0) {
+        if (fwrite(buffer, 1, got, out) != got) {
+            status = HTTK_WORKFLOW_REFUSED;
+            break;
+        }
+    }
+    if (ferror(in)) {
+        status = HTTK_WORKFLOW_REFUSED;
+    }
+    if (fclose(out) != 0) {
+        status = HTTK_WORKFLOW_REFUSED;
+    }
+    fclose(in);
+    return status;
+}
+
+int httk_file_exists(const char *path) {
+    struct stat info;
+    return path != NULL && stat(path, &info) == 0 && S_ISREG(info.st_mode);
+}
+
+char *httk_join_path(const char *a, const char *b) {
+    if (a == NULL || b == NULL) {
+        return NULL;
+    }
+    size_t alen = strlen(a);
+    const char *sep = (alen > 0 && a[alen - 1] != '/') ? "/" : "";
+    if (b[0] == '/') {
+        alen = 0;
+        sep = "";
+    }
+    size_t need = alen + strlen(sep) + strlen(b) + 1;
+    char *out = malloc(need);
+    if (out != NULL) {
+        snprintf(out, need, "%.*s%s%s", (int)alen, a, sep, b);
+    }
+    return out;
 }

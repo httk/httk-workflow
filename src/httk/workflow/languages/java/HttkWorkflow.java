@@ -297,6 +297,14 @@ public final class HttkWorkflow {
             return read("parameter", name, "--default", fallback);
         }
 
+        public boolean stageInput(String name, String destination) {
+            return staged(command("stage-input", name, destination));
+        }
+
+        public boolean stageInput(String name, String destination, String fallback) {
+            return staged(command("stage-input", name, destination, "--default", fallback));
+        }
+
         public Optional<String> setting(String name) {
             return read("setting", name);
         }
@@ -483,6 +491,13 @@ public final class HttkWorkflow {
                 return Optional.empty();
             }
             throw BridgeError.refused(result.status);
+        }
+
+        private static boolean staged(int status) {
+            if (status == OK || status == ABSENT) {
+                return status == OK;
+            }
+            throw BridgeError.refused(status);
         }
 
         private BridgeResult capture(String... args) {

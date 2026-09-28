@@ -261,6 +261,14 @@ httk_workflow_environment() {
     fi
 }
 
+httk_workflow_stage_input() {
+    if [ "$#" -ge 3 ]; then
+        _httk_workflow_bridge stage-input "$1" "$2" --default "$3"
+    else
+        _httk_workflow_bridge stage-input "$1" "$2"
+    fi
+}
+
 httk_workflow_state_get() {
     _httk_workflow_bridge state-get "$1"
 }

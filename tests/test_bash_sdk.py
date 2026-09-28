@@ -474,6 +474,38 @@ record refused_assignment httk_workflow_state_merge nonsense""",
     assert "job parameter 'nothing' is not defined; defined parameters: encut" in diagnosed.stderr
 
 
+def test_stage_input_copies_a_payload_file_or_answers_absent(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, step="only", parameters={"encut": 520})
+    (fixture.payload / "files" / "POSCAR").write_bytes(b"Si\n1.0\n")
+    source = _runner(
+        "only",
+        body="""record() {
+    local name=$1
+    shift
+    local code=0
+    "$@" >/dev/null 2>&1 || code=$?
+    printf '%s=%s\\n' "$name" "$code"
+}
+step_only() { :; }
+record staged httk_workflow_stage_input poscar POSCAR files/POSCAR
+record no_file httk_workflow_stage_input incar INCAR files/INCAR
+record no_parameter httk_workflow_stage_input missing X
+record refused httk_workflow_stage_input encut ENCUT""",
+        main="",
+    )
+
+    completed = fixture.run(source)
+    assert completed.returncode == 0, completed.stderr
+    assert dict(line.split("=") for line in completed.stdout.splitlines()) == {
+        "staged": "0",
+        "no_file": "1",
+        "no_parameter": "1",
+        "refused": "2",
+    }
+    assert (fixture.workdir / "POSCAR").read_bytes() == b"Si\n1.0\n"
+    assert not (fixture.workdir / "INCAR").exists()
+
+
 def test_a_corrupt_attempt_context_is_refused_with_two(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, step="only")
     fixture.environment["HTTK_WORKFLOW_CONTEXT"] = "{}"

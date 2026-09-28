@@ -202,6 +202,7 @@ status.
 | *`sub`* `httk_workflow_parameter(name, value, fallback, status)` | `httk_workflow_parameter` |
 | *`sub`* `httk_workflow_setting(name, value, fallback, status)` | `httk_workflow_setting` |
 | *`sub`* `httk_workflow_environment(name, value, fallback, status)` | `httk_workflow_environment` |
+| `httk_workflow_stage_input(name, destination, fallback)` | `httk_workflow_stage_input` |
 | *`sub`* `httk_workflow_state_get(name, value, status)` | `httk_workflow_state_get` |
 | `httk_workflow_state_set(name, value)` | `httk_workflow_state_set` |
 | `httk_workflow_state_delete(name)` | `httk_workflow_state_delete` |
@@ -231,6 +232,11 @@ status.
 | `httk_template_render(template_file, output, values_file)` | `httk_template_render` |
 | `httk_compress(args)` | `httk_compress` |
 | `httk_decompress(args)` | `httk_decompress` |
+| `httk_copy_file(source, destination)` | `httk_copy_file` |
+| `httk_getenv(name, fallback)` | (pure Fortran, `get_environment_variable`) |
+
+`httk_getenv` is a function returning an always-allocated string: the variable's
+value, or `fallback` (default `""`) when it is unset or empty.
 
 Booleans are Fortran `logical`: `httk_workflow_remove`'s `missing_ok` is an
 optional `logical`, marshalled to the C `int` flag. As in C, the `httk_vasp_*`

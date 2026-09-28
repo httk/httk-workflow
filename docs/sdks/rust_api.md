@@ -178,6 +178,7 @@ are `&[&str]` option arrays; a `fallback` is an `Option<&str>` default.
 | `Attempt::parameter(name, fallback)` | `httk_workflow_parameter` |
 | `Attempt::setting(name, fallback)` | `httk_workflow_setting` |
 | `Attempt::environment(name, fallback)` | `httk_workflow_environment` |
+| `Attempt::stage_input(name, destination, fallback)` | `httk_workflow_stage_input` |
 | `Attempt::state_get(name)` | `httk_workflow_state_get` |
 | `Attempt::state_set(name, value)` | `httk_workflow_state_set` |
 | `Attempt::state_delete(name)` | `httk_workflow_state_delete` |
@@ -209,7 +210,8 @@ are `&[&str]` option arrays; a `fallback` is an `Option<&str>` default.
 | `Attempt::decompress(args)` | `httk_decompress` |
 
 Booleans are Rust `bool`: `Attempt::remove`'s `missing_ok`, and `Attempt::fail`'s
-`retryable`. `Attempt::gather` takes a `Gather` options struct with `when`,
+`retryable`. `Attempt::stage_input` returns `Ok(true)` when staged and
+`Ok(false)` when the payload has no such file. `Attempt::gather` takes a `Gather` options struct with `when`,
 `count`, `on_impossible`, and `priority` fields, each `Option`, defaulting to the
 bridge's own default (`Gather::default()`). As in C, the `httk_vasp_*` surface of
 the Bash SDK has no dedicated methods; reach a `vasp-*` verb through

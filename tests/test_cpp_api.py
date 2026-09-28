@@ -310,3 +310,28 @@ def test_optional_reads_distinguish_absent_refused_empty_and_nonempty(tmp_path: 
     completed = attempt.run(binary)
     assert completed.returncode == 0, completed.stderr
     assert attempt.outcome()["action"] == "succeed"
+
+
+def test_stage_input_is_true_staged_false_absent_and_throws_refused(tmp_path: Path) -> None:
+    body = """
+  if (!Attempt::stage_input("poscar", "POSCAR", "files/POSCAR")) return 10;
+  if (Attempt::stage_input("incar", "INCAR", "files/INCAR")) return 11;
+  if (Attempt::stage_input("nothing", "X")) return 12;
+  std::string python = std::getenv("HTTK_WORKFLOW_PYTHON");
+  unsetenv("HTTK_WORKFLOW_PYTHON");
+  try {
+    (void)Attempt::stage_input("poscar", "AGAIN", "files/POSCAR");
+    return 13;
+  } catch (const BridgeError& error) {
+    if (error.status() != 2) return 14;
+  }
+  setenv("HTTK_WORKFLOW_PYTHON", python.c_str(), 1);
+  return Attempt::succeed();
+"""
+    binary = _write_runner(tmp_path, "tests.cpp.stage", {"probe": body})
+    attempt = _attempt(tmp_path, step="probe")
+    (attempt.payload / "files" / "POSCAR").write_bytes(b"Si\n1.0\n")
+    completed = attempt.run(binary)
+    assert completed.returncode == 0, completed.stderr
+    assert attempt.outcome()["action"] == "succeed"
+    assert (attempt.workdir / "POSCAR").read_bytes() == b"Si\n1.0\n"

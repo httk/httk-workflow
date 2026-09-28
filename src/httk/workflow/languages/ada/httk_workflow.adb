@@ -38,6 +38,8 @@ package body Httk_Workflow is
      with Import, Convention => C, External_Name => "httk_workflow_context";
    function C_Parameter (Name, Fallback : CS.chars_ptr; Status : access C.int) return CS.chars_ptr
      with Import, Convention => C, External_Name => "httk_workflow_parameter";
+   function C_Stage_Input (Name, Destination, Fallback : CS.chars_ptr) return C.int
+     with Import, Convention => C, External_Name => "httk_workflow_stage_input";
    function C_Setting (Name, Fallback : CS.chars_ptr; Status : access C.int) return CS.chars_ptr
      with Import, Convention => C, External_Name => "httk_workflow_setting";
    function C_Environment (Name, Fallback : CS.chars_ptr; Status : access C.int) return CS.chars_ptr
@@ -274,6 +276,18 @@ package body Httk_Workflow is
      (Name : String; Fallback : String; Value : out U.Unbounded_String;
       Present : out Boolean; Status : out C.int) is
    begin Read_Named (Name, Fallback, True, Value, Present, Status, 'p'); end Httk_Workflow_Parameter;
+   function Stage_Input (Name, Destination : String; Fallback : CS.chars_ptr) return C.int is
+      B_Name : CS.chars_ptr := New_Input (Name); B_Destination : CS.chars_ptr := New_Input (Destination);
+      B_Fallback : CS.chars_ptr := Fallback; Result : C.int;
+   begin
+      Result := C_Stage_Input (B_Name, B_Destination, B_Fallback);
+      Release (B_Name); Release (B_Destination); Release (B_Fallback);
+      return Result;
+   end Stage_Input;
+   function Httk_Workflow_Stage_Input (Name : String; Destination : String) return C.int is
+   begin return Stage_Input (Name, Destination, CS.Null_Ptr); end Httk_Workflow_Stage_Input;
+   function Httk_Workflow_Stage_Input (Name : String; Destination : String; Fallback : String) return C.int is
+   begin return Stage_Input (Name, Destination, New_Input (Fallback)); end Httk_Workflow_Stage_Input;
    procedure Httk_Workflow_Setting
      (Name : String; Value : out U.Unbounded_String; Present : out Boolean; Status : out C.int) is
    begin Read_Named (Name, "", False, Value, Present, Status, 's'); end Httk_Workflow_Setting;

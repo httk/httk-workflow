@@ -85,6 +85,7 @@ read default means the bridge's absent convention applies.
 | `Runner->main` | `Runner.main` | `httk_workflow_main` |
 | `Attempt->invoke(\@argv)` | — | — |
 | `context`, `parameter`, `setting`, `environment` | same-named methods | same-named bridge functions |
+| `stage_input` | same-named method | `httk_workflow_stage_input` |
 | `state_get`, `state_set`, `state_delete`, `state_merge` | same-named methods | same-named bridge functions |
 | `declaration`, `declare` | same-named methods | same-named bridge functions |
 | `children`, `child`, `spawn` | same-named methods | same-named bridge functions |

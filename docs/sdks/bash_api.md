@@ -205,6 +205,7 @@ step composed lives in shell state, so the subshell costs a step nothing.
 | `httk_workflow_parameter NAME [DEFAULT]` | one member of the job's opaque `parameters` object |
 | `httk_workflow_setting NAME [DEFAULT]` | one application setting: job parameter, `HTTK_*`, workspace setting, then the call default |
 | `httk_workflow_environment NAME [DEFAULT]` | one declared workflow environment value: job override, declared setting `HTTK_*`, workspace setting, declaration default, then the call default |
+| `httk_workflow_stage_input NAME DESTINATION [DEFAULT]` | copies the payload file parameter NAME names (DEFAULT is the payload-relative fallback, e.g. `files/POSCAR`) to DESTINATION in the workdir; 1 when the payload has no such file |
 | `httk_workflow_context [FIELD]` | the attempt context, or one field of it |
 | `httk_workflow_state_get NAME` | one key of the job's JSON state |
 | `httk_workflow_declaration NAME` | one workflow declaration: the observed document, else the declared one; 1 when neither exists |
@@ -430,9 +431,11 @@ EOF
 ```
 
 A batch stops at its first failing line, names that line on stderr, and reports
-its exit status. Blank lines and `#` comments are ignored, and a batch cannot
-contain another batch. There is no long-lived coprocess: a batch removes the
-interpreter starts that matter without a second process to keep alive and reap.
+its exit status. An absent `stage-input` (`httk_workflow_stage_input`) is a failing
+line too, so stage optional inputs outside a batch. Blank lines and `#` comments
+are ignored, and a batch cannot contain another batch. There is no long-lived
+coprocess: a batch removes the interpreter starts that matter without a second
+process to keep alive and reap.
 
 ## Exit codes
 

@@ -141,7 +141,9 @@ class _Attempt:
         return json.loads((self.control / "error.json").read_text(encoding="utf-8"))
 
 
-def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -> _Attempt:
+def _attempt(
+    tmp_path: Path, *, step: str, parameters: dict[str, object] | None = None, data_generation: int | None = None
+) -> _Attempt:
     """Fabricate one attempt of one job, without a manager (mirrors test_c_api)."""
 
     payload = tmp_path / "payload"
@@ -156,6 +158,7 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
             runner_path="files/runner",
             initial_step=step,
             data_mode="none" if data_generation is None else "transactional",
+            parameters=parameters or {},
         ),
     )
     control = payload / f"attempts/{uuid.uuid4()}"
@@ -342,3 +345,22 @@ def test_a_handler_that_returns_an_error_leaves_a_breadcrumb_and_no_outcome(tmp_
     assert breadcrumb["step"] == "explode"
     assert breadcrumb["exception"] == "RustError"
     assert breadcrumb["message"] == "explode exited with status 3"
+
+
+def test_stage_input_copies_a_payload_file_or_answers_false(tmp_path: Path) -> None:
+    body = (
+        'println!("{:?}", attempt.stage_input("poscar", "POSCAR", Some("files/POSCAR"))); '
+        'println!("{:?}", attempt.stage_input("incar", "INCAR", Some("files/INCAR"))); '
+        'println!("{:?}", attempt.stage_input("missing", "X", None)); '
+        'println!("{:?}", attempt.stage_input("encut", "X", None)); '
+        "let _ = attempt.succeed(); Ok(())"
+    )
+    binary = _write_runner(tmp_path, "tests.rust", {"start": body})
+    attempt = _attempt(tmp_path, step="start", parameters={"encut": 520})
+    (attempt.payload / "files" / "POSCAR").write_bytes(b"Si\n1.0\n")
+
+    completed = attempt.run(binary)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.splitlines() == ["Ok(true)", "Ok(false)", "Ok(false)", "Err(Refused)"]
+    assert (attempt.workdir / "POSCAR").read_bytes() == b"Si\n1.0\n"
+    assert attempt.outcome()["action"] == "succeed"

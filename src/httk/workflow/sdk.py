@@ -675,6 +675,36 @@ class Attempt:
             raise KeyError(f"job parameter {name!r} is not defined; defined parameters: {available}")
         return default
 
+    def stage_input(self, name: str, destination: str | os.PathLike[str], default: object = _MISSING) -> Path | None:
+        """Copy one payload input file, named by a job parameter, into the workdir.
+
+        The parameter holds a payload-relative path, such as ``files/POSCAR``. Only
+        the bytes are copied; an existing destination is overwritten and mode bits
+        are not preserved. The value is joined to the payload as given, without
+        validation, so an absolute path is used as is.
+
+        :param name: The parameter that names the payload-relative source path.
+        :param destination: The target path, relative to the workdir unless absolute.
+        :param default: The payload-relative path to use when the parameter is absent.
+        :return: The copied file's path, or ``None`` when the payload has no such file.
+        :raises KeyError: If the parameter is absent and no default was supplied.
+        :raises ValueError: If the parameter value is not a string.
+        :raises OSError: If the file cannot be copied.
+        """
+
+        value = self.parameter(name, default)
+        if not isinstance(value, str):
+            raise ValueError(
+                f"parameter {name!r} (or its default) must name a payload-relative path, not {type(value).__name__}"
+            )
+        source = self.payload / value
+        if not source.is_file():
+            return None
+        target = self.workdir / destination
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+        return target
+
     def setting(self, name: str, default: object = None) -> object:
         """Resolve one application setting through its layers.
 

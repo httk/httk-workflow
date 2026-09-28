@@ -83,7 +83,7 @@ The public package keeps the C names and groups, with Ada strings copied into
 | --- | --- |
 | `Httk_Workflow_Runner`, `Httk_Workflow_Main` | `httk_workflow_runner`, `httk_workflow_main` |
 | `Httk_Workflow_Invoke` | `httk_workflow_invoke` |
-| `Httk_Workflow_Context`, `Parameter`, `Setting`, `Environment` | `httk_workflow_context`, `httk_workflow_parameter`, `httk_workflow_setting`, `httk_workflow_environment` |
+| `Httk_Workflow_Context`, `Parameter`, `Setting`, `Environment`, `Stage_Input` | `httk_workflow_context`, `httk_workflow_parameter`, `httk_workflow_setting`, `httk_workflow_environment`, `httk_workflow_stage_input` |
 | `Httk_Workflow_State_Get`, `State_Set`, `State_Delete`, `State_Merge` | corresponding `httk_workflow_state_*` functions |
 | `Httk_Workflow_Declaration`, `Declare` | `httk_workflow_declaration`, `httk_workflow_declare` |
 | `Httk_Workflow_Runlog_Note`, `Runlog_Headline`, `Runlog_Append`, `Log` | corresponding `httk_workflow_*` functions |
@@ -95,8 +95,8 @@ The public package keeps the C names and groups, with Ada strings copied into
 | `Httk_Compress`, `Httk_Decompress` | `httk_compress`, `httk_decompress` |
 
 Tail arguments use `String_List`, an array of `Unbounded_String`; `No_Arguments`
-passes a C NULL array. `Httk_Workflow_Parameter`, `Setting`, and `Environment`
-have overloads with and without a fallback. `Httk_Workflow_Exit` is the Ada
+passes a C NULL array. `Httk_Workflow_Parameter`, `Setting`, `Environment`, and
+`Stage_Input` have overloads with and without a fallback. `Httk_Workflow_Exit` is the Ada
 counterpart of returning from a C `main`.
 
 ## Strings, ownership, and absent reads
