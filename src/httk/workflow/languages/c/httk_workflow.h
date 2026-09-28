@@ -150,6 +150,14 @@ int httk_workflow_invoke(char **out, const char *const *argv);
 
 /* The attempt context, or one field of it when `field` is non-NULL. */
 char *httk_workflow_context(const char *field, int *status);
+/*
+ * The parent job as compact JSON, or one field of it when `field` is non-NULL
+ * (workspace_id, job_id, job_key, placement, activation_id, spawn_id, payload,
+ * workdir; payload and workdir are absolute paths). Absent (status 1) when the job
+ * has no reachable parent, or the field is absent or null: `workdir` is absent for
+ * a parent that uses isolated workdirs.
+ */
+char *httk_workflow_parent(const char *field, int *status);
 /* One member of the job's opaque parameters object, with an optional default. */
 char *httk_workflow_parameter(const char *name, const char *fallback, int *status);
 /* One resolved application setting, with an optional default. */

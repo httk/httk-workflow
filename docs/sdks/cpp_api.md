@@ -83,7 +83,7 @@ protocol state; the current attempt is selected by the manager's environment.
 | --- | --- |
 | `Runner::main`, `Runner::describe`, `Runner::add_step` | `httk_workflow_runner`, `httk_workflow_main`, `httk_workflow_describe` |
 | `Attempt::invoke`, `invoke_capture` | `httk_workflow_invoke` |
-| `Attempt::context`, `parameter`, `setting`, `environment` | corresponding read functions |
+| `Attempt::context`, `parent`, `parameter`, `setting`, `environment` | corresponding read functions |
 | `Attempt::stage_input` (`true` staged, `false` absent, throws `BridgeError` otherwise) | `httk_workflow_stage_input` |
 | `Attempt::state_get`, `state_set`, `state_delete`, `state_merge` | corresponding `httk_workflow_state_*` functions |
 | `Attempt::declaration`, `declare` | `httk_workflow_declaration`, `httk_workflow_declare` |
@@ -98,7 +98,10 @@ protocol state; the current attempt is selected by the manager's environment.
 Methods taking tail arguments use `Attempt::Arguments`, an alias for
 `std::vector<std::string>`, and pass a temporary NULL-terminated C array. An
 empty vector is passed as a C NULL pointer. Methods with a fallback have an
-overload with and without that fallback. C++ runners do local file work with
+overload with and without that fallback. `Attempt::parent()` and
+`Attempt::parent(field)` are `std::nullopt` when the job has no reachable parent,
+and `parent("workdir")` is `std::nullopt` for a parent that uses isolated
+workdirs. C++ runners do local file work with
 `std::filesystem` rather than the C SDK's `httk_copy_file`, `httk_file_exists`,
 and `httk_join_path` helpers.
 

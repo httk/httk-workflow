@@ -445,7 +445,10 @@ record present_child httk_workflow_child site-0 state
 record absent_child_field httk_workflow_child site-0 failure_code
 record absent_child httk_workflow_child site-9 state
 record refused_field httk_workflow_child site-0 nonsense
-record refused_assignment httk_workflow_state_merge nonsense""",
+record refused_assignment httk_workflow_state_merge nonsense
+record no_parent httk_workflow_parent
+record no_parent_field httk_workflow_parent payload
+record refused_parent_field httk_workflow_parent workdri""",
         main="",
     )
 
@@ -462,6 +465,9 @@ record refused_assignment httk_workflow_state_merge nonsense""",
         "absent_child": "1",
         "refused_field": "2",
         "refused_assignment": "2",
+        "no_parent": "1",
+        "no_parent_field": "1",
+        "refused_parent_field": "2",
     }
 
     # A refused read says why on stderr; an absent one is silent when there is

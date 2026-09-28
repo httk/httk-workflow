@@ -134,6 +134,70 @@ matching between jobs. A workflow's {doc}`declarations` describe what it consume
 and produces as *provenance* — they are recorded, not used to plumb one call into
 the next.
 
+## Sharing files with children
+
+Results flow back up through {py:attr}`~httk.workflow.Attempt.children`. Files
+flow down to a child in one of two ways, and the choice is mostly about size.
+
+**Copy them in at spawn time.** The `files=` of `call`, or a prepared payload
+directory passed to `spawn`, puts the file in the child's own immutable payload,
+where the child stages it with `stage_input`. This is the better default for
+small inputs such as a POSCAR, an INCAR fragment, or a parameter file: the child
+is self-contained, the payload digest covers exactly what it ran with, a later
+step of the parent cannot change it underneath the child, and the child can be
+transferred to another workspace on its own.
+
+**Read them in place.** Copying stops making sense when the file is large and
+many children share it: a CHGCAR that non-self-consistent band-structure
+children start from, or a multi-gigabyte WAVECAR that same-mesh follow-ups
+such as optics or hybrid-functional runs start from. A child then locates its
+parent with {py:attr}`~httk.workflow.Attempt.parent` (`httk_workflow_parent` in
+Bash, and the same `parent` read in every other SDK) and reads the file from the
+parent's workdir, or links to it:
+
+```python
+@run.step
+def bands(a):
+    parent = a.parent
+    if parent is None or parent.workdir is None:
+        a.fail("bands.no_parent_workdir", "no persistent parent workdir to read CHGCAR from")
+        return
+    link = a.workdir / "CHGCAR"
+    link.unlink(missing_ok=True)  # a replayed step finds the link already there
+    link.symlink_to(parent.workdir / "CHGCAR")
+    ...  # run VASP with ICHARG = 11 and LCHARG = .FALSE.
+    link.unlink()  # an absolute link would keep this job from being transferred
+```
+
+Reading in place gives up the guarantees a copy has, so it comes with rules:
+
+- **The parent writes the shared files before it publishes the spawning
+  outcome, and leaves them alone until every child that reads them is
+  terminal.** A child can start as soon as that outcome is published, and
+  nothing freezes the parent's workdir. With an `all_*` join condition that
+  point is the gather; with `any_*`, `at_least`, or an `on_impossible` route the
+  parent resumes while siblings may still run, and a step that rewrites the file
+  then changes it for all of them. On a storage-durable workspace, synchronize
+  the shared files yourself before publishing: the outcome is flushed, the
+  parent's workdir is not.
+- **A link is only safe for a file the child does not write.** VASP rewrites
+  WAVECAR and CHGCAR at the end of a run unless `LWAVE` and `LCHARG` are
+  `.FALSE.`, and writing through a symbolic link, or to a hard link, changes the
+  parent's file for every sibling. Copy the file when the child needs to write
+  its own.
+- **A link leaving the payload blocks transfer.** A transfer refuses a payload
+  containing an absolute symbolic link, or a relative one pointing outside it,
+  even when parent and child move together. Remove the link at the end of the
+  step, or read the file directly, if the child must stay transferable.
+- **The parent needs a persistent workdir.** An isolated workdir is a fresh
+  directory per attempt that the child cannot name, so `parent.workdir` is
+  `None` for such a parent.
+- **The child stays with its parent.** `a.parent` is `None` when the parent is
+  not found at its recorded placement in the child's workspace, which is what a
+  child transferred on its own, or one whose parent was removed or transferred,
+  sees. Do not remove or transfer a parent while children that read it in place
+  are still running.
+
 ## Failure semantics
 
 A called child that fails is an ordinary join dependency. When the join condition

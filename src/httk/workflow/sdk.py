@@ -44,6 +44,7 @@ from types import MappingProxyType
 from typing import Any, Literal, Self, cast, overload
 
 from ._util import json_bytes, read_json, require_string, validate_inputs, write_json_atomic
+from .errors import FormatError
 from .models import (
     JOB_STATE_DIRECTORY,
     RESERVED_WORKFLOW_ENVIRONMENT_PREFIX,
@@ -51,6 +52,8 @@ from .models import (
     JobDefinition,
     _matches_environment_type,
     environment_variable_name,
+    normalize_placement,
+    parse_job_key,
     validate_declaration_name,
     validate_declarations,
     validate_failure,
@@ -82,6 +85,7 @@ __all__ = [
     "ChildSpec",
     "ChildrenView",
     "InstantiateHandler",
+    "ParentJob",
     "Runner",
     "RunnerRef",
 ]
@@ -473,6 +477,34 @@ class ChildResult:
 
 
 @dataclass(frozen=True)
+class ParentJob:
+    """Where the job that spawned this one lives, for reading its files in place.
+
+    The location comes from the immutable ``parent`` member every spawned child's
+    ``job.json`` carries, joined to this attempt's workspace root. Nothing is
+    copied or frozen: the parent's workdir is ordinary storage its own steps may
+    still change, so a parent that shares files this way writes them before it
+    publishes the spawning outcome and leaves them alone until every child that
+    reads them is terminal. Paths are absolute.
+
+    :param job_id: The parent job UUID.
+    :param job_key: The parent job key, its payload directory name.
+    :param placement: The parent's workspace placement.
+    :param payload: The parent's payload directory.
+    :param workdir: The parent's persistent workdir, or ``None`` when the parent
+        uses isolated workdirs, whose per-attempt directory a child cannot name.
+    :param raw: The ``parent`` member of this job's ``job.json``, verbatim.
+    """
+
+    job_id: str
+    job_key: str
+    placement: PurePosixPath
+    payload: Path
+    workdir: Path | None
+    raw: Mapping[str, object]
+
+
+@dataclass(frozen=True)
 class ChildrenView:
     """The children observed by the join that started this activation.
 
@@ -582,6 +614,7 @@ class Attempt:
         self._action: str | None = None
         self._job: JobDefinition | None = None
         self._children: ChildrenView | None = None
+        self._parent: ParentJob | None | _Missing = _MISSING
         self._environment_snapshot: dict[str, object] | None = None
 
     def __repr__(self) -> str:
@@ -647,6 +680,62 @@ class Attempt:
                 )
             )
         return self._children
+
+    @property
+    def parent(self) -> ParentJob | None:
+        """The job that spawned this one, when it is reachable in this workspace.
+
+        ``None`` when this job has no parent, or when no parent payload is found
+        at the recorded placement in this workspace: a child transferred away from
+        its parent, or a parent transferred or removed. A parent and child
+        transferred together still find each other when both keep their
+        placements. Reading it performs one small file read of the parent's
+        ``job.json``.
+
+        :raises httk.workflow.errors.FormatError: If this job's ``parent`` member or
+            the parent's ``job.json`` is malformed.
+        """
+
+        if isinstance(self._parent, _Missing):
+            self._parent = self._locate_parent()
+        return self._parent
+
+    def _locate_parent(self) -> ParentJob | None:
+        """Resolve this job's ``parent`` member against the workspace root."""
+
+        raw = self.job.parent
+        if raw is None:
+            return None
+        job_key, placement = raw.get("job_key"), raw.get("placement")
+        # Children written before spawns recorded the parent's placement cannot be located.
+        if not isinstance(job_key, str) or not isinstance(placement, str):
+            return None
+        if parse_job_key(job_key)[1] != raw.get("job_id"):
+            raise FormatError(f"parent job_key {job_key!r} does not carry the parent job_id")
+        normalized = normalize_placement(placement)
+        payload = self.workspace.joinpath(*normalized.parts, job_key)
+        definition_path = payload / "job.json"
+        if not definition_path.is_file():
+            return None
+        try:
+            definition = JobDefinition.from_path(definition_path)
+        except FormatError:
+            # A parent removed between the check and the read is absent, not corrupt.
+            if not definition_path.exists():
+                return None
+            raise
+        if definition.id != raw.get("job_id"):
+            return None
+        return ParentJob(
+            job_id=definition.id,
+            job_key=job_key,
+            placement=normalized,
+            payload=payload,
+            workdir=(
+                payload.joinpath(*definition.workdir_path.parts) if definition.workdir_mode == "persistent" else None
+            ),
+            raw=dict(raw),
+        )
 
     @property
     def published(self) -> bool:

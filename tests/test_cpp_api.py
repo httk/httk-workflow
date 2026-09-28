@@ -128,11 +128,13 @@ class _Attempt:
         return json.loads((self.control / "error.json").read_text(encoding="utf-8"))
 
 
-def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -> _Attempt:
+def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None, parent: bool = False) -> _Attempt:
     payload = tmp_path / "payload"
     files = payload / "files"
     files.mkdir(parents=True)
     (files / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    workspace_id = str(uuid.uuid4())
+    parent_block = _fabricate_parent(tmp_path / "workspace", workspace_id) if parent else None
     prepare_job_payload(
         payload,
         JobSpec(
@@ -142,6 +144,7 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
             initial_step=step,
             data_mode="none" if data_generation is None else "transactional",
         ),
+        parent=parent_block,
     )
     control = payload / f"attempts/{uuid.uuid4()}"
     control.mkdir(parents=True)
@@ -151,7 +154,7 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
         {
             "format": "httk-workflow-attempt-context",
             "format_version": 2,
-            "workspace_id": str(uuid.uuid4()),
+            "workspace_id": workspace_id,
             "job_id": str(uuid.uuid4()),
             "job_key": f"fabricated--{uuid.uuid4()}",
             "placement": "project/fabricated",
@@ -181,6 +184,32 @@ def _attempt(tmp_path: Path, *, step: str, data_generation: int | None = None) -
     for name in ("HTTK_WORKFLOW_DESCRIBE", "HTTK_WORKFLOW_RUNNER_WORKFLOW", "HTTK_WORKFLOW_RUNNER_STEPS"):
         environment.pop(name, None)
     return _Attempt(payload, control, workdir, environment)
+
+
+def _fabricate_parent(workspace: Path, workspace_id: str) -> dict[str, object]:
+    """Fabricate a parent payload with a persistent ``calc`` workdir; return the child's ``parent`` block."""
+
+    staging = workspace / "project/parent/staging"
+    (staging / "files").mkdir(parents=True)
+    (staging / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    spec = JobSpec(
+        name="Parent",
+        workflow="tests.parent",
+        runner_path="files/runner",
+        initial_step="start",
+        workdir_mode="persistent",
+        workdir_path="calc",
+    )
+    job_id = prepare_job_payload(staging, spec).id
+    job_key = staging.rename(staging.with_name(f"parent--{job_id}")).name
+    return {
+        "workspace_id": workspace_id,
+        "job_id": job_id,
+        "job_key": job_key,
+        "placement": "project/parent",
+        "activation_id": str(uuid.uuid4()),
+        "spawn_id": str(uuid.uuid4()),
+    }
 
 
 def test_the_sdk_and_a_runner_compile_warning_clean(tmp_path: Path) -> None:
@@ -335,3 +364,38 @@ def test_stage_input_is_true_staged_false_absent_and_throws_refused(tmp_path: Pa
     assert completed.returncode == 0, completed.stderr
     assert attempt.outcome()["action"] == "succeed"
     assert (attempt.workdir / "POSCAR").read_bytes() == b"Si\n1.0\n"
+
+
+def test_parent_reads_the_spawning_job_or_answers_absent(tmp_path: Path) -> None:
+    """A child reads its parent's payload, workdir and id; a job without a parent reads absent (1)."""
+
+    body = """
+  auto show = [](const std::string& label, const std::optional<std::string>& value) {
+    (void)Attempt::log("probe", label + (value ? " 0 " + *value : " 1"));
+  };
+  show("WHOLE", Attempt::parent());
+  show("PAYLOAD", Attempt::parent("payload"));
+  show("WORKDIR", Attempt::parent("workdir"));
+  show("JOB", Attempt::parent("job_id"));
+  return Attempt::succeed();
+"""
+    binary = _write_runner(tmp_path / "build", "tests.cpp.parent", {"probe": body})
+    child = _attempt(tmp_path / "child", step="probe", parent=True)
+    parent_payload = next((tmp_path / "child/workspace/project/parent").iterdir())
+    completed = child.run(binary)
+    assert completed.returncode == 0, completed.stderr
+    job_id = parent_payload.name.removeprefix("parent--")
+    for expected in (
+        f"PAYLOAD 0 {parent_payload}",
+        f"WORKDIR 0 {parent_payload / 'calc'}",
+        f"JOB 0 {job_id}",
+        '"spawn_id"',
+    ):
+        assert expected in completed.stderr, completed.stderr
+    assert child.outcome()["action"] == "succeed"
+
+    orphan = _attempt(tmp_path / "orphan", step="probe")
+    completed = orphan.run(binary)
+    assert completed.returncode == 0, completed.stderr
+    for expected in ("WHOLE 1", "PAYLOAD 1", "WORKDIR 1", "JOB 1"):
+        assert expected in completed.stderr, completed.stderr

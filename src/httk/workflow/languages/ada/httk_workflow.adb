@@ -36,6 +36,8 @@ package body Httk_Workflow is
      with Import, Convention => C, External_Name => "httk_workflow_invoke";
    function C_Context (Field : CS.chars_ptr; Status : access C.int) return CS.chars_ptr
      with Import, Convention => C, External_Name => "httk_workflow_context";
+   function C_Parent (Field : CS.chars_ptr; Status : access C.int) return CS.chars_ptr
+     with Import, Convention => C, External_Name => "httk_workflow_parent";
    function C_Parameter (Name, Fallback : CS.chars_ptr; Status : access C.int) return CS.chars_ptr
      with Import, Convention => C, External_Name => "httk_workflow_parameter";
    function C_Stage_Input (Name, Destination, Fallback : CS.chars_ptr) return C.int
@@ -250,6 +252,27 @@ package body Httk_Workflow is
       Release (Input);
       Status := Read_With_Pointer (Pointer, C_Status, Value, Present);
    end Httk_Workflow_Context;
+
+   procedure Httk_Workflow_Parent
+     (Value : out U.Unbounded_String; Present : out Boolean; Status : out C.int) is
+      C_Status : aliased C.int;
+      Pointer : CS.chars_ptr;
+   begin
+      Pointer := C_Parent (CS.Null_Ptr, C_Status'Access);
+      Status := Read_With_Pointer (Pointer, C_Status, Value, Present);
+   end Httk_Workflow_Parent;
+
+   procedure Httk_Workflow_Parent
+     (Value : out U.Unbounded_String; Present : out Boolean; Status : out C.int;
+      Field : String) is
+      Input : CS.chars_ptr := New_Input (Field);
+      C_Status : aliased C.int;
+      Pointer : CS.chars_ptr;
+   begin
+      Pointer := C_Parent (Input, C_Status'Access);
+      Release (Input);
+      Status := Read_With_Pointer (Pointer, C_Status, Value, Present);
+   end Httk_Workflow_Parent;
 
    procedure Read_Named
      (Name, Fallback : String; Has_Fallback : Boolean; Value : out U.Unbounded_String;

@@ -47,6 +47,7 @@ from .sdk import (
     ChildResult,
     ChildSpec,
     InstantiateHandler,
+    ParentJob,
     Runner,
     RunnerRef,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "JobRecord",
     "JobState",
     "NotIdleError",
+    "ParentJob",
     # Execution / authoring surface.
     "Runner",
     "RunnerRef",

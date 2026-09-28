@@ -211,6 +211,7 @@ step composed lives in shell state, so the subshell costs a step nothing.
 | `httk_workflow_declaration NAME` | one workflow declaration: the observed document, else the declared one; 1 when neither exists |
 | `httk_workflow_children [--all\|--succeeded\|--failed]` | one tab-separated row per observed child |
 | `httk_workflow_child LABEL FIELD` | one field of one observed child |
+| `httk_workflow_parent [FIELD]` | the job that spawned this one, or one field of it; 1 when there is no reachable parent |
 | `$HTTK_WORKFLOW_STEP` | the step this attempt runs |
 | `$HTTK_WORKFLOW_WORKDIR`, `$HTTK_WORKFLOW_JOB_DIR`, `$HTTK_WORKFLOW_DATA_DIR` | absolute paths; the data directory is set only for a transactional job |
 | `$HTTK_WORKFLOW_DURABLE` | `1` on a storage-durable workspace, `0` otherwise |
@@ -273,6 +274,25 @@ done < <(httk_workflow_children --succeeded)
 `payload`, `workdir`, `data`, or `data_generation`. The observation is empty
 unless this activation followed a gather, which is why `aggregate` above hands
 what it learned to `triage` through job state.
+
+`httk_workflow_parent` reads the other direction: the job that spawned this one.
+Without a field it prints the parent as one JSON object; `FIELD` is `job_id`,
+`job_key`, `placement`, `workspace_id`, `activation_id`, `spawn_id`, `payload`, or
+`workdir`, the last two as absolute paths. It exits 1 for a root job, for a child
+whose parent is not reachable in this workspace, and for `workdir` when the
+parent uses isolated workdirs; an unknown field is refused with 2. Assign the
+answer before using it, because a command substitution inside another
+command's arguments loses its exit status under `set -e`:
+
+```bash
+parent_workdir=$(httk_workflow_parent workdir)
+# -f: a replayed step finds the link already there. The INCAR sets
+# ICHARG = 11 and LCHARG = .FALSE., so VASP only reads through the link.
+ln -sfn "$parent_workdir/CHGCAR" CHGCAR
+```
+
+See the "Sharing files with children" section of {doc}`../composing_workflows`
+for when reading in place is the right choice and what keeps it safe.
 
 ## What a step publishes
 

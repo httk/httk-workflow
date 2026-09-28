@@ -222,6 +222,11 @@ sub context {
     return defined($field) ? $self->_read('context', $field) : $self->_read('context');
 }
 
+sub parent {
+    my ($self, $field) = @_;
+    return defined($field) ? $self->_read('parent', $field) : $self->_read('parent');
+}
+
 sub parameter {
     my ($self, $name, @rest) = @_;
     return $self->_read_named('parameter', $name, $rest[0], @rest ? 1 : 0);

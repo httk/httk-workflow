@@ -107,6 +107,10 @@ public:
     static std::optional<std::string> context(const std::string& field) {
         return read(httk_workflow_context, field.c_str());
     }
+    static std::optional<std::string> parent() { return read(httk_workflow_parent, nullptr); }
+    static std::optional<std::string> parent(const std::string& field) {
+        return read(httk_workflow_parent, field.c_str());
+    }
 
     static std::optional<std::string> parameter(const std::string& name) {
         return named_read(httk_workflow_parameter, name, nullptr);

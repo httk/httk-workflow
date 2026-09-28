@@ -175,6 +175,7 @@ are `&[&str]` option arrays; a `fallback` is an `Option<&str>` default.
 | `Runner::description(&self)` | `httk_workflow_describe` |
 | `Attempt::invoke(argv)` | `httk_workflow_invoke` |
 | `Attempt::context(field)` | `httk_workflow_context` |
+| `Attempt::parent(field)` | `httk_workflow_parent` |
 | `Attempt::parameter(name, fallback)` | `httk_workflow_parameter` |
 | `Attempt::setting(name, fallback)` | `httk_workflow_setting` |
 | `Attempt::environment(name, fallback)` | `httk_workflow_environment` |
@@ -211,7 +212,9 @@ are `&[&str]` option arrays; a `fallback` is an `Option<&str>` default.
 
 Booleans are Rust `bool`: `Attempt::remove`'s `missing_ok`, and `Attempt::fail`'s
 `retryable`. `Attempt::stage_input` returns `Ok(true)` when staged and
-`Ok(false)` when the payload has no such file. `Attempt::gather` takes a `Gather` options struct with `when`,
+`Ok(false)` when the payload has no such file. `Attempt::parent` returns
+`Ok(None)` when the job has no reachable parent, and `Attempt::parent(Some("workdir"))`
+is `Ok(None)` for a parent that uses isolated workdirs. `Attempt::gather` takes a `Gather` options struct with `when`,
 `count`, `on_impossible`, and `priority` fields, each `Option`, defaulting to the
 bridge's own default (`Gather::default()`). As in C, the `httk_vasp_*` surface of
 the Bash SDK has no dedicated methods; reach a `vasp-*` verb through

@@ -186,7 +186,12 @@ class _Attempt:
 
 
 def _attempt(
-    tmp_path: Path, *, step: str, parameters: dict[str, object] | None = None, data_generation: int | None = None
+    tmp_path: Path,
+    *,
+    step: str,
+    parameters: dict[str, object] | None = None,
+    data_generation: int | None = None,
+    parent: bool = False,
 ) -> _Attempt:
     """Fabricate one attempt without a manager (mirrors the other language SDK tests)."""
 
@@ -194,6 +199,8 @@ def _attempt(
     files = payload / "files"
     files.mkdir(parents=True)
     (files / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    workspace_id = str(uuid.uuid4())
+    parent_block = _fabricate_parent(tmp_path / "workspace", workspace_id) if parent else None
     prepare_job_payload(
         payload,
         JobSpec(
@@ -204,6 +211,7 @@ def _attempt(
             data_mode="none" if data_generation is None else "transactional",
             parameters=parameters or {},
         ),
+        parent=parent_block,
     )
     control = payload / f"attempts/{uuid.uuid4()}"
     control.mkdir(parents=True)
@@ -213,7 +221,7 @@ def _attempt(
         {
             "format": "httk-workflow-attempt-context",
             "format_version": 2,
-            "workspace_id": str(uuid.uuid4()),
+            "workspace_id": workspace_id,
             "job_id": str(uuid.uuid4()),
             "job_key": f"fabricated--{uuid.uuid4()}",
             "placement": "project/fabricated",
@@ -243,6 +251,32 @@ def _attempt(
     for name in ("HTTK_WORKFLOW_DESCRIBE", "HTTK_WORKFLOW_RUNNER_WORKFLOW", "HTTK_WORKFLOW_RUNNER_STEPS"):
         environment.pop(name, None)
     return _Attempt(payload, control, workdir, environment)
+
+
+def _fabricate_parent(workspace: Path, workspace_id: str) -> dict[str, object]:
+    """Fabricate a parent payload with a persistent ``calc`` workdir; return the child's ``parent`` block."""
+
+    staging = workspace / "project/parent/staging"
+    (staging / "files").mkdir(parents=True)
+    (staging / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    spec = JobSpec(
+        name="Parent",
+        workflow="tests.parent",
+        runner_path="files/runner",
+        initial_step="start",
+        workdir_mode="persistent",
+        workdir_path="calc",
+    )
+    job_id = prepare_job_payload(staging, spec).id
+    job_key = staging.rename(staging.with_name(f"parent--{job_id}")).name
+    return {
+        "workspace_id": workspace_id,
+        "job_id": job_id,
+        "job_key": job_key,
+        "placement": "project/parent",
+        "activation_id": str(uuid.uuid4()),
+        "spawn_id": str(uuid.uuid4()),
+    }
 
 
 def test_the_sdk_and_a_runner_compile_warning_clean(tmp_path: Path) -> None:
@@ -405,3 +439,49 @@ def test_stage_input_copies_a_payload_file_or_answers_absent(tmp_path: Path) -> 
     assert completed.returncode == 0, completed.stderr
     assert (attempt.workdir / "POSCAR").read_bytes() == b"Si\n1.0\n"
     assert attempt.outcome()["action"] == "succeed"
+
+
+def test_parent_reads_the_spawning_job_or_answers_absent(tmp_path: Path) -> None:
+    """A child reads its parent's payload, workdir and id; a job without a parent reads absent (1)."""
+
+    body = """declare
+        function Show (Label : String; Field : String := "") return C.int is
+          Value : U.Unbounded_String;
+          Present : Boolean;
+          Status : C.int;
+        begin
+          if Field = "" then
+            Httk_Workflow.Httk_Workflow_Parent (Value, Present, Status);
+          else
+            Httk_Workflow.Httk_Workflow_Parent (Value, Present, Status, Field);
+          end if;
+          return Httk_Workflow.Httk_Workflow_Log ("probe", Label & C.int'Image (Status) & " " & U.To_String (Value));
+        end Show;
+      begin
+        if Show ("WHOLE") /= 0 then return 10; end if;
+        if Show ("PAYLOAD", "payload") /= 0 then return 11; end if;
+        if Show ("WORKDIR", "workdir") /= 0 then return 12; end if;
+        if Show ("JOB", "job_id") /= 0 then return 13; end if;
+        if Httk_Workflow.Httk_Workflow_Succeed /= 0 then null; end if;
+        return 0;
+      end;"""
+    binary = _write_runner(tmp_path / "build", "tests.ada.parent", {"probe": body})
+    child = _attempt(tmp_path / "child", step="probe", parent=True)
+    parent_payload = next((tmp_path / "child/workspace/project/parent").iterdir())
+    completed = child.run(binary)
+    assert completed.returncode == 0, completed.stderr
+    job_id = parent_payload.name.removeprefix("parent--")
+    for expected in (
+        f"PAYLOAD 0 {parent_payload}",
+        f"WORKDIR 0 {parent_payload / 'calc'}",
+        f"JOB 0 {job_id}",
+        '"spawn_id"',
+    ):
+        assert expected in completed.stderr, completed.stderr
+    assert child.outcome()["action"] == "succeed"
+
+    orphan = _attempt(tmp_path / "orphan", step="probe")
+    completed = orphan.run(binary)
+    assert completed.returncode == 0, completed.stderr
+    for expected in ("WHOLE 1", "PAYLOAD 1", "WORKDIR 1", "JOB 1"):
+        assert expected in completed.stderr, completed.stderr

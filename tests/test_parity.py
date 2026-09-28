@@ -36,6 +36,7 @@ def characterize(a):
     sites = a.parameter("sites")
     failing = str(a.parameter("failing", "")).split(",")
     a.state["sites"] = sites
+    (a.workdir / "shared.txt").write_text("from the parent\\n", encoding="utf-8")
     for site in range(sites):
         a.spawn(
             ChildSpec(
@@ -54,6 +55,8 @@ def characterize(a):
 def relax(a):
     site = a.parameter("site")
     (a.workdir / "site.txt").write_text("%s\\n" % site, encoding="utf-8")
+    shared = (a.parent.workdir / "shared.txt").read_text(encoding="utf-8")
+    (a.workdir / "parent.txt").write_text(shared, encoding="utf-8")
     if a.parameter("diverge"):
         a.fail("relax.diverged", "site %s did not relax" % site)
     else:
@@ -97,6 +100,7 @@ step_characterize() {
     sites=$(httk_workflow_parameter sites)
     failing=$(httk_workflow_parameter failing '')
     httk_workflow_state_set sites "$sites"
+    printf 'from the parent\\n' >shared.txt
     site=0
     while [ "$site" -lt "$sites" ]; do
         diverge=false
@@ -119,6 +123,7 @@ step_relax() {
     local site
     site=$(httk_workflow_parameter site)
     printf '%s\\n' "$site" >site.txt
+    cat "$(httk_workflow_parent workdir)/shared.txt" >parent.txt
     if [ "$(httk_workflow_parameter diverge)" = true ]; then
         httk_workflow_fail relax.diverged "site $site did not relax"
     else
@@ -307,6 +312,8 @@ def test_a_bash_campaign_and_a_python_campaign_publish_the_same_artifacts(
         f"site-{site}\t{site}\n" for site in range(sites) if site != 1
     )
     assert _artifacts(python)["site-0/data/results/site.txt"] == "0\n"
+    # Every child read the parent's workdir in place through its parent accessor.
+    assert _artifacts(python)["site-0/run/parent.txt"] == "from the parent\n"
     assert [item["id"] for item in _transactions(python)["site-0"]] == ["op-0001"]
 
     # And the Bash runner published exactly the same thing.

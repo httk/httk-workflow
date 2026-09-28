@@ -89,6 +89,10 @@ _JOIN_CONDITIONS = ("all_succeeded", "all_terminal", "any_succeeded", "any_termi
 _CODE_BRIDGES = {"vasp-": _vasp_bridge}
 
 
+# The fields `parent FIELD` reads; anything else is a usage error, not an absence.
+_PARENT_FIELDS = ("workspace_id", "job_id", "job_key", "placement", "activation_id", "spawn_id", "payload", "workdir")
+
+
 class _Absent(Exception):
     """A read whose answer is legitimately not there."""
 
@@ -105,6 +109,8 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("batch")
     context = commands.add_parser("context")
     context.add_argument("field", nargs="?")
+    parent = commands.add_parser("parent")
+    parent.add_argument("field", nargs="?")
     job_input = commands.add_parser("parameter")
     job_input.add_argument("name")
     job_input.add_argument("--default")
@@ -692,6 +698,26 @@ def _attempt_command(arguments: argparse.Namespace) -> int:
             raise _Absent()
         elif raw[arguments.field] is not None:
             _print(raw[arguments.field])
+    elif command == "parent":
+        if arguments.field is not None and arguments.field not in _PARENT_FIELDS:
+            raise _Refused(f"unknown parent field {arguments.field!r}; expected one of {', '.join(_PARENT_FIELDS)}")
+        located = _attempt().parent
+        if located is None:
+            raise _Absent()
+        fields = {
+            **located.raw,
+            "job_id": located.job_id,
+            "job_key": located.job_key,
+            "placement": located.placement.as_posix(),
+            "payload": str(located.payload),
+            "workdir": None if located.workdir is None else str(located.workdir),
+        }
+        if arguments.field is None:
+            _print(fields)
+        elif fields.get(arguments.field) is None:
+            raise _Absent()
+        else:
+            _print(fields[arguments.field])
     elif command == "parameter":
         attempt = _attempt()
         try:

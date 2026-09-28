@@ -83,6 +83,7 @@ removed; stderr and stdin remain inherited.
 | `Runner(String, steps)`, `step`, `main` | runner registration and dispatch |
 | `invoke` | caller-supplied verb and arguments |
 | `context`, `parameter`, `setting`, `environment` | same-named reads |
+| `parent` | `parent` |
 | `stageInput` | `stage-input` |
 | `stateGet`, `stateSet`, `stateDelete`, `stateMerge` | `state-get`, `state-set`, `state-delete`, `state-merge` |
 | `declaration`, `declare` | `declaration`, `declare` |
@@ -98,4 +99,7 @@ removed; stderr and stdin remain inherited.
 
 `Gather` accepts optional `when`, `count`, `onImpossible`, and `priority`
 values through chainable setters. Array arguments are passed as literal
-`ProcessBuilder` arguments and never through a shell.
+`ProcessBuilder` arguments and never through a shell. `parent()` returns the
+parent job as compact JSON and `parent(field)` one of its fields; both are
+empty when the job has no reachable parent, and `parent("workdir")` is empty
+for a parent that uses isolated workdirs.

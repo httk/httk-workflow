@@ -438,6 +438,16 @@ impl Attempt {
         }
     }
 
+    /// The job's parent as compact JSON, or one `field` of it; `Ok(None)` when
+    /// there is no reachable parent or the field is absent (`workdir` for an
+    /// isolated-workdir parent).
+    pub fn parent(&self, field: Option<&str>) -> Result<Option<String>, BridgeError> {
+        match field {
+            Some(field) => self.read(&["parent", field]),
+            None => self.read(&["parent"]),
+        }
+    }
+
     /// One member of the job's opaque parameters object, with an optional default.
     pub fn parameter(&self, name: &str, fallback: Option<&str>) -> Result<Option<String>, BridgeError> {
         self.read_named("parameter", name, fallback)

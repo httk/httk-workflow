@@ -150,6 +150,7 @@ bridge exit status out-parameter.
 | `httk_workflow_describe()` | `httk_workflow_main --describe` | `Runner.description` |
 | `httk_workflow_invoke(out, argv)` | `_httk_workflow_bridge` | `shell_bridge.main` |
 | `httk_workflow_context(field, status)` | `httk_workflow_context` | `Attempt.context` |
+| `httk_workflow_parent(field, status)` | `httk_workflow_parent` | `Attempt.parent`, `ParentJob` |
 | `httk_workflow_parameter(name, fallback, status)` | `httk_workflow_parameter` | `Attempt.parameter` |
 | `httk_workflow_setting(name, fallback, status)` | `httk_workflow_setting` | `Attempt.setting` |
 | `httk_workflow_environment(name, fallback, status)` | `httk_workflow_environment` | `Attempt.environment` |
@@ -186,6 +187,11 @@ bridge exit status out-parameter.
 | `httk_copy_file(source, destination)` | — | `shutil.copyfile` |
 | `httk_file_exists(path)` | — | `Path.is_file` |
 | `httk_join_path(a, b)` | — | `Path.__truediv__` |
+
+`httk_workflow_parent` returns the parent job as compact JSON, or one field of
+it (`job_id`, `payload`, `workdir`, ...), and reports `HTTK_WORKFLOW_ABSENT` when
+the job has no reachable parent; `workdir` is also absent for a parent that uses
+isolated workdirs.
 
 The last three rows are local helpers that never call the bridge: they exist
 because C has no standard way to copy a file, test for a regular file, or join

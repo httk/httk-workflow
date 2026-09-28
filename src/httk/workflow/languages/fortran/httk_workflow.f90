@@ -79,7 +79,7 @@ module httk_workflow
   ! --- Public authoring surface. ---------------------------------------------
   public :: httk_workflow_runner, httk_workflow_main, httk_workflow_describe
   public :: httk_workflow_invoke
-  public :: httk_workflow_context, httk_workflow_parameter, httk_workflow_setting
+  public :: httk_workflow_context, httk_workflow_parent, httk_workflow_parameter, httk_workflow_setting
   public :: httk_workflow_environment, httk_workflow_state_get
   public :: httk_workflow_stage_input, httk_copy_file, httk_getenv
   public :: httk_workflow_declaration, httk_workflow_children, httk_workflow_child
@@ -136,6 +136,13 @@ module httk_workflow
     end function
 
     function c_context(field, status) bind(c, name="httk_workflow_context") result(p)
+      import :: c_ptr, c_int
+      type(c_ptr), value :: field
+      integer(c_int), intent(out) :: status
+      type(c_ptr) :: p
+    end function
+
+    function c_parent(field, status) bind(c, name="httk_workflow_parent") result(p)
       import :: c_ptr, c_int
       type(c_ptr), value :: field
       integer(c_int), intent(out) :: status
@@ -592,6 +599,24 @@ contains
       call take(c_context(c_loc(bfield), st), value)
     else
       call take(c_context(c_null_ptr, st), value)
+    end if
+    if (present(status)) status = int(st)
+  end subroutine
+
+  ! The parent job as JSON, or one field of it when `field` is present. Absent
+  ! (status 1, unallocated) when the job has no reachable parent, or the field is
+  ! absent or null: `workdir` is absent for a parent using isolated workdirs.
+  subroutine httk_workflow_parent(value, field, status)
+    character(len=:), allocatable, intent(out) :: value
+    character(len=*), intent(in), optional :: field
+    integer, intent(out), optional :: status
+    character(kind=c_char), allocatable, target :: bfield(:)
+    integer(c_int) :: st
+    if (present(field)) then
+      bfield = cstr(field)
+      call take(c_parent(c_loc(bfield), st), value)
+    else
+      call take(c_parent(c_null_ptr, st), value)
     end if
     if (present(status)) status = int(st)
   end subroutine

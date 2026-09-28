@@ -141,8 +141,34 @@ class _Attempt:
         return json.loads((self.control / "error.json").read_text(encoding="utf-8"))
 
 
+def _parent_job(tmp_path: Path) -> dict[str, str]:
+    """Fabricate a persistent-workdir parent payload in the workspace; return a child's ``parent`` block."""
+
+    staging = tmp_path / "workspace" / "project" / "parent" / "staging"
+    (staging / "files").mkdir(parents=True)
+    (staging / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    spec = JobSpec(
+        name="Parent", workflow="tests.parent", runner_path="files/runner", initial_step="start", workdir_path="calc"
+    )
+    job_id = prepare_job_payload(staging, spec).id
+    staging.rename(staging.with_name(f"parent--{job_id}"))
+    return {
+        "workspace_id": str(uuid.uuid4()),
+        "job_id": job_id,
+        "job_key": f"parent--{job_id}",
+        "placement": "project/parent",
+        "activation_id": str(uuid.uuid4()),
+        "spawn_id": str(uuid.uuid4()),
+    }
+
+
 def _attempt(
-    tmp_path: Path, *, step: str, parameters: dict[str, object] | None = None, data_generation: int | None = None
+    tmp_path: Path,
+    *,
+    step: str,
+    parameters: dict[str, object] | None = None,
+    data_generation: int | None = None,
+    parent: dict[str, str] | None = None,
 ) -> _Attempt:
     """Fabricate one attempt of one job, without a manager (mirrors test_c_api)."""
 
@@ -160,6 +186,7 @@ def _attempt(
             data_mode="none" if data_generation is None else "transactional",
             parameters=parameters or {},
         ),
+        parent=parent,
     )
     control = payload / f"attempts/{uuid.uuid4()}"
     control.mkdir(parents=True)
@@ -169,7 +196,7 @@ def _attempt(
         {
             "format": "httk-workflow-attempt-context",
             "format_version": 2,
-            "workspace_id": str(uuid.uuid4()),
+            "workspace_id": parent["workspace_id"] if parent else str(uuid.uuid4()),
             "job_id": str(uuid.uuid4()),
             "job_key": f"fabricated--{uuid.uuid4()}",
             "placement": "project/fabricated",
@@ -364,3 +391,28 @@ def test_stage_input_copies_a_payload_file_or_answers_false(tmp_path: Path) -> N
     assert completed.stdout.splitlines() == ["Ok(true)", "Ok(false)", "Ok(false)", "Err(Refused)"]
     assert (attempt.workdir / "POSCAR").read_bytes() == b"Si\n1.0\n"
     assert attempt.outcome()["action"] == "succeed"
+
+
+def test_parent_reads_the_parent_location_or_answers_none(tmp_path: Path) -> None:
+    body = (
+        'println!("{}", attempt.parent(Some("payload")).unwrap().unwrap()); '
+        'println!("{}", attempt.parent(Some("workdir")).unwrap().unwrap()); '
+        'println!("{}", attempt.parent(Some("job_id")).unwrap().unwrap()); '
+        'println!("{}", attempt.parent(None).unwrap().unwrap()); '
+        "let _ = attempt.succeed(); Ok(())"
+    )
+    binary = _write_runner(tmp_path, "tests.rust", {"start": body})
+    parent = _parent_job(tmp_path)
+    completed = _attempt(tmp_path, step="start", parent=parent).run(binary)
+    assert completed.returncode == 0, completed.stderr
+    payload = tmp_path / "workspace" / "project" / "parent" / parent["job_key"]
+    lines = completed.stdout.splitlines()
+    assert lines[:3] == [str(payload), str(payload / "calc"), parent["job_id"]]
+    assert json.loads(lines[3])["spawn_id"] == parent["spawn_id"]
+
+    orphan = _write_runner(
+        tmp_path, "tests.rust", {"start": 'println!("{:?}", attempt.parent(None)); Ok(())'}, "orphan"
+    )
+    completed = _attempt(tmp_path / "orphan", step="start").run(orphan)
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "Ok(None)\n"

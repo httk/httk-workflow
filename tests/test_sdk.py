@@ -5,7 +5,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -38,6 +38,9 @@ run = Runner("tests.campaign")
 
 @run.step
 def characterize(a):
+    assert a.parent is None
+    # Shared with every child in place, through Attempt.parent, not copied.
+    (a.workdir / "shared.txt").write_text("from the parent", encoding="utf-8")
     a.state["sites"] = a.parameter("sites")
     failing = a.parameter("failing", [])
     for site in range(a.parameter("sites")):
@@ -56,6 +59,18 @@ def characterize(a):
 @run.step
 def relax(a):
     (a.workdir / "site.txt").write_text(str(a.parameter("site")), encoding="utf-8")
+    parent = a.parent
+    (a.workdir / "parent.json").write_text(
+        json.dumps(
+            {{
+                "job_id": parent.job_id,
+                "placement": parent.placement.as_posix(),
+                "payload": str(parent.payload),
+                "shared": (parent.workdir / "shared.txt").read_text(encoding="utf-8"),
+            }}
+        ),
+        encoding="utf-8",
+    )
     if a.parameter("diverge"):
         a.fail("relax.diverged", "site %s did not relax" % a.parameter("site"))
     else:
@@ -178,7 +193,19 @@ def test_a_dynamic_campaign_spawns_gathers_and_aggregates(tmp_path: Path) -> Non
 
     children = [found for found in workspace.scan_markers() if found.job_key != marker.job_key]
     assert len(children) == 3 and all(child.kind == "succeeded" for child in children)
+    parent_payload = workspace.payload_path(marker.placement, marker.job_key)
     for child in children:
+        # A child at another placement locates its parent through the recorded
+        # parent placement and reads the parent's workdir in place.
+        seen = json.loads(
+            (workspace.payload_path(child.placement, child.job_key) / "run" / "parent.json").read_text(encoding="utf-8")
+        )
+        assert seen == {
+            "job_id": job_id,
+            "placement": "project/campaign",
+            "payload": str(parent_payload),
+            "shared": "from the parent",
+        }
         child_job = workspace.load_job(child)
         assert child_job.runner_source == "workspace" and child_job.runner_path.as_posix() == "campaign/run.py"
         assert child_job.workflow == "tests.campaign"
@@ -1070,6 +1097,114 @@ def test_stage_input_copies_the_payload_file_a_parameter_names(tmp_path: Path) -
         ValueError, match=r"parameter 'encut' \(or its default\) must name a payload-relative path, not int"
     ):
         attempt.stage_input("encut", "ENCUT")
+
+
+def _child_of(
+    tmp_path: Path,
+    *,
+    parent_mode: Literal["persistent", "isolated"] = "persistent",
+    parent_placement: str = "project/parent",
+    parent_workspace: str | None = None,
+    create_parent: bool = True,
+) -> tuple[Attempt, Path]:
+    """Bind one attempt of a child whose parent lives in the same fabricated workspace."""
+
+    workspace, workspace_id = tmp_path / "workspace", str(uuid.uuid4())
+    parent_id = str(uuid.uuid4())
+    parent_key = f"parent--{parent_id}"
+    parent_payload = workspace / parent_placement / parent_key
+
+    def spec(**workdir: Any) -> JobSpec:
+        return JobSpec(
+            name="Fabricated", workflow="tests.sdk", runner_path="files/runner", initial_step="start", **workdir
+        )
+
+    if create_parent:
+        (parent_payload / "files").mkdir(parents=True)
+        (parent_payload / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        prepare_job_payload(parent_payload, spec(workdir_mode=parent_mode, workdir_path="calc"))
+        # prepare_job_payload chooses the id, so rename the payload to the key it implies.
+        parent_id = JobDefinition.from_path(parent_payload / "job.json").id
+        parent_key = f"parent--{parent_id}"
+        parent_payload = parent_payload.rename(parent_payload.with_name(parent_key))
+    child_payload = workspace / "project/children" / f"child--{uuid.uuid4()}"
+    (child_payload / "files").mkdir(parents=True)
+    (child_payload / "files" / "runner").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    parent = {
+        "workspace_id": parent_workspace or workspace_id,
+        "job_id": parent_id,
+        "job_key": parent_key,
+        "placement": parent_placement,
+        "activation_id": str(uuid.uuid4()),
+        "spawn_id": str(uuid.uuid4()),
+    }
+    prepare_job_payload(child_payload, spec(), parent=parent)
+    control = child_payload / f"attempts/{uuid.uuid4()}"
+    control.mkdir(parents=True)
+    (child_payload / "run").mkdir()
+    context = {
+        "format": "httk-workflow-attempt-context",
+        "format_version": 2,
+        "workspace_id": workspace_id,
+        "job_id": str(uuid.uuid4()),
+        "job_key": child_payload.name,
+        "placement": "project/children",
+        "payload": str(child_payload),
+        "step": "start",
+        "activation_id": str(uuid.uuid4()),
+        "attempt_id": str(uuid.uuid4()),
+    }
+    attempt = Attempt.initialize(
+        {
+            "HTTK_WORKFLOW_CONTEXT": json.dumps(context),
+            "HTTK_WORKFLOW_CONTROL_DIR": str(control),
+            "HTTK_WORKFLOW_JOB_DIR": str(child_payload),
+            "HTTK_WORKFLOW_WORKDIR": str(child_payload / "run"),
+            "HTTK_WORKFLOW_WORKSPACE_DIR": str(workspace),
+            "HTTK_WORKFLOW_STEP": "start",
+        }
+    )
+    return attempt, parent_payload
+
+
+def test_parent_locates_the_spawning_job_and_its_persistent_workdir(tmp_path: Path) -> None:
+    attempt, parent_payload = _child_of(tmp_path)
+    parent = attempt.parent
+    assert parent is not None
+    assert parent.payload == parent_payload
+    assert parent.workdir == parent_payload / "calc"
+    assert parent.placement.as_posix() == "project/parent"
+    assert parent.job_key == parent_payload.name
+    assert parent.raw["spawn_id"]
+
+
+def test_parent_is_found_after_parent_and_child_moved_to_another_workspace(tmp_path: Path) -> None:
+    # The recorded parent workspace is the one the child was spawned in; a tree
+    # transferred together is located by placement and key alone.
+    attempt, parent_payload = _child_of(tmp_path, parent_workspace=str(uuid.uuid4()))
+    parent = attempt.parent
+    assert parent is not None and parent.payload == parent_payload
+
+
+def test_parent_has_no_workdir_when_the_parent_uses_isolated_workdirs(tmp_path: Path) -> None:
+    attempt, parent_payload = _child_of(tmp_path, parent_mode="isolated")
+    parent = attempt.parent
+    assert parent is not None and parent.payload == parent_payload and parent.workdir is None
+
+
+def test_parent_is_none_without_a_reachable_parent(tmp_path: Path) -> None:
+    assert _attempt(tmp_path, step="start").parent is None
+    moved, _ = _child_of(tmp_path / "moved", create_parent=False)
+    assert moved.parent is None
+    with pytest.raises(FormatError):
+        _ = _child_of(tmp_path / "unsafe", parent_placement="../outside")[0].parent
+
+
+def test_parent_refuses_a_corrupt_parent_definition(tmp_path: Path) -> None:
+    attempt, parent_payload = _child_of(tmp_path)
+    (parent_payload / "job.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(FormatError):
+        _ = attempt.parent
 
 
 def test_job_inputs_round_trip_and_are_bounded(tmp_path: Path) -> None:

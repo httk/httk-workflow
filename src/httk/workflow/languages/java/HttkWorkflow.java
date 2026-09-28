@@ -289,6 +289,14 @@ public final class HttkWorkflow {
             return read("context", field);
         }
 
+        public Optional<String> parent() {
+            return read("parent");
+        }
+
+        public Optional<String> parent(String field) {
+            return read("parent", field);
+        }
+
         public Optional<String> parameter(String name) {
             return read("parameter", name);
         }

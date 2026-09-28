@@ -199,6 +199,7 @@ status.
 | `httk_workflow_describe()` | `httk_workflow_describe` |
 | `httk_workflow_invoke(argv, output)` | `httk_workflow_invoke` |
 | *`sub`* `httk_workflow_context(value, field, status)` | `httk_workflow_context` |
+| *`sub`* `httk_workflow_parent(value, field, status)` | `httk_workflow_parent` |
 | *`sub`* `httk_workflow_parameter(name, value, fallback, status)` | `httk_workflow_parameter` |
 | *`sub`* `httk_workflow_setting(name, value, fallback, status)` | `httk_workflow_setting` |
 | *`sub`* `httk_workflow_environment(name, value, fallback, status)` | `httk_workflow_environment` |
@@ -234,6 +235,10 @@ status.
 | `httk_decompress(args)` | `httk_decompress` |
 | `httk_copy_file(source, destination)` | `httk_copy_file` |
 | `httk_getenv(name, fallback)` | (pure Fortran, `get_environment_variable`) |
+
+`httk_workflow_parent` leaves `value` unallocated with status `1` when the job has
+no reachable parent, and for `field="workdir"` when the parent uses isolated
+workdirs.
 
 `httk_getenv` is a function returning an always-allocated string: the variable's
 value, or `fallback` (default `""`) when it is unset or empty.

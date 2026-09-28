@@ -237,6 +237,10 @@ httk_workflow_context() {
     _httk_workflow_bridge context "$@"
 }
 
+httk_workflow_parent() {
+    _httk_workflow_bridge parent "$@"
+}
+
 httk_workflow_parameter() {
     if [ "$#" -ge 2 ]; then
         _httk_workflow_bridge parameter "$1" --default "$2"

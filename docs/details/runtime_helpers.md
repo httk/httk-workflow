@@ -189,6 +189,7 @@ envelope and serialization rules are normative in {doc}`workflow_packages`.
 | `a.state` | dict-like JSON state that belongs to the **job** |
 | `a.log` | the append-only structured run log of the job payload (`logs/runlog.jsonl`) |
 | `a.children` | the typed children of the join that started this activation |
+| `a.parent` | the job that spawned this one, located for reading its files in place; `None` for a root job |
 | `a.declaration(name)` | one workflow declaration: the observed document, else the declared one, else `None` |
 
 `a.state` is stored inside the payload, below `.httk-job/`, so it survives
@@ -234,6 +235,26 @@ codes = [child.failure.code for child in a.children.failed]
 
 A new activation reached by `advance` observes no children, which is why
 `aggregate` above hands what it learned to `triage` through `a.state`.
+
+`a.parent` is the other direction: a frozen `ParentJob` naming the job that
+spawned this one, with its `job_id`, `job_key`, `placement`, and absolute
+`payload` and `workdir` paths, located from the `parent` member of this job's
+`job.json`. `workdir` is `None` when the parent uses isolated workdirs, and
+`a.parent` itself is `None` for a root job and for a child whose parent is not
+reachable in this workspace:
+
+```python
+parent = a.parent
+if parent is not None and parent.workdir is not None:
+    chgcar = parent.workdir / "CHGCAR"
+```
+
+It raises `FormatError` when this job's `parent` member or the parent's
+`job.json` is malformed, which is corruption rather than absence.
+
+When to read a parent's files in place instead of copying them into the child,
+and the rules that keep it safe, are in the "Sharing files with children"
+section of {doc}`/composing_workflows`.
 
 ## What an attempt publishes
 

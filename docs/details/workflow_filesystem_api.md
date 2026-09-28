@@ -2068,6 +2068,11 @@ parent remains committing.
 
 Each child is an ordinary independently schedulable job with one job file, one
 state marker, its own attempts, and the ability to create more children.
+Because its `job.json` names the parent's `job_key` and `placement`, a running
+child can locate its parent's payload as `<workspace>/<placement>/<job_key>`
+without a scan, for example to read a large shared file in place; the SDKs
+expose this as the `parent` read. The location is only meaningful while parent
+and child share a workspace.
 
 ### Waiting and joining
 

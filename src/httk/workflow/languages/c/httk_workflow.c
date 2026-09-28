@@ -426,6 +426,15 @@ char *httk_workflow_context(const char *field, int *status) {
     return read_value(prefix, NULL, status);
 }
 
+char *httk_workflow_parent(const char *field, int *status) {
+    if (field != NULL) {
+        const char *prefix[] = {"parent", field, NULL};
+        return read_value(prefix, NULL, status);
+    }
+    const char *prefix[] = {"parent", NULL};
+    return read_value(prefix, NULL, status);
+}
+
 static char *read_named(const char *verb, const char *name, const char *fallback, int *status) {
     const char *prefix[] = {verb, name, NULL};
     const char *tail[] = {"--default", fallback, NULL};
