@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from httk.core.requirements import parse_requirements, unmet_requirements
 
+from ._calls import unready_calls
 from .errors import (
     FormatError,
     TransitionLostError,
@@ -113,6 +114,10 @@ def eligible_ready(manager: Any) -> list[tuple[Marker, dict[str, int]]]:
         unmet = unmet_job_requirements(job.requires)
         if unmet:
             _LOGGER.debug("skipping ready job %s: unmet requirements %s", marker.job_key, "; ".join(unmet))
+            continue
+        unready = unready_calls(manager.workspace, job)
+        if unready:
+            _LOGGER.debug("skipping ready job %s: %s", marker.job_key, "; ".join(unready))
             continue
         try:
             requirement = effective_requirement(job, state, manager.resources, manager.maximum_workers)
@@ -325,6 +330,10 @@ def _classify_pending(manager: Any, marker: Marker, blocked: dict[str, Counter[s
     if unmet:
         blocked["requirements"][unmet[0]] += 1
         return False
+    unready = unready_calls(manager.workspace, job)
+    if unready:
+        blocked["calls"][unready[0]] += 1
+        return False
     try:
         state = manager._read_frame(marker)
     except (WorkflowError, OSError):
@@ -370,6 +379,7 @@ def work_census(manager: Any) -> "WorkCensus":
         "pool": Counter(),
         "capability": Counter(),
         "requirements": Counter(),
+        "calls": Counter(),
         "resources": Counter(),
     }
     ready_claimable = 0

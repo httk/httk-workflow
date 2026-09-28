@@ -26,6 +26,7 @@ from .models import (
     RESERVED_WORKFLOW_ENVIRONMENT_PREFIX,
     environment_variable_name,
     runner_command_reference,
+    validate_calls,
     validate_declarations,
     validate_resources,
     validate_runner_command,
@@ -631,6 +632,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
             "resources",
             "steps",
             "requires",
+            "calls",
         },
         "[workflow]",
         root,
@@ -653,6 +655,12 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
     except ValueError as exc:
         raise _error(root, str(exc)) from exc
     declaration_uri = _optional_string(workflow, "declaration_uri", "[workflow]", root)
+    calls: dict[str, str] | None = None
+    if "calls" in workflow:
+        try:
+            calls = validate_calls(_table(workflow["calls"], "[workflow.calls]", root), "[workflow.calls]")
+        except FormatError as exc:
+            raise _error(root, str(exc)) from exc
     short_name: str | None = None
     if _uri is not None:
         # An installed git package is identified by its URI; the manifest name is its short name.
@@ -924,6 +932,7 @@ def parse_workflow_manifest(directory: str | Path, *, _uri: str | None = None) -
         declaration_uri=declaration_uri,
         declaration_file=None,
         requires=requires,
+        calls=calls,
         _input_metadata=input_metadata,
         collector=(
             f"{lang.collect.__module__}:{lang.collect.__qualname__}"

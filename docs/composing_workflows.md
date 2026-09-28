@@ -46,6 +46,25 @@ This is a distinct tool from the two nearby ones:
 - a **workflow package directory** (one holding `httk_workflow.toml`);
 - a **bare workflow document** of a compat format (a CWL file, a jobflow document, …).
 
+A workflow package **declares** what it calls in `[workflow.calls]` and calls it
+by alias:
+
+```toml
+[workflow.calls]
+relax = "vasp.relax"
+```
+
+```python
+a.call("relax", label="relax", files={"POSCAR": a.payload / "files" / "POSCAR"})
+```
+
+The declaration makes the dependencies known before anything runs: a job is
+refused at creation if a declared workflow is unknown, a manager does not start
+it until each is installed (and built, when compiled) on its machine, and a call
+to an undeclared workflow is refused. See the `[workflow.calls]` section of
+{doc}`details/workflow_packages`. A runner file of your own has no manifest and
+may call anything.
+
 Where the runner ends up depends on what it is. A registered packaged workflow is
 referenced through the reserved `pkg:` form, so **nothing is copied** into the
 workspace runner store. A runner file of your own is **published into the

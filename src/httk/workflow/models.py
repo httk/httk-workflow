@@ -486,6 +486,42 @@ def parse_package_runner(value: str) -> tuple[str, PurePosixPath] | None:
     return module, relative
 
 
+def validate_calls(value: object, source: str) -> dict[str, str]:
+    """Validate a mapping from call alias to workflow reference.
+
+    :param value: The mapping to validate.
+    :param source: Name the member in error messages.
+    :return: The validated mapping.
+    :raises httk.workflow.errors.FormatError: If an alias or reference is invalid.
+    """
+
+    from httk.core.git_sources import parse_git_uri
+
+    mapping = require_mapping(value, source)
+    calls: dict[str, str] = {}
+    for alias, reference in mapping.items():
+        label = validate_label(alias, f"{source} alias")
+        if not isinstance(reference, str) or not reference or any(character.isspace() for character in reference):
+            raise FormatError(f"{source}.{label} must be a workflow name or git URI without whitespace")
+        if reference.startswith("git+"):
+            try:
+                pinned = parse_git_uri(reference).pinned
+            except ValueError as exc:
+                raise FormatError(f"{source}.{label}: {exc}") from exc
+            if not pinned:
+                raise FormatError(f"{source}.{label} must pin its git URI to a full commit hash: {reference}")
+        elif "/" in reference or reference.startswith("."):
+            # A path would resolve against whatever directory a job is created from.
+            raise FormatError(f"{source}.{label} must name a workflow or a git URI, not a path")
+        calls[label] = reference
+    shadowed = sorted(
+        set(calls) & set(calls.values()) - {alias for alias, reference in calls.items() if alias == reference}
+    )
+    if shadowed:
+        raise FormatError(f"{source} alias {shadowed[0]!r} is also another call's reference")
+    return calls
+
+
 def validate_runner_path(value: object, source: str) -> PurePosixPath:
     """Validate ``runner.path`` against the root implied by ``runner.source``.
 
@@ -1475,6 +1511,9 @@ class JobDefinition:
     raw: Mapping[str, object]
     #: The ``NAME>=VERSION`` distributions a claiming manager's environment must meet.
     requires: tuple[str, ...] = ()
+    #: The workflows this job may call, alias to resolved reference, when its
+    #: workflow declared them; ``None`` for a job that declares nothing.
+    calls: Mapping[str, str] | None = None
     #: The unexpanded package command run instead of the tree ``run`` entry, when declared.
     runner_command: tuple[str, ...] | None = None
     stored_digest: str | None = None
@@ -1603,6 +1642,8 @@ class JobDefinition:
             requires = () if requires_raw is None else parse_requirements(requires_raw, "requires")
         except ValueError as exc:
             raise FormatError(str(exc)) from exc
+        calls_raw = value.get("calls")
+        calls = None if calls_raw is None else validate_calls(calls_raw, "calls")
         return cls(
             id=job_id,
             tag=tag,
@@ -1630,6 +1671,7 @@ class JobDefinition:
             parent=None if parent is None else dict(parent),
             raw=dict(value),
             requires=tuple(item.text for item in requires),
+            calls=calls,
             runner_command=runner_command,
         )
 

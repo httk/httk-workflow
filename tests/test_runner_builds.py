@@ -3,20 +3,23 @@
 import hashlib
 import json
 import shlex
+import shutil
 from pathlib import Path, PurePosixPath
 
 import pytest
 from httk.core.cli import CLIContext
+from httk.core.plugins.install import install_plugin
 
 from conftest import register_ws
-from httk.workflow import TaskManager, Workspace
+from httk.workflow import TaskManager, Workspace, git_workflows
 from httk.workflow._runner_builds import (
     platform_tag,
     register_build,
     registered_artifacts,
 )
 from httk.workflow.errors import RunnerResolutionError
-from httk.workflow.scaffold import BuildSpec, new_job
+from httk.workflow.packages import _reset_plugin_workflow_cache, load_workflow_package
+from httk.workflow.scaffold import _WORKFLOW_PROVIDERS, BuildSpec, new_job
 from httk.workflow.workflow_cli import command
 from test_workflow_packages import _package
 
@@ -363,3 +366,112 @@ def test_in_workspace_package_errors_remain_package_specific(tmp_path: Path, cap
     assert "target package is malformed" in capsys.readouterr().err
     assert command(["build", "--workspace", name, str(buildless)], context) == 1
     assert "has no [workflow.build] section" in capsys.readouterr().err
+
+
+def _named_package(root: Path, workflow_id: str, *, build: bool = True) -> Path:
+    build_section = '[workflow.build]\ncommand = "./build.sh"\nartifacts = ["out"]\n' if build else ""
+    package = _package(
+        root,
+        f'[workflow]\nname = "{workflow_id}"\n[workflow.runner]\nsteps = ["start"]\n{build_section}',
+    )
+    _script(package / "build.sh", "mkdir -p out; printf artifact > out/result")
+    return package
+
+
+def test_workflow_build_accepts_a_registered_workflow_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd
+) -> None:
+    """Building by name registers exactly the tree a job selecting that name pins."""
+
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "build-by-name")
+    package = _named_package(tmp_path / "named", "tests.build.named")
+    provider = load_workflow_package(package, register=False)
+    monkeypatch.setitem(_WORKFLOW_PROVIDERS, provider.workflow_id, provider)
+
+    assert command(["build", "--workspace", name, "tests.build.named"], context) == 0
+    output = capfd.readouterr().out
+    assert "tests.build.named:" in output and f"package: {package.resolve()}" in output
+    assert "registered:" in output
+
+    job = new_job(workspace, "tests.build.named")
+    relative = PurePosixPath(str(job.runner["path"]))
+    tag = platform_tag(BuildSpec("./build.sh", ("out",)))
+    artifacts = registered_artifacts(workspace, relative, tag, expected_source_sha256=str(job.runner["sha256"]))
+    assert artifacts is not None and (artifacts / "out" / "result").read_text(encoding="utf-8") == "artifact"
+
+    assert command(["build", "--workspace", name, "--json", "tests.build.named"], context) == 0
+    (row,) = json.loads(capfd.readouterr().out)
+    assert row["target"] == "tests.build.named" and row["workflow"] == "tests.build.named"
+    assert row["package"] == str(package.resolve()) and row["status"] == "registered"
+    assert row["store"] == relative.as_posix()
+
+
+def test_workflow_build_accepts_an_installed_plugin_workflow_name(tmp_path: Path, capfd) -> None:
+    from test_plugin_workflows import _plugin
+
+    install_plugin(_plugin(tmp_path / "plugin", "plugin-build-name", [("test.plugin.buildname", "pbn", True)]))
+    _reset_plugin_workflow_cache()
+    try:
+        workspace = Workspace.initialize(tmp_path / "workspace")
+        context = CLIContext("httk", tmp_path)
+        name = register_ws(context, workspace.root, "build-plugin-name")
+        assert command(["build", "--workspace", name, "--json", "pbn"], context) == 0
+        (row,) = json.loads(capfd.readouterr().out)
+        assert row["workflow"] == "test.plugin.buildname" and row["status"] == "registered"
+        assert (Path(str(row["artifacts"])) / "build" / "run").is_file()
+        job = new_job(workspace, "test.plugin.buildname")
+        assert job.runner["path"] == row["store"]
+    finally:
+        _reset_plugin_workflow_cache()
+
+
+def test_workflow_build_by_name_reports_unknown_buildless_and_packaged_workflows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relax_workflow: object, capfd
+) -> None:
+    workspace = Workspace.initialize(tmp_path / "workspace")
+    context = CLIContext("httk", tmp_path)
+    name = register_ws(context, workspace.root, "build-name-errors")
+
+    assert command(["build", "--workspace", name, "tests.build.nosuch"], context) == 1
+    err = capfd.readouterr().err
+    assert "no workflow package, workflow name, or workspace runner matches 'tests.build.nosuch'" in err
+
+    buildless = load_workflow_package(
+        _named_package(tmp_path / "plain", "tests.build.plain", build=False), register=False
+    )
+    monkeypatch.setitem(_WORKFLOW_PROVIDERS, buildless.workflow_id, buildless)
+    assert command(["build", "--workspace", name, "tests.build.plain"], context) == 0
+    assert "nothing to build" in capfd.readouterr().out
+    assert command(["build", "--workspace", name, "--json", "tests.build.plain"], context) == 0
+    (row,) = json.loads(capfd.readouterr().out)
+    assert row["status"] == "nothing-to-build" and "artifacts" not in row
+
+    assert command(["build", "--workspace", name, "test-relax"], context) == 1
+    assert "is not a directory workflow package" in capfd.readouterr().err
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not available")
+def test_workflow_build_accepts_a_git_uri_and_its_installed_short_name(tmp_path: Path, capfd) -> None:
+    from test_git_workflows import _git
+
+    repository = _named_package(tmp_path / "repo", "tests.build.gitflow")
+    _git(repository, "init", "-q", "-b", "main")
+    _git(repository, "add", "-A")
+    _git(repository, "commit", "-q", "-m", "one")
+    git_workflows._reset_fetched_workflow_cache()
+    try:
+        workspace = Workspace.initialize(tmp_path / "workspace")
+        context = CLIContext("httk", tmp_path)
+        name = register_ws(context, workspace.root, "build-git")
+        uri = f"git+file://{repository}"
+        assert command(["build", "--workspace", name, "--json", uri], context) == 0
+        (by_uri,) = json.loads(capfd.readouterr().out)
+        assert by_uri["target"] == uri and by_uri["status"] == "registered"
+        assert str(by_uri["workflow"]).startswith(f"{uri}@")
+        assert command(["build", "--workspace", name, "--json", "tests.build.gitflow"], context) == 0
+        (by_name,) = json.loads(capfd.readouterr().out)
+        assert by_name["store"] == by_uri["store"] and by_name["package"] == by_uri["package"]
+    finally:
+        git_workflows._reset_fetched_workflow_cache()

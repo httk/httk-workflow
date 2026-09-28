@@ -101,6 +101,7 @@ before a provider is returned.
 | `declaration_file` | no | Relative regular-file member containing an externally authored OPTIMADE-format workflow declaration JSON. |
 | `resources` | no | Default resource requirements, a table mapping resource labels to non-negative integer values. |
 | `steps` | no | Per-step resource overrides; only valid with an executable runner and only for names in its declared `steps` list. |
+| `calls` | no | The workflows this one calls as sub-workflows: a `[workflow.calls]` table mapping an alias to a workflow name or git URI (see below). |
 | `requires` | no | Minimum distribution versions, a list of `NAME>=VERSION` strings (only `>=`, a plain `N(.N)*` release, each distribution once), for example `["httk-workflow>=2.2.0", "httk-atomistic>=2.1.2"]`. |
 
 ```toml
@@ -141,6 +142,43 @@ The manager runs every runner with its own interpreter's directory first on
 requirements were just checked in and needs no import guard of its own.
 Describe, executable instantiate hooks, and postprocess scripts get the same
 interpreter-first `PATH`.
+
+### `[workflow.calls]`: declared sub-workflows
+
+A workflow that calls other workflows with `Attempt.call` (or
+`httk_workflow_call` and the other SDKs' `call`) declares them, so its
+dependencies are known before any job runs:
+
+```toml
+[workflow.calls]
+child = "examples.subworkflow-child"
+relax = "git+https://github.com/httk/workflows-vasp@458aacb2493586faa2c9ac033334457569aeaf75#vasp-relax"
+```
+
+Each key is an alias (label syntax) and each value a workflow name or a git URI.
+A name must select a registered, plugin-bundled, or installed workflow; a path is
+refused, because it would resolve against whatever directory a job is created
+from. A git URI must be pinned to a full commit hash, so every job of a campaign
+calls the same definition. An alias may not equal another entry's reference.
+The declaration is checked three times:
+
+- **at job creation**, every declared call must resolve, and so must every call
+  those workflows declare in turn; a job whose dependency is unknown is refused. The job records the calls in its `job.json` as the
+  `calls` member: a name as written, resolved again wherever the job runs, and a
+  git URI as its canonical, commit-pinned form, so the job calls exactly the
+  definition that existed when it was created;
+- **at claim time**, a manager claims the job only when every recorded call
+  resolves on its own machine and, for a compiled package, is built in the
+  workspace, again transitively. A running manager notices a workflow installed
+  or built after it started within about a minute. Otherwise the job stays unclaimed and `httk job why`,
+  `httk workflow precheck`, and the manager's idle summary name what to install
+  or build. `httk workflow build NAME` builds a workflow together with every
+  workflow it declares it calls, transitively. The check only looks things up: a git
+  URI resolves through the installed cache and never fetches;
+- **at call time**, a job whose workflow declares `[workflow.calls]` may call
+  only those workflows, by alias (`a.call("child", ...)`) or by the recorded
+  reference; anything else is refused. A job run from a runner file of your
+  own, which has no manifest to declare in, may call anything.
 
 ### `[workflow.runner]`: executable form
 
@@ -306,6 +344,27 @@ httk workflow build --workspace WORKSPACE ./my-workflow
 httk job new --workspace WORKSPACE --workflow-dir ./my-workflow --step prepare
 httk workflow run --workspace WORKSPACE
 ```
+
+The build target may also be a workflow reference, resolved exactly as
+`httk job new --workflow` resolves it: a registered id or alias, a workflow an
+installed plugin bundles, an installed git workflow's short name, or a git URI
+(fetched and installed, like `job new --workflow URI`). The command builds the
+package directory that reference resolves to, so the registration is the one a
+job selecting that name pins; there is no need to locate a plugin's installed
+directory:
+
+```console
+httk workflow build --workspace WORKSPACE examples.chain-rust
+httk job new --workspace WORKSPACE --workflow examples.chain-rust
+```
+
+A target spelled as a path (absolute, `./`, `../`, or containing `/`) is always
+a package directory; write `./NAME` for a directory in the current directory. A
+bare name is a workspace runner-store name when that store entry exists,
+otherwise a workflow reference, otherwise a job reference. A workflow reference
+whose package has no `[workflow.build]` section succeeds with "nothing to
+build"; one that is not a directory package (a packaged runner file) is an
+error.
 
 Managers never build. This rejects a thundering herd of managers compiling the
 same package; on a shared filesystem, one registration for a platform tag serves

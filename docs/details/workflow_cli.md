@@ -157,21 +157,46 @@ httk workflow build [--workspace WORKSPACE] [--json] TARGET...
 httk workflow build [--workspace WORKSPACE] [--json] --list
 ```
 
-`TARGET` may be a workflow package directory, a workspace runner-store path,
-or a job reference whose runner is a workspace package. A package directory is
-published first, then its source tree is built and its artifacts are registered
-for the local platform tag. A store path or job reference builds the already
-published source tree. `--list` does no build and prints the workspace's
-registrations; `--json` emits machine-readable build or list records. Exit 0
-means the registration completed (or the list was read); malformed targets,
-probe/build failures, and missing artifacts are nonzero failures.
+`TARGET` may be a workflow package directory, a workflow reference, a
+workspace runner-store path, or a job reference whose runner is a workspace
+package. A workflow reference is resolved exactly as `job new --workflow`
+resolves it: a registered id or alias, an installed plugin workflow, an
+installed git workflow's short name, or a git URI (fetched and installed). A
+package directory, or the directory a workflow reference resolves to, is
+published first under the same digest-pinned store name a job of it pins, then
+its source tree is built and its artifacts are registered for the local
+platform tag. A store path or job reference builds the already published source
+tree.
+
+Targets are classified without guessing: a git URI is a workflow reference; a
+path spelling (absolute, `./`, `../`, or containing `/`) is a package directory
+(write `./NAME` for one in the current directory); a glob is a job reference;
+a bare name is a runner-store name when that store entry exists, then a
+workflow name, then a job reference.
+
+`--list` does no build and prints the workspace's registrations; `--json` emits
+machine-readable build or list records. Each build record names the `target`
+as written, and for a workflow reference also the resolved `workflow` id and
+`package` directory (both `null` otherwise), plus `status`: `registered`, or
+`nothing-to-build` for a workflow reference whose package has no
+`[workflow.build]` section, which exits 0. Exit 0 means every registration
+completed (or the list was read); malformed targets, unknown names, workflow
+references that are not directory packages, a package directory without
+`[workflow.build]`, probe/build failures, and missing artifacts are nonzero
+failures.
+
+A workflow reference or package directory whose manifest declares
+`[workflow.calls]` also builds every workflow it calls, transitively. Each is
+reported as its own row carrying `called_by` and `alias`, with `status`
+`failed` and an `error` when a called workflow cannot be resolved (which makes
+the command exit 1).
 
 The build vocabulary and engine come from `httk.core.building`; this layer keeps
 the workspace runner-build store and platform-tagged registrations. The
 manager passes registered artifacts through `HTTK_WORKFLOW_RUNNER_ARTIFACTS`
-without modifying the published source tree. A plugin-sourced workflow is first resolved and pinned into
-the workspace like any other package, then built with the same command using
-its job or store runner target.
+without modifying the published source tree. A plugin-sourced workflow is
+built by its name: `httk workflow build NAME` pins it into the workspace like
+any other package and builds it.
 
 ### `job` — making jobs, and finding out about them
 

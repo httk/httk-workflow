@@ -72,7 +72,7 @@ if TYPE_CHECKING:
     from .compat import LanguageRequest
 
 from ._util import interpreter_first_path, validate_inputs
-from .errors import FormatError
+from .errors import FormatError, WorkflowError
 from .models import (
     ATTEMPTS_DIRECTORY,
     JOB_STATE_DIRECTORY,
@@ -184,6 +184,7 @@ class WorkflowProvider:
     :param declaration_file: Name the source declaration file.
     :param name: Give the short name of a workflow whose id is a git URI.
     :param requires: Give the ``NAME>=VERSION`` distribution requirements a job of it must meet.
+    :param calls: Declare the workflows a job of it may call, alias to workflow reference.
     """
 
     workflow_id: str
@@ -220,6 +221,7 @@ class WorkflowProvider:
     declaration_file: str | None = None
     name: str | None = None
     requires: tuple[str, ...] = ()
+    calls: Mapping[str, str] | None = None
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -525,6 +527,7 @@ class ResolvedWorkflow:
     :param declaration_file: Name the source declaration file.
     :param name: Give the short name of a workflow whose id is a git URI.
     :param requires: Give the ``NAME>=VERSION`` distribution requirements a job of it must meet.
+    :param calls: Declare the workflows a job of it may call, alias to workflow reference.
     """
 
     source: Path
@@ -564,6 +567,7 @@ class ResolvedWorkflow:
     declaration_file: str | None = None
     name: str | None = None
     requires: tuple[str, ...] = ()
+    calls: Mapping[str, str] | None = None
     _input_metadata: Mapping[str, Mapping[str, object]] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -1041,8 +1045,64 @@ def _provider_resolution(provider: WorkflowProvider) -> ResolvedWorkflow:
         declaration_file=provider.declaration_file,
         name=provider.name,
         requires=provider.requires,
+        calls=provider.calls,
         _input_metadata=provider._input_metadata,
     )
+
+
+def resolve_calls(calls: Mapping[str, str]) -> dict[str, str]:
+    """Resolve the workflows a workflow declares it calls, for one new job to record.
+
+    Every declared call must resolve, transitively, so a job whose dependencies
+    are unknown is refused when it is created rather than failing when it runs. A
+    name must select a registered, plugin-bundled, or installed workflow (never a
+    path) and is recorded as it is, to be resolved again wherever the job runs; a
+    git URI, which the manifest pins to a commit, is recorded in its canonical
+    form, so the job calls exactly the definition that existed when it was
+    created.
+
+    :param calls: The declared calls, alias to workflow reference.
+    :return: The calls to record, alias to resolved reference.
+    :raises ValueError: If a declared call, or one of its own declared calls, cannot be resolved.
+    """
+
+    resolved: dict[str, str] = {}
+    seen: set[str] = set()
+    for alias, reference in calls.items():
+        recorded, provider = _call_provider(alias, reference)
+        resolved[alias] = recorded
+        _require_calls_resolve(provider, seen | {recorded})
+    return resolved
+
+
+def _call_provider(alias: str, reference: str) -> tuple[str, WorkflowProvider]:
+    """Resolve one declared call to the reference to record and its provider."""
+
+    try:
+        if reference.startswith("git+"):
+            recorded = resolve_workflow(reference).registration_id or reference
+            provider = workflow_provider(recorded)
+        else:
+            recorded, provider = reference, workflow_provider(reference)
+    except (WorkflowError, ValueError, OSError) as exc:
+        raise ValueError(f"declared call {alias} = {reference!r} does not resolve here: {exc}") from exc
+    if provider is None:
+        raise ValueError(
+            f"declared call {alias} = {reference!r} does not resolve here: no registered, plugin, or installed "
+            "workflow has that name"
+        )
+    return recorded, provider
+
+
+def _require_calls_resolve(provider: WorkflowProvider, seen: set[str]) -> None:
+    """Require every call *provider* itself declares to resolve too, transitively."""
+
+    for alias, reference in (provider.calls or {}).items():
+        if reference in seen:
+            continue
+        seen.add(reference)
+        _recorded, called = _call_provider(alias, reference)
+        _require_calls_resolve(called, seen)
 
 
 def resolve_workflow(
@@ -1133,6 +1193,7 @@ def resolve_workflow(
                 declaration_uri=provider.declaration_uri,
                 declaration_file=provider.declaration_file,
                 requires=provider.requires,
+                calls=provider.calls,
                 _input_metadata=provider._input_metadata,
             )
         elif path.exists():
@@ -2074,6 +2135,7 @@ def _build_payload(
         declarations=_merge_provenance_declaration(workflow.declarations, provenance),
         declared=declared_member,
         requires=workflow.requires,
+        calls=None if workflow.calls is None else resolve_calls(workflow.calls),
     )
     if prepared.finalize is not None:
         spec = prepared.finalize(spec)

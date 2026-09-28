@@ -9,6 +9,7 @@ from httk.core.cli import CLIContext
 from ..precheck import (
     DEFAULT_PRECHECK_STATES,
     ENVIRONMENT_VARIABLE_CAVEAT,
+    has_call_problem,
     has_claim_problem,
     has_environment_problem,
     has_input_problem,
@@ -40,6 +41,7 @@ def _summary(findings: list[dict[str, object]]) -> dict[str, int]:
         "language_indeterminate": sum(status_of(item, "language") == "indeterminate" for item in findings),
         "requirements_problems": sum(has_requirements_problem(item) for item in findings),
         "requirements_indeterminate": sum(status_of(item, "requirements") == "indeterminate" for item in findings),
+        "call_problems": sum(has_call_problem(item) for item in findings),
         "input_problems": sum(has_input_problem(item) for item in findings),
         "step_problems": sum(has_step_problem(item) for item in findings),
     }
@@ -111,6 +113,9 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
                     problems.append(f"{member}: {value.get('problem')}")
                 elif isinstance(value, Mapping) and value.get("status") == "indeterminate":
                     problems.append(f"{member} indeterminate: {value.get('problem')}")
+            calls = finding.get("calls")
+            if isinstance(calls, list):
+                problems.extend(str(problem) for problem in calls)
             inputs = finding.get("inputs")
             if isinstance(inputs, list):
                 problems.extend(f"input: {problem}" for problem in inputs)
@@ -123,7 +128,8 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
             f"checked {summary['checked']}, unresolved {summary['unresolved']}, "
             f"runner problems {summary['runner_problems']}, unclaimable {summary['claim_problems']}, "
             f"language problems {summary['language_problems']}, "
-            f"requirements problems {summary['requirements_problems']}, input problems {summary['input_problems']}, "
+            f"requirements problems {summary['requirements_problems']}, call problems {summary['call_problems']}, "
+            f"input problems {summary['input_problems']}, "
             f"step problems {summary['step_problems']}"
         )
     return (
@@ -133,6 +139,7 @@ def handle_precheck(arguments: argparse.Namespace, context: CLIContext) -> int:
         or summary["claim_problems"]
         or summary["language_problems"]
         or summary["requirements_problems"]
+        or summary["call_problems"]
         or summary["input_problems"]
         or summary["step_problems"]
         else 0

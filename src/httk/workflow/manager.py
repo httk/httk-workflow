@@ -245,9 +245,9 @@ class WorkCensus:
 
     def _blocked_groups(self) -> list[str]:
         groups: list[str] = []
-        for kind in ("executor", "pool", "capability", "requirements", "resources"):
+        for kind in ("executor", "pool", "capability", "requirements", "calls", "resources"):
             for name, count in sorted(self.ready_blocked.get(kind, {}).items()):
-                label = {"resources": f"resource={name}", "requirements": f"requires {name}"}.get(
+                label = {"resources": f"resource={name}", "requirements": f"requires {name}", "calls": name}.get(
                     kind, f"{kind}={name}"
                 )
                 groups.append(f"{label}: {count}")
@@ -283,9 +283,10 @@ class WorkCensus:
         executors = sorted(self.ready_blocked.get("executor", {}))
         resources = sorted(self.ready_blocked.get("resources", {}))
         requirements = sorted(self.ready_blocked.get("requirements", {}))
-        if not (pools or capabilities or executors or resources or requirements):
+        calls = sorted(self.ready_blocked.get("calls", {}))
+        if not (pools or capabilities or executors or resources or requirements or calls):
             return None
-        if resources and not (pools or capabilities or executors or requirements):
+        if resources and not (pools or capabilities or executors or requirements or calls):
             count = sum(self.ready_blocked["resources"].values())
             names = ", ".join(f"`{name}`" for name in resources)
             resource_flags = " ".join(f"--worker-resource {name} COUNT" for name in resources)
@@ -317,6 +318,12 @@ class WorkCensus:
             lacks.append("the job requirement(s) " + "; ".join(requirements))
             remedies.append(
                 "install the required distribution versions in this manager's environment and restart the manager"
+            )
+        if calls:
+            lacks.append("the called workflow(s) " + "; ".join(calls))
+            remedies.append(
+                "install or build the called workflows on this machine as each problem says "
+                "(a running manager notices within a minute)"
             )
         remedy = "; ".join(remedies) if remedies else "start a manager that serves them"
         return (

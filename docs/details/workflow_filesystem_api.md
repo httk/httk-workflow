@@ -1062,6 +1062,15 @@ unclaimed when its own environment does not meet every entry, exactly like a
 missing capability. The member is omitted when empty, and a manager that
 predates it ignores it.
 
+The optional top-level `calls` member maps an alias (label syntax) to the
+workflow reference a job may call as a sub-workflow: a workflow name, or a
+commit-pinned git URI. It is written when the job's workflow declares
+`[workflow.calls]` (an empty object when it declares none of them but the
+table), and is absent for a job that declares nothing. A manager SHOULD leave a
+ready job unclaimed while any recorded reference does not resolve on its
+machine or names a compiled package not built in the workspace, and a runner
+SDK MUST refuse a call to a workflow the member does not name.
+
 The literal pool name `default` is reserved for jobs requiring no explicit
 routing. A manager started without pool configuration MUST advertise
 `default`. Thus a trivial deployment uses the value shown above without any

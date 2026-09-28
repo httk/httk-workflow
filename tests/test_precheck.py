@@ -182,6 +182,7 @@ def test_precheck_reports_resolution_sources_and_exit_code(tmp_path: Path, capsy
         "language_indeterminate": 0,
         "requirements_problems": 0,
         "requirements_indeterminate": 0,
+        "call_problems": 0,
         "input_problems": 0,
         "step_problems": 0,
     }

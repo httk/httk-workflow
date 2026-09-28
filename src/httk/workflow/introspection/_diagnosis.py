@@ -600,7 +600,7 @@ def _manager_checks(
         )
 
 
-def _requirement_checks(job: JobDefinition, report: _Diagnosing) -> ClaimRequirements:
+def _requirement_checks(job: JobDefinition, report: _Diagnosing, workspace: Workspace) -> ClaimRequirements:
     """Record the claim preconditions the job itself declares."""
 
     requirements = claim_requirements(job)
@@ -627,6 +627,19 @@ def _requirement_checks(job: JobDefinition, report: _Diagnosing) -> ClaimRequire
                 if unmet
                 else f"{', '.join(job.requires)} met in this process's environment; each manager re-checks "
                 "them in its own before claiming"
+            ),
+        )
+    if job.calls:
+        from .._calls import unready_calls
+
+        unready = unready_calls(workspace, job)
+        report.check(
+            "called workflows",
+            not unready,
+            (
+                "; ".join(unready) + "; a manager claims this job only when every declared call is ready on its machine"
+                if unready
+                else f"{', '.join(sorted(job.calls))} resolve and are built here; each manager re-checks before claiming"
             ),
         )
     return requirements
@@ -953,7 +966,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
         )
         served = _profile_check(workspace, report)
         if job is not None and served:
-            requirements = _requirement_checks(job, report)
+            requirements = _requirement_checks(job, report, workspace)
             _manager_checks(
                 workspace,
                 requirements,
@@ -967,7 +980,7 @@ def explain_job(workspace: Workspace, marker: Marker) -> Diagnosis:
         summary = "this job is ready and waiting to be claimed; every claim precondition is listed below"
         served = _profile_check(workspace, report)
         if job is not None and served:
-            requirements = _requirement_checks(job, report)
+            requirements = _requirement_checks(job, report, workspace)
             _manager_checks(
                 workspace,
                 requirements,

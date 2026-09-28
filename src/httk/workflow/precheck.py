@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 from httk.core.digests import sha256_file, tree_digest
 
 from . import compat
+from ._calls import unready_calls
 from ._manager_runners import check_runner_reference, contained, runner_command_problem, runner_module_allowed
 from ._manager_scheduling import unmet_job_requirements
 from .errors import WorkflowError
@@ -401,6 +402,7 @@ def _finding(
             "claim": None,
             "language": None,
             "requirements": None,
+            "calls": [],
             "inputs": [],
             "step": None,
         }
@@ -422,6 +424,7 @@ def _finding(
         "claim": _claim_finding(marker, job, managers),
         "language": _language_finding(job, managers),
         "requirements": _requirements_finding(job, managers),
+        "calls": list(unready_calls(workspace, job)),
         "inputs": _input_problems(workspace, marker, job),
         "step": _step_finding(workspace, marker, job),
     }
@@ -499,6 +502,12 @@ def has_requirements_problem(finding: Mapping[str, object]) -> bool:
 
     requirements = finding.get("requirements")
     return isinstance(requirements, Mapping) and requirements.get("status") == "problem"
+
+
+def has_call_problem(finding: Mapping[str, object]) -> bool:
+    """Return whether a finding names a declared called workflow not ready here."""
+
+    return bool(finding.get("calls"))
 
 
 def has_input_problem(finding: Mapping[str, object]) -> bool:

@@ -35,6 +35,7 @@ from .models import (
     JOB_STATE_DIRECTORY,
     JobDefinition,
     normalize_placement,
+    validate_calls,
     validate_declarations,
     validate_declared,
     validate_environment,
@@ -178,6 +179,7 @@ class JobSpec:
     :param declared: Supply the declared parameter and input metadata sections.
     :param compatibility: Supply an optional compatibility profile.
     :param requires: Require these ``NAME>=VERSION`` distributions in the claiming manager's environment.
+    :param calls: Declare the workflows the job may call, alias to resolved reference.
     """
 
     name: str
@@ -212,6 +214,7 @@ class JobSpec:
     declared: Mapping[str, object] = field(default_factory=dict)
     compatibility: Mapping[str, object] | None = None
     requires: tuple[str, ...] = ()
+    calls: Mapping[str, str] | None = None
 
     def as_mapping(self, *, parent: Mapping[str, object] | None = None) -> dict[str, object]:
         """Return the validated job-definition mapping.
@@ -280,6 +283,8 @@ class JobSpec:
             result["declared"] = validate_declared(self.declared)
         if self.requires:
             result["requires"] = list(self.requires)
+        if self.calls is not None:
+            result["calls"] = validate_calls(self.calls, "calls")
         if self.compatibility is not None:
             result["compatibility"] = copy.deepcopy(dict(self.compatibility))
         return result

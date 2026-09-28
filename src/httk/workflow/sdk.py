@@ -1113,6 +1113,33 @@ class Attempt:
         _LOGGER.debug("spawned %s at step %s as %s", reference.job_key, child.step, entry_label)
         return reference
 
+    def _declared_call(self, workflow: str | os.PathLike[str]) -> str | os.PathLike[str]:
+        """Map a call target through this job's declared calls, refusing an undeclared one.
+
+        A job whose workflow declared ``[workflow.calls]`` may call only those
+        workflows, named by alias or by the reference the job recorded; a job
+        that declared nothing (a runner file of your own, or one created before
+        declarations existed) may call anything.
+        """
+
+        # An attempt bound without a job definition (an in-process harness)
+        # declares nothing; a real attempt always has one.
+        if not (self.payload / "job.json").is_file():
+            return workflow
+        calls = self.job.calls
+        if calls is None:
+            return workflow
+        name = os.fspath(workflow)
+        if name in calls:
+            return calls[name]
+        if name in calls.values():
+            return name
+        declared = ", ".join(f"{alias} = {reference}" for alias, reference in sorted(calls.items())) or "none"
+        raise ValueError(
+            f"workflow {name!r} is not declared in [workflow.calls] of {self.job.workflow} "
+            f"(declared: {declared}); declare it there so it is checked before this job starts"
+        )
+
     def call(
         self,
         workflow: str | os.PathLike[str],
@@ -1150,7 +1177,8 @@ class Attempt:
         publishes nothing the second time. Both need the workspace root reachable
         from where this step runs, exactly as :attr:`children` does.
 
-        :param workflow: Select the workflow, runner file, package, or document to call.
+        :param workflow: Select the workflow, runner file, package, or document to call; for a
+            job whose workflow declares ``[workflow.calls]``, one of those aliases or references.
         :param label: The unique label used to gather and observe the child later.
         :param inputs: Supply the called workflow's declared inputs.
         :param files: Map payload names to files to stage for the child.
@@ -1165,11 +1193,13 @@ class Attempt:
         :param workflow_id: Override the workflow id in the child job definition.
         :param name: Set the child job's display name.
         :return: The reference to the registered child.
-        :raises ValueError: If the workflow, label, inputs, or job settings are invalid.
+        :raises ValueError: If the workflow is undeclared or invalid, or the label, inputs, or job
+            settings are invalid.
         """
 
         self._reject_published()
         validate_label(label, "child label")
+        workflow = self._declared_call(workflow)
         # Resolving here decides only how the runner is referenced: a packaged
         # workflow is pinned through ``pkg:`` and copies nothing, a runner file of
         # your own is published into the workspace store.

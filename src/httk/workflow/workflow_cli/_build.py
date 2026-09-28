@@ -13,8 +13,8 @@ from httk.core.cli import CLIContext
 from .._runner_builds import register_build
 from ..errors import FormatError
 from ..introspection import JobSelectorResolver
-from ..packages import MANIFEST_NAME, read_build_spec, source_tree_digest
-from ..scaffold import resolve_workflow
+from ..packages import MANIFEST_NAME, load_workflow_package, read_build_spec, source_tree_digest
+from ..scaffold import WorkflowProvider, workflow_provider
 from ..workspace import Workspace
 from ._common import _ERRORS, _add_by_path_argument, _leaf, _local_root
 
@@ -90,6 +90,131 @@ def _resolve_job_target(
     return store_path, job.runner_path, spec, job.runner_sha256
 
 
+def _publish_provider(
+    workspace: Workspace, provider: WorkflowProvider, reference: str
+) -> tuple[Path, PurePosixPath, BuildSpec, str] | None:
+    """Publish a resolved directory package and return its build target, or ``None`` when it has no build.
+
+    The package is published under the digest-pinned name a job selecting the
+    same workflow publishes it under, so the registration is found by that job.
+    """
+
+    directory = provider.directory
+    if directory is None:
+        raise ValueError(
+            f"workflow {reference!r} ({provider.workflow_id}) is not a directory workflow package; "
+            "only a package with a [workflow.build] section can be built"
+        )
+    try:
+        spec = read_build_spec(directory)
+    except ValueError as exc:
+        raise ValueError(f"workflow {reference!r} package {directory} is malformed: {exc}") from exc
+    if spec is None:
+        return None
+    reference_mapping = workspace.publish_runner(
+        directory, name=f"{directory.name}.{source_tree_digest(directory)[:12]}"
+    )
+    store_relative = PurePosixPath(str(reference_mapping["path"]))
+    return workspace.runner_store_path(store_relative), store_relative, spec, str(reference_mapping["sha256"])
+
+
+def _register(
+    workspace: Workspace,
+    target: tuple[Path, PurePosixPath, BuildSpec, str],
+    *,
+    stdout_to_stderr: bool,
+) -> dict[str, object]:
+    """Build one published runner and return its registration report fields."""
+
+    store_path, store_relative, spec, source_sha256 = target
+    artifacts = register_build(
+        workspace,
+        store_path,
+        store_relative,
+        spec,
+        source_sha256=source_sha256,
+        stdout_to_stderr=stdout_to_stderr,
+    )
+    stamp = json.loads((artifacts.parent / "build.json").read_text(encoding="utf-8"))
+    return {
+        "status": "registered",
+        "store": store_relative.as_posix(),
+        "platform": stamp["platform"],
+        "platform_output": stamp["platform_output"],
+        "platform_tag": stamp["platform_tag"],
+        "artifacts": str(artifacts),
+        "built_at": stamp["built_at"],
+    }
+
+
+def build_workflow_provider(
+    workspace: Workspace,
+    provider: WorkflowProvider,
+    *,
+    reference: str,
+    stdout_to_stderr: bool = False,
+) -> dict[str, object]:
+    """Build one resolved workflow provider in the foreground and register its artifacts.
+
+    This is the unit ``httk workflow build NAME`` applies to a workflow
+    reference; it is meant to be applied once per workflow a build covers. A
+    directory package without a ``[workflow.build]`` section has nothing to
+    build and reports ``status`` ``"nothing-to-build"`` rather than failing.
+
+    :param workspace: Build into this workspace's runner store and registrations.
+    :param provider: Build this resolved workflow provider.
+    :param reference: Name the provider in messages and in the report, as the user wrote it.
+    :param stdout_to_stderr: Send build output to standard error (for JSON reports).
+    :return: The report row: ``workflow``, ``package``, ``status`` and, when built, the registration fields.
+    :raises ValueError: If the provider is not a directory package or its manifest is malformed.
+    :raises RunnerResolutionError: If the build fails.
+    """
+
+    row: dict[str, object] = {"workflow": provider.workflow_id, "package": str(provider.directory)}
+    published = _publish_provider(workspace, provider, reference)
+    if published is None:
+        row["status"] = "nothing-to-build"
+        return row
+    row.update(_register(workspace, published, stdout_to_stderr=stdout_to_stderr))
+    return row
+
+
+def _path_like(target: str) -> bool:
+    """Return whether *target* is spelled as a filesystem path rather than a name."""
+
+    return (
+        Path(target).expanduser().is_absolute()
+        or target in {".", ".."}
+        or target.startswith(("./", "../"))
+        or os.sep in target
+        or (os.altsep is not None and os.altsep in target)
+    )
+
+
+def _workflow_reference(workspace: Workspace, target: str) -> WorkflowProvider | None:
+    """Return the provider a workflow reference selects, as ``job new --workflow`` resolves it.
+
+    A git URI is fetched and installed (an explicit URI is consent to fetch).
+    Otherwise path spellings, job globs and existing workspace runner-store
+    names keep their meaning, and a remaining bare name selects a registered id
+    or alias, an installed plugin workflow, or an installed git workflow's short
+    name; ``None`` means the target is not a workflow reference.
+    """
+
+    if target.startswith("git+"):
+        from ..git_workflows import fetch_workflow
+
+        return fetch_workflow(target)
+    if _path_like(target) or any(character in target for character in "*?["):
+        return None
+    try:
+        if workspace.runner_store_path(target).is_dir():
+            return None
+    except FormatError:
+        pass
+    return workflow_provider(target)
+
+
 def _resolve_target(
     workspace: Workspace,
     target: str,
@@ -101,14 +226,7 @@ def _resolve_target(
     candidate = raw_path if raw_path.is_absolute() else base / raw_path
     if any(character in target for character in "*?["):
         return _resolve_job_target(workspace, target, base=base, resolver=resolver)
-    path_like = (
-        raw_path.is_absolute()
-        or target in {".", ".."}
-        or target.startswith(("./", "../"))
-        or os.sep in target
-        or (os.altsep is not None and os.altsep in target)
-    )
-    if path_like:
+    if _path_like(target):
         path = raw_path if raw_path.is_absolute() else base / raw_path
         if not path.is_dir():
             raise ValueError(f"workflow package directory does not exist: {path}")
@@ -119,12 +237,10 @@ def _resolve_target(
                 raise ValueError(f"target package is malformed: {exc}") from exc
             if spec is None:
                 raise ValueError(f"target {path} has no [workflow.build] section")
-            resolved = resolve_workflow(path)
-            if resolved.directory is None:
-                raise ValueError(f"target {path} is not a workflow package directory")
-            reference = workspace.publish_runner(path, name=resolved.store_name)
-            store_relative = PurePosixPath(str(reference["path"]))
-            return workspace.runner_store_path(store_relative), store_relative, spec, str(reference["sha256"])
+            published = _publish_provider(workspace, load_workflow_package(path, register=False), target)
+            if published is None:
+                raise ValueError(f"target {path} has no [workflow.build] section")
+            return published
         if candidate.resolve().is_relative_to(workspace.root.resolve()):
             return _resolve_job_target(workspace, target, base=base, resolver=resolver)
         raise ValueError(f"target {path} has no [workflow.build] section")
@@ -147,7 +263,10 @@ def _resolve_target(
             raise ValueError("workflow build job target must resolve to one job")
         marker = markers[0]
     except ValueError:
-        raise ValueError(f"no workflow package or workspace runner matches {target!r}") from None
+        raise ValueError(
+            f"no workflow package, workflow name, or workspace runner matches {target!r}; "
+            "write ./NAME for a package directory in the current directory"
+        ) from None
     job = workspace.load_job(marker)
     if job.runner_source != "workspace":
         raise ValueError(f"job {target} does not reference a workspace workflow package")
@@ -176,6 +295,94 @@ def _resolve_store_target(workspace: Workspace, store: str) -> tuple[Path, PureP
     return store_path, relative, spec, source_tree_digest(store_path)
 
 
+def _package_provider(target: str, base: Path) -> WorkflowProvider | None:
+    """Return the provider of a package-directory target, for building what it calls."""
+
+    if not _path_like(target):
+        return None
+    path = Path(target).expanduser()
+    path = path if path.is_absolute() else base / path
+    if not (path / MANIFEST_NAME).is_file():
+        return None
+    from ..packages import parse_workflow_manifest
+
+    return parse_workflow_manifest(path)
+
+
+def _called_rows(
+    workspace: Workspace,
+    provider: WorkflowProvider,
+    seen: set[str],
+    *,
+    stdout_to_stderr: bool,
+) -> list[dict[str, object]]:
+    """Build every workflow *provider* declares in ``[workflow.calls]``, transitively.
+
+    Each call resolves as ``httk workflow build NAME`` resolves a name, so a
+    workflow and everything it calls are ready after one command. A call target
+    that does not resolve is reported as a failed row rather than stopping the
+    others.
+    """
+
+    rows: list[dict[str, object]] = []
+    for alias, reference in sorted((provider.calls or {}).items()):
+        if reference in seen:
+            continue
+        seen.add(reference)
+        row: dict[str, object] = {"target": reference, "called_by": provider.workflow_id, "alias": alias}
+        try:
+            # A call resolves as Attempt.call resolves it, never as a store or job selector.
+            called: WorkflowProvider | None
+            if reference.startswith("git+"):
+                from ..git_workflows import fetch_workflow
+
+                called = fetch_workflow(reference)
+            else:
+                called = workflow_provider(reference)
+            if called is None:
+                raise ValueError(f"called workflow {reference!r} is not known on this machine")
+            if called.directory is None or called.language is not None or called.runner_package is not None:
+                # Only a directory package runs from a build; anything else is ready as it is.
+                rows.append({**row, "workflow": called.workflow_id, "package": None, "status": "nothing-to-build"})
+                rows.extend(_called_rows(workspace, called, seen, stdout_to_stderr=stdout_to_stderr))
+                continue
+            row.update(
+                build_workflow_provider(workspace, called, reference=reference, stdout_to_stderr=stdout_to_stderr)
+            )
+        except _ERRORS as exc:
+            row.update({"workflow": reference, "package": None, "status": "failed", "error": str(exc)})
+            rows.append(row)
+            continue
+        rows.append(row)
+        rows.extend(_called_rows(workspace, called, seen, stdout_to_stderr=stdout_to_stderr))
+    return rows
+
+
+def _print_result(result: Mapping[str, object]) -> None:
+    """Print one build report row as text."""
+
+    called_by = f" (called by {result['called_by']})" if result.get("called_by") else ""
+    print(f"{result['target']}:{called_by}")
+    if result.get("status") == "failed":
+        print(f"failed: {result.get('error')}")
+        return
+    if result["package"] is not None:
+        print(f"workflow: {result['workflow']}")
+        print(f"package: {result['package']}")
+    if result["status"] == "nothing-to-build":
+        print(
+            "nothing to build: the package has no [workflow.build] section"
+            if result["package"] is not None
+            else "nothing to build: not a compiled workflow package"
+        )
+        return
+    print(
+        f"platform probe: command={result['platform'] or 'any'} "
+        f"output={result['platform_output']!r} tag={result['platform_tag']}"
+    )
+    print(f"registered: {result['artifacts']}")
+
+
 def handle_build(arguments: argparse.Namespace, context: CLIContext) -> int:
     """Build a workflow package in the foreground and register its artifacts."""
 
@@ -190,38 +397,33 @@ def handle_build(arguments: argparse.Namespace, context: CLIContext) -> int:
     resolver = JobSelectorResolver(workspace, Path(context.cwd))
     for target in targets:
         try:
-            if arguments.store is not None:
-                store_path, store_relative, spec, source_sha256 = _resolve_store_target(workspace, target)
+            provider = None if arguments.store is not None else _workflow_reference(workspace, target)
+            if provider is not None:
+                result = {
+                    "target": target,
+                    **build_workflow_provider(workspace, provider, reference=target, stdout_to_stderr=arguments.json),
+                }
             else:
-                store_path, store_relative, spec, source_sha256 = _resolve_target(
-                    workspace, target, base=Path(context.cwd), resolver=resolver
-                )
-            artifacts = register_build(
-                workspace,
-                store_path,
-                store_relative,
-                spec,
-                source_sha256=source_sha256,
-                stdout_to_stderr=arguments.json,
-            )
-            stamp = json.loads((artifacts.parent / "build.json").read_text(encoding="utf-8"))
-            result = {
-                "target": target,
-                "store": store_relative.as_posix(),
-                "platform": stamp["platform"],
-                "platform_output": stamp["platform_output"],
-                "platform_tag": stamp["platform_tag"],
-                "artifacts": str(artifacts),
-                "built_at": stamp["built_at"],
-            }
+                if arguments.store is not None:
+                    resolved = _resolve_store_target(workspace, target)
+                else:
+                    resolved = _resolve_target(workspace, target, base=Path(context.cwd), resolver=resolver)
+                result = {
+                    "target": target,
+                    "workflow": None,
+                    "package": None,
+                    **_register(workspace, resolved, stdout_to_stderr=arguments.json),
+                }
             results.append(result)
             if not arguments.json:
-                print(f"{target}:")
-                print(
-                    f"platform probe: command={stamp['platform'] or 'any'} "
-                    f"output={stamp['platform_output']!r} tag={stamp['platform_tag']}"
-                )
-                print(f"registered: {artifacts}")
+                _print_result(result)
+            root = provider if provider is not None else _package_provider(target, Path(context.cwd))
+            if root is not None and root.calls:
+                for row in _called_rows(workspace, root, {root.workflow_id, target}, stdout_to_stderr=arguments.json):
+                    failed = failed or row.get("status") == "failed"
+                    results.append(row)
+                    if not arguments.json:
+                        _print_result(row)
         except _ERRORS as exc:
             failed = True
             print(f"{target}: {exc}", file=sys.stderr)
@@ -237,14 +439,20 @@ def build_build_parser(subparsers: "argparse._SubParsersAction[argparse.Argument
         subparsers,
         "build",
         summary="build and register a compiled workflow package",
-        description="Build a published workflow package in the foreground and register its artifacts",
+        description=(
+            "Build a workflow package, selected by path or by workflow name, in the foreground and register "
+            "its artifacts"
+        ),
         handler=handle_build,
     )
     parser.add_argument(
         "targets",
         nargs="*",
         metavar="TARGET",
-        help="a package path (absolute, ./, ../, or containing /), store runner path, or job reference",
+        help=(
+            "a package path (absolute, ./, ../, or containing /), a workflow reference (a git URI, "
+            "or a registered, plugin, or installed git workflow name), a store runner path, or a job reference"
+        ),
     )
     parser.add_argument(
         "--workspace",
