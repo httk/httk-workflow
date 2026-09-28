@@ -86,7 +86,7 @@ module httk_workflow
   public :: httk_workflow_state_set, httk_workflow_state_delete, httk_workflow_state_merge
   public :: httk_workflow_declare, httk_workflow_runlog_note, httk_workflow_runlog_headline
   public :: httk_workflow_runlog_append, httk_workflow_log
-  public :: httk_workflow_put, httk_workflow_remove, httk_workflow_spawn
+  public :: httk_workflow_put, httk_workflow_remove, httk_workflow_spawn, httk_workflow_call
   public :: httk_workflow_advance, httk_workflow_gather, httk_workflow_succeed
   public :: httk_workflow_fail, httk_workflow_retry, httk_workflow_pause
   public :: httk_workflow_batch, httk_workflow_job_prepare, httk_workflow_workdir_apply
@@ -276,6 +276,13 @@ module httk_workflow
     function c_spawn(label, args, status) bind(c, name="httk_workflow_spawn") result(p)
       import :: c_ptr, c_int
       type(c_ptr), value :: label, args
+      integer(c_int), intent(out) :: status
+      type(c_ptr) :: p
+    end function
+
+    function c_call(label, workflow, args, status) bind(c, name="httk_workflow_call") result(p)
+      import :: c_ptr, c_int
+      type(c_ptr), value :: label, workflow, args
       integer(c_int), intent(out) :: status
       type(c_ptr) :: p
     end function
@@ -926,6 +933,30 @@ contains
       pargs = c_null_ptr
     end if
     call take(c_spawn(c_loc(blabel), pargs, st), job_key)
+    if (present(status)) status = int(st)
+  end subroutine
+
+  ! Spawn another registered workflow (id, alias, git URI, runner file, or
+  ! package directory) as a child under a unique label; `args` carries the call
+  ! options, and `job_key` receives the child's job key.
+  subroutine httk_workflow_call(label, workflow, job_key, args, status)
+    character(len=*), intent(in) :: label, workflow
+    character(len=:), allocatable, intent(out) :: job_key
+    character(len=*), intent(in), optional :: args(:)
+    integer, intent(out), optional :: status
+    character(kind=c_char), allocatable, target :: blabel(:), bworkflow(:), flat(:)
+    type(c_ptr), allocatable, target :: ptrs(:)
+    type(c_ptr) :: pargs
+    integer(c_int) :: st
+    blabel = cstr(label)
+    bworkflow = cstr(workflow)
+    if (present(args)) then
+      call cstr_array(args, flat, ptrs)
+      pargs = c_loc(ptrs(1))
+    else
+      pargs = c_null_ptr
+    end if
+    call take(c_call(c_loc(blabel), c_loc(bworkflow), pargs, st), job_key)
     if (present(status)) status = int(st)
   end subroutine
 

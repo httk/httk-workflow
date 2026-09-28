@@ -85,6 +85,9 @@ package Httk_Workflow is
    procedure Httk_Workflow_Spawn
      (Label : String; Job_Key : out U.Unbounded_String; Present : out Boolean;
       Status : out C.int; Arguments : String_List := No_Arguments);
+   procedure Httk_Workflow_Call
+     (Label : String; Workflow : String; Job_Key : out U.Unbounded_String; Present : out Boolean;
+      Status : out C.int; Arguments : String_List := No_Arguments);
 
    function Httk_Workflow_Advance
      (Next_Step : String; Arguments : String_List := No_Arguments) return C.int;

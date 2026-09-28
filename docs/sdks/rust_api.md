@@ -193,6 +193,7 @@ are `&[&str]` option arrays; a `fallback` is an `Option<&str>` default.
 | `Attempt::put(source, destination)` | `httk_workflow_put` |
 | `Attempt::remove(destination, missing_ok)` | `httk_workflow_remove` |
 | `Attempt::spawn(label, args)` | `httk_workflow_spawn` |
+| `Attempt::call(label, workflow, args)` | `httk_workflow_call` |
 | `Attempt::children(selection)` | `httk_workflow_children` |
 | `Attempt::child(label, field)` | `httk_workflow_child` |
 | `Attempt::advance(next_step, args)` | `httk_workflow_advance` |
@@ -214,7 +215,10 @@ Booleans are Rust `bool`: `Attempt::remove`'s `missing_ok`, and `Attempt::fail`'
 `retryable`. `Attempt::stage_input` returns `Ok(true)` when staged and
 `Ok(false)` when the payload has no such file. `Attempt::parent` returns
 `Ok(None)` when the job has no reachable parent, and `Attempt::parent(Some("workdir"))`
-is `Ok(None)` for a parent that uses isolated workdirs. `Attempt::gather` takes a `Gather` options struct with `when`,
+is `Ok(None)` for a parent that uses isolated workdirs. `Attempt::call` spawns
+another registered workflow (an id or alias, a git URI, a runner file, or a
+package directory) as a child and returns its job key; `args` carries the
+`call` options (`--file NAME=PATH`, `--input NAME=PATH`, `--parameter K=V`, …). `Attempt::gather` takes a `Gather` options struct with `when`,
 `count`, `on_impossible`, and `priority` fields, each `Option`, defaulting to the
 bridge's own default (`Gather::default()`). As in C, the `httk_vasp_*` surface of
 the Bash SDK has no dedicated methods; reach a `vasp-*` verb through

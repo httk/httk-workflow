@@ -584,6 +584,17 @@ impl Attempt {
         self.read(&argv)
     }
 
+    /// Spawn another registered `workflow` (id, alias, git URI, runner file,
+    /// or package directory) as a child under a mandatory unique `label`,
+    /// created when the outcome is published; returns the child's job key.
+    /// `args` carries the call options (`--file NAME=PATH`, `--input NAME=PATH`,
+    /// `--parameter K=V`, `--step`, …).
+    pub fn call(&self, label: &str, workflow: &str, args: &[&str]) -> Result<Option<String>, BridgeError> {
+        let mut argv = vec!["call", label, workflow];
+        argv.extend_from_slice(args);
+        self.read(&argv)
+    }
+
     // --- What a step publishes (exactly one per attempt) --------------------
 
     /// Run `next_step` next; `args` may carry `--state NAME=VALUE` and `--priority`.

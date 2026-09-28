@@ -76,6 +76,8 @@ package body Httk_Workflow is
      with Import, Convention => C, External_Name => "httk_workflow_remove";
    function C_Spawn (Label : CS.chars_ptr; Arguments : System.Address; Status : access C.int) return CS.chars_ptr
      with Import, Convention => C, External_Name => "httk_workflow_spawn";
+   function C_Call (Label, Workflow : CS.chars_ptr; Arguments : System.Address; Status : access C.int) return CS.chars_ptr
+     with Import, Convention => C, External_Name => "httk_workflow_call";
    function C_Advance (Next_Step : CS.chars_ptr; Arguments : System.Address) return C.int
      with Import, Convention => C, External_Name => "httk_workflow_advance";
    function C_Gather (Next_Step : CS.chars_ptr; Arguments : System.Address) return C.int
@@ -424,6 +426,12 @@ package body Httk_Workflow is
       B_Label : CS.chars_ptr := New_Input (Label); Pointers : C_String_Array (0 .. Arguments'Length);
       C_Status : aliased C.int; Pointer : CS.chars_ptr;
    begin Prepare_Arguments (Arguments, Pointers); Pointer := C_Spawn (B_Label, Arguments_Address (Pointers), C_Status'Access); Release (B_Label); Release_Arguments (Pointers); Status := Read_With_Pointer (Pointer, C_Status, Job_Key, Present); end Httk_Workflow_Spawn;
+   procedure Httk_Workflow_Call
+     (Label : String; Workflow : String; Job_Key : out U.Unbounded_String; Present : out Boolean;
+      Status : out C.int; Arguments : String_List := No_Arguments) is
+      B_Label : CS.chars_ptr := New_Input (Label); B_Workflow : CS.chars_ptr := New_Input (Workflow);
+      Pointers : C_String_Array (0 .. Arguments'Length); C_Status : aliased C.int; Pointer : CS.chars_ptr;
+   begin Prepare_Arguments (Arguments, Pointers); Pointer := C_Call (B_Label, B_Workflow, Arguments_Address (Pointers), C_Status'Access); Release (B_Label); Release (B_Workflow); Release_Arguments (Pointers); Status := Read_With_Pointer (Pointer, C_Status, Job_Key, Present); end Httk_Workflow_Call;
 
    function Httk_Workflow_Advance (Next_Step : String; Arguments : String_List := No_Arguments) return C.int is
       B_Next : CS.chars_ptr := New_Input (Next_Step); Pointers : C_String_Array (0 .. Arguments'Length); Result : C.int;

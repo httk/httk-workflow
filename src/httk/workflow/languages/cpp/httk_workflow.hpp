@@ -193,6 +193,13 @@ public:
         char* output = httk_workflow_spawn(label.c_str(), args.empty() ? nullptr : args.data(), &status);
         return required_result(output, status);
     }
+    static std::string call(const std::string& label, const std::string& workflow, const Arguments& arguments = {}) {
+        int status = HTTK_WORKFLOW_OK;
+        auto args = c_arguments(arguments);
+        char* output =
+            httk_workflow_call(label.c_str(), workflow.c_str(), args.empty() ? nullptr : args.data(), &status);
+        return required_result(output, status);
+    }
 
     static int advance(const std::string& next_step, const Arguments& arguments = {}) {
         return with_arguments(arguments, [&](const char* const* args) {

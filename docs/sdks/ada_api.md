@@ -87,7 +87,7 @@ The public package keeps the C names and groups, with Ada strings copied into
 | `Httk_Workflow_State_Get`, `State_Set`, `State_Delete`, `State_Merge` | corresponding `httk_workflow_state_*` functions |
 | `Httk_Workflow_Declaration`, `Declare` | `httk_workflow_declaration`, `httk_workflow_declare` |
 | `Httk_Workflow_Runlog_Note`, `Runlog_Headline`, `Runlog_Append`, `Log` | corresponding `httk_workflow_*` functions |
-| `Httk_Workflow_Put`, `Remove`, `Spawn` | corresponding transactional/child C functions |
+| `Httk_Workflow_Put`, `Remove`, `Spawn`, `Call` | corresponding transactional/child C functions |
 | `Httk_Workflow_Children`, `Child` | `httk_workflow_children`, `httk_workflow_child` |
 | `Httk_Workflow_Advance`, `Gather`, `Succeed`, `Fail`, `Retry`, `Pause` | corresponding outcome C functions |
 | `Httk_Workflow_Batch`, `Job_Prepare`, `Workdir_Apply` | corresponding C functions |

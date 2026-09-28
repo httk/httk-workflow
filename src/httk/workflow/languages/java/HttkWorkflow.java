@@ -391,6 +391,17 @@ public final class HttkWorkflow {
             return readWithTail("spawn", label, args);
         }
 
+        public Optional<String> call(String label, String workflow, String... args) {
+            List<String> argv = new ArrayList<>();
+            argv.add("call");
+            argv.add(label);
+            argv.add(workflow);
+            if (args != null) {
+                argv.addAll(Arrays.asList(args));
+            }
+            return read(argv.toArray(new String[0]));
+        }
+
         public Optional<String> children() {
             return read("children");
         }

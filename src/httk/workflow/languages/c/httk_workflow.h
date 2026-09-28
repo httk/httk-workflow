@@ -224,6 +224,14 @@ char *httk_workflow_remove(const char *destination, int missing_ok, int *status)
  * (--step, --parameter NAME=VALUE, --payload, --runner, ...) untouched.
  */
 char *httk_workflow_spawn(const char *label, const char *const *args, int *status);
+/*
+ * Spawn another registered `workflow` (a registered id or alias, a git URI, a
+ * runner file, or a package directory) as a child under a mandatory unique
+ * `label`, created when the outcome is published; returns the child's job key.
+ * `args` carries the call options (--file NAME=PATH, --input NAME=PATH,
+ * --parameter NAME=VALUE, --environment NAME=VALUE, --step, ...) untouched.
+ */
+char *httk_workflow_call(const char *label, const char *workflow, const char *const *args, int *status);
 
 /* --- What a step publishes (exactly one per attempt) ------------------------ */
 

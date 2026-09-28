@@ -558,6 +558,11 @@ char *httk_workflow_spawn(const char *label, const char *const *args, int *statu
     return read_value(prefix, args, status);
 }
 
+char *httk_workflow_call(const char *label, const char *workflow, const char *const *args, int *status) {
+    const char *prefix[] = {"call", label, workflow, NULL};
+    return read_value(prefix, args, status);
+}
+
 int httk_workflow_advance(const char *next_step, const char *const *args) {
     const char *prefix[] = {"advance", next_step, NULL};
     return call(NULL, prefix, args);

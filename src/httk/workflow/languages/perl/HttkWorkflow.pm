@@ -282,6 +282,10 @@ sub spawn {
     my ($self, $label, $args) = @_;
     return $self->_read('spawn', $label, _args($args));
 }
+sub call {
+    my ($self, $label, $workflow, $args) = @_;
+    return $self->_read('call', $label, $workflow, _args($args));
+}
 sub children {
     my ($self, $selection) = @_;
     return $self->_read('children') unless defined($selection);

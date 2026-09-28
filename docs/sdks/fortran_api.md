@@ -217,6 +217,7 @@ status.
 | *`sub`* `httk_workflow_put(source, destination, operation, status)` | `httk_workflow_put` |
 | *`sub`* `httk_workflow_remove(destination, operation, missing_ok, status)` | `httk_workflow_remove` |
 | *`sub`* `httk_workflow_spawn(label, job_key, args, status)` | `httk_workflow_spawn` |
+| *`sub`* `httk_workflow_call(label, workflow, job_key, args, status)` | `httk_workflow_call` |
 | *`sub`* `httk_workflow_children(value, selection, status)` | `httk_workflow_children` |
 | *`sub`* `httk_workflow_child(label, field, value, status)` | `httk_workflow_child` |
 | `httk_workflow_advance(next_step, args)` | `httk_workflow_advance` |

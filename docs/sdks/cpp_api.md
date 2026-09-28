@@ -88,7 +88,7 @@ protocol state; the current attempt is selected by the manager's environment.
 | `Attempt::state_get`, `state_set`, `state_delete`, `state_merge` | corresponding `httk_workflow_state_*` functions |
 | `Attempt::declaration`, `declare` | `httk_workflow_declaration`, `httk_workflow_declare` |
 | `Attempt::runlog_note`, `runlog_headline`, `runlog_append`, `log` | corresponding `httk_workflow_*` functions |
-| `Attempt::put`, `remove`, `spawn` | corresponding transactional/child C functions |
+| `Attempt::put`, `remove`, `spawn`, `call` | corresponding transactional/child C functions |
 | `Attempt::children`, `child` | `httk_workflow_children`, `httk_workflow_child` |
 | `Attempt::advance`, `gather`, `succeed`, `fail`, `retry`, `pause` | corresponding outcome C functions |
 | `Attempt::batch`, `job_prepare`, `workdir_apply` | corresponding C functions |
@@ -126,8 +126,8 @@ An allocated empty C string is an engaged optional with `value->empty() ==
 true`. A NULL answer with status `HTTK_WORKFLOW_ABSENT` (`1`) is `std::nullopt`.
 A refused read with status `HTTK_WORKFLOW_REFUSED` (`2`) throws
 `httk::workflow::BridgeError`; `error.status()` preserves the C status.
-`spawn`, which must produce a child key, also throws `BridgeError` for a
-refused or missing result. The other result-returning operations retain the
+`spawn` and `call`, which must produce a child key, also throw `BridgeError` for
+a refused or missing result. The other result-returning operations retain the
 optional result shape. Command verbs return the C bridge status directly;
 `Attempt::run` returns the supervised classification (`0`, `22`, `124`, or
 `125`) rather than throwing for the program's result.

@@ -20,8 +20,10 @@ from typing import Any
 import pytest
 
 import httk.workflow
+from httk.workflow import Workspace
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.scaffold import describe_runner
+from test_bash_sdk import _CALL_SUB_RUNNER
 
 pytestmark = pytest.mark.skipif(shutil.which("perl") is None, reason="no Perl interpreter is available")
 
@@ -168,6 +170,32 @@ def _attempt(
     for name in ("HTTK_WORKFLOW_DESCRIBE", "HTTK_WORKFLOW_RUNNER_WORKFLOW", "HTTK_WORKFLOW_RUNNER_STEPS"):
         environment.pop(name, None)
     return _Attempt(payload, control, workdir, environment)
+
+
+def _call_target(tmp_path: Path) -> tuple[Path, Path]:
+    """Initialize the attempt's workspace; write a callable Python runner file and a file to stage."""
+
+    Workspace.initialize(tmp_path / "workspace")
+    sub = tmp_path / "sub_runner.py"
+    sub.write_text(_CALL_SUB_RUNNER.format(src=Path(__file__).parents[1] / "src"), encoding="utf-8")
+    sub.chmod(0o755)
+    input_file = tmp_path / "input.txt"
+    input_file.write_text("staged-by-call\n", encoding="utf-8")
+    return sub, input_file
+
+
+def _assert_called(attempt: _Attempt, job_key: str) -> None:
+    """The outcome registered one ``sub`` child running the called workflow, with the staged file."""
+
+    ready = attempt.control / "outcome.ready"
+    spawn = json.loads((ready / "children" / "spawn.json").read_text(encoding="utf-8"))
+    assert [(entry["label"], entry["job_key"]) for entry in spawn["children"]] == [("sub", job_key)]
+    child_dir = ready / "children" / "jobs" / job_key
+    child = json.loads((child_dir / "job.json").read_text(encoding="utf-8"))
+    assert child["workflow"] == "tests.sub"
+    assert child["runner"]["source"] == "workspace"
+    assert (child_dir / "files" / "input.txt").read_text(encoding="utf-8") == "staged-by-call\n"
+    assert attempt.outcome()["join"]["condition"] == "all_succeeded"
 
 
 def test_the_module_is_warning_clean() -> None:
@@ -361,3 +389,16 @@ def test_parent_reads_the_parent_location_or_answers_undef(tmp_path: Path) -> No
     completed = _attempt(tmp_path / "orphan", step="start").run(orphan)
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout == "0"
+
+
+def test_call_spawns_another_workflow_as_a_child(tmp_path: Path) -> None:
+    sub, input_file = _call_target(tmp_path)
+    body = (
+        f"print $attempt->call('sub', '{sub}', ['--file', 'input.txt={input_file}']), \"\\n\"; "
+        "$attempt->gather('finish');"
+    )
+    runner = _runner(tmp_path, steps=("start", "finish"), handlers={"start": body, "finish": ""})
+    attempt = _attempt(tmp_path, step="start")
+    completed = attempt.run(runner)
+    assert completed.returncode == 0, completed.stderr
+    _assert_called(attempt, completed.stdout.strip())

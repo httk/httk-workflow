@@ -168,6 +168,7 @@ bridge exit status out-parameter.
 | `httk_workflow_put(source, dest, status)` | `httk_workflow_put` | `Attempt.put` |
 | `httk_workflow_remove(dest, missing_ok, status)` | `httk_workflow_remove` | `Attempt.remove` |
 | `httk_workflow_spawn(label, args, status)` | `httk_workflow_spawn` | `Attempt.spawn` |
+| `httk_workflow_call(label, workflow, args, status)` | `httk_workflow_call` | `Attempt.call` |
 | `httk_workflow_children(selection, status)` | `httk_workflow_children` | `Attempt.children` |
 | `httk_workflow_child(label, field, status)` | `httk_workflow_child` | `ChildResult` |
 | `httk_workflow_advance(next_step, args)` | `httk_workflow_advance` | `Attempt.advance` |

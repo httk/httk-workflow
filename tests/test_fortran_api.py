@@ -26,6 +26,7 @@ from typing import Any
 import pytest
 
 import httk.workflow
+from httk.workflow import Workspace
 from httk.workflow.protocol import JobSpec, prepare_job_payload
 from httk.workflow.scaffold import describe_runner
 
@@ -537,3 +538,63 @@ def test_parent_reads_the_spawning_job_or_answers_absent(tmp_path: Path) -> None
     assert completed.returncode == 0, completed.stderr
     for expected in ("WHOLE 1", "PAYLOAD 1", "WORKDIR 1", "JOB 1"):
         assert expected in completed.stderr, completed.stderr
+
+
+_CALL_SUB_RUNNER = """#!{python}
+from httk.workflow import Runner
+
+run = Runner("tests.sub")
+
+
+@run.step
+def run_sub(a):
+    a.succeed()
+
+
+raise SystemExit(run.main())
+"""
+
+
+def _stage_call_target(attempt: _Attempt) -> None:
+    """Write a runner file of another workflow and a file to stage into the attempt's workdir."""
+
+    Workspace.initialize(attempt.payload.parent / "workspace")
+    sub = attempt.workdir / "sub_runner.py"
+    sub.write_text(_CALL_SUB_RUNNER.format(python=sys.executable), encoding="utf-8")
+    sub.chmod(0o755)
+    (attempt.workdir / "input.txt").write_text("staged-by-call\n", encoding="utf-8")
+
+
+def _assert_called(attempt: _Attempt, stderr: str) -> None:
+    """The call registered one child running the other workflow, with the staged file."""
+
+    ready = attempt.control / "outcome.ready"
+    spawn = json.loads((ready / "children" / "spawn.json").read_text(encoding="utf-8"))
+    assert [entry["label"] for entry in spawn["children"]] == ["sub"]
+    job_key = spawn["children"][0]["job_key"]
+    assert f"KEY 0 {job_key}" in stderr, stderr
+    child_dir = ready / "children" / "jobs" / job_key
+    child = json.loads((child_dir / "job.json").read_text(encoding="utf-8"))
+    assert child["workflow"] == "tests.sub"
+    assert (child_dir / "files" / "input.txt").read_text(encoding="utf-8") == "staged-by-call\n"
+    assert attempt.outcome()["join"]["condition"] == "all_succeeded"
+
+
+def test_call_spawns_another_workflow_as_a_child(tmp_path: Path) -> None:
+    """httk_workflow_call registers a runner file of another workflow as a labelled child."""
+
+    body = """character(len=:), allocatable :: key
+    character(len=8) :: tag
+    integer :: st
+    call httk_workflow_call("sub", "./sub_runner.py", key, [character(len=19) :: "--file", &
+      "input.txt=input.txt"], st)
+    write (tag, '(I0)') st
+    if (.not. allocated(key)) key = ""
+    call ignore(httk_workflow_log("probe", "KEY " // trim(tag) // " " // key))
+    code = httk_workflow_gather("finish")"""
+    binary = _write_runner(tmp_path, "tests.fortran.call", {"start": body, "finish": "code = httk_workflow_succeed()"})
+    attempt = _attempt(tmp_path / "attempt", step="start")
+    _stage_call_target(attempt)
+    completed = attempt.run(binary)
+    assert completed.returncode == 0, completed.stderr
+    _assert_called(attempt, completed.stderr)

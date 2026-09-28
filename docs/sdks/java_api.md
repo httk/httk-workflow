@@ -90,7 +90,7 @@ removed; stderr and stdin remain inherited.
 | `runlogNote`, `runlogHeadline`, `runlogAppend` | `runlog` |
 | `log` | local stderr helper |
 | `put`, `remove` | `put`, `remove` |
-| `children`, `child`, `spawn` | `children`, `child`, `spawn` |
+| `children`, `child`, `spawn`, `call` | `children`, `child`, `spawn`, `call` |
 | `advance`, `gather` | `advance`, `gather` |
 | `succeed`, `fail`, `retry`, `pause` | same-named commands |
 | `batch`, `jobPrepare`, `workdirApply` | same-named commands |
@@ -102,4 +102,7 @@ values through chainable setters. Array arguments are passed as literal
 `ProcessBuilder` arguments and never through a shell. `parent()` returns the
 parent job as compact JSON and `parent(field)` one of its fields; both are
 empty when the job has no reachable parent, and `parent("workdir")` is empty
-for a parent that uses isolated workdirs.
+for a parent that uses isolated workdirs. `call(label, workflow, args...)`
+spawns another registered workflow (an id or alias, a git URI, a runner file,
+or a package directory) as a child and returns its job key; `args` carries the
+`call` options (`--file NAME=PATH`, `--input NAME=PATH`, `--parameter K=V`, …).
